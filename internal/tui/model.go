@@ -151,9 +151,12 @@ type model struct {
 	// entered PermissionModePlan, so /plan off can restore it exactly (mirrors
 	// the execProfile displaced/applied pattern below).
 	permissionModeBeforePlan agent.PermissionMode
-	selfCorrectTests         bool
-	reasoningEffort          modelregistry.ReasoningEffort
-	serviceTier              string
+	// program is the live Bubble Tea program, set right before Run so /plan open
+	// can suspend the TUI, launch $EDITOR, and resume on exit.
+	program          *tea.Program
+	selfCorrectTests bool
+	reasoningEffort  modelregistry.ReasoningEffort
+	serviceTier      string
 	// Active execution profile (set by /profile; applies to the NEXT run).
 	// The displaced/applied pairs let a switch or /profile balanced restore
 	// exactly what the profile replaced while leaving later manual overrides
@@ -4926,10 +4929,7 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.debugText()})
 		return m, nil
 	case commandPlan:
-		text := ""
-		m, text = m.handlePlanCommand(command.text)
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
-		return m, nil
+		return m.handlePlanCommand(command.text)
 	case commandDoctor:
 		return m.startDoctorCommand(command.text)
 	case commandSearch:
