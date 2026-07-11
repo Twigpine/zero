@@ -1547,6 +1547,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.transientNotice = transientNotice{}
 		}
 		return m, nil
+	case planEditorFinishedMsg:
+		if msg.err != nil {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "plan editor error: " + msg.err.Error()})
+		}
+		return m, nil
 	case exitConfirmExpiredMsg:
 		if msg.seq == m.exitConfirmSeq {
 			m.exitConfirmActive = false
