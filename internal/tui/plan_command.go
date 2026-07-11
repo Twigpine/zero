@@ -96,7 +96,7 @@ func (m model) openPlanInEditor() (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "plan path error: " + err.Error()})
 		return m, nil
 	}
-	if _, ok := fileExists(path); !ok {
+	if !fileExists(path) {
 		if _, err := planmode.WritePlan(m.cwd, m.activeSession.SessionID, ""); err != nil {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "plan write error: " + err.Error()})
 			return m, nil
@@ -121,8 +121,17 @@ func (m model) openPlanInEditor() (tea.Model, tea.Cmd) {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+		if err != nil {
+			return planEditorFinishedMsg{err: err}
+		}
 		return nil
 	})
+}
+
+// planEditorFinishedMsg reports a failed $VISUAL/$EDITOR run launched by
+// /plan open so the transcript can surface it.
+type planEditorFinishedMsg struct {
+	err error
 }
 
 func planEnterText(m model) string {
@@ -138,13 +147,9 @@ func planEnterText(m model) string {
 
 func (m model) planText() string {
 	// Prefer the session plan file when present.
-	if path, err := planmode.PlanFilePath(m.cwd, m.activeSession.SessionID); err == nil && path != "" {
-		if content, exists, err := planmode.ReadPlan(m.cwd, m.activeSession.SessionID); err == nil && exists {
-			header := "Current Plan (plan mode)"
-			if path != "" {
-				header += "\n" + path
-			}
-			return header + "\n" + strings.TrimRight(content, "\n")
+	if path, err := planmode.PlanFilePath(m.cwd, m.activeSession.SessionID); err == nil {
+		if content, err := os.ReadFile(path); err == nil {
+			return "Current Plan (plan mode)\n" + path + "\n" + strings.TrimRight(string(content), "\n")
 		}
 	}
 
@@ -174,10 +179,7 @@ func (m model) planText() string {
 	return strings.Join(lines, "\n")
 }
 
-func fileExists(path string) (struct{}, bool) {
+func fileExists(path string) bool {
 	_, err := os.Stat(path)
-	if err != nil {
-		return struct{}{}, false
-	}
-	return struct{}{}, true
+	return err == nil
 }
