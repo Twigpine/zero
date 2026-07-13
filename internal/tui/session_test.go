@@ -885,6 +885,43 @@ func TestResumeDifferentSessionExitsPlanMode(t *testing.T) {
 	}
 }
 
+// A session that never entered plan mode has an explicit, non-Plan
+// permissionMode with no permissionModeBeforePlan to restore. /new and
+// /resume must not reset that choice to Auto just because they
+// unconditionally call exitPlanMode on every session switch.
+func TestNewSessionPreservesNonPlanPermissionMode(t *testing.T) {
+	store := testSessionStore(t)
+	m := newModel(context.Background(), Options{SessionStore: store})
+	m.permissionMode = agent.PermissionModeAsk
+
+	m = m.startNewSession()
+
+	if m.permissionMode != agent.PermissionModeAsk {
+		t.Fatalf("expected /new to preserve the explicit Ask permission mode, got %s", m.permissionMode)
+	}
+}
+
+func TestResumeDifferentSessionPreservesNonPlanPermissionMode(t *testing.T) {
+	store := testSessionStore(t)
+	active, err := store.Create(sessions.CreateInput{Title: "Active"})
+	if err != nil {
+		t.Fatalf("Create active: %v", err)
+	}
+	other, err := store.Create(sessions.CreateInput{Title: "Other"})
+	if err != nil {
+		t.Fatalf("Create other: %v", err)
+	}
+	m := newModel(context.Background(), Options{SessionStore: store})
+	m.activeSession = active
+	m.permissionMode = agent.PermissionModeAsk
+
+	m, _ = m.handleResumeCommand(other.SessionID)
+
+	if m.permissionMode != agent.PermissionModeAsk {
+		t.Fatalf("expected /resume to a different session to preserve the explicit Ask permission mode, got %s", m.permissionMode)
+	}
+}
+
 // Resuming the session that is already active (e.g. `/resume latest` or
 // `/resume <currentID>`) is not a switch, so it must leave plan mode alone —
 // matching the existing loopsCleared guard just below.
