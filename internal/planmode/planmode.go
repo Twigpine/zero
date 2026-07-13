@@ -32,9 +32,13 @@ The plan should converge on one concrete approach. Do not leave unresolved
 choices such as "Option A" and "Option B". If something remains uncertain, make
 the safest reasonable assumption and state it clearly.`
 
-// PlanFilePath returns the deterministic plan file path for a session under the
-// workspace .zero/plans directory. The session ID is slugified so the file name
-// is stable across re-entering plan mode within the same session.
+// PlanFilePath returns the deterministic, absolute plan file path for a
+// session under the workspace .zero/plans directory, for display and for
+// handing to an external editor process. It performs no filesystem access and
+// gives no containment guarantee by itself: ReadPlan and WritePlan are the
+// safe way to actually read or write plan content, since they resolve paths
+// through os.Root and cannot be redirected outside the workspace even by a
+// symlink planted between this call and theirs.
 func PlanFilePath(workspaceRoot, sessionID string) (string, error) {
 	root := strings.TrimSpace(workspaceRoot)
 	if root == "" {
@@ -44,23 +48,18 @@ func PlanFilePath(workspaceRoot, sessionID string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve workspace root: %w", err)
 	}
-	id := slugify(sessionID)
-	relativePath := filepath.ToSlash(filepath.Join(PlanDirName, id+".md"))
-	path := filepath.Join(absoluteRoot, filepath.FromSlash(relativePath))
-	if err := ensurePlanPathContained(absoluteRoot, path); err != nil {
-		return "", err
-	}
-	return path, nil
+	return filepath.Join(absoluteRoot, planRelativePath(sessionID)), nil
 }
 
 // ReadPlan reads the plan file for a session. The bool reports whether a plan
 // file exists; a missing file is not an error.
 func ReadPlan(workspaceRoot, sessionID string) (string, bool, error) {
-	path, err := PlanFilePath(workspaceRoot, sessionID)
+	root, err := openWorkspaceRoot(workspaceRoot)
 	if err != nil {
 		return "", false, err
 	}
-	data, err := os.ReadFile(path)
+	defer root.Close()
+	data, err := root.ReadFile(planRelativePath(sessionID))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", false, nil
@@ -73,55 +72,51 @@ func ReadPlan(workspaceRoot, sessionID string) (string, bool, error) {
 // WritePlan writes (creating the directory as needed) the plan file for a
 // session and returns its path.
 func WritePlan(workspaceRoot, sessionID, content string) (string, error) {
-	path, err := PlanFilePath(workspaceRoot, sessionID)
+	root, err := openWorkspaceRoot(workspaceRoot)
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	defer root.Close()
+
+	if err := root.MkdirAll(filepath.FromSlash(PlanDirName), 0o700); err != nil {
 		return "", fmt.Errorf("create plan directory: %w", err)
 	}
-	if err := os.WriteFile(path, []byte(strings.TrimRight(content, "\n")+"\n"), 0o600); err != nil {
+	file, err := root.OpenFile(planRelativePath(sessionID), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
 		return "", fmt.Errorf("write plan file: %w", err)
 	}
-	return path, nil
+	defer file.Close()
+	if _, err := file.WriteString(strings.TrimRight(content, "\n") + "\n"); err != nil {
+		return "", fmt.Errorf("write plan file: %w", err)
+	}
+	return PlanFilePath(workspaceRoot, sessionID)
 }
 
-func ensurePlanPathContained(workspaceRoot, path string) error {
-	relative, err := filepath.Rel(filepath.Clean(workspaceRoot), filepath.Clean(path))
+// openWorkspaceRoot opens the workspace directory as an os.Root, which the
+// Go runtime resolves relative to using descriptor-relative (openat-style)
+// operations: every subsequent Root method call re-walks the path from that
+// descriptor and refuses to follow a symlink referencing a location outside
+// it. That closes the check/use race a separate Lstat-then-open preflight
+// would leave open (a symlink planted at .zero, .zero/plans, or the plan file
+// itself between the check and the later open could otherwise redirect the
+// read/write outside the workspace).
+func openWorkspaceRoot(workspaceRoot string) (*os.Root, error) {
+	root := strings.TrimSpace(workspaceRoot)
+	if root == "" {
+		return nil, fmt.Errorf("workspace root is required")
+	}
+	r, err := os.OpenRoot(root)
 	if err != nil {
-		return fmt.Errorf("resolve plan file path: %w", err)
+		return nil, fmt.Errorf("open workspace root: %w", err)
 	}
-	if relative == "." || relative == ".." || filepath.IsAbs(relative) || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("plan file path escapes workspace root")
-	}
-	return rejectSymlinkEscape(workspaceRoot, path)
+	return r, nil
 }
 
-// rejectSymlinkEscape walks path's ancestors up to (but not including)
-// workspaceRoot and refuses to proceed if any existing component - the plan
-// file itself, the plans directory, or .zero - is a symlink. The lexical
-// filepath.Rel check above only guards against ".." traversal in the
-// constructed path; a pre-planted symlink at any of those locations would
-// still let os.MkdirAll/os.WriteFile/os.ReadFile follow it outside the
-// workspace despite the path string looking contained.
-func rejectSymlinkEscape(workspaceRoot, path string) error {
-	root := filepath.Clean(workspaceRoot)
-	for current := filepath.Clean(path); current != root; current = filepath.Dir(current) {
-		parent := filepath.Dir(current)
-		if parent == current {
-			// Reached the filesystem root without hitting workspaceRoot; the
-			// filepath.Rel check above already rejects this case.
-			return nil
-		}
-		info, err := os.Lstat(current)
-		switch {
-		case err == nil && info.Mode()&os.ModeSymlink != 0:
-			return fmt.Errorf("plan file path %s contains a symlink", current)
-		case err != nil && !os.IsNotExist(err):
-			return fmt.Errorf("check plan file path: %w", err)
-		}
-	}
-	return nil
+// planRelativePath returns the workspace-relative plan file path for a
+// session. The session ID is slugified to a filesystem-safe alphabet (see
+// slugify), so the result can never contain ".." or an absolute path.
+func planRelativePath(sessionID string) string {
+	return filepath.Join(filepath.FromSlash(PlanDirName), slugify(sessionID)+".md")
 }
 
 // slugify turns an arbitrary session identifier into a filesystem-safe slug.

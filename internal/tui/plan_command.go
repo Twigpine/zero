@@ -19,7 +19,7 @@ type currentPlanReader interface {
 
 // handlePlanCommand toggles plan mode on the current session:
 //
-//	/plan            toggle plan mode on/off; when on, show the current plan
+//	/plan            toggle plan mode on/off; entering shows the current plan
 //	/plan open       open the session's plan file in $VISUAL/$EDITOR
 //	/plan off        exit plan mode (alias: /plan exit)
 //
@@ -39,26 +39,36 @@ func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan mode is not active."})
 			return m, nil
 		}
-		m.permissionMode = agent.PermissionModeAuto
-		if m.permissionModeBeforePlan != "" {
-			m.permissionMode = m.permissionModeBeforePlan
-		}
-		m.permissionModeBeforePlan = ""
+		m = m.exitPlanMode()
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Exited plan mode. The agent can now implement."})
 		return m, nil
 	case "open":
-		return m.openPlanInEditor()
+		updated, err := m.ensureActiveSession("")
+		if err != nil {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "session error: " + err.Error()})
+			return m, nil
+		}
+		return updated.openPlanInEditor()
 	}
 
-	// No subcommand: toggle plan mode, then surface the current plan.
+	// No subcommand: toggle plan mode. A bare /plan while already in plan mode
+	// exits it (matching the advertised on/off toggle); entering it shows the
+	// plan that was just seeded.
 	if m.permissionMode == agent.PermissionModePlan {
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.planText()})
+		m = m.exitPlanMode()
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Exited plan mode. The agent can now implement."})
 		return m, nil
 	}
 	if m.pending || m.exiting {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot enter plan mode while a run is active."})
 		return m, nil
 	}
+	updated, err := m.ensureActiveSession("")
+	if err != nil {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "session error: " + err.Error()})
+		return m, nil
+	}
+	m = updated
 	m.permissionModeBeforePlan = m.permissionMode
 	m.permissionMode = agent.PermissionModePlan
 	textToShow := planEnterText(m) + "\n\n" + m.planText()
@@ -88,6 +98,19 @@ func planModeCommandUnavailable(command parsedCommand) bool {
 	}
 }
 
+// exitPlanMode restores the permission mode that was active before /plan
+// entered plan mode. Shared by /plan off, the bare-/plan toggle, and session
+// switches (/new, /resume), which must not leave a stale plan-mode grant (or a
+// stale "restore to" mode) attached to a session other than the one that set it.
+func (m model) exitPlanMode() model {
+	m.permissionMode = agent.PermissionModeAuto
+	if m.permissionModeBeforePlan != "" {
+		m.permissionMode = m.permissionModeBeforePlan
+	}
+	m.permissionModeBeforePlan = ""
+	return m
+}
+
 // openPlanInEditor writes the session plan file (if missing) and suspends the
 // TUI to launch $VISUAL/$EDITOR on it, resuming on exit.
 func (m model) openPlanInEditor() (tea.Model, tea.Cmd) {
@@ -100,7 +123,12 @@ func (m model) openPlanInEditor() (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "plan path error: " + err.Error()})
 		return m, nil
 	}
-	if !fileExists(path) {
+	_, exists, err := planmode.ReadPlan(m.cwd, m.activeSession.SessionID)
+	if err != nil {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "plan read error: " + err.Error()})
+		return m, nil
+	}
+	if !exists {
 		// Seed the file with the agent's in-memory update_plan draft (if any)
 		// rather than leaving it blank: once the file exists, planText prefers
 		// it over the draft, so starting empty would shadow real plan content
@@ -143,23 +171,29 @@ func planEnterText(m model) string {
 		planNote = "\nPlan file: " + path
 	}
 	return "Entered plan mode. The agent can inspect the workspace and shape the plan with update_plan, but cannot edit files or run commands until you exit.\n" +
-		"Use /plan to view the plan, /plan open to edit it, or /plan off to implement." + planNote
+		"Use /plan open to edit the plan, or /plan (again) / /plan off to implement." + planNote
 }
 }
 
 func (m model) planText() string {
-	// Prefer the session plan file when present.
-	if path, err := planmode.PlanFilePath(m.cwd, m.activeSession.SessionID); err == nil {
-		content, readErr := os.ReadFile(path)
-		switch {
-		case readErr == nil:
-			return "Current Plan (plan mode)\n" + path + "\n" + strings.TrimRight(string(content), "\n")
-		case !os.IsNotExist(readErr):
-			// A real I/O/permission failure, not just a not-yet-created file:
-			// surface it instead of silently falling back to the in-memory
-			// draft, which would hide the failure entirely.
-			return "plan file read error: " + readErr.Error()
+	// Prefer the session plan file when present. update_plan persists to this
+	// file on every call (see model.go's OnToolResult hook), so it is the
+	// durable source of truth once anything has been captured; the in-memory
+	// draft below is only a fallback for a plan that predates any write.
+	path, pathErr := planmode.PlanFilePath(m.cwd, m.activeSession.SessionID)
+	content, exists, readErr := planmode.ReadPlan(m.cwd, m.activeSession.SessionID)
+	switch {
+	case readErr != nil:
+		// A real I/O/permission failure, not just a not-yet-created file:
+		// surface it instead of silently falling back to the in-memory draft,
+		// which would hide the failure entirely.
+		return "plan file read error: " + readErr.Error()
+	case exists:
+		header := "Current Plan (plan mode)"
+		if pathErr == nil {
+			header += "\n" + path
 		}
+		return header + "\n" + strings.TrimRight(content, "\n")
 	}
 
 	// Fall back to the update_plan list the agent has been building.
@@ -182,12 +216,18 @@ func (m model) formatPlanDraft() string {
 	if !ok {
 		return ""
 	}
-	plan := reader.CurrentPlan()
-	if len(plan) == 0 {
+	return formatPlanItems(reader.CurrentPlan())
+}
+
+// formatPlanItems renders update_plan items as plain text, or "" if there are
+// none. Shared by formatPlanDraft (in-memory fallback for display) and the
+// OnToolResult hook in model.go that persists every update_plan call to disk.
+func formatPlanItems(items []tools.PlanItem) string {
+	if len(items) == 0 {
 		return ""
 	}
-	lines := make([]string, 0, len(plan))
-	for index, item := range plan {
+	lines := make([]string, 0, len(items))
+	for index, item := range items {
 		line := fmt.Sprintf("%d. [%s] %s", index+1, item.Status, item.Content)
 		if item.Notes != "" {
 			line += "\n   Notes: " + item.Notes
@@ -195,9 +235,4 @@ func (m model) formatPlanDraft() string {
 		lines = append(lines, line)
 	}
 	return strings.Join(lines, "\n")
-}
-
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }

@@ -6037,8 +6037,20 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			if result.Name == "update_plan" && m.registry != nil {
 				if planTool, ok := m.registry.Get("update_plan"); ok {
 					if reader, ok := planTool.(interface{ CurrentPlan() []tools.PlanItem }); ok {
+						items := reader.CurrentPlan()
 						if m.runtimeMessageSink != nil {
-							m.runtimeMessageSink(planUpdateMsg{runID: runID, items: reader.CurrentPlan()})
+							m.runtimeMessageSink(planUpdateMsg{runID: runID, items: items})
+						}
+						// Persist every update_plan call to the session's plan file: it
+						// is the single durable source of truth /plan reads from, so a
+						// plan built entirely through update_plan (the user never ran
+						// /plan open) still survives a restart/resume, and one seeded by
+						// /plan open keeps reflecting later agent updates instead of
+						// showing that first snapshot forever.
+						if m.activeSession.SessionID != "" {
+							if _, err := planmode.WritePlan(m.cwd, m.activeSession.SessionID, formatPlanItems(items)); err != nil {
+								m.sendAgentRow(runID, transcriptRow{kind: rowError, text: "plan file write error: " + err.Error()})
+							}
 						}
 					}
 				}
