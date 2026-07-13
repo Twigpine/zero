@@ -2905,6 +2905,11 @@ func TestNextPermissionModeFoldsUnsafeToAsk(t *testing.T) {
 	if got := nextPermissionMode(agent.PermissionModeUnsafe); got != agent.PermissionModeAsk {
 		t.Fatalf("Unsafe -> %s, want Ask", got)
 	}
+	// Plan mode is a deliberate read-only gate entered via /plan; a casual
+	// shift+tab toggle must be a no-op, not silently drop back to Ask.
+	if got := nextPermissionMode(agent.PermissionModePlan); got != agent.PermissionModePlan {
+		t.Fatalf("Plan -> %s, want Plan (no-op)", got)
+	}
 }
 
 func TestModelNotifierFocusAndCompletion(t *testing.T) {

@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 // PlanDirName is the workspace-relative directory where /plan plan files live,
@@ -95,6 +94,33 @@ func ensurePlanPathContained(workspaceRoot, path string) error {
 	if relative == "." || relative == ".." || filepath.IsAbs(relative) || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("plan file path escapes workspace root")
 	}
+	return rejectSymlinkEscape(workspaceRoot, path)
+}
+
+// rejectSymlinkEscape walks path's ancestors up to (but not including)
+// workspaceRoot and refuses to proceed if any existing component - the plan
+// file itself, the plans directory, or .zero - is a symlink. The lexical
+// filepath.Rel check above only guards against ".." traversal in the
+// constructed path; a pre-planted symlink at any of those locations would
+// still let os.MkdirAll/os.WriteFile/os.ReadFile follow it outside the
+// workspace despite the path string looking contained.
+func rejectSymlinkEscape(workspaceRoot, path string) error {
+	root := filepath.Clean(workspaceRoot)
+	for current := filepath.Clean(path); current != root; current = filepath.Dir(current) {
+		parent := filepath.Dir(current)
+		if parent == current {
+			// Reached the filesystem root without hitting workspaceRoot; the
+			// filepath.Rel check above already rejects this case.
+			return nil
+		}
+		info, err := os.Lstat(current)
+		switch {
+		case err == nil && info.Mode()&os.ModeSymlink != 0:
+			return fmt.Errorf("plan file path %s contains a symlink", current)
+		case err != nil && !os.IsNotExist(err):
+			return fmt.Errorf("check plan file path: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -102,7 +128,11 @@ func ensurePlanPathContained(workspaceRoot, path string) error {
 func slugify(id string) string {
 	id = strings.TrimSpace(id)
 	if id == "" {
-		id = fmt.Sprintf("%d", time.Now().UnixNano())
+		// A stable fallback, not a per-call timestamp: PlanFilePath is called
+		// independently from several sites (planEnterText, planText,
+		// openPlanInEditor) before a session ID may exist, and they must all
+		// resolve to the same file rather than a fresh one each time.
+		id = "plan"
 	}
 	var b strings.Builder
 	prevDash := false

@@ -17,8 +17,7 @@ type currentPlanReader interface {
 	CurrentPlan() []tools.PlanItem
 }
 
-// handlePlanCommand toggles plan mode on the current session, in the style of
-// openclaude's /plan:
+// handlePlanCommand toggles plan mode on the current session:
 //
 //	/plan            toggle plan mode on/off; when on, show the current plan
 //	/plan open       open the session's plan file in $VISUAL/$EDITOR
@@ -41,6 +40,10 @@ func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.permissionMode = agent.PermissionModeAuto
+		if m.permissionModeBeforePlan != "" {
+			m.permissionMode = m.permissionModeBeforePlan
+		}
+		m.permissionModeBeforePlan = ""
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Exited plan mode. The agent can now implement."})
 		return m, nil
 	case "open":
@@ -56,6 +59,7 @@ func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot enter plan mode while a run is active."})
 		return m, nil
 	}
+	m.permissionModeBeforePlan = m.permissionMode
 	m.permissionMode = agent.PermissionModePlan
 	textToShow := planEnterText(m) + "\n\n" + m.planText()
 	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: textToShow})
@@ -97,7 +101,11 @@ func (m model) openPlanInEditor() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if !fileExists(path) {
-		if _, err := planmode.WritePlan(m.cwd, m.activeSession.SessionID, ""); err != nil {
+		// Seed the file with the agent's in-memory update_plan draft (if any)
+		// rather than leaving it blank: once the file exists, planText prefers
+		// it over the draft, so starting empty would shadow real plan content
+		// the agent already captured.
+		if _, err := planmode.WritePlan(m.cwd, m.activeSession.SessionID, m.formatPlanDraft()); err != nil {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "plan write error: " + err.Error()})
 			return m, nil
 		}
@@ -108,11 +116,6 @@ func (m model) openPlanInEditor() (tea.Model, tea.Cmd) {
 	}
 	if editor == "" {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Set $VISUAL or $EDITOR to open the plan file:\n" + path})
-		return m, nil
-	}
-	if m.program == nil {
-		// No live program (e.g. under test): just report the path.
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan file: " + path})
 		return m, nil
 	}
 	parts := strings.Fields(editor)
@@ -135,9 +138,8 @@ type planEditorFinishedMsg struct {
 }
 
 func planEnterText(m model) string {
-	path, err := planmode.PlanFilePath(m.cwd, m.activeSession.SessionID)
 	planNote := ""
-	if err == nil && path != "" {
+	if path, err := planmode.PlanFilePath(m.cwd, m.activeSession.SessionID); err == nil {
 		planNote = "\nPlan file: " + path
 	}
 	return "Entered plan mode. The agent can inspect the workspace and shape the plan with update_plan, but cannot edit files or run commands until you exit.\n" +
@@ -148,27 +150,43 @@ func planEnterText(m model) string {
 func (m model) planText() string {
 	// Prefer the session plan file when present.
 	if path, err := planmode.PlanFilePath(m.cwd, m.activeSession.SessionID); err == nil {
-		if content, err := os.ReadFile(path); err == nil {
+		content, readErr := os.ReadFile(path)
+		switch {
+		case readErr == nil:
 			return "Current Plan (plan mode)\n" + path + "\n" + strings.TrimRight(string(content), "\n")
+		case !os.IsNotExist(readErr):
+			// A real I/O/permission failure, not just a not-yet-created file:
+			// surface it instead of silently falling back to the in-memory
+			// draft, which would hide the failure entirely.
+			return "plan file read error: " + readErr.Error()
 		}
 	}
 
 	// Fall back to the update_plan list the agent has been building.
+	if draft := m.formatPlanDraft(); draft != "" {
+		return "Current Plan\n" + draft
+	}
+	return "Plan mode is active. No plan written yet. Use update_plan to outline steps, or /plan open to draft the plan file."
+}
+
+// formatPlanDraft renders the agent's in-memory update_plan items as plain
+// text, or "" if nothing has been captured yet. Shared by planText's fallback
+// and openPlanInEditor's file-seeding so a newly created plan file starts from
+// the agent's real draft instead of blank.
+func (m model) formatPlanDraft() string {
 	tool, ok := m.registry.Get("update_plan")
 	if !ok {
-		return "Plan mode is active. No plan written yet. Use update_plan to outline steps, or /plan open to draft the plan file."
+		return ""
 	}
 	reader, ok := tool.(currentPlanReader)
 	if !ok {
-		return "Plan mode is active. No plan written yet."
+		return ""
 	}
 	plan := reader.CurrentPlan()
 	if len(plan) == 0 {
-		return "Plan mode is active. No plan written yet. Use update_plan to outline steps, or /plan open to draft the plan file."
+		return ""
 	}
-
-	lines := make([]string, 0, len(plan)+1)
-	lines = append(lines, "Current Plan")
+	lines := make([]string, 0, len(plan))
 	for index, item := range plan {
 		line := fmt.Sprintf("%d. [%s] %s", index+1, item.Status, item.Content)
 		if item.Notes != "" {
