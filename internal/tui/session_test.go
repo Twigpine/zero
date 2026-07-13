@@ -837,6 +837,75 @@ func TestResumeCommandIsBlockedWhileRunPending(t *testing.T) {
 	}
 }
 
+// Regression: plan mode (and the permission mode /plan off would restore)
+// used to live only on the TUI model, so /new left it attached across the
+// session switch — silently making the fresh session read-only, and letting
+// its eventual /plan off restore the OLD session's permission mode into it.
+func TestNewSessionExitsPlanMode(t *testing.T) {
+	store := testSessionStore(t)
+	m := newModel(context.Background(), Options{SessionStore: store})
+	m.permissionMode = agent.PermissionModePlan
+	m.permissionModeBeforePlan = agent.PermissionModeAsk
+
+	m = m.startNewSession()
+
+	if m.permissionMode != agent.PermissionModeAsk {
+		t.Fatalf("expected /new to exit plan mode and restore Ask, got %s", m.permissionMode)
+	}
+	if m.permissionModeBeforePlan != "" {
+		t.Fatalf("expected permissionModeBeforePlan to be cleared, got %q", m.permissionModeBeforePlan)
+	}
+}
+
+func TestResumeDifferentSessionExitsPlanMode(t *testing.T) {
+	store := testSessionStore(t)
+	active, err := store.Create(sessions.CreateInput{Title: "Active"})
+	if err != nil {
+		t.Fatalf("Create active: %v", err)
+	}
+	other, err := store.Create(sessions.CreateInput{Title: "Other"})
+	if err != nil {
+		t.Fatalf("Create other: %v", err)
+	}
+	m := newModel(context.Background(), Options{SessionStore: store})
+	m.activeSession = active
+	m.permissionMode = agent.PermissionModePlan
+	m.permissionModeBeforePlan = agent.PermissionModeAsk
+
+	m, _ = m.handleResumeCommand(other.SessionID)
+
+	if m.activeSession.SessionID != other.SessionID {
+		t.Fatalf("expected to resume the other session, got %#v", m.activeSession)
+	}
+	if m.permissionMode != agent.PermissionModeAsk {
+		t.Fatalf("expected /resume to a different session to exit plan mode and restore Ask, got %s", m.permissionMode)
+	}
+	if m.permissionModeBeforePlan != "" {
+		t.Fatalf("expected permissionModeBeforePlan to be cleared, got %q", m.permissionModeBeforePlan)
+	}
+}
+
+// Resuming the session that is already active (e.g. `/resume latest` or
+// `/resume <currentID>`) is not a switch, so it must leave plan mode alone —
+// matching the existing loopsCleared guard just below.
+func TestResumeSameSessionKeepsPlanMode(t *testing.T) {
+	store := testSessionStore(t)
+	active, err := store.Create(sessions.CreateInput{Title: "Active"})
+	if err != nil {
+		t.Fatalf("Create active: %v", err)
+	}
+	m := newModel(context.Background(), Options{SessionStore: store})
+	m.activeSession = active
+	m.permissionMode = agent.PermissionModePlan
+	m.permissionModeBeforePlan = agent.PermissionModeAsk
+
+	m, _ = m.handleResumeCommand(active.SessionID)
+
+	if m.permissionMode != agent.PermissionModePlan {
+		t.Fatalf("expected resuming the same session to leave plan mode active, got %s", m.permissionMode)
+	}
+}
+
 func TestResumePickerExcludesSubRunSessions(t *testing.T) {
 	store := testSessionStore(t)
 	if _, err := store.Create(sessions.CreateInput{Title: "Real Conversation"}); err != nil {

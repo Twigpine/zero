@@ -67,6 +67,12 @@ func (m model) ensureActiveSession(prompt string) (model, error) {
 func (m model) startNewSession() model {
 	previousID := m.activeSession.SessionID
 
+	// Plan mode (and the mode /plan off would restore) belongs to the session
+	// that entered it — carrying it into a fresh session would silently make
+	// the new session read-only, or later restore the old session's mode into
+	// it. Exit it here rather than leaving it to a same-session-only /plan off.
+	m = m.exitPlanMode()
+
 	m.activeSession = sessions.Metadata{}
 	m.pendingSessionTitle = ""
 	m.sessionEvents = nil
@@ -232,6 +238,12 @@ func (m model) handleResumeCommand(args string) (model, string) {
 	// on a real change — `/resume latest` or `/resume <currentID>` can resolve to
 	// the already-active session, whose loops belong to it, not a "previous" one.
 	previousID := m.activeSession.SessionID
+	if session.SessionID != previousID {
+		// Plan mode (and the mode /plan off would restore) belongs to the
+		// session that entered it, not to whatever session becomes active —
+		// see the matching guard in startNewSession.
+		m = m.exitPlanMode()
+	}
 	m.activeSession = *session
 	m.pendingSessionTitle = ""
 	m.sessionEvents = append([]sessions.Event{}, events...)

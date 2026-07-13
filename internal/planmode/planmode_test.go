@@ -3,6 +3,7 @@ package planmode
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -41,6 +42,14 @@ func TestPlanFilePathEmptySessionIsStable(t *testing.T) {
 }
 
 func TestWritePlanUsesRestrictivePermissions(t *testing.T) {
+	// Windows reports 0666 for a plan file regardless of the mode passed to
+	// OpenFile - NTFS permissions are governed by ACLs, not the POSIX mode
+	// bits Go maps them to. Assert the mode bits only where they mean
+	// something; Windows containment relies on the workspace-scoped os.Root
+	// resolution in WritePlan/ReadPlan instead, not on file permissions.
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not meaningful on Windows")
+	}
 	root := t.TempDir()
 	path, err := WritePlan(root, "session-1", "notes")
 	if err != nil {
@@ -90,24 +99,29 @@ func TestReadPlanMissingFileIsNotAnError(t *testing.T) {
 	}
 }
 
-func TestPlanFilePathRejectsSymlinkedPlansDir(t *testing.T) {
+func TestWritePlanRejectsSymlinkedPlansDir(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, ".zero"), 0o700); err != nil {
 		t.Fatalf("mkdir .zero: %v", err)
 	}
 	// Plant a symlink at .zero/plans pointing outside the workspace, as if an
-	// attacker (or a stale state) had redirected it before /plan open ran.
+	// attacker (or stale state) had redirected it before WritePlan ran. Unlike
+	// a preflight Lstat check, os.Root re-resolves this on every call, so
+	// planting the symlink right before the call still gets caught.
 	if err := os.Symlink(outside, filepath.Join(root, ".zero", "plans")); err != nil {
 		t.Fatalf("symlink .zero/plans: %v", err)
 	}
 
-	if _, err := PlanFilePath(root, "session-1"); err == nil {
-		t.Fatal("expected PlanFilePath to reject a symlinked plans directory")
+	if _, err := WritePlan(root, "session-1", "notes"); err == nil {
+		t.Fatal("expected WritePlan to reject a symlinked plans directory")
+	}
+	if _, _, err := ReadPlan(root, "session-1"); err == nil {
+		t.Fatal("expected ReadPlan to reject a symlinked plans directory")
 	}
 }
 
-func TestPlanFilePathRejectsSymlinkedPlanFile(t *testing.T) {
+func TestWritePlanRejectsSymlinkedPlanFile(t *testing.T) {
 	root := t.TempDir()
 	outsideFile := filepath.Join(t.TempDir(), "exfil.md")
 	if err := os.WriteFile(outsideFile, []byte("secret"), 0o600); err != nil {
@@ -122,7 +136,10 @@ func TestPlanFilePathRejectsSymlinkedPlanFile(t *testing.T) {
 		t.Fatalf("symlink plan file: %v", err)
 	}
 
-	if _, err := PlanFilePath(root, "session-1"); err == nil {
-		t.Fatal("expected PlanFilePath to reject a symlinked plan file")
+	if _, err := WritePlan(root, "session-1", "notes"); err == nil {
+		t.Fatal("expected WritePlan to reject a symlinked plan file")
+	}
+	if _, _, err := ReadPlan(root, "session-1"); err == nil {
+		t.Fatal("expected ReadPlan to reject a symlinked plan file")
 	}
 }
