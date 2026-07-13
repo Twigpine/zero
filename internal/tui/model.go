@@ -28,6 +28,7 @@ import (
 	"github.com/Twigpine/zero/internal/modelregistry"
 	"github.com/Twigpine/zero/internal/notify"
 	"github.com/Twigpine/zero/internal/peermsg"
+	"github.com/Twigpine/zero/internal/planmode"
 	"github.com/Twigpine/zero/internal/providerhealth"
 	"github.com/Twigpine/zero/internal/providermodeldiscovery"
 	"github.com/Twigpine/zero/internal/providers"
@@ -5635,8 +5636,15 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		if runOptions.permissionMode != "" {
 			options.PermissionMode = runOptions.permissionMode
 		}
-		if runOptions.systemPrompt != "" {
+		switch {
+		case runOptions.systemPrompt != "":
 			options.SystemPrompt = runOptions.systemPrompt
+		case options.PermissionMode == agent.PermissionModePlan:
+			// Plan mode is toggled via /plan on the normal submit path (not a
+			// dedicated run-launch command like /spec), so there is no call site
+			// to pass planmode.DraftSystemPrompt through runOptions: set it here
+			// from the active permission mode instead.
+			options.SystemPrompt = planmode.DraftSystemPrompt
 		}
 		if runOptions.transientSystemPrompt != "" {
 			options.TransientSystemPrompt = runOptions.transientSystemPrompt
