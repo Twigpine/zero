@@ -1551,7 +1551,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case planEditorFinishedMsg:
 		if msg.err != nil {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "plan editor error: " + msg.err.Error()})
+			return m, nil
 		}
+		// The user may have edited the plan file in $EDITOR; sync it back into
+		// the in-memory update_plan so the edited plan drives execution.
+		m.reloadPlanFromFile()
 		return m, nil
 	case exitConfirmExpiredMsg:
 		if msg.seq == m.exitConfirmSeq {
