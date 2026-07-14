@@ -60,6 +60,14 @@ func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot open the plan file while a run is active."})
 			return m, nil
 		}
+		// Validate plan mode is active before ensureActiveSession, not after:
+		// openPlanInEditor rejects this same condition, but by then a session
+		// would already have been created for what should be a pure no-op
+		// error, leaving a persistent empty session behind in /resume.
+		if m.permissionMode != agent.PermissionModePlan {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Enter plan mode (/plan) before opening the plan file."})
+			return m, nil
+		}
 		updated, err := m.ensureActiveSession("")
 		if err != nil {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "session error: " + err.Error()})
@@ -181,13 +189,30 @@ func (m model) openPlanInEditor() (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Set $VISUAL or $EDITOR to open the plan file:\n" + path})
 		return m, nil
 	}
+	// The editor is launched on a staged copy outside the workspace, not on
+	// path directly: see planmode.StageForEditor for why handing $EDITOR a
+	// workspace-relative path would leave a symlink-swap containment race.
+	stagedPath, cleanup, err := planmode.StageForEditor(m.cwd, m.activeSession.SessionID)
+	if err != nil {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "plan stage error: " + err.Error()})
+		return m, nil
+	}
 	parts := strings.Fields(editor)
-	cmd := exec.Command(parts[0], append(parts[1:], path)...) //nolint:gosec // editor path from $VISUAL/$EDITOR
+	cmd := exec.Command(parts[0], append(parts[1:], stagedPath)...) //nolint:gosec // editor path from $VISUAL/$EDITOR
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	workspaceRoot := m.cwd
+	sessionID := m.activeSession.SessionID
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-		return planEditorFinishedMsg{err: err}
+		defer cleanup()
+		if err != nil {
+			return planEditorFinishedMsg{err: err}
+		}
+		if commitErr := planmode.CommitStagedEdit(workspaceRoot, sessionID, stagedPath); commitErr != nil {
+			return planEditorFinishedMsg{err: commitErr}
+		}
+		return planEditorFinishedMsg{err: nil}
 	})
 }
 
@@ -222,50 +247,59 @@ func (m model) reloadPlanFromFile() ([]tools.PlanItem, bool) {
 // $EDITOR back into plan items. A numbered line ("N. [status] ...") starts a
 // new step; an optional leading "[status]" is parsed back into the item's
 // Status (matching formatPlanItems) so completed/in-progress steps survive an
-// edit instead of resetting to pending. A "Notes: ..." line, and any further
-// non-numbered lines that follow it, fold into the preceding item's Notes
-// field (joined by newline) rather than becoming steps of their own, so a
-// multi-line notes block survives a round-trip through $EDITOR instead of
-// shattering into bogus new pending steps. A non-numbered line that does NOT
-// follow a "Notes:" line is instead treated as a freeform new step (e.g. a
-// line the user added without bothering to number it), matching how earlier
-// versions of this parser treated any non-blank line. Blank lines are
-// dropped.
+// edit instead of resetting to pending.
+//
+// An indented line (formatPlanItems writes continuations with a leading
+// "   ") folds into the current item instead of becoming a step of its own:
+// before a "Notes: ..." line it extends the item's (possibly multi-line)
+// Content, and a "Notes: ..." line plus any indented lines after it extend
+// the item's Notes. This lets both multi-line Content and multi-line Notes
+// round-trip through $EDITOR instead of shattering into bogus new pending
+// steps. A non-numbered line with NO leading indentation is instead treated
+// as a freeform new step (e.g. one the user typed without bothering to
+// number or indent it), matching how earlier versions of this parser treated
+// any non-blank line. Blank lines are dropped.
 func parsePlanFileLines(content string) []tools.PlanItem {
 	items := make([]tools.PlanItem, 0)
 	inNotes := false
 	for _, raw := range strings.Split(content, "\n") {
-		line := strings.TrimSpace(raw)
-		if line == "" {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
 			continue
 		}
-		if match := numberedStatusRe.FindStringSubmatch(line); match != nil {
+		if match := numberedStatusRe.FindStringSubmatch(trimmed); match != nil {
 			status := "pending"
 			if match[1] != "" {
 				status = tools.NormalizePlanStatus(match[1])
 			}
 			items = append(items, tools.PlanItem{
-				Content: strings.TrimSpace(line[len(match[0]):]),
+				Content: strings.TrimSpace(trimmed[len(match[0]):]),
 				Status:  status,
 			})
 			inNotes = false
 			continue
 		}
-		if notes, ok := strings.CutPrefix(line, "Notes:"); ok && len(items) > 0 {
-			items[len(items)-1].Notes = strings.TrimSpace(notes)
+		indented := raw != trimmed
+		if !indented || len(items) == 0 {
+			items = append(items, tools.PlanItem{Content: trimmed, Status: "pending"})
+			inNotes = false
+			continue
+		}
+		last := &items[len(items)-1]
+		if notes, ok := strings.CutPrefix(trimmed, "Notes:"); ok {
+			last.Notes = strings.TrimSpace(notes)
 			inNotes = true
 			continue
 		}
-		if inNotes && len(items) > 0 {
-			last := &items[len(items)-1]
+		if inNotes {
 			if last.Notes == "" {
-				last.Notes = line
+				last.Notes = trimmed
 			} else {
-				last.Notes += "\n" + line
+				last.Notes += "\n" + trimmed
 			}
 			continue
 		}
-		items = append(items, tools.PlanItem{Content: line, Status: "pending"})
+		last.Content += "\n" + trimmed
 	}
 	return items
 }
@@ -327,15 +361,28 @@ func (m model) formatPlanDraft() string {
 // formatPlanItems renders update_plan items as plain text, or "" if there are
 // none. Shared by formatPlanDraft (in-memory fallback for display) and the
 // OnToolResult hook in model.go that persists every update_plan call to disk.
+//
+// A multi-line Content or Notes is rendered with each continuation line
+// indented ("   "), matching what parsePlanFileLines expects: it is the
+// indentation, not just the "Notes:" marker, that tells a reload apart a
+// continuation of the current item from a freeform new step.
 func formatPlanItems(items []tools.PlanItem) string {
 	if len(items) == 0 {
 		return ""
 	}
 	lines := make([]string, 0, len(items))
 	for index, item := range items {
-		line := fmt.Sprintf("%d. [%s] %s", index+1, item.Status, item.Content)
+		contentLines := strings.Split(item.Content, "\n")
+		line := fmt.Sprintf("%d. [%s] %s", index+1, item.Status, contentLines[0])
+		for _, cont := range contentLines[1:] {
+			line += "\n   " + cont
+		}
 		if item.Notes != "" {
-			line += "\n   Notes: " + item.Notes
+			noteLines := strings.Split(item.Notes, "\n")
+			line += "\n   Notes: " + noteLines[0]
+			for _, cont := range noteLines[1:] {
+				line += "\n   " + cont
+			}
 		}
 		lines = append(lines, line)
 	}

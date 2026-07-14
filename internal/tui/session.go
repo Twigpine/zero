@@ -250,6 +250,16 @@ func (m model) handleResumeCommand(args string) (model, string) {
 	}
 	m.activeSession = *session
 	m.pendingSessionTitle = ""
+	if session.SessionID != previousID {
+		// resetPlanForSessionSwitch cleared the previous session's plan; now
+		// hydrate the destination session's own persisted plan file (if any),
+		// so the sticky panel and update_plan reflect what THIS session had
+		// saved instead of starting empty and risking an overwrite on the
+		// next update_plan call.
+		if items, ok := m.reloadPlanFromFile(); ok {
+			m.plan.updateFromItems(items, m.now())
+		}
+	}
 	m.sessionEvents = append([]sessions.Event{}, events...)
 	if m.providerName == "" {
 		m.providerName = session.Provider
