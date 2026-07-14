@@ -71,6 +71,45 @@ func TestWritePlanUsesRestrictivePermissions(t *testing.T) {
 	}
 }
 
+func TestWritePlanTightensPreExistingLoosePermissions(t *testing.T) {
+	// Regression: MkdirAll/OpenFile's mode argument only applies at creation
+	// time, so a pre-existing 0755 plan directory or 0644 plan file (e.g.
+	// predating this restriction, or created some other way) stayed
+	// group/other-readable forever after, contrary to the owner-only
+	// storage contract WritePlan is supposed to enforce on every write.
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not meaningful on Windows")
+	}
+	root := t.TempDir()
+	planDir := filepath.Join(root, PlanDirName)
+	if err := os.MkdirAll(planDir, 0o755); err != nil {
+		t.Fatalf("pre-create loose plan dir: %v", err)
+	}
+	planFile := filepath.Join(planDir, "session-1.md")
+	if err := os.WriteFile(planFile, []byte("stale"), 0o644); err != nil {
+		t.Fatalf("pre-create loose plan file: %v", err)
+	}
+
+	path, err := WritePlan(root, "session-1", "notes")
+	if err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat plan file: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("expected pre-existing plan file tightened to mode 0600, got %o", perm)
+	}
+	dirInfo, err := os.Stat(planDir)
+	if err != nil {
+		t.Fatalf("stat plan dir: %v", err)
+	}
+	if perm := dirInfo.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("expected pre-existing plan dir tightened to mode 0700, got %o", perm)
+	}
+}
+
 func TestReadWritePlanRoundtrip(t *testing.T) {
 	root := t.TempDir()
 	if _, err := WritePlan(root, "session-1", "# Draft\n\nStep one."); err != nil {

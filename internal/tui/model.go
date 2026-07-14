@@ -1556,8 +1556,26 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The user may have edited the plan file in $EDITOR; sync it back into
 		// the in-memory update_plan so the edited plan drives execution, and
 		// refresh the sticky plan panel to match.
-		if items, ok := m.reloadPlanFromFile(); ok {
-			m.plan.updateFromItems(items, m.now())
+		items, ok := m.reloadPlanFromFile()
+		if !ok {
+			return m, nil
+		}
+		m.plan.updateFromItems(items, m.now())
+		// SetPlan (inside reloadPlanFromFile) only changes the update_plan
+		// tool's in-memory state; the model has no way to observe that on its
+		// own. Record it as a session event too, so a user-authored edit
+		// actually reaches the next turn's context — whether that turn is
+		// more planning or, after /plan off, the implementation run the
+		// feature is supposed to drive.
+		if plan := formatPlanItems(items); plan != "" {
+			var err error
+			m, err = m.appendSessionEvent(sessions.EventMessage, map[string]any{
+				"role":    "user",
+				"content": "I edited the plan file directly. Updated plan:\n\n" + plan,
+			})
+			if err != nil {
+				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "session record error: " + err.Error()})
+			}
 		}
 		return m, nil
 	case exitConfirmExpiredMsg:

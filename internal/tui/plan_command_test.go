@@ -64,6 +64,31 @@ func TestPlanOffRestoresPreviousPermissionMode(t *testing.T) {
 	}
 }
 
+func TestPlanOpenOutsidePlanModeDoesNotCreateSession(t *testing.T) {
+	// Regression: /plan open when plan mode is inactive used to call
+	// ensureActiveSession before openPlanInEditor's own guard rejected the
+	// command, leaving a persistent empty session behind in /resume for what
+	// should have been a pure no-op error.
+	store := testSessionStore(t)
+	m := newModel(context.Background(), Options{
+		Cwd:            t.TempDir(),
+		SessionStore:   store,
+		PermissionMode: agent.PermissionModeAsk,
+	})
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewUpdatePlanTool())
+	m.registry = registry
+
+	updated, _ := m.handlePlanCommand("open")
+	next := updated.(model)
+	if next.activeSession.SessionID != "" {
+		t.Fatalf("expected no session to be created for an invalid /plan open, got %+v", next.activeSession)
+	}
+	if !transcriptContains(next.transcript, "Enter plan mode (/plan) before opening the plan file.") {
+		t.Fatalf("expected a plan-mode-required notice in the transcript, got %#v", next.transcript)
+	}
+}
+
 func TestPlanOpenBlockedWhileRunActive(t *testing.T) {
 	// Regression: the bare /plan toggle refused to run while m.pending (a run
 	// in flight), but "/plan open" had no such guard, letting it race a live
@@ -333,6 +358,30 @@ func TestPlanOpenEditorReloadPreservesStatusAndNotes(t *testing.T) {
 	}
 	if got[2].Status != "pending" || got[2].Content != "step three" {
 		t.Fatalf("expected step three unchanged, got %+v", got[2])
+	}
+}
+
+func TestPlanItemsRoundTripMultilineContent(t *testing.T) {
+	// Regression: a multi-line PlanItem.Content (e.g. from an agent-authored
+	// update_plan call) used to be written verbatim by formatPlanItems, and
+	// its continuation lines then reloaded as bogus new freeform pending
+	// steps instead of staying part of the original item's Content.
+	items := []tools.PlanItem{
+		{Content: "first line\nsecond line\nthird line", Status: "in_progress", Notes: "a note\nsecond note line"},
+		{Content: "step two", Status: "pending"},
+	}
+	reloaded := parsePlanFileLines(formatPlanItems(items))
+	if len(reloaded) != 2 {
+		t.Fatalf("expected 2 items after round-trip, got %d: %+v", len(reloaded), reloaded)
+	}
+	if reloaded[0].Content != items[0].Content {
+		t.Fatalf("expected multi-line content preserved, got %q", reloaded[0].Content)
+	}
+	if reloaded[0].Status != "in_progress" || reloaded[0].Notes != items[0].Notes {
+		t.Fatalf("expected status/notes preserved, got %+v", reloaded[0])
+	}
+	if reloaded[1].Content != "step two" {
+		t.Fatalf("expected step two unaffected, got %+v", reloaded[1])
 	}
 }
 

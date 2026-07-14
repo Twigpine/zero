@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/config"
 )
 
 // PlanDirName is the workspace-relative directory where /plan plan files live,
@@ -78,18 +80,94 @@ func WritePlan(workspaceRoot, sessionID, content string) (string, error) {
 	}
 	defer root.Close()
 
-	if err := root.MkdirAll(filepath.FromSlash(PlanDirName), 0o700); err != nil {
+	dirRelPath := filepath.FromSlash(PlanDirName)
+	if err := root.MkdirAll(dirRelPath, 0o700); err != nil {
 		return "", fmt.Errorf("create plan directory: %w", err)
 	}
-	file, err := root.OpenFile(planRelativePath(sessionID), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	// MkdirAll's mode only applies at creation: it does not tighten an
+	// already-existing, more permissive directory (e.g. one predating this
+	// restriction, or created some other way). Chmod unconditionally so a
+	// pre-existing 0755 directory is brought back to owner-only on every
+	// write, matching the storage contract.
+	if err := root.Chmod(dirRelPath, 0o700); err != nil {
+		return "", fmt.Errorf("restrict plan directory permissions: %w", err)
+	}
+	fileRelPath := planRelativePath(sessionID)
+	file, err := root.OpenFile(fileRelPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return "", fmt.Errorf("write plan file: %w", err)
 	}
 	defer file.Close()
+	// Same reasoning as the directory Chmod above: OpenFile's mode only
+	// applies when it creates the file, so a pre-existing 0644 plan file
+	// would otherwise stay group/other-readable.
+	if err := root.Chmod(fileRelPath, 0o600); err != nil {
+		return "", fmt.Errorf("restrict plan file permissions: %w", err)
+	}
 	if _, err := file.WriteString(strings.TrimRight(content, "\n") + "\n"); err != nil {
 		return "", fmt.Errorf("write plan file: %w", err)
 	}
 	return PlanFilePath(workspaceRoot, sessionID)
+}
+
+// StageForEditor copies a session's current plan content (read safely via
+// ReadPlan) into a fresh file outside the workspace, for handing to an
+// external $EDITOR process launched by /plan open.
+//
+// Handing $EDITOR a path inside the workspace itself would leave a
+// symlink-swap race: ReadPlan/WritePlan resolve descriptor-relative through
+// os.Root and cannot be redirected, but the external editor process opens
+// its argument path with its own ordinary (non-Root) I/O, so a sandboxed
+// tool invocation could replace the plan file with a symlink between our
+// protected write and the editor's open, causing the editor (which runs
+// unsandboxed, under the real user) to follow it and edit an arbitrary
+// user-writable target. The OS temp directory does not avoid this: the
+// sandbox's default write scope explicitly includes it (see
+// defaultTempWriteRootCandidates in internal/sandbox), so a sandboxed
+// process could plant the same symlink there. config.UserConfigDir() is not
+// part of that default scope, so a sandboxed process cannot pre-stage a
+// symlink at the path this creates.
+func StageForEditor(workspaceRoot, sessionID string) (stagedPath string, cleanup func(), err error) {
+	content, _, err := ReadPlan(workspaceRoot, sessionID)
+	if err != nil {
+		return "", nil, err
+	}
+	dir, err := editorStagingDir()
+	if err != nil {
+		return "", nil, err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", nil, fmt.Errorf("create plan editor staging directory: %w", err)
+	}
+	path := filepath.Join(dir, slugify(sessionID)+".md")
+	if err := os.WriteFile(path, []byte(strings.TrimRight(content, "\n")+"\n"), 0o600); err != nil {
+		return "", nil, fmt.Errorf("stage plan file for editor: %w", err)
+	}
+	return path, func() { _ = os.Remove(path) }, nil
+}
+
+// CommitStagedEdit reads a file staged by StageForEditor (now edited by the
+// user's $EDITOR) and writes its content back into the workspace via
+// WritePlan, which is the safe, descriptor-relative path back through
+// os.Root.
+func CommitStagedEdit(workspaceRoot, sessionID, stagedPath string) error {
+	data, err := os.ReadFile(stagedPath)
+	if err != nil {
+		return fmt.Errorf("read staged plan file: %w", err)
+	}
+	_, err = WritePlan(workspaceRoot, sessionID, string(data))
+	return err
+}
+
+// editorStagingDir is where plan files are staged for external $EDITOR
+// access. See StageForEditor for why this location, not the OS temp
+// directory, is what actually closes the containment race.
+func editorStagingDir() (string, error) {
+	dir, err := config.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve editor staging directory: %w", err)
+	}
+	return filepath.Join(dir, "zero", "plan-edit"), nil
 }
 
 // openWorkspaceRoot opens the workspace directory as an os.Root, which the
