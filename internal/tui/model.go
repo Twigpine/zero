@@ -1554,8 +1554,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// The user may have edited the plan file in $EDITOR; sync it back into
-		// the in-memory update_plan so the edited plan drives execution.
-		m.reloadPlanFromFile()
+		// the in-memory update_plan so the edited plan drives execution, and
+		// refresh the sticky plan panel to match.
+		if items, ok := m.reloadPlanFromFile(); ok {
+			m.plan.updateFromItems(items, m.now())
+		}
 		return m, nil
 	case exitConfirmExpiredMsg:
 		if msg.seq == m.exitConfirmSeq {

@@ -64,6 +64,23 @@ func TestPlanOffRestoresPreviousPermissionMode(t *testing.T) {
 	}
 }
 
+func TestPlanOpenBlockedWhileRunActive(t *testing.T) {
+	// Regression: the bare /plan toggle refused to run while m.pending (a run
+	// in flight), but "/plan open" had no such guard, letting it race a live
+	// run to suspend the TUI into $EDITOR.
+	m := newPlanModeTestModel(t, t.TempDir(), agent.PermissionModePlan)
+	m.pending = true
+
+	updated, cmd := m.handlePlanCommand("open")
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("expected /plan open to return no command while a run is active")
+	}
+	if !transcriptContains(next.transcript, "Cannot open the plan file while a run is active") {
+		t.Fatalf("expected a blocked-run notice in the transcript, got %#v", next.transcript)
+	}
+}
+
 func TestBarePlanTogglesOff(t *testing.T) {
 	// Regression: a second bare /plan used to just re-print the current plan
 	// and leave PermissionModePlan active, contradicting the advertised
@@ -316,6 +333,31 @@ func TestPlanOpenEditorReloadPreservesStatusAndNotes(t *testing.T) {
 	}
 	if got[2].Status != "pending" || got[2].Content != "step three" {
 		t.Fatalf("expected step three unchanged, got %+v", got[2])
+	}
+}
+
+func TestParsePlanFileLinesFoldsMultilineNotes(t *testing.T) {
+	// Regression: a "Notes: ..." block spanning more than one line used to
+	// have its continuation lines treated as bogus new pending steps instead
+	// of folding into the preceding item's Notes.
+	content := "1. [in_progress] step one\n" +
+		"   Notes: first line\n" +
+		"   second line continuation\n" +
+		"2. [pending] step two\n" +
+		"a freeform unnumbered line"
+
+	items := parsePlanFileLines(content)
+	if len(items) != 3 {
+		t.Fatalf("expected 3 items (2 numbered steps + 1 freeform), got %d: %+v", len(items), items)
+	}
+	if items[0].Notes != "first line\nsecond line continuation" {
+		t.Fatalf("expected multi-line notes folded, got %q", items[0].Notes)
+	}
+	if items[1].Content != "step two" || items[1].Notes != "" {
+		t.Fatalf("expected step two unaffected, got %+v", items[1])
+	}
+	if items[2].Content != "a freeform unnumbered line" || items[2].Status != "pending" {
+		t.Fatalf("expected a trailing unnumbered line to become its own step, got %+v", items[2])
 	}
 }
 
