@@ -857,6 +857,30 @@ func TestNewSessionExitsPlanMode(t *testing.T) {
 	}
 }
 
+// Regression: exitPlanMode only restored the permission mode, not the plan
+// itself. A session switch left the previous session's plan in the shared
+// update_plan tool state and sticky panel, leaking it into a session that
+// never drafted it.
+func TestNewSessionClearsPreviousPlan(t *testing.T) {
+	store := testSessionStore(t)
+	planTool := tools.NewUpdatePlanTool()
+	planTool.SetPlan([]tools.PlanItem{{Content: "leftover step", Status: "pending"}})
+	registry := tools.NewRegistry()
+	registry.Register(planTool)
+	m := newModel(context.Background(), Options{SessionStore: store, Registry: registry})
+	m.permissionMode = agent.PermissionModePlan
+	m.plan.updateFromItems(planTool.CurrentPlan(), m.now())
+
+	m = m.startNewSession()
+
+	if len(planTool.CurrentPlan()) != 0 {
+		t.Fatalf("expected /new to clear the shared update_plan state, got %+v", planTool.CurrentPlan())
+	}
+	if !m.plan.isEmpty() {
+		t.Fatalf("expected /new to clear the sticky plan panel, got %+v", m.plan)
+	}
+}
+
 func TestResumeDifferentSessionExitsPlanMode(t *testing.T) {
 	store := testSessionStore(t)
 	active, err := store.Create(sessions.CreateInput{Title: "Active"})

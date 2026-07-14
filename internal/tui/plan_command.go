@@ -56,6 +56,10 @@ func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Exited plan mode. The agent can now implement."})
 		return m, nil
 	case "open":
+		if m.pending || m.exiting {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot open the plan file while a run is active."})
+			return m, nil
+		}
 		updated, err := m.ensureActiveSession("")
 		if err != nil {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "session error: " + err.Error()})
@@ -126,6 +130,22 @@ func (m model) exitPlanMode() model {
 	return m
 }
 
+// resetPlanForSessionSwitch clears the in-memory plan (both the update_plan
+// tool's state and the sticky plan panel) so a session switch doesn't leak
+// the previous session's plan into a session that never drafted it. Callers
+// must also call exitPlanMode; unlike that call, a plain /plan off/toggle
+// within the same session must NOT go through this path, since exiting plan
+// mode there is exactly the hand-off into implementing the plan just drafted.
+func (m model) resetPlanForSessionSwitch() model {
+	if writer, ok := m.registry.Get("update_plan"); ok {
+		if reloader, ok := writer.(planFileReloader); ok {
+			reloader.SetPlan(nil)
+		}
+	}
+	m.plan.clear()
+	return m
+}
+
 // openPlanInEditor writes the session plan file (if missing) and suspends the
 // TUI to launch $VISUAL/$EDITOR on it, resuming on exit.
 func (m model) openPlanInEditor() (tea.Model, tea.Cmd) {
@@ -167,10 +187,7 @@ func (m model) openPlanInEditor() (tea.Model, tea.Cmd) {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-		if err != nil {
-			return planEditorFinishedMsg{err: err}
-		}
-		return nil
+		return planEditorFinishedMsg{err: err}
 	})
 }
 
@@ -184,11 +201,13 @@ type planEditorFinishedMsg struct {
 // content into the in-memory update_plan, so edits the user makes in $EDITOR
 // become the plan that drives execution. The file is only the on-disk target;
 // the in-memory plan stays the source of truth. A missing or unreadable file
-// is left as-is (the in-memory plan remains authoritative).
-func (m model) reloadPlanFromFile() {
+// is left as-is (the in-memory plan remains authoritative). Returns the parsed
+// items and true on success, so the caller can also refresh the sticky plan
+// panel, which reloadPlanFromFile cannot do itself as a value-receiver method.
+func (m model) reloadPlanFromFile() ([]tools.PlanItem, bool) {
 	content, ok, err := planmode.ReadPlan(m.cwd, m.activeSession.SessionID)
 	if err != nil || !ok {
-		return
+		return nil, false
 	}
 	items := parsePlanFileLines(content)
 	if writer, ok := m.registry.Get("update_plan"); ok {
@@ -196,35 +215,57 @@ func (m model) reloadPlanFromFile() {
 			reloader.SetPlan(items)
 		}
 	}
+	return items, true
 }
 
 // parsePlanFileLines converts the plain-text plan file the user edits in
-// $EDITOR back into plan items. Each numbered line is a step; an optional
-// leading "[status]" is parsed back into the item's Status (matching
-// formatPlanItems) so completed/in-progress steps survive an edit instead of
-// resetting to pending. A "Notes: ..." line folds into the preceding item's
-// Notes field rather than becoming a step of its own. Blank lines are dropped.
+// $EDITOR back into plan items. A numbered line ("N. [status] ...") starts a
+// new step; an optional leading "[status]" is parsed back into the item's
+// Status (matching formatPlanItems) so completed/in-progress steps survive an
+// edit instead of resetting to pending. A "Notes: ..." line, and any further
+// non-numbered lines that follow it, fold into the preceding item's Notes
+// field (joined by newline) rather than becoming steps of their own, so a
+// multi-line notes block survives a round-trip through $EDITOR instead of
+// shattering into bogus new pending steps. A non-numbered line that does NOT
+// follow a "Notes:" line is instead treated as a freeform new step (e.g. a
+// line the user added without bothering to number it), matching how earlier
+// versions of this parser treated any non-blank line. Blank lines are
+// dropped.
 func parsePlanFileLines(content string) []tools.PlanItem {
 	items := make([]tools.PlanItem, 0)
+	inNotes := false
 	for _, raw := range strings.Split(content, "\n") {
 		line := strings.TrimSpace(raw)
 		if line == "" {
 			continue
 		}
-		if notes, ok := strings.CutPrefix(line, "Notes:"); ok {
-			if len(items) > 0 {
-				items[len(items)-1].Notes = strings.TrimSpace(notes)
-			}
-			continue
-		}
-		status := "pending"
 		if match := numberedStatusRe.FindStringSubmatch(line); match != nil {
+			status := "pending"
 			if match[1] != "" {
 				status = tools.NormalizePlanStatus(match[1])
 			}
-			line = strings.TrimSpace(line[len(match[0]):])
+			items = append(items, tools.PlanItem{
+				Content: strings.TrimSpace(line[len(match[0]):]),
+				Status:  status,
+			})
+			inNotes = false
+			continue
 		}
-		items = append(items, tools.PlanItem{Content: line, Status: status})
+		if notes, ok := strings.CutPrefix(line, "Notes:"); ok && len(items) > 0 {
+			items[len(items)-1].Notes = strings.TrimSpace(notes)
+			inNotes = true
+			continue
+		}
+		if inNotes && len(items) > 0 {
+			last := &items[len(items)-1]
+			if last.Notes == "" {
+				last.Notes = line
+			} else {
+				last.Notes += "\n" + line
+			}
+			continue
+		}
+		items = append(items, tools.PlanItem{Content: line, Status: "pending"})
 	}
 	return items
 }

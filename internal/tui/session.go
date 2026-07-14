@@ -71,7 +71,10 @@ func (m model) startNewSession() model {
 	// that entered it — carrying it into a fresh session would silently make
 	// the new session read-only, or later restore the old session's mode into
 	// it. Exit it here rather than leaving it to a same-session-only /plan off.
+	// The plan itself belongs to the old session too, so clear it rather than
+	// leaking it into a session that never drafted it.
 	m = m.exitPlanMode()
+	m = m.resetPlanForSessionSwitch()
 
 	m.activeSession = sessions.Metadata{}
 	m.pendingSessionTitle = ""
@@ -243,6 +246,7 @@ func (m model) handleResumeCommand(args string) (model, string) {
 		// session that entered it, not to whatever session becomes active —
 		// see the matching guard in startNewSession.
 		m = m.exitPlanMode()
+		m = m.resetPlanForSessionSwitch()
 	}
 	m.activeSession = *session
 	m.pendingSessionTitle = ""
