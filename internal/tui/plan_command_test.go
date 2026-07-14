@@ -241,6 +241,84 @@ func TestUpdatePlanPersistsToPlanFile(t *testing.T) {
 	}
 }
 
+func TestPlanOpenEditorExitReloadsFileIntoPlan(t *testing.T) {
+	// After /plan open edits the plan file in $EDITOR, the edited content
+	// must be reloaded into the in-memory update_plan so it drives
+	// execution, rather than being shadowed.
+	registry := tools.NewRegistry()
+	planTool := tools.NewUpdatePlanTool()
+	registry.Register(planTool)
+
+	cwd := t.TempDir()
+	m := newModel(context.Background(), Options{
+		Cwd:            cwd,
+		Registry:       registry,
+		PermissionMode: agent.PermissionModePlan,
+	})
+	m.activeSession = sessions.Metadata{SessionID: "plan-test-session"}
+
+	path, err := planmode.PlanFilePath(cwd, "plan-test-session")
+	if err != nil {
+		t.Fatalf("PlanFilePath: %v", err)
+	}
+	if _, err := planmode.WritePlan(cwd, "plan-test-session", "1. [pending] original step"); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+
+	// Simulate the editor exiting after the user rewrote the file.
+	if err := os.WriteFile(path, []byte("edited first step\nedited second step\n"), 0o600); err != nil {
+		t.Fatalf("rewrite plan file: %v", err)
+	}
+	m.reloadPlanFromFile()
+
+	got := planTool.CurrentPlan()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 reloaded plan items, got %d: %+v", len(got), got)
+	}
+	if got[0].Content != "edited first step" || got[1].Content != "edited second step" {
+		t.Fatalf("expected edited contents reloaded, got %+v", got)
+	}
+}
+
+func TestPlanOpenEditorReloadPreservesStatusAndNotes(t *testing.T) {
+	// Regression: parsePlanFileLines used to discard the "[status]" bracket
+	// (resetting every reloaded item to "pending") and treat a "Notes: ..."
+	// continuation line as its own bogus plan item instead of folding it
+	// into the preceding step.
+	registry := tools.NewRegistry()
+	planTool := tools.NewUpdatePlanTool()
+	registry.Register(planTool)
+
+	cwd := t.TempDir()
+	m := newModel(context.Background(), Options{
+		Cwd:            cwd,
+		Registry:       registry,
+		PermissionMode: agent.PermissionModePlan,
+	})
+	m.activeSession = sessions.Metadata{SessionID: "plan-test-session"}
+
+	content := "1. [completed] step one\n2. [in_progress] step two\n   Notes: half done\n3. [pending] step three"
+	if _, err := planmode.WritePlan(cwd, "plan-test-session", content); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+
+	m.reloadPlanFromFile()
+
+	got := planTool.CurrentPlan()
+	if len(got) != 3 {
+		t.Fatalf("expected 3 plan items (no bogus 'Notes' item), got %d: %+v", len(got), got)
+	}
+	if got[0].Status != "completed" {
+		t.Fatalf("expected step one to stay completed, got %q", got[0].Status)
+	}
+	if got[1].Status != "in_progress" || got[1].Notes != "half done" {
+		t.Fatalf("expected step two to stay in_progress with notes preserved, got status=%q notes=%q", got[1].Status, got[1].Notes)
+	}
+	if got[2].Status != "pending" || got[2].Content != "step three" {
+		t.Fatalf("expected step three unchanged, got %+v", got[2])
+	}
+}
+
 func TestPlanModeWiresDraftSystemPrompt(t *testing.T) {
 	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
 		{Type: zeroruntime.StreamEventText, Content: "planning"},

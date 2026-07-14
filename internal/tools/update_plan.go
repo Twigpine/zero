@@ -87,6 +87,17 @@ func (tool *updatePlanTool) CurrentPlan() []PlanItem {
 	return append([]PlanItem{}, tool.currentPlan...)
 }
 
+// SetPlan replaces the in-memory plan with already-parsed items. It is used to
+// sync a user-edited plan file (opened via /plan open) back into the agent's
+// source of truth; the file is only ever the seed/target, the in-memory plan
+// drives execution.
+func (tool *updatePlanTool) SetPlan(plan []PlanItem) {
+	plan = enforceSingleInProgress(plan)
+	tool.mu.Lock()
+	tool.currentPlan = plan
+	tool.mu.Unlock()
+}
+
 func (tool *updatePlanTool) ClearPlan() {
 	tool.mu.Lock()
 	tool.currentPlan = nil
@@ -127,7 +138,7 @@ func parsePlanItems(value any) ([]PlanItem, error) {
 		if err != nil {
 			return nil, fmt.Errorf("plan item %d %s", index+1, err.Error())
 		}
-		status = normalizePlanStatus(status)
+		status = NormalizePlanStatus(status)
 		notes, err := stringArgWithEmpty(object, "notes", "", false, true)
 		if err != nil {
 			return nil, fmt.Errorf("plan item %d %s", index+1, err.Error())
@@ -143,10 +154,10 @@ func parsePlanItems(value any) ([]PlanItem, error) {
 	return plan, nil
 }
 
-// normalizePlanStatus coerces a free-form status into one of the four canonical
+// NormalizePlanStatus coerces a free-form status into one of the four canonical
 // values. Unknown/empty input maps to "pending" so a weak model's stray status
 // never fails the whole update_plan call (which would freeze the plan panel).
-func normalizePlanStatus(status string) string {
+func NormalizePlanStatus(status string) string {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "completed", "complete", "done", "finished", "resolved", "✓", "x", "[x]":
 		return "completed"

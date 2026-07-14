@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -13,8 +14,20 @@ import (
 	"github.com/Twigpine/zero/internal/tools"
 )
 
+// numberedStatusRe matches the "N. [status] " prefix that formatPlanItems
+// writes, capturing the status so a user-edited plan file (seeded from that
+// format) can be re-parsed back into plan items without losing progress.
+var numberedStatusRe = regexp.MustCompile(`^\d+\.\s*(?:\[([^\]]*)\]\s*)?`)
+
 type currentPlanReader interface {
 	CurrentPlan() []tools.PlanItem
+}
+
+// planFileReloader syncs a user-edited plan file back into the in-memory plan.
+// The in-memory update_plan is the execution source of truth; the file is its
+// seed and on-disk target, so after /plan open the edited file is reloaded here.
+type planFileReloader interface {
+	SetPlan([]tools.PlanItem)
 }
 
 // handlePlanCommand toggles plan mode on the current session:
@@ -165,6 +178,55 @@ func (m model) openPlanInEditor() (tea.Model, tea.Cmd) {
 // /plan open so the transcript can surface it.
 type planEditorFinishedMsg struct {
 	err error
+}
+
+// reloadPlanFromFile reads the session plan file (if any) and syncs its
+// content into the in-memory update_plan, so edits the user makes in $EDITOR
+// become the plan that drives execution. The file is only the on-disk target;
+// the in-memory plan stays the source of truth. A missing or unreadable file
+// is left as-is (the in-memory plan remains authoritative).
+func (m model) reloadPlanFromFile() {
+	content, ok, err := planmode.ReadPlan(m.cwd, m.activeSession.SessionID)
+	if err != nil || !ok {
+		return
+	}
+	items := parsePlanFileLines(content)
+	if writer, ok := m.registry.Get("update_plan"); ok {
+		if reloader, ok := writer.(planFileReloader); ok {
+			reloader.SetPlan(items)
+		}
+	}
+}
+
+// parsePlanFileLines converts the plain-text plan file the user edits in
+// $EDITOR back into plan items. Each numbered line is a step; an optional
+// leading "[status]" is parsed back into the item's Status (matching
+// formatPlanItems) so completed/in-progress steps survive an edit instead of
+// resetting to pending. A "Notes: ..." line folds into the preceding item's
+// Notes field rather than becoming a step of its own. Blank lines are dropped.
+func parsePlanFileLines(content string) []tools.PlanItem {
+	items := make([]tools.PlanItem, 0)
+	for _, raw := range strings.Split(content, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		if notes, ok := strings.CutPrefix(line, "Notes:"); ok {
+			if len(items) > 0 {
+				items[len(items)-1].Notes = strings.TrimSpace(notes)
+			}
+			continue
+		}
+		status := "pending"
+		if match := numberedStatusRe.FindStringSubmatch(line); match != nil {
+			if match[1] != "" {
+				status = tools.NormalizePlanStatus(match[1])
+			}
+			line = strings.TrimSpace(line[len(match[0]):])
+		}
+		items = append(items, tools.PlanItem{Content: line, Status: status})
+	}
+	return items
 }
 
 func planEnterText(m model) string {
