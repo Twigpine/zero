@@ -216,13 +216,23 @@ func editorStagingDirIsPrivate(dir, workspaceRoot, tempDir string) bool {
 	return true
 }
 
-// physicalPath resolves symlinks best-effort: a path that cannot be resolved
-// (not existing yet) is compared as spelled.
+// physicalPath resolves symlinks best-effort. A path that does not exist yet
+// is resolved through its deepest existing ancestor with the remainder
+// rejoined, so a not-yet-created staging directory still compares in the
+// same physical spelling as the (existing, resolved) roots: without this,
+// macOS's /var vs /private/var and Windows's 8.3 short names (RUNNER~1)
+// would make the containment comparison silently miss.
 func physicalPath(path string) string {
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		return resolved
 	}
-	return path
+	cleaned := filepath.Clean(path)
+	parent := filepath.Dir(cleaned)
+	if parent == cleaned {
+		// Reached a filesystem root that itself cannot be resolved.
+		return cleaned
+	}
+	return filepath.Join(physicalPath(parent), filepath.Base(cleaned))
 }
 
 // isUnderOrEqual reports whether path is root itself or a descendant of it.
