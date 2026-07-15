@@ -182,3 +182,99 @@ func TestWritePlanRejectsSymlinkedPlanFile(t *testing.T) {
 		t.Fatal("expected ReadPlan to reject a symlinked plan file")
 	}
 }
+
+func TestEditorStagingDirIsPrivateRejectsOSTempDir(t *testing.T) {
+	workspaceRoot := t.TempDir()
+	// t.TempDir() itself lives under os.TempDir(), so it doubles as a stand-in
+	// for what config.UserConfigDir() would resolve to if XDG_CONFIG_HOME were
+	// pointed at the OS temp directory.
+	dir := t.TempDir()
+	if editorStagingDirIsPrivate(dir, workspaceRoot) {
+		t.Fatalf("expected %q (under the OS temp dir) to be rejected", dir)
+	}
+}
+
+func TestEditorStagingDirIsPrivateRejectsWorkspaceDir(t *testing.T) {
+	workspaceRoot := t.TempDir()
+	dir := filepath.Join(workspaceRoot, ".config", "zero", "plan-edit")
+	if editorStagingDirIsPrivate(dir, workspaceRoot) {
+		t.Fatalf("expected %q (inside the workspace) to be rejected", dir)
+	}
+	// The workspace root itself, not just a descendant, must also be rejected.
+	if editorStagingDirIsPrivate(workspaceRoot, workspaceRoot) {
+		t.Fatal("expected the workspace root itself to be rejected")
+	}
+}
+
+func TestEditorStagingDirIsPrivateAcceptsElsewhere(t *testing.T) {
+	// workspaceRoot (via t.TempDir()) and a naive "sibling of workspaceRoot"
+	// both live under os.TempDir(), so the stand-in for a real XDG config
+	// directory has to be built as a sibling of the OS temp dir itself,
+	// not of the workspace, to land genuinely outside both.
+	workspaceRoot := t.TempDir()
+	tempDir := filepath.Clean(os.TempDir())
+	dir := filepath.Join(filepath.Dir(tempDir), "not-temp-not-workspace", "zero", "plan-edit")
+	if !editorStagingDirIsPrivate(dir, workspaceRoot) {
+		t.Fatalf("expected %q to be accepted as private", dir)
+	}
+}
+
+func TestStageContentForEditorRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path, cleanup, err := stageContentForEditor(dir, "session-1", "# Draft\n\nStep one.")
+	if err != nil {
+		t.Fatalf("stageContentForEditor: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read staged file: %v", err)
+	}
+	if string(data) != "# Draft\n\nStep one.\n" {
+		t.Fatalf("staged content = %q", string(data))
+	}
+
+	cleanup()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected cleanup to remove the staged file, stat err=%v", err)
+	}
+}
+
+func TestStageContentForEditorGeneratesUniquePathsPerCall(t *testing.T) {
+	// Two concurrent invocations for the same session (e.g. two Zero
+	// instances editing a resumed session) must not collide on one shared
+	// deterministic path.
+	dir := t.TempDir()
+	pathA, cleanupA, err := stageContentForEditor(dir, "session-1", "draft A")
+	if err != nil {
+		t.Fatalf("stageContentForEditor (A): %v", err)
+	}
+	defer cleanupA()
+	pathB, cleanupB, err := stageContentForEditor(dir, "session-1", "draft B")
+	if err != nil {
+		t.Fatalf("stageContentForEditor (B): %v", err)
+	}
+	defer cleanupB()
+
+	if pathA == pathB {
+		t.Fatalf("expected distinct staged paths, both were %q", pathA)
+	}
+	dataA, err := os.ReadFile(pathA)
+	if err != nil {
+		t.Fatalf("read A: %v", err)
+	}
+	dataB, err := os.ReadFile(pathB)
+	if err != nil {
+		t.Fatalf("read B: %v", err)
+	}
+	if string(dataA) != "draft A\n" || string(dataB) != "draft B\n" {
+		t.Fatalf("cross-contaminated staged files: A=%q B=%q", dataA, dataB)
+	}
+
+	// cleanupA must not touch B's file, and vice versa.
+	cleanupA()
+	if _, err := os.Stat(pathB); err != nil {
+		t.Fatalf("cleanupA should not have removed B's staged file: %v", err)
+	}
+}

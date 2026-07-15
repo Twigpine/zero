@@ -124,9 +124,21 @@ func WritePlan(workspaceRoot, sessionID, content string) (string, error) {
 // user-writable target. The OS temp directory does not avoid this: the
 // sandbox's default write scope explicitly includes it (see
 // defaultTempWriteRootCandidates in internal/sandbox), so a sandboxed
-// process could plant the same symlink there. config.UserConfigDir() is not
-// part of that default scope, so a sandboxed process cannot pre-stage a
-// symlink at the path this creates.
+// process could plant the same symlink there. config.UserConfigDir() is
+// usually outside that default scope, but it honors XDG_CONFIG_HOME (on
+// macOS explicitly here, on Linux via os.UserConfigDir itself), so a
+// misconfigured or sandboxed-process environment pointing that at the
+// workspace or the OS temp dir would put the staging directory right back in
+// a default-writable root. editorStagingDirIsPrivate rejects that case
+// instead of silently staging somewhere unsafe.
+//
+// Two more layers close the remaining gap even when the directory itself is
+// private: the filename includes a random, per-invocation suffix (os.CreateTemp)
+// so a sandboxed process can't pre-plant a symlink at a path it can't predict,
+// and CreateTemp opens with O_EXCL, so even a guessed or colliding path is
+// refused rather than followed if something is already there. The random
+// suffix also means two Zero instances editing the same resumed session no
+// longer collide on the same staged file.
 func StageForEditor(workspaceRoot, sessionID string) (stagedPath string, cleanup func(), err error) {
 	content, _, err := ReadPlan(workspaceRoot, sessionID)
 	if err != nil {
@@ -136,14 +148,59 @@ func StageForEditor(workspaceRoot, sessionID string) (stagedPath string, cleanup
 	if err != nil {
 		return "", nil, err
 	}
+	if !editorStagingDirIsPrivate(dir, workspaceRoot) {
+		return "", nil, fmt.Errorf("plan editor staging directory %s is inside a default sandbox-writable root (the workspace or the OS temp directory); check XDG_CONFIG_HOME", dir)
+	}
+	return stageContentForEditor(dir, sessionID, content)
+}
+
+// stageContentForEditor creates a fresh, uniquely-named file under dir
+// holding content, for StageForEditor to hand to $EDITOR. Split out from
+// StageForEditor so the staging mechanics (CreateTemp, O_EXCL) are testable
+// against an arbitrary directory without needing to fake config.UserConfigDir
+// or XDG_CONFIG_HOME; the privacy check above is StageForEditor's job, not
+// this function's.
+func stageContentForEditor(dir, sessionID, content string) (stagedPath string, cleanup func(), err error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", nil, fmt.Errorf("create plan editor staging directory: %w", err)
 	}
-	path := filepath.Join(dir, slugify(sessionID)+".md")
-	if err := os.WriteFile(path, []byte(strings.TrimRight(content, "\n")+"\n"), 0o600); err != nil {
+	file, err := os.CreateTemp(dir, slugify(sessionID)+"-*.md")
+	if err != nil {
+		return "", nil, fmt.Errorf("stage plan file for editor: %w", err)
+	}
+	path := file.Name()
+	if _, err := file.WriteString(strings.TrimRight(content, "\n") + "\n"); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return "", nil, fmt.Errorf("stage plan file for editor: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
 		return "", nil, fmt.Errorf("stage plan file for editor: %w", err)
 	}
 	return path, func() { _ = os.Remove(path) }, nil
+}
+
+// editorStagingDirIsPrivate reports whether dir avoids the sandbox's default
+// writable roots (the OS temp directory and the workspace itself), which are
+// writable from inside the sandbox by default regardless of any extra grant.
+func editorStagingDirIsPrivate(dir, workspaceRoot string) bool {
+	if isUnderOrEqual(dir, os.TempDir()) {
+		return false
+	}
+	if absRoot, err := filepath.Abs(workspaceRoot); err == nil && isUnderOrEqual(dir, absRoot) {
+		return false
+	}
+	return true
+}
+
+// isUnderOrEqual reports whether path is root itself or a descendant of it.
+func isUnderOrEqual(path, root string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 // CommitStagedEdit reads a file staged by StageForEditor (now edited by the
