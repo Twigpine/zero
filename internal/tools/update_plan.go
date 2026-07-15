@@ -69,15 +69,25 @@ func NewUpdatePlanTool() *updatePlanTool {
 	}
 }
 
-func (tool *updatePlanTool) Run(_ context.Context, args map[string]any) Result {
+func (tool *updatePlanTool) Run(ctx context.Context, args map[string]any) Result {
 	plan, err := parsePlanItems(args["plan"])
 	if err != nil {
 		return errorResult("Error: Invalid arguments for update_plan: " + err.Error())
 	}
 	plan = enforceSingleInProgress(plan)
 	tool.mu.Lock()
+	defer tool.mu.Unlock()
+	// The context check shares the mutex with SetPlan/ClearPlan: a cancelled
+	// run's goroutine can reach this point after the UI has already reset the
+	// shared plan for a new session (its loop only checks cancellation
+	// between calls), and a late write here would repopulate the next
+	// session's plan with the cancelled run's state. Refusing under the lock
+	// means either this write lands before the reset (and the reset clears
+	// it) or the cancellation is visible here and nothing is written.
+	if ctx.Err() != nil {
+		return errorResult("Error: update_plan skipped: the run was cancelled.")
+	}
 	tool.currentPlan = plan
-	tool.mu.Unlock()
 	return okResult(formatPlan(plan))
 }
 

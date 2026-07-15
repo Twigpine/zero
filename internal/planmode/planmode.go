@@ -148,10 +148,25 @@ func StageForEditor(workspaceRoot, sessionID string) (stagedPath string, cleanup
 	if err != nil {
 		return "", nil, err
 	}
-	if !editorStagingDirIsPrivate(dir, workspaceRoot) {
-		return "", nil, fmt.Errorf("plan editor staging directory %s is inside a default sandbox-writable root (the workspace or the OS temp directory); check XDG_CONFIG_HOME", dir)
+	// Create the directory before judging it, then judge (and use) its
+	// PHYSICAL path: a lexical check would pass an XDG_CONFIG_HOME that is
+	// itself a symlink into the workspace or the OS temp directory, while
+	// MkdirAll/CreateTemp followed the link and staged the file somewhere a
+	// sandboxed process can write. Resolving after MkdirAll also covers a
+	// pre-existing staging directory that was replaced with a symlink, and
+	// anchoring the staging on the resolved path means the file is created
+	// where it was checked, not wherever the link points next.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", nil, fmt.Errorf("create plan editor staging directory: %w", err)
 	}
-	return stageContentForEditor(dir, sessionID, content)
+	resolvedDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", nil, fmt.Errorf("resolve plan editor staging directory: %w", err)
+	}
+	if !editorStagingDirIsPrivate(resolvedDir, workspaceRoot, os.TempDir()) {
+		return "", nil, fmt.Errorf("plan editor staging directory %s resolves into a default sandbox-writable root (the workspace or the OS temp directory); check XDG_CONFIG_HOME", dir)
+	}
+	return stageContentForEditor(resolvedDir, sessionID, content)
 }
 
 // stageContentForEditor creates a fresh, uniquely-named file under dir
@@ -182,16 +197,32 @@ func stageContentForEditor(dir, sessionID, content string) (stagedPath string, c
 }
 
 // editorStagingDirIsPrivate reports whether dir avoids the sandbox's default
-// writable roots (the OS temp directory and the workspace itself), which are
-// writable from inside the sandbox by default regardless of any extra grant.
-func editorStagingDirIsPrivate(dir, workspaceRoot string) bool {
-	if isUnderOrEqual(dir, os.TempDir()) {
+// writable roots (tempDir, normally os.TempDir(), and the workspace itself),
+// which are writable from inside the sandbox by default regardless of any
+// extra grant. All three paths are compared in physical form: dir or either
+// root may be reached through symlinks (an XDG_CONFIG_HOME symlinked into
+// the workspace, macOS's /var -> /private/var), and a lexical comparison of
+// unlike spellings would wave a staging directory through a boundary it
+// actually sits inside. tempDir is a parameter so tests can exercise the
+// symlink cases without needing to plant links outside the real temp dir.
+func editorStagingDirIsPrivate(dir, workspaceRoot, tempDir string) bool {
+	dir = physicalPath(dir)
+	if isUnderOrEqual(dir, physicalPath(tempDir)) {
 		return false
 	}
-	if absRoot, err := filepath.Abs(workspaceRoot); err == nil && isUnderOrEqual(dir, absRoot) {
+	if absRoot, err := filepath.Abs(workspaceRoot); err == nil && isUnderOrEqual(dir, physicalPath(absRoot)) {
 		return false
 	}
 	return true
+}
+
+// physicalPath resolves symlinks best-effort: a path that cannot be resolved
+// (not existing yet) is compared as spelled.
+func physicalPath(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return path
 }
 
 // isUnderOrEqual reports whether path is root itself or a descendant of it.

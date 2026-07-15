@@ -385,6 +385,41 @@ func TestPlanItemsRoundTripMultilineContent(t *testing.T) {
 	}
 }
 
+func TestPlanItemsRoundTripAmbiguousContinuations(t *testing.T) {
+	// Regression for the encoding ambiguities that silently rewrote plans on
+	// an open-and-save: a continuation that looks like a numbered step used
+	// to shatter into a new item, a continuation beginning "Notes:" used to
+	// become the notes delimiter, and blank continuation lines vanished.
+	items := []tools.PlanItem{
+		{Content: "Investigate\n2. validate", Status: "pending"},
+		{Content: "Header\nNotes: literal content line", Status: "pending", Notes: "real note"},
+		{Content: "before\n\nafter", Status: "pending"},
+		{Content: "escape\n\\Notes: already escaped", Status: "pending"},
+	}
+	reloaded := parsePlanFileLines(formatPlanItems(items))
+	if len(reloaded) != len(items) {
+		t.Fatalf("expected %d items after round-trip, got %d: %+v", len(items), len(reloaded), reloaded)
+	}
+	for index := range items {
+		if reloaded[index].Content != items[index].Content {
+			t.Fatalf("item %d content changed on round-trip: %q -> %q", index, items[index].Content, reloaded[index].Content)
+		}
+		if reloaded[index].Notes != items[index].Notes {
+			t.Fatalf("item %d notes changed on round-trip: %q -> %q", index, items[index].Notes, reloaded[index].Notes)
+		}
+	}
+	// A second pass must be a fixed point: open-and-save twice changes nothing.
+	again := parsePlanFileLines(formatPlanItems(reloaded))
+	if len(again) != len(reloaded) {
+		t.Fatalf("second round-trip changed item count: %d -> %d", len(reloaded), len(again))
+	}
+	for index := range reloaded {
+		if again[index] != reloaded[index] {
+			t.Fatalf("second round-trip changed item %d: %+v -> %+v", index, reloaded[index], again[index])
+		}
+	}
+}
+
 func TestParsePlanFileLinesFoldsMultilineNotes(t *testing.T) {
 	// Regression: a "Notes: ..." block spanning more than one line used to
 	// have its continuation lines treated as bogus new pending steps instead
