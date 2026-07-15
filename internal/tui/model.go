@@ -6060,8 +6060,13 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				rows = append(rows, row)
 				m.sendAgentRow(runID, row)
 			}
-			// Keep the latest plan state in sync for run details and step drill-in.
-			if result.Name == "update_plan" && m.registry != nil {
+			// Keep the latest plan state in sync for run details and step
+			// drill-in. Only on a successful result: an errored call
+			// (including one refused because its run was already cancelled)
+			// must not re-read the shared plan and write it into this run's
+			// session file, which could clobber that file with a later
+			// session's state.
+			if result.Name == "update_plan" && result.Status == tools.StatusOK && m.registry != nil {
 				if planTool, ok := m.registry.Get("update_plan"); ok {
 					if reader, ok := planTool.(interface{ CurrentPlan() []tools.PlanItem }); ok {
 						items := reader.CurrentPlan()

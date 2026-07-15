@@ -260,59 +260,84 @@ func (m model) reloadPlanFromFile() ([]tools.PlanItem, bool) {
 // Status (matching formatPlanItems) so completed/in-progress steps survive an
 // edit instead of resetting to pending.
 //
-// An indented line (formatPlanItems writes continuations with a leading
-// "   ") folds into the current item instead of becoming a step of its own:
-// before a "Notes: ..." line it extends the item's (possibly multi-line)
-// Content, and a "Notes: ..." line plus any indented lines after it extend
-// the item's Notes. This lets both multi-line Content and multi-line Notes
-// round-trip through $EDITOR instead of shattering into bogus new pending
-// steps. A non-numbered line with NO leading indentation is instead treated
-// as a freeform new step (e.g. one the user typed without bothering to
-// number or indent it), matching how earlier versions of this parser treated
-// any non-blank line. Blank lines are dropped.
+// Indentation is authoritative and is decided BEFORE anything else: an
+// indented line (formatPlanItems writes every continuation with a leading
+// "   ") always folds into the current item, even when its text happens to
+// look like a numbered step ("2. validate") — deciding by content first
+// would shatter such a continuation into a bogus new pending step. Within an
+// item, the first indented "Notes: ..." line switches from Content to Notes;
+// an indented continuation whose text itself begins with "Notes:" (or a
+// backslash) is escaped by formatPlanItems with a leading backslash, which
+// this parser strips, so real content is distinguishable from the notes
+// delimiter. A whitespace-only indented line is a preserved blank
+// continuation line; a fully blank line is a separator and is dropped. A
+// non-numbered line with NO leading indentation is a freeform new step (e.g.
+// one the user typed without bothering to number or indent it).
 func parsePlanFileLines(content string) []tools.PlanItem {
 	items := make([]tools.PlanItem, 0)
 	inNotes := false
 	for _, raw := range strings.Split(content, "\n") {
+		raw = strings.TrimRight(raw, "\r")
 		trimmed := strings.TrimSpace(raw)
-		if trimmed == "" {
-			continue
-		}
-		if match := numberedStatusRe.FindStringSubmatch(trimmed); match != nil {
-			status := "pending"
-			if match[1] != "" {
-				status = tools.NormalizePlanStatus(match[1])
-			}
-			items = append(items, tools.PlanItem{
-				Content: strings.TrimSpace(trimmed[len(match[0]):]),
-				Status:  status,
-			})
-			inNotes = false
-			continue
-		}
-		indented := raw != trimmed
+		indented := len(raw) > 0 && (raw[0] == ' ' || raw[0] == '\t')
 		if !indented || len(items) == 0 {
+			if trimmed == "" {
+				continue
+			}
+			if match := numberedStatusRe.FindStringSubmatch(trimmed); match != nil {
+				status := "pending"
+				if match[1] != "" {
+					status = tools.NormalizePlanStatus(match[1])
+				}
+				items = append(items, tools.PlanItem{
+					Content: strings.TrimSpace(trimmed[len(match[0]):]),
+					Status:  status,
+				})
+				inNotes = false
+				continue
+			}
 			items = append(items, tools.PlanItem{Content: trimmed, Status: "pending"})
 			inNotes = false
 			continue
 		}
 		last := &items[len(items)-1]
-		if notes, ok := strings.CutPrefix(trimmed, "Notes:"); ok {
-			last.Notes = strings.TrimSpace(notes)
-			inNotes = true
-			continue
+		if !inNotes {
+			if notes, ok := strings.CutPrefix(trimmed, "Notes:"); ok {
+				last.Notes = strings.TrimSpace(notes)
+				inNotes = true
+				continue
+			}
 		}
+		line := unescapePlanContinuation(trimmed)
 		if inNotes {
 			if last.Notes == "" {
-				last.Notes = trimmed
+				last.Notes = line
 			} else {
-				last.Notes += "\n" + trimmed
+				last.Notes += "\n" + line
 			}
 			continue
 		}
-		last.Content += "\n" + trimmed
+		last.Content += "\n" + line
 	}
 	return items
+}
+
+// escapePlanContinuation guards a continuation line whose literal text would
+// otherwise be parsed as structure: a line beginning with "Notes:" (the notes
+// delimiter) or with a backslash (the escape itself) gets one leading
+// backslash, which unescapePlanContinuation strips on reload.
+func escapePlanContinuation(line string) string {
+	if strings.HasPrefix(strings.TrimSpace(line), "Notes:") || strings.HasPrefix(line, `\`) {
+		return `\` + line
+	}
+	return line
+}
+
+func unescapePlanContinuation(line string) string {
+	if strings.HasPrefix(line, `\`) {
+		return line[1:]
+	}
+	return line
 }
 
 func planEnterText(m model) string {
@@ -385,14 +410,17 @@ func formatPlanItems(items []tools.PlanItem) string {
 	for index, item := range items {
 		contentLines := strings.Split(item.Content, "\n")
 		line := fmt.Sprintf("%d. [%s] %s", index+1, item.Status, contentLines[0])
+		// Continuations are indented (which is what makes them continuations
+		// to parsePlanFileLines, even when the text looks like "2. validate")
+		// and escaped where their literal text would read as structure.
 		for _, cont := range contentLines[1:] {
-			line += "\n   " + cont
+			line += "\n   " + escapePlanContinuation(cont)
 		}
 		if item.Notes != "" {
 			noteLines := strings.Split(item.Notes, "\n")
 			line += "\n   Notes: " + noteLines[0]
 			for _, cont := range noteLines[1:] {
-				line += "\n   " + cont
+				line += "\n   " + escapePlanContinuation(cont)
 			}
 		}
 		lines = append(lines, line)

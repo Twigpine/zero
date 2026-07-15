@@ -189,7 +189,7 @@ func TestEditorStagingDirIsPrivateRejectsOSTempDir(t *testing.T) {
 	// for what config.UserConfigDir() would resolve to if XDG_CONFIG_HOME were
 	// pointed at the OS temp directory.
 	dir := t.TempDir()
-	if editorStagingDirIsPrivate(dir, workspaceRoot) {
+	if editorStagingDirIsPrivate(dir, workspaceRoot, os.TempDir()) {
 		t.Fatalf("expected %q (under the OS temp dir) to be rejected", dir)
 	}
 }
@@ -197,11 +197,11 @@ func TestEditorStagingDirIsPrivateRejectsOSTempDir(t *testing.T) {
 func TestEditorStagingDirIsPrivateRejectsWorkspaceDir(t *testing.T) {
 	workspaceRoot := t.TempDir()
 	dir := filepath.Join(workspaceRoot, ".config", "zero", "plan-edit")
-	if editorStagingDirIsPrivate(dir, workspaceRoot) {
+	if editorStagingDirIsPrivate(dir, workspaceRoot, os.TempDir()) {
 		t.Fatalf("expected %q (inside the workspace) to be rejected", dir)
 	}
 	// The workspace root itself, not just a descendant, must also be rejected.
-	if editorStagingDirIsPrivate(workspaceRoot, workspaceRoot) {
+	if editorStagingDirIsPrivate(workspaceRoot, workspaceRoot, os.TempDir()) {
 		t.Fatal("expected the workspace root itself to be rejected")
 	}
 }
@@ -214,8 +214,72 @@ func TestEditorStagingDirIsPrivateAcceptsElsewhere(t *testing.T) {
 	workspaceRoot := t.TempDir()
 	tempDir := filepath.Clean(os.TempDir())
 	dir := filepath.Join(filepath.Dir(tempDir), "not-temp-not-workspace", "zero", "plan-edit")
-	if !editorStagingDirIsPrivate(dir, workspaceRoot) {
+	if !editorStagingDirIsPrivate(dir, workspaceRoot, os.TempDir()) {
 		t.Fatalf("expected %q to be accepted as private", dir)
+	}
+}
+
+func TestEditorStagingDirIsPrivateResolvesSymlinkedDir(t *testing.T) {
+	// An XDG config path that is lexically outside both roots but is a
+	// symlink INTO the workspace (or temp) must be rejected: MkdirAll and
+	// CreateTemp follow the link, so judging the spelled path would stage
+	// the file somewhere sandbox-writable. The fake temp root keeps the
+	// scenario constructible portably (everything a test may create lives
+	// under the real temp dir, which would otherwise mask the workspace case).
+	base := t.TempDir()
+	fakeTemp := filepath.Join(base, "faketemp")
+	workspaceRoot := filepath.Join(base, "workspace")
+	target := filepath.Join(workspaceRoot, "hidden-staging")
+	if err := os.MkdirAll(fakeTemp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "looks-private")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	if editorStagingDirIsPrivate(link, workspaceRoot, fakeTemp) {
+		t.Fatal("expected a staging dir symlinked into the workspace to be rejected")
+	}
+
+	// Same for a link into the temp root.
+	tempTarget := filepath.Join(fakeTemp, "hidden-staging")
+	if err := os.MkdirAll(tempTarget, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tempLink := filepath.Join(base, "looks-private-too")
+	if err := os.Symlink(tempTarget, tempLink); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if editorStagingDirIsPrivate(tempLink, workspaceRoot, fakeTemp) {
+		t.Fatal("expected a staging dir symlinked into the temp root to be rejected")
+	}
+}
+
+func TestEditorStagingDirIsPrivateResolvesSymlinkedRoots(t *testing.T) {
+	// The inverse direction: the WORKSPACE itself is reached through a
+	// symlink, so a staging dir spelled via the physical workspace path does
+	// not lexically sit under the symlinked spelling. Physical comparison
+	// must still reject it.
+	base := t.TempDir()
+	fakeTemp := filepath.Join(base, "faketemp")
+	realWorkspace := filepath.Join(base, "real-workspace")
+	if err := os.MkdirAll(fakeTemp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(realWorkspace, "cfg"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	workspaceLink := filepath.Join(base, "workspace-link")
+	if err := os.Symlink(realWorkspace, workspaceLink); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	if editorStagingDirIsPrivate(filepath.Join(realWorkspace, "cfg"), workspaceLink, fakeTemp) {
+		t.Fatal("expected a staging dir inside the physical workspace to be rejected when the workspace is addressed through a symlink")
 	}
 }
 
