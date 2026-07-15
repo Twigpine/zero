@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"mvdan.cc/sh/v3/shell"
 
 	"github.com/Twigpine/zero/internal/agent"
 	"github.com/Twigpine/zero/internal/planmode"
@@ -197,7 +198,17 @@ func (m model) openPlanInEditor() (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "plan stage error: " + err.Error()})
 		return m, nil
 	}
-	parts := strings.Fields(editor)
+	// $VISUAL/$EDITOR commonly quote an executable path containing spaces
+	// (e.g. `"/Applications/Visual Studio Code.app/.../code" --wait`);
+	// strings.Fields would split that mid-path. shell.Fields applies POSIX
+	// shell word-splitting, so quoted segments and any $VAR references in the
+	// value are handled the way a shell would.
+	parts, err := shell.Fields(editor, os.Getenv)
+	if err != nil || len(parts) == 0 {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "invalid $VISUAL/$EDITOR value: " + editor})
+		cleanup()
+		return m, nil
+	}
 	cmd := exec.Command(parts[0], append(parts[1:], stagedPath)...) //nolint:gosec // editor path from $VISUAL/$EDITOR
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout

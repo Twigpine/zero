@@ -1567,15 +1567,17 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// actually reaches the next turn's context — whether that turn is
 		// more planning or, after /plan off, the implementation run the
 		// feature is supposed to drive.
+		content := "I edited the plan file directly and cleared the plan."
 		if plan := formatPlanItems(items); plan != "" {
-			var err error
-			m, err = m.appendSessionEvent(sessions.EventMessage, map[string]any{
-				"role":    "user",
-				"content": "I edited the plan file directly. Updated plan:\n\n" + plan,
-			})
-			if err != nil {
-				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "session record error: " + err.Error()})
-			}
+			content = "I edited the plan file directly. Updated plan:\n\n" + plan
+		}
+		var err error
+		m, err = m.appendSessionEvent(sessions.EventMessage, map[string]any{
+			"role":    "user",
+			"content": content,
+		})
+		if err != nil {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "session record error: " + err.Error()})
 		}
 		return m, nil
 	case exitConfirmExpiredMsg:
