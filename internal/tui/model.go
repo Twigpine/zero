@@ -1561,6 +1561,14 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.plan.updateFromItems(items, m.now())
+		// The sticky-panel refresh above is the only visible sign the edit was
+		// taken up; a /plan open with no other output would otherwise look like
+		// nothing happened. Confirm the reload (or a clear) in the transcript.
+		reloadNote := "Reloaded the edited plan."
+		if len(items) == 0 {
+			reloadNote = "Cleared the plan (the edited plan file is empty)."
+		}
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: reloadNote})
 		// SetPlan (inside reloadPlanFromFile) only changes the update_plan
 		// tool's in-memory state; the model has no way to observe that on its
 		// own. Record it as a session event too, so a user-authored edit
