@@ -322,6 +322,49 @@ func TestPlanOpenEditorExitReloadsFileIntoPlan(t *testing.T) {
 	}
 }
 
+func TestPlanEditorFinishedMsgReloadsPanelAndConfirms(t *testing.T) {
+	// The editor-completion path must run through the real planEditorFinishedMsg
+	// case in Update (not just reloadPlanFromFile, which tests can call
+	// directly): it reloads the edited file into BOTH the update_plan tool (the
+	// execution source of truth) and the sticky panel, and confirms the reload
+	// in the transcript so a bare /plan open doesn't look like a silent no-op.
+	registry := tools.NewRegistry()
+	planTool := tools.NewUpdatePlanTool()
+	registry.Register(planTool)
+
+	cwd := t.TempDir()
+	m := newModel(context.Background(), Options{
+		Cwd:            cwd,
+		SessionStore:   testSessionStore(t),
+		Registry:       registry,
+		PermissionMode: agent.PermissionModePlan,
+	})
+	m, err := m.ensureActiveSession("plan editor completion")
+	if err != nil {
+		t.Fatalf("ensureActiveSession: %v", err)
+	}
+	if _, err := planmode.WritePlan(cwd, m.activeSession.SessionID, "1. [in_progress] edited step\n   Notes: from editor"); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+
+	updated, _ := m.Update(planEditorFinishedMsg{err: nil})
+	next := updated.(model)
+
+	// update_plan (what drives execution) reflects the edited file.
+	got := planTool.CurrentPlan()
+	if len(got) != 1 || got[0].Content != "edited step" || got[0].Status != "in_progress" {
+		t.Fatalf("expected update_plan reloaded from the edited file, got %+v", got)
+	}
+	// The sticky panel was refreshed too, not just the tool state.
+	if next.plan.isEmpty() {
+		t.Fatal("expected the sticky plan panel to be refreshed from the reloaded file")
+	}
+	// A completion message reaches the transcript.
+	if !transcriptContains(next.transcript, "Reloaded the edited plan.") {
+		t.Fatalf("expected an editor-reload completion message, got %#v", next.transcript)
+	}
+}
+
 func TestPlanOpenEditorReloadPreservesStatusAndNotes(t *testing.T) {
 	// Regression: parsePlanFileLines used to discard the "[status]" bracket
 	// (resetting every reloaded item to "pending") and treat a "Notes: ..."
