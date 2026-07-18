@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -48,6 +49,15 @@ func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
 
 	arg := strings.ToLower(strings.TrimSpace(text))
 	switch arg {
+	case "":
+		// Bare /plan: the toggle logic below the switch handles it.
+	default:
+		// An unrecognized subcommand (a typo like "openx", or "status") must
+		// not fall through to the bare toggle: while plan mode is active that
+		// would silently exit the read-only boundary and re-enable
+		// implementation.
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: fmt.Sprintf("Unknown /plan subcommand %q. Usage: /plan, /plan open, /plan off", arg)})
+		return m, nil
 	case "off", "exit":
 		if m.permissionMode != agent.PermissionModePlan {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan mode is not active."})
@@ -426,4 +436,21 @@ func formatPlanItems(items []tools.PlanItem) string {
 		lines = append(lines, line)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// planSnapshotFromResult decodes the plan items a successful update_plan call
+// carried in its result meta (tools.PlanSnapshotMeta). ok=false when the
+// snapshot is absent or undecodable — the caller then skips panel/file
+// updates rather than re-reading the shared tool, whose state may already
+// belong to another session by the time the result callback runs.
+func planSnapshotFromResult(result agent.ToolResult) ([]tools.PlanItem, bool) {
+	encoded, ok := result.Meta[tools.PlanSnapshotMeta]
+	if !ok {
+		return nil, false
+	}
+	var items []tools.PlanItem
+	if err := json.Unmarshal([]byte(encoded), &items); err != nil {
+		return nil, false
+	}
+	return items, true
 }

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/config"
 )
@@ -93,19 +94,37 @@ func WritePlan(workspaceRoot, sessionID, content string) (string, error) {
 		return "", fmt.Errorf("restrict plan directory permissions: %w", err)
 	}
 	fileRelPath := planRelativePath(sessionID)
-	file, err := root.OpenFile(fileRelPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	// Refuse a symlinked plan file. os.Root blocks escapes from the
+	// workspace, but it still follows a symlink whose target stays inside
+	// it — a `.zero/plans/<slug>.md -> ../../victim` planted during an
+	// earlier writable run would otherwise turn plan mode's one allowed
+	// write into an overwrite of an arbitrary workspace file.
+	if info, err := root.Lstat(fileRelPath); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("plan file %s is a symlink; refusing to write through it", fileRelPath)
+	}
+	// Write an owner-only temporary sibling and rename it into place: a
+	// disk-full failure, short write, or interruption must never leave the
+	// durable plan empty or partial (the old O_TRUNC open destroyed the
+	// previous plan before the new content was written). The random suffix
+	// plus O_EXCL means a colliding or pre-planted path is refused, and the
+	// rename target was verified above not to be a symlink.
+	tmpRelPath := fmt.Sprintf("%s.tmp-%d-%d", fileRelPath, os.Getpid(), time.Now().UnixNano())
+	file, err := root.OpenFile(tmpRelPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return "", fmt.Errorf("write plan file: %w", err)
 	}
-	defer file.Close()
-	// Same reasoning as the directory Chmod above: OpenFile's mode only
-	// applies when it creates the file, so a pre-existing 0644 plan file
-	// would otherwise stay group/other-readable.
-	if err := root.Chmod(fileRelPath, 0o600); err != nil {
-		return "", fmt.Errorf("restrict plan file permissions: %w", err)
-	}
 	if _, err := file.WriteString(strings.TrimRight(content, "\n") + "\n"); err != nil {
+		file.Close()
+		_ = root.Remove(tmpRelPath)
 		return "", fmt.Errorf("write plan file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		_ = root.Remove(tmpRelPath)
+		return "", fmt.Errorf("write plan file: %w", err)
+	}
+	if err := root.Rename(tmpRelPath, fileRelPath); err != nil {
+		_ = root.Remove(tmpRelPath)
+		return "", fmt.Errorf("replace plan file: %w", err)
 	}
 	return PlanFilePath(workspaceRoot, sessionID)
 }
