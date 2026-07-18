@@ -6074,23 +6074,26 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			// must not re-read the shared plan and write it into this run's
 			// session file, which could clobber that file with a later
 			// session's state.
-			if result.Name == "update_plan" && result.Status == tools.StatusOK && m.registry != nil {
-				if planTool, ok := m.registry.Get("update_plan"); ok {
-					if reader, ok := planTool.(interface{ CurrentPlan() []tools.PlanItem }); ok {
-						items := reader.CurrentPlan()
-						if m.runtimeMessageSink != nil {
-							m.runtimeMessageSink(planUpdateMsg{runID: runID, items: items})
-						}
-						// Persist every update_plan call to the session's plan file: it
-						// is the single durable source of truth /plan reads from, so a
-						// plan built entirely through update_plan (the user never ran
-						// /plan open) still survives a restart/resume, and one seeded by
-						// /plan open keeps reflecting later agent updates instead of
-						// showing that first snapshot forever.
-						if m.activeSession.SessionID != "" {
-							if _, err := planmode.WritePlan(m.cwd, m.activeSession.SessionID, formatPlanItems(items)); err != nil {
-								m.sendAgentRow(runID, transcriptRow{kind: rowError, text: "plan file write error: " + err.Error()})
-							}
+			if result.Name == "update_plan" && result.Status == tools.StatusOK {
+				// Use the plan snapshot the successful call carried with its
+				// result, never a fresh CurrentPlan() read: this callback runs
+				// after update_plan released its mutex, so a cancel plus
+				// /new or /resume in that window can clear or hydrate the
+				// shared tool, and re-reading it here would persist the wrong
+				// session's plan (or an empty reset) under this run's session.
+				if items, ok := planSnapshotFromResult(result); ok {
+					if m.runtimeMessageSink != nil {
+						m.runtimeMessageSink(planUpdateMsg{runID: runID, items: items})
+					}
+					// Persist every update_plan call to the session's plan file: it
+					// is the single durable source of truth /plan reads from, so a
+					// plan built entirely through update_plan (the user never ran
+					// /plan open) still survives a restart/resume, and one seeded by
+					// /plan open keeps reflecting later agent updates instead of
+					// showing that first snapshot forever.
+					if m.activeSession.SessionID != "" {
+						if _, err := planmode.WritePlan(m.cwd, m.activeSession.SessionID, formatPlanItems(items)); err != nil {
+							m.sendAgentRow(runID, transcriptRow{kind: rowError, text: "plan file write error: " + err.Error()})
 						}
 					}
 				}

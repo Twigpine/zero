@@ -52,6 +52,11 @@ const (
 	SandboxDenialKindMeta    = "sandbox_denial_kind"
 	SandboxDenialReasonMeta  = "sandbox_denial_reason"
 	SandboxDenialKeywordMeta = "sandbox_denial_keyword"
+	// PlanSnapshotMeta carries the JSON-encoded []PlanItem a successful
+	// update_plan call installed, so consumers persist exactly that call's
+	// plan instead of re-reading the shared tool later (by which time a
+	// session switch may have cleared or replaced it).
+	PlanSnapshotMeta = "plan_snapshot"
 )
 
 const (

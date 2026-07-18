@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -88,7 +89,14 @@ func (tool *updatePlanTool) Run(ctx context.Context, args map[string]any) Result
 		return errorResult("Error: update_plan skipped: the run was cancelled.")
 	}
 	tool.currentPlan = plan
-	return okResult(formatPlan(plan))
+	result := okResult(formatPlan(plan))
+	// Carry this call's plan with its result: the TUI persists the plan from
+	// the result callback, which runs after Run releases the mutex, so
+	// re-reading CurrentPlan there could observe a later session's state.
+	if data, err := json.Marshal(plan); err == nil {
+		result.Meta = map[string]string{PlanSnapshotMeta: string(data)}
+	}
+	return result
 }
 
 func (tool *updatePlanTool) CurrentPlan() []PlanItem {
