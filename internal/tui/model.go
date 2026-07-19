@@ -5678,8 +5678,15 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			// Plan mode is toggled via /plan on the normal submit path (not a
 			// dedicated run-launch command like /spec), so there is no call site
 			// to pass planmode.DraftSystemPrompt through runOptions: set it here
-			// from the active permission mode instead.
-			options.SystemPrompt = planmode.DraftSystemPrompt
+			// from the active permission mode instead. Layer it onto (rather
+			// than replace) any configured options.SystemPrompt: an embedder's
+			// system prompt encodes product policy that must still apply while
+			// planning, not just on ordinary turns.
+			if configured := strings.TrimSpace(options.SystemPrompt); configured != "" {
+				options.SystemPrompt = configured + "\n\n" + planmode.DraftSystemPrompt
+			} else {
+				options.SystemPrompt = planmode.DraftSystemPrompt
+			}
 		}
 		if runOptions.transientSystemPrompt != "" {
 			options.TransientSystemPrompt = runOptions.transientSystemPrompt
