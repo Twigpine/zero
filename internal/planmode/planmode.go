@@ -178,6 +178,15 @@ func StageForEditor(workspaceRoot, sessionID string) (stagedPath string, cleanup
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", nil, fmt.Errorf("create plan editor staging directory: %w", err)
 	}
+	// MkdirAll's mode only applies at creation: it does not tighten an
+	// already-existing, more permissive directory (e.g. one predating this
+	// restriction). Chmod unconditionally, matching WritePlan's plan
+	// directory handling, so a pre-existing 0755 staging directory can't
+	// leave a closed staged file visible to another local user before the
+	// editor reopens it.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return "", nil, fmt.Errorf("restrict plan editor staging directory permissions: %w", err)
+	}
 	resolvedDir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
 		return "", nil, fmt.Errorf("resolve plan editor staging directory: %w", err)
