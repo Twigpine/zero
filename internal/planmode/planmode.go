@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -261,7 +262,12 @@ func editorStagingDirIsPrivate(dir, workspaceRoot, tempDir string) bool {
 // verifyPrivateDirectory reports an error when path is not a plain directory
 // or is still group/world-writable after the caller tightened it. Symlinks
 // are rejected via Lstat so a TOCTOU swap of the directory for a link cannot
-// host a staged file that $EDITOR will follow.
+// host a staged file that $EDITOR will follow. The permission-bit check is
+// skipped on Windows: NTFS reports a directory's POSIX mode via ACLs rather
+// than the bits os.Chmod sets, so it does not reflect what os.Chmod(0o700)
+// actually restricted (see the same rationale on the file-mode check in
+// TestWritePlanUsesRestrictivePermissions) — containment there relies on the
+// path checks in editorStagingDirIsPrivate instead.
 func verifyPrivateDirectory(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -272,6 +278,9 @@ func verifyPrivateDirectory(path string) error {
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("%s is not a directory", path)
+	}
+	if runtime.GOOS == "windows" {
+		return nil
 	}
 	if perm := info.Mode().Perm(); perm&0o022 != 0 {
 		return fmt.Errorf("%s is group/world-writable (mode %o) after restriction", path, perm)

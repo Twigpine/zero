@@ -8,13 +8,27 @@ import (
 	"testing"
 )
 
+// setUserConfigHomeEnv points config.UserConfigDir at dir. os.UserConfigDir
+// (which UserConfigDir defers to outside darwin) reads %AppData% on Windows
+// and ignores XDG_CONFIG_HOME there, so a test that only sets XDG_CONFIG_HOME
+// silently fails to isolate storage on Windows and falls through to the
+// runner's real profile directory.
+func setUserConfigHomeEnv(t *testing.T, dir string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Setenv("AppData", dir)
+		return
+	}
+	t.Setenv("XDG_CONFIG_HOME", dir)
+}
+
 // isolatePlanStorage redirects the user config root so plan files land under a
 // throwaway directory rather than the real ~/.config. Durable plans live under
 // UserConfigDir (not the workspace), so every planmode test must isolate it.
 func isolatePlanStorage(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", root)
+	setUserConfigHomeEnv(t, root)
 	return root
 }
 
@@ -233,11 +247,11 @@ func TestWritePlanRejectsSymlinkedPlanFile(t *testing.T) {
 }
 
 func TestWritePlanRejectsStorageInsideWorkspace(t *testing.T) {
-	// If XDG_CONFIG_HOME is pointed at the workspace, plan storage would
+	// If the user config root is pointed at the workspace, plan storage would
 	// become a silent workspace write. Refuse rather than undermine the
 	// read-only / no-write-grant contract.
 	workspace := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", workspace)
+	setUserConfigHomeEnv(t, workspace)
 	if _, err := WritePlan(workspace, "session-1", "notes"); err == nil {
 		t.Fatal("expected WritePlan to reject plan storage inside the workspace")
 	}

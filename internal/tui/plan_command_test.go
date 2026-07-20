@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -43,6 +44,12 @@ func isolatePlanConfig(t *testing.T) {
 		t.Fatalf("MkdirAll plan config: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	// os.UserConfigDir (which config.UserConfigDir defers to outside darwin)
+	// reads %AppData% on Windows and ignores XDG_CONFIG_HOME there, so both
+	// must be set for this override to actually take effect cross-platform.
+	if runtime.GOOS == "windows" {
+		t.Setenv("AppData", root)
+	}
 	t.Setenv("XDG_CONFIG_HOME", root)
 }
 
