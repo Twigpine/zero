@@ -4,10 +4,22 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
+// isolatePlanStorage redirects the user config root so plan files land under a
+// throwaway directory rather than the real ~/.config. Durable plans live under
+// UserConfigDir (not the workspace), so every planmode test must isolate it.
+func isolatePlanStorage(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", root)
+	return root
+}
+
 func TestPlanFilePathIsStableAcrossCalls(t *testing.T) {
+	isolatePlanStorage(t)
 	root := t.TempDir()
 	first, err := PlanFilePath(root, "session-1")
 	if err != nil {
@@ -27,6 +39,7 @@ func TestPlanFilePathEmptySessionIsStable(t *testing.T) {
 	// sites before a session ID may exist (planEnterText, planText,
 	// openPlanInEditor); they must all resolve to the same file rather than a
 	// fresh one each call (regression for the old time.Now().UnixNano() slug).
+	isolatePlanStorage(t)
 	root := t.TempDir()
 	first, err := PlanFilePath(root, "")
 	if err != nil {
@@ -41,15 +54,36 @@ func TestPlanFilePathEmptySessionIsStable(t *testing.T) {
 	}
 }
 
+func TestPlanFilePathLivesOutsideWorkspace(t *testing.T) {
+	// Regression for the update_plan auto-persist write: durable plan state
+	// must not land under the workspace, or a read-only auto-allowed tool
+	// would create/overwrite workspace files without a write grant.
+	cfg := isolatePlanStorage(t)
+	workspace := t.TempDir()
+	path, err := PlanFilePath(workspace, "session-1")
+	if err != nil {
+		t.Fatalf("PlanFilePath: %v", err)
+	}
+	if isUnderOrEqual(path, workspace) {
+		t.Fatalf("plan path %q must not live under the workspace %q", path, workspace)
+	}
+	if !isUnderOrEqual(path, cfg) {
+		t.Fatalf("plan path %q must live under the user config root %q", path, cfg)
+	}
+	if !strings.Contains(path, filepath.FromSlash(PlanDirName)) {
+		t.Fatalf("plan path %q must include %q", path, PlanDirName)
+	}
+}
+
 func TestWritePlanUsesRestrictivePermissions(t *testing.T) {
 	// Windows reports 0666 for a plan file regardless of the mode passed to
 	// OpenFile - NTFS permissions are governed by ACLs, not the POSIX mode
 	// bits Go maps them to. Assert the mode bits only where they mean
-	// something; Windows containment relies on the workspace-scoped os.Root
-	// resolution in WritePlan/ReadPlan instead, not on file permissions.
+	// something; Windows containment relies on path isolation instead.
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX permission bits are not meaningful on Windows")
 	}
+	isolatePlanStorage(t)
 	root := t.TempDir()
 	path, err := WritePlan(root, "session-1", "notes")
 	if err != nil {
@@ -80,21 +114,25 @@ func TestWritePlanTightensPreExistingLoosePermissions(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX permission bits are not meaningful on Windows")
 	}
+	isolatePlanStorage(t)
 	root := t.TempDir()
-	planDir := filepath.Join(root, PlanDirName)
+	path, err := PlanFilePath(root, "session-1")
+	if err != nil {
+		t.Fatalf("PlanFilePath: %v", err)
+	}
+	planDir := filepath.Dir(path)
 	if err := os.MkdirAll(planDir, 0o755); err != nil {
 		t.Fatalf("pre-create loose plan dir: %v", err)
 	}
-	planFile := filepath.Join(planDir, "session-1.md")
-	if err := os.WriteFile(planFile, []byte("stale"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("stale"), 0o644); err != nil {
 		t.Fatalf("pre-create loose plan file: %v", err)
 	}
 
-	path, err := WritePlan(root, "session-1", "notes")
+	written, err := WritePlan(root, "session-1", "notes")
 	if err != nil {
 		t.Fatalf("WritePlan: %v", err)
 	}
-	info, err := os.Stat(path)
+	info, err := os.Stat(written)
 	if err != nil {
 		t.Fatalf("stat plan file: %v", err)
 	}
@@ -110,7 +148,28 @@ func TestWritePlanTightensPreExistingLoosePermissions(t *testing.T) {
 	}
 }
 
+func TestWritePlanDoesNotTouchWorkspace(t *testing.T) {
+	// Core P1 regression: persisting a plan must not create anything under
+	// the workspace, even via .zero/plans (the previous location).
+	isolatePlanStorage(t)
+	workspace := t.TempDir()
+	if _, err := WritePlan(workspace, "session-1", "notes"); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, ".zero")); !os.IsNotExist(err) {
+		t.Fatalf("WritePlan must not create .zero under the workspace, stat err=%v", err)
+	}
+	entries, err := os.ReadDir(workspace)
+	if err != nil {
+		t.Fatalf("ReadDir workspace: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected empty workspace after WritePlan, got %v", entries)
+	}
+}
+
 func TestReadWritePlanRoundtrip(t *testing.T) {
+	isolatePlanStorage(t)
 	root := t.TempDir()
 	if _, err := WritePlan(root, "session-1", "# Draft\n\nStep one."); err != nil {
 		t.Fatalf("WritePlan: %v", err)
@@ -128,6 +187,7 @@ func TestReadWritePlanRoundtrip(t *testing.T) {
 }
 
 func TestReadPlanMissingFileIsNotAnError(t *testing.T) {
+	isolatePlanStorage(t)
 	root := t.TempDir()
 	_, ok, err := ReadPlan(root, "no-such-session")
 	if err != nil {
@@ -138,41 +198,22 @@ func TestReadPlanMissingFileIsNotAnError(t *testing.T) {
 	}
 }
 
-func TestWritePlanRejectsSymlinkedPlansDir(t *testing.T) {
-	root := t.TempDir()
-	outside := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, ".zero"), 0o700); err != nil {
-		t.Fatalf("mkdir .zero: %v", err)
-	}
-	// Plant a symlink at .zero/plans pointing outside the workspace, as if an
-	// attacker (or stale state) had redirected it before WritePlan ran. Unlike
-	// a preflight Lstat check, os.Root re-resolves this on every call, so
-	// planting the symlink right before the call still gets caught.
-	if err := os.Symlink(outside, filepath.Join(root, ".zero", "plans")); err != nil {
-		t.Fatalf("symlink .zero/plans: %v", err)
-	}
-
-	if _, err := WritePlan(root, "session-1", "notes"); err == nil {
-		t.Fatal("expected WritePlan to reject a symlinked plans directory")
-	}
-	if _, _, err := ReadPlan(root, "session-1"); err == nil {
-		t.Fatal("expected ReadPlan to reject a symlinked plans directory")
-	}
-}
-
 func TestWritePlanRejectsSymlinkedPlanFile(t *testing.T) {
+	isolatePlanStorage(t)
 	root := t.TempDir()
+	path, err := PlanFilePath(root, "session-1")
+	if err != nil {
+		t.Fatalf("PlanFilePath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir plan dir: %v", err)
+	}
 	outsideFile := filepath.Join(t.TempDir(), "exfil.md")
 	if err := os.WriteFile(outsideFile, []byte("secret"), 0o600); err != nil {
 		t.Fatalf("write outside file: %v", err)
 	}
-	plansDir := filepath.Join(root, ".zero", "plans")
-	if err := os.MkdirAll(plansDir, 0o700); err != nil {
-		t.Fatalf("mkdir plans: %v", err)
-	}
-	id := slugify("session-1")
-	if err := os.Symlink(outsideFile, filepath.Join(plansDir, id+".md")); err != nil {
-		t.Fatalf("symlink plan file: %v", err)
+	if err := os.Symlink(outsideFile, path); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
 	}
 
 	if _, err := WritePlan(root, "session-1", "notes"); err == nil {
@@ -180,6 +221,25 @@ func TestWritePlanRejectsSymlinkedPlanFile(t *testing.T) {
 	}
 	if _, _, err := ReadPlan(root, "session-1"); err == nil {
 		t.Fatal("expected ReadPlan to reject a symlinked plan file")
+	}
+	// Victim content must be untouched.
+	data, err := os.ReadFile(outsideFile)
+	if err != nil {
+		t.Fatalf("read outside file: %v", err)
+	}
+	if string(data) != "secret" {
+		t.Fatalf("symlinked victim was modified: %q", data)
+	}
+}
+
+func TestWritePlanRejectsStorageInsideWorkspace(t *testing.T) {
+	// If XDG_CONFIG_HOME is pointed at the workspace, plan storage would
+	// become a silent workspace write. Refuse rather than undermine the
+	// read-only / no-write-grant contract.
+	workspace := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", workspace)
+	if _, err := WritePlan(workspace, "session-1", "notes"); err == nil {
+		t.Fatal("expected WritePlan to reject plan storage inside the workspace")
 	}
 }
 
@@ -340,5 +400,61 @@ func TestStageContentForEditorGeneratesUniquePathsPerCall(t *testing.T) {
 	cleanupA()
 	if _, err := os.Stat(pathB); err != nil {
 		t.Fatalf("cleanupA should not have removed B's staged file: %v", err)
+	}
+}
+
+func TestStageContentForEditorTightensPreExistingLoosePermissions(t *testing.T) {
+	// Regression: MkdirAll(0700) does not change an existing group/world-
+	// writable plan-edit directory. stageContentForEditor must chmod before
+	// CreateTemp so a closed staged file is not writable by another local
+	// user before $EDITOR reopens it.
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not meaningful on Windows")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatalf("chmod loose staging dir: %v", err)
+	}
+	path, cleanup, err := stageContentForEditor(dir, "session-1", "draft")
+	if err != nil {
+		t.Fatalf("stageContentForEditor: %v", err)
+	}
+	defer cleanup()
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat staging dir: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm&0o022 != 0 {
+		t.Fatalf("expected staging dir tightened away from group/world write, got %o", perm)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("staged file missing: %v", err)
+	}
+}
+
+func TestVerifyPrivateDirectoryRejectsGroupWritable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not meaningful on Windows")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o770); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	if err := verifyPrivateDirectory(dir); err == nil {
+		t.Fatal("expected verifyPrivateDirectory to reject a group-writable directory")
+	}
+}
+
+func TestVerifyPrivateDirectoryAcceptsOwnerOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not meaningful on Windows")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	if err := verifyPrivateDirectory(dir); err != nil {
+		t.Fatalf("verifyPrivateDirectory: %v", err)
 	}
 }

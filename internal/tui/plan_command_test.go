@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,8 +16,39 @@ import (
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
+// isolatePlanConfig redirects XDG_CONFIG_HOME so durable plan files and
+// editor staging land under a throwaway directory. The directory is kept
+// outside os.TempDir(): StageForEditor rejects staging roots that sit in the
+// sandbox's default-writable temp tree.
+func isolatePlanConfig(t *testing.T) {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+	// t.Name() can contain slashes (subtests); flatten so MkdirAll gets one leaf.
+	name := strings.Map(func(r rune) rune {
+		switch r {
+		case '/', '\\', ' ', ':':
+			return '_'
+		default:
+			return r
+		}
+	}, t.Name())
+	root := filepath.Join(home, ".cache", "zero-planmode-test", name)
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatalf("RemoveAll plan config: %v", err)
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("MkdirAll plan config: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	t.Setenv("XDG_CONFIG_HOME", root)
+}
+
 func newPlanModeTestModel(t *testing.T, cwd string, permissionMode agent.PermissionMode) model {
 	t.Helper()
+	isolatePlanConfig(t)
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewUpdatePlanTool())
 	m := newModel(context.Background(), Options{
@@ -137,6 +169,7 @@ func TestPlanCommandCreatesSessionBeforeWritingPlanFile(t *testing.T) {
 	// fresh session would also reuse and which orphaned its content once the
 	// real session ID appeared. Entering plan mode must create the session
 	// first so the plan file is named for it from the start.
+	isolatePlanConfig(t)
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewUpdatePlanTool())
 	cwd := t.TempDir()
@@ -186,6 +219,7 @@ func TestPlanOpenLaunchesEditorCommand(t *testing.T) {
 }
 
 func TestPlanOpenSeedsFileFromDraft(t *testing.T) {
+	isolatePlanConfig(t)
 	registry := tools.NewRegistry()
 	planTool := tools.NewUpdatePlanTool()
 	result := planTool.Run(context.Background(), map[string]any{
@@ -234,6 +268,9 @@ func TestUpdatePlanPersistsToPlanFile(t *testing.T) {
 	// /plan open) disappeared on restart/resume, and a plan file seeded once
 	// by /plan open never reflected later update_plan calls. The plan file
 	// must be the durable source of truth, refreshed on every update_plan call.
+	// It must also stay outside the workspace so the read-only auto-allow
+	// contract remains honest.
+	isolatePlanConfig(t)
 	store := testSessionStore(t)
 	cwd := t.TempDir()
 	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{
@@ -281,12 +318,23 @@ func TestUpdatePlanPersistsToPlanFile(t *testing.T) {
 	if !strings.Contains(content, "Wire model catalog") {
 		t.Fatalf("expected the persisted plan file to reflect the update_plan call, got: %q", content)
 	}
+	path, err := planmode.PlanFilePath(cwd, next.activeSession.SessionID)
+	if err != nil {
+		t.Fatalf("PlanFilePath: %v", err)
+	}
+	if strings.HasPrefix(path, cwd+string(os.PathSeparator)) || path == cwd {
+		t.Fatalf("durable plan path %q must not live under the workspace %q", path, cwd)
+	}
+	if _, err := os.Stat(filepath.Join(cwd, ".zero")); !os.IsNotExist(err) {
+		t.Fatalf("update_plan must not create .zero under the workspace, stat err=%v", err)
+	}
 }
 
 func TestPlanOpenEditorExitReloadsFileIntoPlan(t *testing.T) {
 	// After /plan open edits the plan file in $EDITOR, the edited content
 	// must be reloaded into the in-memory update_plan so it drives
 	// execution, rather than being shadowed.
+	isolatePlanConfig(t)
 	registry := tools.NewRegistry()
 	planTool := tools.NewUpdatePlanTool()
 	registry.Register(planTool)
@@ -328,6 +376,7 @@ func TestPlanEditorFinishedMsgReloadsPanelAndConfirms(t *testing.T) {
 	// directly): it reloads the edited file into BOTH the update_plan tool (the
 	// execution source of truth) and the sticky panel, and confirms the reload
 	// in the transcript so a bare /plan open doesn't look like a silent no-op.
+	isolatePlanConfig(t)
 	registry := tools.NewRegistry()
 	planTool := tools.NewUpdatePlanTool()
 	registry.Register(planTool)
@@ -370,6 +419,7 @@ func TestPlanOpenEditorReloadPreservesStatusAndNotes(t *testing.T) {
 	// (resetting every reloaded item to "pending") and treat a "Notes: ..."
 	// continuation line as its own bogus plan item instead of folding it
 	// into the preceding step.
+	isolatePlanConfig(t)
 	registry := tools.NewRegistry()
 	planTool := tools.NewUpdatePlanTool()
 	registry.Register(planTool)
@@ -494,6 +544,10 @@ func TestPlanModeWiresDraftSystemPrompt(t *testing.T) {
 		{Type: zeroruntime.StreamEventDone},
 	}}
 	m := newPlanModeTestModel(t, t.TempDir(), agent.PermissionModePlan)
+	// Embedders set product policy via agentOptions.SystemPrompt. Plan mode
+	// must layer its restriction onto that prompt rather than replace it.
+	const configuredPrompt = "Custom product policy for this embedder."
+	m.agentOptions.SystemPrompt = configuredPrompt
 	m.provider = provider
 	m.input.SetValue("outline the approach")
 
@@ -514,5 +568,11 @@ func TestPlanModeWiresDraftSystemPrompt(t *testing.T) {
 	systemPrompt := provider.requests[0].Messages[0].Content
 	if !strings.Contains(systemPrompt, "Plan mode is active on this session") {
 		t.Fatalf("expected planmode.DraftSystemPrompt to be wired in, got:\n%s", systemPrompt)
+	}
+	if !strings.Contains(systemPrompt, configuredPrompt) {
+		t.Fatalf("expected configured SystemPrompt to be preserved under plan mode, got:\n%s", systemPrompt)
+	}
+	if !strings.HasPrefix(systemPrompt, configuredPrompt) {
+		t.Fatalf("expected plan-mode layer to follow the configured prompt, got:\n%s", systemPrompt)
 	}
 }
