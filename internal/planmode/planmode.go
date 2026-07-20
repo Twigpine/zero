@@ -10,9 +10,11 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 )
 
-// PlanDirName is the workspace-relative directory where /plan plan files live,
-// mirroring the spec-draft convention under .zero (see specmode.SpecDirName).
-const PlanDirName = ".zero/plans"
+// PlanDirName is the config-relative directory (under UserConfigDir) where
+// durable /plan files live. Plans are kept outside the workspace so the
+// auto-allowed, read-only update_plan tool can persist without a write grant
+// and without mutating the workspace.
+const PlanDirName = "zero/plans"
 
 // DraftSystemPrompt is the system prompt the TUI runs while /plan mode is active
 // on the current session. It is read-only: the agent inspects the workspace and
@@ -36,33 +38,34 @@ choices such as "Option A" and "Option B". If something remains uncertain, make
 the safest reasonable assumption and state it clearly.`
 
 // PlanFilePath returns the deterministic, absolute plan file path for a
-// session under the workspace .zero/plans directory, for display and for
-// handing to an external editor process. It performs no filesystem access and
-// gives no containment guarantee by itself: ReadPlan and WritePlan are the
-// safe way to actually read or write plan content, since they resolve paths
-// through os.Root and cannot be redirected outside the workspace even by a
-// symlink planted between this call and theirs.
+// session under the per-user config plans directory, scoped by workspace so
+// two workspaces never share a plan file. It performs no filesystem access;
+// ReadPlan and WritePlan are the safe way to actually read or write plan
+// content.
 func PlanFilePath(workspaceRoot, sessionID string) (string, error) {
-	root := strings.TrimSpace(workspaceRoot)
-	if root == "" {
-		return "", fmt.Errorf("workspace root is required")
-	}
-	absoluteRoot, err := filepath.Abs(root)
+	base, absWorkspace, err := planStorageBase(workspaceRoot)
 	if err != nil {
-		return "", fmt.Errorf("resolve workspace root: %w", err)
+		return "", err
 	}
-	return filepath.Join(absoluteRoot, planRelativePath(sessionID)), nil
+	return filepath.Join(base, slugify(absWorkspace), slugify(sessionID)+".md"), nil
 }
 
 // ReadPlan reads the plan file for a session. The bool reports whether a plan
 // file exists; a missing file is not an error.
 func ReadPlan(workspaceRoot, sessionID string) (string, bool, error) {
-	root, err := openWorkspaceRoot(workspaceRoot)
+	path, err := PlanFilePath(workspaceRoot, sessionID)
 	if err != nil {
 		return "", false, err
 	}
-	defer root.Close()
-	data, err := root.ReadFile(planRelativePath(sessionID))
+	if err := ensurePlanPathContained(workspaceRoot, path); err != nil {
+		return "", false, err
+	}
+	// Refuse a symlinked plan file so a planted link cannot redirect the read
+	// to an arbitrary target.
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return "", false, fmt.Errorf("plan file %s is a symlink; refusing to read through it", path)
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", false, nil
@@ -73,16 +76,20 @@ func ReadPlan(workspaceRoot, sessionID string) (string, bool, error) {
 }
 
 // WritePlan writes (creating the directory as needed) the plan file for a
-// session and returns its path.
+// session and returns its path. The file is stored under the user config
+// directory, never inside the workspace, so an auto-allowed read-only tool
+// can persist without a workspace write grant.
 func WritePlan(workspaceRoot, sessionID, content string) (string, error) {
-	root, err := openWorkspaceRoot(workspaceRoot)
+	path, err := PlanFilePath(workspaceRoot, sessionID)
 	if err != nil {
 		return "", err
 	}
-	defer root.Close()
+	if err := ensurePlanPathContained(workspaceRoot, path); err != nil {
+		return "", err
+	}
 
-	dirRelPath := filepath.FromSlash(PlanDirName)
-	if err := root.MkdirAll(dirRelPath, 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create plan directory: %w", err)
 	}
 	// MkdirAll's mode only applies at creation: it does not tighten an
@@ -90,66 +97,63 @@ func WritePlan(workspaceRoot, sessionID, content string) (string, error) {
 	// restriction, or created some other way). Chmod unconditionally so a
 	// pre-existing 0755 directory is brought back to owner-only on every
 	// write, matching the storage contract.
-	if err := root.Chmod(dirRelPath, 0o700); err != nil {
+	if err := os.Chmod(dir, 0o700); err != nil {
 		return "", fmt.Errorf("restrict plan directory permissions: %w", err)
 	}
-	fileRelPath := planRelativePath(sessionID)
-	// Refuse a symlinked plan file. os.Root blocks escapes from the
-	// workspace, but it still follows a symlink whose target stays inside
-	// it — a `.zero/plans/<slug>.md -> ../../victim` planted during an
-	// earlier writable run would otherwise turn plan mode's one allowed
-	// write into an overwrite of an arbitrary workspace file.
-	if info, err := root.Lstat(fileRelPath); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("plan file %s is a symlink; refusing to write through it", fileRelPath)
+	// Re-check containment after creation: MkdirAll follows intermediate
+	// symlinks, so a planted link under the config plans root could otherwise
+	// land the durable file inside the workspace or elsewhere.
+	if err := ensurePlanPathContained(workspaceRoot, path); err != nil {
+		return "", err
+	}
+	// Refuse a symlinked plan file. A `<session>.md -> victim` planted during
+	// an earlier run would otherwise turn a plan write into an overwrite of
+	// an arbitrary user-writable target.
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("plan file %s is a symlink; refusing to write through it", path)
 	}
 	// Write an owner-only temporary sibling and rename it into place: a
 	// disk-full failure, short write, or interruption must never leave the
-	// durable plan empty or partial (the old O_TRUNC open destroyed the
-	// previous plan before the new content was written). The random suffix
-	// plus O_EXCL means a colliding or pre-planted path is refused, and the
-	// rename target was verified above not to be a symlink.
-	tmpRelPath := fmt.Sprintf("%s.tmp-%d-%d", fileRelPath, os.Getpid(), time.Now().UnixNano())
-	file, err := root.OpenFile(tmpRelPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	// durable plan empty or partial. The random suffix plus O_EXCL means a
+	// colliding or pre-planted path is refused, and the rename target was
+	// verified above not to be a symlink (rename replaces the name itself).
+	tmpPath := fmt.Sprintf("%s.tmp-%d-%d", path, os.Getpid(), time.Now().UnixNano())
+	file, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return "", fmt.Errorf("write plan file: %w", err)
 	}
 	if _, err := file.WriteString(strings.TrimRight(content, "\n") + "\n"); err != nil {
 		file.Close()
-		_ = root.Remove(tmpRelPath)
+		_ = os.Remove(tmpPath)
 		return "", fmt.Errorf("write plan file: %w", err)
 	}
 	if err := file.Close(); err != nil {
-		_ = root.Remove(tmpRelPath)
+		_ = os.Remove(tmpPath)
 		return "", fmt.Errorf("write plan file: %w", err)
 	}
-	if err := root.Rename(tmpRelPath, fileRelPath); err != nil {
-		_ = root.Remove(tmpRelPath)
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
 		return "", fmt.Errorf("replace plan file: %w", err)
 	}
-	return PlanFilePath(workspaceRoot, sessionID)
+	return path, nil
 }
 
 // StageForEditor copies a session's current plan content (read safely via
 // ReadPlan) into a fresh file outside the workspace, for handing to an
 // external $EDITOR process launched by /plan open.
 //
-// Handing $EDITOR a path inside the workspace itself would leave a
-// symlink-swap race: ReadPlan/WritePlan resolve descriptor-relative through
-// os.Root and cannot be redirected, but the external editor process opens
-// its argument path with its own ordinary (non-Root) I/O, so a sandboxed
-// tool invocation could replace the plan file with a symlink between our
-// protected write and the editor's open, causing the editor (which runs
-// unsandboxed, under the real user) to follow it and edit an arbitrary
-// user-writable target. The OS temp directory does not avoid this: the
-// sandbox's default write scope explicitly includes it (see
-// defaultTempWriteRootCandidates in internal/sandbox), so a sandboxed
-// process could plant the same symlink there. config.UserConfigDir() is
-// usually outside that default scope, but it honors XDG_CONFIG_HOME (on
-// macOS explicitly here, on Linux via os.UserConfigDir itself), so a
-// misconfigured or sandboxed-process environment pointing that at the
-// workspace or the OS temp dir would put the staging directory right back in
-// a default-writable root. editorStagingDirIsPrivate rejects that case
-// instead of silently staging somewhere unsafe.
+// Handing $EDITOR a path at the durable plan location would leave a
+// symlink-swap race between our protected write and the editor's open. The
+// OS temp directory does not avoid this either: the sandbox's default write
+// scope explicitly includes it (see defaultTempWriteRootCandidates in
+// internal/sandbox), so a sandboxed process could plant the same symlink
+// there. config.UserConfigDir() is usually outside that default scope, but
+// it honors XDG_CONFIG_HOME (on macOS explicitly here, on Linux via
+// os.UserConfigDir itself), so a misconfigured or sandboxed-process
+// environment pointing that at the workspace or the OS temp dir would put
+// the staging directory right back in a default-writable root.
+// editorStagingDirIsPrivate rejects that case instead of silently staging
+// somewhere unsafe.
 //
 // Two more layers close the remaining gap even when the directory itself is
 // private: the filename includes a random, per-invocation suffix (os.CreateTemp)
@@ -194,6 +198,13 @@ func StageForEditor(workspaceRoot, sessionID string) (stagedPath string, cleanup
 	if !editorStagingDirIsPrivate(resolvedDir, workspaceRoot, os.TempDir()) {
 		return "", nil, fmt.Errorf("plan editor staging directory %s resolves into a default sandbox-writable root (the workspace or the OS temp directory); check XDG_CONFIG_HOME", dir)
 	}
+	// Verify the resolved directory after chmod: refuse anything that is not
+	// a plain directory or that is still group/world-writable. A pre-existing
+	// sticky or ACL-permissive directory that chmod could not fully lock down
+	// must not host a closed staged file the unsandboxed editor will reopen.
+	if err := verifyPrivateDirectory(resolvedDir); err != nil {
+		return "", nil, fmt.Errorf("plan editor staging directory: %w", err)
+	}
 	return stageContentForEditor(resolvedDir, sessionID, content)
 }
 
@@ -206,6 +217,9 @@ func StageForEditor(workspaceRoot, sessionID string) (stagedPath string, cleanup
 func stageContentForEditor(dir, sessionID, content string) (stagedPath string, cleanup func(), err error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", nil, fmt.Errorf("create plan editor staging directory: %w", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return "", nil, fmt.Errorf("restrict plan editor staging directory permissions: %w", err)
 	}
 	file, err := os.CreateTemp(dir, slugify(sessionID)+"-*.md")
 	if err != nil {
@@ -244,6 +258,27 @@ func editorStagingDirIsPrivate(dir, workspaceRoot, tempDir string) bool {
 	return true
 }
 
+// verifyPrivateDirectory reports an error when path is not a plain directory
+// or is still group/world-writable after the caller tightened it. Symlinks
+// are rejected via Lstat so a TOCTOU swap of the directory for a link cannot
+// host a staged file that $EDITOR will follow.
+func verifyPrivateDirectory(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is a symlink; refusing to stage through it", path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", path)
+	}
+	if perm := info.Mode().Perm(); perm&0o022 != 0 {
+		return fmt.Errorf("%s is group/world-writable (mode %o) after restriction", path, perm)
+	}
+	return nil
+}
+
 // physicalPath resolves symlinks best-effort. A path that does not exist yet
 // is resolved through its deepest existing ancestor with the remainder
 // rejoined, so a not-yet-created staging directory still compares in the
@@ -273,9 +308,8 @@ func isUnderOrEqual(path, root string) bool {
 }
 
 // CommitStagedEdit reads a file staged by StageForEditor (now edited by the
-// user's $EDITOR) and writes its content back into the workspace via
-// WritePlan, which is the safe, descriptor-relative path back through
-// os.Root.
+// user's $EDITOR) and writes its content back into the durable plan store
+// via WritePlan.
 func CommitStagedEdit(workspaceRoot, sessionID, stagedPath string) error {
 	data, err := os.ReadFile(stagedPath)
 	if err != nil {
@@ -296,31 +330,43 @@ func editorStagingDir() (string, error) {
 	return filepath.Join(dir, "zero", "plan-edit"), nil
 }
 
-// openWorkspaceRoot opens the workspace directory as an os.Root, which the
-// Go runtime resolves relative to using descriptor-relative (openat-style)
-// operations: every subsequent Root method call re-walks the path from that
-// descriptor and refuses to follow a symlink referencing a location outside
-// it. That closes the check/use race a separate Lstat-then-open preflight
-// would leave open (a symlink planted at .zero, .zero/plans, or the plan file
-// itself between the check and the later open could otherwise redirect the
-// read/write outside the workspace).
-func openWorkspaceRoot(workspaceRoot string) (*os.Root, error) {
+// planStorageBase returns the absolute user-config plans root and the
+// absolute workspace path used to scope per-workspace plan files.
+func planStorageBase(workspaceRoot string) (base string, absWorkspace string, err error) {
 	root := strings.TrimSpace(workspaceRoot)
 	if root == "" {
-		return nil, fmt.Errorf("workspace root is required")
+		return "", "", fmt.Errorf("workspace root is required")
 	}
-	r, err := os.OpenRoot(root)
+	absWorkspace, err = filepath.Abs(root)
 	if err != nil {
-		return nil, fmt.Errorf("open workspace root: %w", err)
+		return "", "", fmt.Errorf("resolve workspace root: %w", err)
 	}
-	return r, nil
+	cfg, err := config.UserConfigDir()
+	if err != nil {
+		return "", "", fmt.Errorf("resolve plan storage directory: %w", err)
+	}
+	return filepath.Join(cfg, filepath.FromSlash(PlanDirName)), absWorkspace, nil
 }
 
-// planRelativePath returns the workspace-relative plan file path for a
-// session. The session ID is slugified to a filesystem-safe alphabet (see
-// slugify), so the result can never contain ".." or an absolute path.
-func planRelativePath(sessionID string) string {
-	return filepath.Join(filepath.FromSlash(PlanDirName), slugify(sessionID)+".md")
+// ensurePlanPathContained verifies that path stays under the config plans
+// root and does not resolve into the workspace. A mis-set XDG_CONFIG_HOME
+// pointing at the workspace would otherwise turn every update_plan
+// persistence into a silent workspace write, which is the gap this storage
+// layout exists to close.
+func ensurePlanPathContained(workspaceRoot, path string) error {
+	base, absWorkspace, err := planStorageBase(workspaceRoot)
+	if err != nil {
+		return err
+	}
+	physPath := physicalPath(path)
+	physBase := physicalPath(base)
+	if !isUnderOrEqual(physPath, physBase) {
+		return fmt.Errorf("plan path %s escapes plan storage root %s", path, base)
+	}
+	if isUnderOrEqual(physPath, physicalPath(absWorkspace)) {
+		return fmt.Errorf("plan storage %s resolves into the workspace; check XDG_CONFIG_HOME", path)
+	}
+	return nil
 }
 
 // slugify turns an arbitrary session identifier into a filesystem-safe slug.

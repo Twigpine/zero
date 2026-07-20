@@ -361,9 +361,9 @@ func planEnterText(m model) string {
 }
 
 func (m model) planText() string {
-	// Prefer the session plan file when present. update_plan persists to this
-	// file on every call (see model.go's OnToolResult hook), so it is the
-	// durable source of truth once anything has been captured; the in-memory
+	// Prefer the durable plan file when present. update_plan persists to the
+	// per-user plan store on every call (see model.go's OnToolResult hook), so
+	// it is the source of truth once anything has been captured; the in-memory
 	// draft below is only a fallback for a plan that predates any write.
 	path, pathErr := planmode.PlanFilePath(m.cwd, m.activeSession.SessionID)
 	content, exists, readErr := planmode.ReadPlan(m.cwd, m.activeSession.SessionID)
