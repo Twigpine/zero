@@ -32,6 +32,47 @@ func isolatePlanStorage(t *testing.T) string {
 	return root
 }
 
+func TestPlanFilePathSeparatesSlugCollisions(t *testing.T) {
+	// slugify alone maps '_' and '-' to the same dash form, so plan_a and
+	// plan-a (and workspaces foo_bar / foo-bar) must not share a path.
+	isolatePlanStorage(t)
+	root := t.TempDir()
+	a, err := PlanFilePath(root, "plan_a")
+	if err != nil {
+		t.Fatalf("PlanFilePath plan_a: %v", err)
+	}
+	b, err := PlanFilePath(root, "plan-a")
+	if err != nil {
+		t.Fatalf("PlanFilePath plan-a: %v", err)
+	}
+	if a == b {
+		t.Fatalf("slug-colliding session IDs must not share a plan path, both %q", a)
+	}
+
+	wsA := filepath.Join(root, "foo_bar")
+	wsB := filepath.Join(root, "foo-bar")
+	if err := os.MkdirAll(wsA, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(wsB, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pathA, err := PlanFilePath(wsA, "session-1")
+	if err != nil {
+		t.Fatalf("PlanFilePath wsA: %v", err)
+	}
+	pathB, err := PlanFilePath(wsB, "session-1")
+	if err != nil {
+		t.Fatalf("PlanFilePath wsB: %v", err)
+	}
+	if pathA == pathB {
+		t.Fatalf("slug-colliding workspaces must not share a plan path, both %q", pathA)
+	}
+	if filepath.Dir(pathA) == filepath.Dir(pathB) {
+		t.Fatalf("workspace path keys collided: %q and %q share dir", pathA, pathB)
+	}
+}
+
 func TestPlanFilePathIsStableAcrossCalls(t *testing.T) {
 	isolatePlanStorage(t)
 	root := t.TempDir()
