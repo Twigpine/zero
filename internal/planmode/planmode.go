@@ -1,6 +1,8 @@
 package planmode
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -43,12 +45,18 @@ the safest reasonable assumption and state it clearly.`
 // two workspaces never share a plan file. It performs no filesystem access;
 // ReadPlan and WritePlan are the safe way to actually read or write plan
 // content.
+//
+// Directory and file names are collision-resistant: slugify alone would map
+// distinct IDs such as "plan_a" and "plan-a" (or workspaces "foo_bar" and
+// "foo-bar") onto the same path, so a durable plan for one session/workspace
+// could be read or overwritten by another. pathKey appends a content hash of
+// the exact original string so the mapping is injective.
 func PlanFilePath(workspaceRoot, sessionID string) (string, error) {
 	base, absWorkspace, err := planStorageBase(workspaceRoot)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(base, slugify(absWorkspace), slugify(sessionID)+".md"), nil
+	return filepath.Join(base, pathKey(absWorkspace), pathKey(sessionID)+".md"), nil
 }
 
 // ReadPlan reads the plan file for a session. The bool reports whether a plan
@@ -378,14 +386,28 @@ func ensurePlanPathContained(workspaceRoot, path string) error {
 	return nil
 }
 
-// slugify turns an arbitrary session identifier into a filesystem-safe slug.
-func slugify(id string) string {
+// pathKey builds a filesystem-safe, collision-resistant directory or file
+// stem from an arbitrary workspace path or session ID. The human-readable
+// slug prefix is for operator convenience only; the SHA-256 suffix makes the
+// key injective so distinct inputs never share a plan path.
+func pathKey(id string) string {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		// A stable fallback, not a per-call timestamp: PlanFilePath is called
 		// independently from several sites (planEnterText, planText,
 		// openPlanInEditor) before a session ID may exist, and they must all
 		// resolve to the same file rather than a fresh one each time.
+		id = "plan"
+	}
+	sum := sha256.Sum256([]byte(id))
+	return slugify(id) + "-" + hex.EncodeToString(sum[:16])
+}
+
+// slugify turns an arbitrary session identifier into a filesystem-safe slug.
+// It is lossy (see pathKey): do not use it alone as a durable storage key.
+func slugify(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
 		id = "plan"
 	}
 	var b strings.Builder
