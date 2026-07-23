@@ -107,6 +107,9 @@ func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
 	m = updated
 	m.permissionModeBeforePlan = m.permissionMode
 	m.permissionMode = agent.PermissionModePlan
+	if items, ok := m.reloadPlanFromFile(); ok {
+		m.plan.updateFromItems(items, m.now())
+	}
 	textToShow := planEnterText(m) + "\n\n" + m.planText()
 	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: textToShow})
 	return m, nil
