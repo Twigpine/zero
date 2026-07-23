@@ -605,3 +605,26 @@ func TestReenteringPlanModePreservesExistingPlanFile(t *testing.T) {
 		t.Fatalf("unexpected plan steps: %+v", next.plan.steps)
 	}
 }
+
+func TestParsePlanFileLinesPreservesContinuationWhitespace(t *testing.T) {
+	content := "1. [pending] Step with indented code\n" +
+		"   ```go\n" +
+		"     func hello() {}\n" +
+		"   ```\n" +
+		"   Notes:\n" +
+		"     - note line 1\n" +
+		"     - note line 2  "
+
+	items := parsePlanFileLines(content)
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+	expectedContent := "Step with indented code\n```go\n  func hello() {}\n```"
+	if items[0].Content != expectedContent {
+		t.Fatalf("content = %q, want %q", items[0].Content, expectedContent)
+	}
+	expectedNotes := "  - note line 1\n  - note line 2  "
+	if items[0].Notes != expectedNotes {
+		t.Fatalf("notes = %q, want %q", items[0].Notes, expectedNotes)
+	}
+}

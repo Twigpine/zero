@@ -2781,7 +2781,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// BEFORE the reset below clears them, and skip spec-draft reviews — those
 		// are legitimate mid-plan err==nil yields where the plan is NOT done.
 		if msg.err == nil && msg.specReview == nil &&
-			m.pendingAskUser == nil && m.pendingPermission == nil {
+			m.pendingAskUser == nil && m.pendingPermission == nil &&
+			m.permissionMode != agent.PermissionModePlan {
 			m.plan.completeRemaining(m.now())
 		}
 		m.pendingPermission = nil

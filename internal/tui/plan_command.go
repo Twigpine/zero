@@ -313,15 +313,24 @@ func parsePlanFileLines(content string) []tools.PlanItem {
 			inNotes = false
 			continue
 		}
+		lineBody := raw
+		if strings.HasPrefix(raw, "   ") {
+			lineBody = raw[3:]
+		} else if strings.HasPrefix(raw, "\t") {
+			lineBody = raw[1:]
+		} else {
+			lineBody = strings.TrimLeft(raw, " \t")
+		}
+
 		last := &items[len(items)-1]
 		if !inNotes {
-			if notes, ok := strings.CutPrefix(trimmed, "Notes:"); ok {
+			if notes, ok := strings.CutPrefix(strings.TrimSpace(lineBody), "Notes:"); ok {
 				last.Notes = strings.TrimSpace(notes)
 				inNotes = true
 				continue
 			}
 		}
-		line := unescapePlanContinuation(trimmed)
+		line := unescapePlanContinuation(lineBody)
 		if inNotes {
 			if last.Notes == "" {
 				last.Notes = line
