@@ -1,6 +1,7 @@
 package specialist
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"sync"
@@ -36,6 +37,7 @@ type specialistAccountingInput struct {
 func (executor Executor) recordSpecialistStart(input specialistAccountingInput) {
 	payload := baseSpecialistPayload(input)
 	_, _ = appendSpecialistSessionEvent(executor.SessionStore, input.ParentSessionID, sessions.EventSpecialistStart, payload)
+	executor.dispatchLifecycleHook("specialistStart", input, payload)
 }
 
 func (executor Executor) recordSpecialistStop(input specialistAccountingInput, summary StreamResult, status string, exitCode int, runErr error, usageRolledUp bool) {
@@ -58,6 +60,19 @@ func (executor Executor) recordSpecialistStop(input specialistAccountingInput, s
 	// Atomic check+append under the session lock so a concurrent stop path cannot
 	// also pass the existence check and write a duplicate stop event.
 	_, _ = appendSpecialistEventOnce(store, input.ParentSessionID, sessions.EventSpecialistStop, payload, input.ChildSessionID, summary.RunID)
+	executor.dispatchLifecycleHook("specialistStop", input, payload)
+}
+
+func (executor Executor) dispatchLifecycleHook(event string, input specialistAccountingInput, payload map[string]any) {
+	if executor.LifecycleHooks == nil || executor.LifecycleHooks.Dispatch == nil {
+		return
+	}
+	hookPayload := make(map[string]any, len(payload)+1)
+	for key, value := range payload {
+		hookPayload[key] = value
+	}
+	hookPayload["event"] = event
+	executor.LifecycleHooks.Dispatch(context.Background(), event, strings.TrimSpace(input.SpecialistName), hookPayload)
 }
 
 func (executor Executor) rollUpSpecialistUsage(input specialistAccountingInput, summary StreamResult) bool {

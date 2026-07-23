@@ -21,10 +21,21 @@ func TestExecutorRecordsForegroundLifecycleAndUsageRollup(t *testing.T) {
 		t.Fatalf("Create parent returned error: %v", err)
 	}
 	zero := 0
+	var hookEvents []string
+	var hookNames []string
 	executor := Executor{
 		BinaryPath:   "/usr/local/bin/zero",
 		SessionStore: store,
 		NewSessionID: func() (string, error) { return "child_task", nil },
+		LifecycleHooks: &LifecycleHooks{
+			Dispatch: func(_ context.Context, event string, specialistName string, payload map[string]any) {
+				hookEvents = append(hookEvents, event)
+				hookNames = append(hookNames, specialistName)
+				if payload["event"] != event {
+					t.Errorf("payload event = %#v, want %q", payload["event"], event)
+				}
+			},
+		},
 		Load: func(LoadOptions) (LoadResult, error) {
 			return LoadResult{Specialists: []Manifest{{
 				Metadata:      Metadata{Name: "worker", Description: "Does focused work"},
@@ -58,6 +69,12 @@ func TestExecutorRecordsForegroundLifecycleAndUsageRollup(t *testing.T) {
 	}
 	if result.Result.Status != tools.StatusOK {
 		t.Fatalf("Run status = %s, output=%s", result.Result.Status, result.Result.Output)
+	}
+	if got, want := strings.Join(hookEvents, ","), "specialistStart,specialistStop"; got != want {
+		t.Fatalf("lifecycle hooks = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(hookNames, ","), "worker,worker"; got != want {
+		t.Fatalf("lifecycle specialist names = %q, want %q", got, want)
 	}
 
 	events, err := store.ReadEvents(parent.SessionID)

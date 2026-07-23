@@ -50,6 +50,18 @@ type Executor struct {
 	BackgroundManager     *background.Manager
 	BackgroundManagerFunc BackgroundManagerFunc
 	BackgroundRuntime     *Runtime
+	// LifecycleHooks optionally dispatches specialistStart/specialistStop hooks.
+	// The shared pointer lets the CLI attach the hooks dispatcher after specialist
+	// tools are registered (hooks are constructed later in startup).
+	LifecycleHooks *LifecycleHooks
+}
+
+// LifecycleHooks bridges specialist accounting into the hooks dispatcher without
+// importing the hooks package into every specialist call site.
+type LifecycleHooks struct {
+	// Dispatch runs configured hooks for event ("specialistStart"/"specialistStop").
+	// specialistName is used as the matcher subject. nil Dispatch is a no-op.
+	Dispatch func(ctx context.Context, event string, specialistName string, payload map[string]any)
 }
 
 type BuildArgsInput struct {

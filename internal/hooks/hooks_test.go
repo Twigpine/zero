@@ -180,7 +180,7 @@ func TestLoadConfigPreservesUserDisabledStateWhenProjectOmitsEnabled(t *testing.
 }
 
 func TestLoadConfigRejectsMatchersOnLifecycleHooks(t *testing.T) {
-	for _, event := range []string{"sessionStart", "specialistStart"} {
+	for _, event := range []string{"sessionStart", "sessionEnd"} {
 		t.Run(event, func(t *testing.T) {
 			dir := t.TempDir()
 			projectConfigPath := filepath.Join(dir, "hooks.json")
@@ -207,6 +207,36 @@ func TestLoadConfigRejectsMatchersOnLifecycleHooks(t *testing.T) {
 				t.Fatalf("missing matcher diagnostic: %#v", result.Diagnostics)
 			}
 		})
+	}
+}
+
+func TestLoadConfigAcceptsMatchersOnSpecialistHooks(t *testing.T) {
+	dir := t.TempDir()
+	projectConfigPath := filepath.Join(dir, "hooks.json")
+	writeHookJSON(t, projectConfigPath, map[string]any{
+		"hooks": []any{map[string]any{
+			"id":      "zero.explorer-start",
+			"event":   "specialistStart",
+			"matcher": "explorer",
+			"command": "node",
+		}},
+	})
+
+	result, err := LoadConfig(LoadOptions{
+		UserConfigPath:    filepath.Join(dir, "missing-user-hooks.json"),
+		ProjectConfigPath: projectConfigPath,
+	})
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if len(result.Config.Hooks) != 1 || result.Config.Hooks[0].Matcher != "explorer" {
+		t.Fatalf("specialist matcher hook = %#v", result.Config.Hooks)
+	}
+	if got := hookIDs(Select(result.Config, SelectInput{Event: EventSpecialistStart, ToolName: "explorer"})); !reflect.DeepEqual(got, []string{"zero.explorer-start"}) {
+		t.Fatalf("matched selection = %#v", got)
+	}
+	if got := Select(result.Config, SelectInput{Event: EventSpecialistStart, ToolName: "worker"}); len(got) != 0 {
+		t.Fatalf("unmatched specialist should be empty, got %#v", got)
 	}
 }
 
