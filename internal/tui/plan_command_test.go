@@ -583,3 +583,25 @@ func TestPlanModeWiresDraftSystemPrompt(t *testing.T) {
 		t.Fatalf("expected plan-mode layer to follow the configured prompt, got:\n%s", systemPrompt)
 	}
 }
+
+func TestReenteringPlanModePreservesExistingPlanFile(t *testing.T) {
+	dir := t.TempDir()
+	m := newPlanModeTestModel(t, dir, agent.PermissionModeAsk)
+	const initialPlan = "1. [pending] Step one from disk\n2. [completed] Step two from disk"
+	if _, err := planmode.WritePlan(dir, m.activeSession.SessionID, initialPlan); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+
+	m.input.SetValue("/plan")
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if next.permissionMode != agent.PermissionModePlan {
+		t.Fatalf("expected /plan to enter plan mode, got %s", next.permissionMode)
+	}
+	if len(next.plan.steps) != 2 {
+		t.Fatalf("expected 2 plan items reloaded from disk, got %d", len(next.plan.steps))
+	}
+	if next.plan.steps[0].content != "Step one from disk" || next.plan.steps[1].status != "completed" {
+		t.Fatalf("unexpected plan steps: %+v", next.plan.steps)
+	}
+}
