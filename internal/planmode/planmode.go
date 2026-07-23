@@ -350,11 +350,10 @@ func editorStagingDir() (string, error) {
 // planStorageBase returns the absolute user-config plans root and the
 // absolute workspace path used to scope per-workspace plan files.
 func planStorageBase(workspaceRoot string) (base string, absWorkspace string, err error) {
-	root := strings.TrimSpace(workspaceRoot)
-	if root == "" {
+	if strings.TrimSpace(workspaceRoot) == "" {
 		return "", "", fmt.Errorf("workspace root is required")
 	}
-	absWorkspace, err = filepath.Abs(root)
+	absWorkspace, err = filepath.Abs(workspaceRoot)
 	if err != nil {
 		return "", "", fmt.Errorf("resolve workspace root: %w", err)
 	}
