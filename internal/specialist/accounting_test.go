@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Twigpine/zero/internal/background"
@@ -303,7 +304,17 @@ func TestRecordSpecialistStopDedupesUnderConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create parent returned error: %v", err)
 	}
-	executor := Executor{SessionStore: store}
+	var hookStops atomic.Int32
+	executor := Executor{
+		SessionStore: store,
+		LifecycleHooks: &LifecycleHooks{
+			Dispatch: func(_ context.Context, event string, _ string, _ map[string]any) {
+				if event == "specialistStop" {
+					hookStops.Add(1)
+				}
+			},
+		},
+	}
 	input := specialistAccountingInput{
 		ParentSessionID: parent.SessionID,
 		ChildSessionID:  "child_task",
@@ -337,5 +348,8 @@ func TestRecordSpecialistStopDedupesUnderConcurrency(t *testing.T) {
 	}
 	if stops != 1 {
 		t.Fatalf("expected exactly 1 stop event under concurrency, got %d", stops)
+	}
+	if got := hookStops.Load(); got != 1 {
+		t.Fatalf("specialistStop hooks = %d, want 1 under concurrency", got)
 	}
 }

@@ -42,8 +42,6 @@ func (executor Executor) recordSpecialistStart(input specialistAccountingInput) 
 
 func (executor Executor) recordSpecialistStop(input specialistAccountingInput, summary StreamResult, status string, exitCode int, runErr error, usageRolledUp bool) {
 	store := accountingStore(executor.SessionStore)
-	accountingMu.Lock()
-	defer accountingMu.Unlock()
 	payload := baseSpecialistPayload(input)
 	if summary.RunID != "" {
 		payload["runId"] = summary.RunID
@@ -57,10 +55,16 @@ func (executor Executor) recordSpecialistStop(input specialistAccountingInput, s
 	if len(summary.Errors) > 0 {
 		payload["errors"] = append([]string(nil), summary.Errors...)
 	}
-	// Atomic check+append under the session lock so a concurrent stop path cannot
-	// also pass the existence check and write a duplicate stop event.
-	_, _ = appendSpecialistEventOnce(store, input.ParentSessionID, sessions.EventSpecialistStop, payload, input.ChildSessionID, summary.RunID)
-	executor.dispatchLifecycleHook("specialistStop", input, payload)
+	// Hold accountingMu only for the deduped append so a slow lifecycle hook cannot
+	// stall concurrent specialist stop/usage accounting.
+	accountingMu.Lock()
+	appended, _ := appendSpecialistEventOnce(store, input.ParentSessionID, sessions.EventSpecialistStop, payload, input.ChildSessionID, summary.RunID)
+	accountingMu.Unlock()
+	// Duplicate stop paths (onExit + TaskOutput poll, swarm races) must not re-run
+	// arbitrary configured hooks for the same specialist stop.
+	if appended {
+		executor.dispatchLifecycleHook("specialistStop", input, payload)
+	}
 }
 
 func (executor Executor) dispatchLifecycleHook(event string, input specialistAccountingInput, payload map[string]any) {
