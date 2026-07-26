@@ -353,3 +353,139 @@ func TestRecordSpecialistStopDedupesUnderConcurrency(t *testing.T) {
 		t.Fatalf("specialistStop hooks = %d, want 1 under concurrency", got)
 	}
 }
+
+func TestRecordSpecialistStopFiresWithoutParentSession(t *testing.T) {
+	var hookStops atomic.Int32
+	executor := Executor{
+		LifecycleHooks: &LifecycleHooks{
+			Dispatch: func(_ context.Context, event string, name string, _ map[string]any) {
+				if event == "specialistStop" {
+					hookStops.Add(1)
+					if name != "subagent" {
+						t.Errorf("specialist name = %q, want subagent", name)
+					}
+				}
+			},
+		},
+	}
+	executor.recordSpecialistStop(specialistAccountingInput{
+		// Swarm members omit ParentSessionID; append never succeeds.
+		ChildSessionID: "member_child",
+		SpecialistName: "subagent",
+		Mode:           "foreground",
+	}, StreamResult{RunID: "run_swarm"}, "success", 0, nil, false)
+
+	if got := hookStops.Load(); got != 1 {
+		t.Fatalf("specialistStop hooks = %d, want 1 with empty parent", got)
+	}
+	// Second observation of the same child/run must not re-fire.
+	executor.recordSpecialistStop(specialistAccountingInput{
+		ChildSessionID: "member_child",
+		SpecialistName: "subagent",
+		Mode:           "foreground",
+	}, StreamResult{RunID: "run_swarm"}, "success", 0, nil, false)
+	if got := hookStops.Load(); got != 1 {
+		t.Fatalf("specialistStop hooks = %d after duplicate, want 1", got)
+	}
+}
+
+func TestRecordSpecialistStopHookLessWinnerDoesNotSuppressLaterHooks(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	parent, err := store.Create(sessions.CreateInput{SessionID: "parent_session"})
+	if err != nil {
+		t.Fatalf("Create parent returned error: %v", err)
+	}
+	input := specialistAccountingInput{
+		ParentSessionID: parent.SessionID,
+		ChildSessionID:  "child_task",
+		SpecialistName:  "worker",
+		Mode:            "background",
+		Background:      true,
+	}
+	summary := StreamResult{RunID: "run_1"}
+
+	// Hook-less TaskOutput path wins the session append race.
+	Executor{SessionStore: store}.recordSpecialistStop(input, summary, "success", 0, nil, true)
+
+	var hookStops atomic.Int32
+	hooks := &LifecycleHooks{
+		Dispatch: func(_ context.Context, event string, _ string, _ map[string]any) {
+			if event == "specialistStop" {
+				hookStops.Add(1)
+			}
+		},
+	}
+	Executor{SessionStore: store, LifecycleHooks: hooks}.recordSpecialistStop(input, summary, "success", 0, nil, true)
+	if got := hookStops.Load(); got != 1 {
+		t.Fatalf("specialistStop hooks = %d, want 1 after hook-less winner", got)
+	}
+}
+
+func TestOutputToolSharesLifecycleHooksWithStopAccounting(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	parent, err := store.Create(sessions.CreateInput{SessionID: "parent_session"})
+	if err != nil {
+		t.Fatalf("Create parent returned error: %v", err)
+	}
+	manager, err := background.NewManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewManager returned error: %v", err)
+	}
+	outputFile, err := manager.Register(background.RegisterInput{
+		TaskID:         "child_task",
+		Type:           "specialist",
+		SpecialistName: "worker",
+		Description:    "Auth check",
+		ParentID:       parent.SessionID,
+	})
+	if err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	if err := os.WriteFile(outputFile, []byte(strings.Join([]string{
+		`{"schemaVersion":2,"type":"run_start","runId":"run_1","sessionId":"child_task"}`,
+		`{"schemaVersion":2,"type":"final","runId":"run_1","text":"done"}`,
+		`{"schemaVersion":2,"type":"run_end","runId":"run_1","status":"success","exitCode":0}`,
+		"",
+	}, "\n")), 0o600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := manager.UpdateStatus("child_task", background.StatusCompleted, 0); err != nil {
+		t.Fatalf("UpdateStatus returned error: %v", err)
+	}
+
+	var hookStops atomic.Int32
+	hooks := &LifecycleHooks{
+		Dispatch: func(_ context.Context, event string, _ string, _ map[string]any) {
+			if event == "specialistStop" {
+				hookStops.Add(1)
+			}
+		},
+	}
+	tool := NewOutputTool(manager)
+	tool.SessionStore = store
+	tool.LifecycleHooks = hooks
+
+	if result := tool.Run(context.Background(), map[string]any{"task_id": "child_task"}); result.Status != tools.StatusOK {
+		t.Fatalf("TaskOutput status = %s output=%s", result.Status, result.Output)
+	}
+	if got := hookStops.Load(); got != 1 {
+		t.Fatalf("specialistStop hooks = %d, want 1 from TaskOutput", got)
+	}
+	// Shared bridge: a later Task.onExit-style caller must not re-fire.
+	Executor{SessionStore: store, LifecycleHooks: hooks}.recordBackgroundTaskAccounting(
+		mustGetBackgroundTask(t, manager, "child_task"),
+		StreamResult{RunID: "run_1"},
+	)
+	if got := hookStops.Load(); got != 1 {
+		t.Fatalf("specialistStop hooks = %d after second path, want 1", got)
+	}
+}
+
+func mustGetBackgroundTask(t *testing.T, manager *background.Manager, taskID string) background.Task {
+	t.Helper()
+	task, ok := manager.Get(taskID)
+	if !ok {
+		t.Fatalf("background task %q not found", taskID)
+	}
+	return task
+}

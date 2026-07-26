@@ -58,11 +58,13 @@ func (executor Executor) recordSpecialistStop(input specialistAccountingInput, s
 	// Hold accountingMu only for the deduped append so a slow lifecycle hook cannot
 	// stall concurrent specialist stop/usage accounting.
 	accountingMu.Lock()
-	appended, _ := appendSpecialistEventOnce(store, input.ParentSessionID, sessions.EventSpecialistStop, payload, input.ChildSessionID, summary.RunID)
+	_, _ = appendSpecialistEventOnce(store, input.ParentSessionID, sessions.EventSpecialistStop, payload, input.ChildSessionID, summary.RunID)
 	accountingMu.Unlock()
-	// Duplicate stop paths (onExit + TaskOutput poll, swarm races) must not re-run
-	// arbitrary configured hooks for the same specialist stop.
-	if appended {
+	// Dispatch is claimed on this LifecycleHooks bridge, not on session append.
+	// Swarm members may have an empty parent session (append never succeeds) and
+	// TaskOutput may race Task.onExit; hooks must still fire exactly once when a
+	// hook-carrying executor observes the stop.
+	if executor.LifecycleHooks.claimStopDispatch(input.ChildSessionID, summary.RunID) {
 		executor.dispatchLifecycleHook("specialistStop", input, payload)
 	}
 }

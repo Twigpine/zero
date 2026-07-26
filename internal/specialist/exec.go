@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/Twigpine/zero/internal/background"
 	"github.com/Twigpine/zero/internal/sessions"
@@ -62,6 +63,26 @@ type LifecycleHooks struct {
 	// Dispatch runs configured hooks for event ("specialistStart"/"specialistStop").
 	// specialistName is used as the matcher subject. nil Dispatch is a no-op.
 	Dispatch func(ctx context.Context, event string, specialistName string, payload map[string]any)
+	// stopOnce dedupes specialistStop dispatch across concurrent finishers that
+	// share this bridge (Task onExit, TaskOutput poll, swarm members).
+	stopOnce sync.Map
+}
+
+// claimStopDispatch reports whether this bridge should run specialistStop for
+// the given child/run. The first observer wins; later finishers return false so
+// hooks are not re-run. Decoupled from session-event append so swarm members
+// without a parent session and hook-carrying reap paths still fire once.
+func (h *LifecycleHooks) claimStopDispatch(childSessionID, runID string) bool {
+	if h == nil || h.Dispatch == nil {
+		return false
+	}
+	childSessionID = strings.TrimSpace(childSessionID)
+	if childSessionID == "" {
+		return true
+	}
+	key := childSessionID + "\x00" + strings.TrimSpace(runID)
+	_, loaded := h.stopOnce.LoadOrStore(key, struct{}{})
+	return !loaded
 }
 
 type BuildArgsInput struct {
