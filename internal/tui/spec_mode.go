@@ -35,6 +35,7 @@ func (m model) handleSpecCommand(task string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	m = m.resetPlanForSessionSwitch().exitPlanMode()
 	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: "/spec " + task})
 	var err error
 	m, err = m.createSpecDraftSession(task)
@@ -202,6 +203,7 @@ func (m model) approveSpecReview() (tea.Model, tea.Cmd) {
 	m.activeSession = impl
 	m.sessionEvents = append([]sessions.Event{}, events...)
 	m = m.syncPeerIdentity()
+	m = m.resetPlanForSessionSwitch().exitPlanMode()
 	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Spec approved. Starting implementation session " + impl.SessionID + "."})
 	runCtx, cancel := context.WithCancel(m.ctx)
 	m = m.beginRun(cancel)
