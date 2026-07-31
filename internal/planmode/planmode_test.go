@@ -28,8 +28,13 @@ func setUserConfigHomeEnv(t *testing.T, dir string) {
 func isolatePlanStorage(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
-	setUserConfigHomeEnv(t, root)
-	return root
+	configDir := filepath.Join(root, "config")
+	tempDir := filepath.Join(root, "tmp")
+	_ = os.MkdirAll(configDir, 0o700)
+	_ = os.MkdirAll(tempDir, 0o700)
+	setUserConfigHomeEnv(t, configDir)
+	SetTempDirForTest(t, tempDir)
+	return configDir
 }
 
 func TestPlanFilePathSeparatesSlugCollisions(t *testing.T) {

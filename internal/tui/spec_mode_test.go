@@ -280,3 +280,20 @@ func TestSpecLaunchesSeedElapsedClock(t *testing.T) {
 		t.Fatal("impl launch did not seed turnStartedAt (elapsed clock would not render)")
 	}
 }
+
+func TestSpecCommandExitsPlanMode(t *testing.T) {
+	store := testSessionStore(t)
+	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{
+		submitSpecScript("call-1", "Review Flow", "# Goal\n\nAdd review flow."),
+	}}
+	m := newSpecModeTestModel(t.TempDir(), provider, store)
+	m.permissionMode = agent.PermissionModePlan
+	m.permissionModeBeforePlan = agent.PermissionModeAuto
+	m.input.SetValue("/spec add review flow")
+
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if next.permissionMode == agent.PermissionModePlan {
+		t.Fatalf("expected /spec to exit plan mode, got %s", next.permissionMode)
+	}
+}

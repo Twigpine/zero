@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"testing"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/config"
@@ -364,11 +366,35 @@ func planStorageBase(workspaceRoot string) (base string, absWorkspace string, er
 	return filepath.Join(cfg, filepath.FromSlash(PlanDirName)), absWorkspace, nil
 }
 
+var (
+	tempDirMu sync.RWMutex
+	tempDirFn = os.TempDir
+)
+
+func effectiveTempDir() string {
+	tempDirMu.RLock()
+	defer tempDirMu.RUnlock()
+	return tempDirFn()
+}
+
+// SetTempDirForTest overrides the temp dir func for unit tests.
+func SetTempDirForTest(t *testing.T, tempDir string) {
+	t.Helper()
+	tempDirMu.Lock()
+	old := tempDirFn
+	tempDirFn = func() string { return tempDir }
+	tempDirMu.Unlock()
+	t.Cleanup(func() {
+		tempDirMu.Lock()
+		tempDirFn = old
+		tempDirMu.Unlock()
+	})
+}
+
 // ensurePlanPathContained verifies that path stays under the config plans
-// root and does not resolve into the workspace. A mis-set XDG_CONFIG_HOME
-// pointing at the workspace would otherwise turn every update_plan
-// persistence into a silent workspace write, which is the gap this storage
-// layout exists to close.
+// root and does not resolve into the workspace or OS temp directory. A mis-set XDG_CONFIG_HOME
+// pointing at the workspace or temp tree would otherwise turn every update_plan
+// persistence into a silent workspace or sandbox-writable write.
 func ensurePlanPathContained(workspaceRoot, path string) error {
 	base, absWorkspace, err := planStorageBase(workspaceRoot)
 	if err != nil {
@@ -382,6 +408,9 @@ func ensurePlanPathContained(workspaceRoot, path string) error {
 	if isUnderOrEqual(physPath, physicalPath(absWorkspace)) {
 		return fmt.Errorf("plan storage %s resolves into the workspace; check XDG_CONFIG_HOME", path)
 	}
+	if physTemp := physicalPath(effectiveTempDir()); physTemp != "" && isUnderOrEqual(physPath, physTemp) {
+		return fmt.Errorf("plan storage %s resolves into temp directory %s; check XDG_CONFIG_HOME", path, physTemp)
+	}
 	return nil
 }
 
@@ -390,15 +419,15 @@ func ensurePlanPathContained(workspaceRoot, path string) error {
 // slug prefix is for operator convenience only; the SHA-256 suffix makes the
 // key injective so distinct inputs never share a plan path.
 func pathKey(id string) string {
-	id = strings.TrimSpace(id)
-	if id == "" {
+	rawID := id
+	if strings.TrimSpace(rawID) == "" {
 		// A stable fallback, not a per-call timestamp: PlanFilePath is called
 		// independently from several sites (planEnterText, planText,
 		// openPlanInEditor) before a session ID may exist, and they must all
 		// resolve to the same file rather than a fresh one each time.
-		id = "plan"
+		rawID = "plan"
 	}
-	sum := sha256.Sum256([]byte(id))
+	sum := sha256.Sum256([]byte(rawID))
 	return slugify(id) + "-" + hex.EncodeToString(sum[:16])
 }
 
