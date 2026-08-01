@@ -4030,10 +4030,12 @@ func TestRunNilTraceForwardsUsage(t *testing.T) {
 }
 
 // TestRunSuppressesExecutableHooksInPlanMode: plan mode promises a read-only
-// turn, but hooks execute configured host commands outside the advertised-tool
-// and sandbox gates. Merely starting and finishing a plan run must therefore
-// launch no hook command at all (a marker-writing sessionStart/sessionEnd hook
-// would otherwise mutate the workspace from a "read-only" session).
+// turn, but sessionStart/sessionEnd hooks execute configured host commands
+// outside the advertised-tool and sandbox gates. Merely starting and finishing
+// a plan run must therefore not launch those lifecycle hooks (a marker-writing
+// sessionStart/sessionEnd hook would otherwise mutate the workspace from a
+// "read-only" session). beforeTool is intentionally still dispatched so
+// fail-closed policy vetoes apply; see TestBeforeToolStillRunsInPlanMode.
 func TestRunSuppressesExecutableHooksInPlanMode(t *testing.T) {
 	goBinary, err := exec.LookPath("go")
 	if err != nil {
@@ -4084,7 +4086,7 @@ func TestRunSuppressesExecutableHooksInPlanMode(t *testing.T) {
 	}
 	for _, event := range events {
 		if event.Type == "hook_execution_started" {
-			t.Fatalf("hook %q executed during a plan-mode run", event.Event)
+			t.Fatalf("lifecycle hook %q executed during a plan-mode run", event.Event)
 		}
 	}
 	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
@@ -4181,5 +4183,64 @@ func TestCancellingASandboxRetryAbortsWithoutRetrying(t *testing.T) {
 				t.Fatalf("the escalated retry ran %d times after a cancel: %+v", len(retryTool.calls), retryTool.calls)
 			}
 		})
+	}
+}
+
+// TestBeforeToolStillRunsInPlanMode pins that hooksSuppressed only gates
+// sessionStart/sessionEnd/afterTool. beforeTool must still dispatch in plan
+// mode so fail-closed policy vetoes apply to read-only tools.
+func TestBeforeToolStillRunsInPlanMode(t *testing.T) {
+	goBinary, err := exec.LookPath("go")
+	if err != nil {
+		goRoot := runtime.GOROOT() //nolint:staticcheck // Safe for this non-portable test binary.
+		goBinary = filepath.Join(goRoot, "bin", "go")
+		if runtime.GOOS == "windows" {
+			goBinary += ".exe"
+		}
+		if _, statErr := os.Stat(goBinary); statErr != nil {
+			t.Skipf("go binary unavailable on PATH or in GOROOT: %v", statErr)
+		}
+	}
+	audit, err := hooks.NewAuditStore(hooks.AuditStoreOptions{AuditPath: filepath.Join(t.TempDir(), "audit.jsonl")})
+	if err != nil {
+		t.Fatalf("NewAuditStore: %v", err)
+	}
+	// An invalid go subcommand exits non-zero quickly and needs no network.
+	dispatcher := hooks.NewDispatcher(hooks.DispatcherOptions{
+		Config: hooks.Config{
+			Enabled: true,
+			Hooks: []hooks.Definition{
+				{ID: "zero.before-read", Event: hooks.EventBeforeTool, Matcher: "read_file", Command: goBinary, Args: []string{"this-is-not-a-go-subcommand"}, Enabled: true},
+			},
+		},
+		Audit: audit,
+	})
+
+	outcome, blocked := dispatchBeforeTool(context.Background(), Options{
+		SessionID:      "session-plan",
+		Cwd:            t.TempDir(),
+		Hooks:          dispatcher,
+		PermissionMode: PermissionModePlan,
+	}, ToolCall{ID: "call-1", Name: "read_file"}, map[string]any{"path": "README.md"})
+	if !blocked {
+		t.Fatalf("beforeTool must still run and be able to veto in plan mode; outcome=%#v", outcome)
+	}
+	if outcome.BlockedBy != "zero.before-read" {
+		t.Fatalf("BlockedBy = %q, want zero.before-read", outcome.BlockedBy)
+	}
+
+	events, err := audit.ReadEvents()
+	if err != nil {
+		t.Fatalf("ReadEvents: %v", err)
+	}
+	started := false
+	for _, event := range events {
+		if event.Type == "hook_execution_started" && event.Event == hooks.EventBeforeTool {
+			started = true
+			break
+		}
+	}
+	if !started {
+		t.Fatal("expected a beforeTool hook_execution_started audit event in plan mode")
 	}
 }

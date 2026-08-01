@@ -152,9 +152,6 @@ type model struct {
 	// entered PermissionModePlan, so /plan off can restore it exactly (mirrors
 	// the execProfile displaced/applied pattern below).
 	permissionModeBeforePlan agent.PermissionMode
-	// program is the live Bubble Tea program, set right before Run so /plan open
-	// can suspend the TUI, launch $EDITOR, and resume on exit.
-	program          *tea.Program
 	selfCorrectTests bool
 	reasoningEffort  modelregistry.ReasoningEffort
 	serviceTier      string

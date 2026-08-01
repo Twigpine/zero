@@ -143,7 +143,13 @@ func (m model) handleBTWCommand(question string) (model, tea.Cmd) {
 	side.activeLoopID = ""
 	side.loopTicking = false
 	side.specialists.clear()
-	side.plan.clear()
+	// Plan mode (and the in-memory plan) belongs to the parent session. A
+	// side surface that inherited it would stay read-only, or leak the
+	// parent's draft into a conversation that never drafted it. Match
+	// /new and /resume: exit plan mode and clear plan state on the side
+	// only. The saved parent keeps its own plan mode and panel for restore.
+	side = side.exitPlanMode()
+	side = side.resetPlanForSessionSwitch()
 	side.planDetailGen++
 	side.streamingText = nil
 	side.streamingReasoning = ""
