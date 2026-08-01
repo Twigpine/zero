@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"testing"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/config"
@@ -375,20 +374,6 @@ func effectiveTempDir() string {
 	tempDirMu.RLock()
 	defer tempDirMu.RUnlock()
 	return tempDirFn()
-}
-
-// SetTempDirForTest overrides the temp dir func for unit tests.
-func SetTempDirForTest(t *testing.T, tempDir string) {
-	t.Helper()
-	tempDirMu.Lock()
-	old := tempDirFn
-	tempDirFn = func() string { return tempDir }
-	tempDirMu.Unlock()
-	t.Cleanup(func() {
-		tempDirMu.Lock()
-		tempDirFn = old
-		tempDirMu.Unlock()
-	})
 }
 
 // ensurePlanPathContained verifies that path stays under the config plans
