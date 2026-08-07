@@ -107,7 +107,7 @@ func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
 	m = updated
 	m.permissionModeBeforePlan = m.permissionMode
 	m.permissionMode = agent.PermissionModePlan
-	if items, ok := m.reloadPlanFromFile(); ok {
+	if items, ok, _ := m.reloadPlanFromFile(); ok {
 		m.plan.updateFromItems(items, m.now())
 	}
 	textToShow := planEnterText(m) + "\n\n" + m.planText()
@@ -252,14 +252,19 @@ type planEditorFinishedMsg struct {
 // reloadPlanFromFile reads the session plan file (if any) and syncs its
 // content into the in-memory update_plan, so edits the user makes in $EDITOR
 // become the plan that drives execution. The file is only the on-disk target;
-// the in-memory plan stays the source of truth. A missing or unreadable file
-// is left as-is (the in-memory plan remains authoritative). Returns the parsed
-// items and true on success, so the caller can also refresh the sticky plan
-// panel, which reloadPlanFromFile cannot do itself as a value-receiver method.
-func (m model) reloadPlanFromFile() ([]tools.PlanItem, bool) {
+// the in-memory plan stays the source of truth. A missing file returns
+// ok=false with a nil error (in-memory plan remains authoritative). A real
+// ReadPlan failure (I/O, symlink refusal) returns the error so the editor
+// round-trip can surface it instead of going silent. Returns the parsed items
+// and true on success, so the caller can also refresh the sticky plan panel,
+// which reloadPlanFromFile cannot do itself as a value-receiver method.
+func (m model) reloadPlanFromFile() ([]tools.PlanItem, bool, error) {
 	content, ok, err := planmode.ReadPlan(m.cwd, m.activeSession.SessionID)
-	if err != nil || !ok {
-		return nil, false
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
 	}
 	items := parsePlanFileLines(content)
 	if writer, ok := m.registry.Get("update_plan"); ok {
@@ -267,7 +272,7 @@ func (m model) reloadPlanFromFile() ([]tools.PlanItem, bool) {
 			reloader.SetPlan(items)
 		}
 	}
-	return items, true
+	return items, true, nil
 }
 
 // parsePlanFileLines converts the plain-text plan file the user edits in

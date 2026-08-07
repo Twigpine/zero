@@ -297,9 +297,97 @@ func TestWritePlanRejectsStorageInsideWorkspace(t *testing.T) {
 	// become a silent workspace write. Refuse rather than undermine the
 	// read-only / no-write-grant contract.
 	workspace := t.TempDir()
+	// Point the temp root elsewhere so the temp-directory rule cannot mask a
+	// missing workspace check (t.TempDir() lives under the real os.TempDir()).
+	SetTempDirForTest(t, filepath.Join(t.TempDir(), "unrelated-temp"))
 	setUserConfigHomeEnv(t, workspace)
-	if _, err := WritePlan(workspace, "session-1", "notes"); err == nil {
+	_, err := WritePlan(workspace, "session-1", "notes")
+	if err == nil {
 		t.Fatal("expected WritePlan to reject plan storage inside the workspace")
+	}
+	if !strings.Contains(err.Error(), "resolves into the workspace") {
+		t.Fatalf("expected the workspace containment error, got: %v", err)
+	}
+}
+
+func TestPlanFilePathBlankIDDiffersFromLiteralPlan(t *testing.T) {
+	// pathKey must stay injective: the no-session fallback must not collide
+	// with a session whose ID is literally "plan".
+	isolatePlanStorage(t)
+	root := t.TempDir()
+	blank, err := PlanFilePath(root, "")
+	if err != nil {
+		t.Fatalf("PlanFilePath blank: %v", err)
+	}
+	named, err := PlanFilePath(root, "plan")
+	if err != nil {
+		t.Fatalf("PlanFilePath plan: %v", err)
+	}
+	if blank == named {
+		t.Fatalf("blank session ID and \"plan\" must not share a plan path: %q", blank)
+	}
+}
+
+func TestStageForEditorRejectsStagingInsideWorkspace(t *testing.T) {
+	// StageForEditor must refuse a config root inside the workspace: that is
+	// the same silent sandbox-writable staging boundary as WritePlan.
+	workspace := t.TempDir()
+	SetTempDirForTest(t, filepath.Join(t.TempDir(), "unrelated-temp"))
+	setUserConfigHomeEnv(t, workspace)
+	_, cleanup, err := StageForEditor(workspace, "session-1")
+	if cleanup != nil {
+		cleanup()
+	}
+	if err == nil {
+		t.Fatal("expected StageForEditor to reject staging inside the workspace")
+	}
+	if !strings.Contains(err.Error(), "sandbox-writable") && !strings.Contains(err.Error(), "workspace") {
+		t.Fatalf("expected workspace/staging containment error, got: %v", err)
+	}
+}
+
+func TestStageForEditorWritesUnderConfigStagingDir(t *testing.T) {
+	// Config must sit outside both the workspace and the real OS temp dir
+	// (sandbox default write roots). Build it as a sibling of os.TempDir(),
+	// matching TestEditorStagingDirIsPrivateAcceptsElsewhere.
+	tempDir := filepath.Clean(os.TempDir())
+	configDir := filepath.Join(filepath.Dir(tempDir), "zero-planmode-stage-test", t.Name())
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(configDir) })
+	setUserConfigHomeEnv(t, configDir)
+	// Isolate plan WritePlan temp containment separately from staging privacy.
+	SetTempDirForTest(t, filepath.Join(t.TempDir(), "plan-tmp"))
+
+	workspace := t.TempDir()
+	if _, err := WritePlan(workspace, "session-1", "1. [pending] draft step\n"); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+	staged, cleanup, err := StageForEditor(workspace, "session-1")
+	if err != nil {
+		t.Fatalf("StageForEditor: %v", err)
+	}
+	t.Cleanup(cleanup)
+	wantRoot := filepath.Join(configDir, "zero", "plan-edit")
+	physStaged := staged
+	if resolved, err := filepath.EvalSymlinks(staged); err == nil {
+		physStaged = resolved
+	}
+	physWant, err := filepath.EvalSymlinks(wantRoot)
+	if err != nil {
+		physWant = wantRoot
+	}
+	rel, err := filepath.Rel(physWant, physStaged)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		t.Fatalf("staged path %q not under config staging dir %q", staged, wantRoot)
+	}
+	data, err := os.ReadFile(staged)
+	if err != nil {
+		t.Fatalf("read staged: %v", err)
+	}
+	if !strings.Contains(string(data), "draft step") {
+		t.Fatalf("staged content missing plan body: %q", data)
 	}
 }
 

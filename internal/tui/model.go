@@ -1553,7 +1553,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The user may have edited the plan file in $EDITOR; sync it back into
 		// the in-memory update_plan so the edited plan drives execution, and
 		// refresh the sticky plan panel to match.
-		items, ok := m.reloadPlanFromFile()
+		items, ok, reloadErr := m.reloadPlanFromFile()
+		if reloadErr != nil {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "plan reload error: " + reloadErr.Error()})
+			return m, nil
+		}
 		if !ok {
 			return m, nil
 		}

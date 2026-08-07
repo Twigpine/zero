@@ -124,9 +124,10 @@ func WritePlan(workspaceRoot, sessionID, content string) (string, error) {
 	}
 	// Write an owner-only temporary sibling and rename it into place: a
 	// disk-full failure, short write, or interruption must never leave the
-	// durable plan empty or partial. The random suffix plus O_EXCL means a
-	// colliding or pre-planted path is refused, and the rename target was
-	// verified above not to be a symlink (rename replaces the name itself).
+	// durable plan empty or partial. The suffix is PID plus nanoseconds
+	// (predictable, not random); O_EXCL is what refuses a colliding or
+	// pre-planted path. The rename target was verified above not to be a
+	// symlink (rename replaces the name itself).
 	tmpPath := fmt.Sprintf("%s.tmp-%d-%d", path, os.Getpid(), time.Now().UnixNano())
 	file, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
@@ -262,7 +263,14 @@ func editorStagingDirIsPrivate(dir, workspaceRoot, tempDir string) bool {
 	if isUnderOrEqual(dir, physicalPath(tempDir)) {
 		return false
 	}
-	if absRoot, err := filepath.Abs(workspaceRoot); err == nil && isUnderOrEqual(dir, physicalPath(absRoot)) {
+	// Fail closed if the workspace root cannot be resolved (e.g. deleted
+	// CWD makes filepath.Abs fail): do not treat an unresolvable workspace
+	// as "private" and skip the containment check.
+	absRoot, err := filepath.Abs(workspaceRoot)
+	if err != nil {
+		return false
+	}
+	if isUnderOrEqual(dir, physicalPath(absRoot)) {
 		return false
 	}
 	return true
@@ -409,8 +417,10 @@ func pathKey(id string) string {
 		// A stable fallback, not a per-call timestamp: PlanFilePath is called
 		// independently from several sites (planEnterText, planText,
 		// openPlanInEditor) before a session ID may exist, and they must all
-		// resolve to the same file rather than a fresh one each time.
-		rawID = "plan"
+		// resolve to the same file rather than a fresh one each time. The
+		// sentinel is namespaced so it cannot collide with a session whose
+		// ID is literally "plan" (which would break injectivity of the map).
+		rawID = "\x00no-session"
 	}
 	sum := sha256.Sum256([]byte(rawID))
 	return slugify(id) + "-" + hex.EncodeToString(sum[:16])

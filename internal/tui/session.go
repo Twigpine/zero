@@ -256,7 +256,7 @@ func (m model) handleResumeCommand(args string) (model, string) {
 		// so the sticky panel and update_plan reflect what THIS session had
 		// saved instead of starting empty and risking an overwrite on the
 		// next update_plan call.
-		if items, ok := m.reloadPlanFromFile(); ok {
+		if items, ok, _ := m.reloadPlanFromFile(); ok {
 			m.plan.updateFromItems(items, m.now())
 		}
 	}
