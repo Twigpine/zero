@@ -13,6 +13,7 @@ import (
 	"github.com/Twigpine/zero/internal/agent"
 	"github.com/Twigpine/zero/internal/config"
 	"github.com/Twigpine/zero/internal/notify"
+	"github.com/Twigpine/zero/internal/planmode"
 	"github.com/Twigpine/zero/internal/sessions"
 	"github.com/Twigpine/zero/internal/tools"
 )
@@ -592,5 +593,51 @@ func TestBTWExitsPlanModeOnSideAndPreservesParent(t *testing.T) {
 	}
 	if returned.plan.isEmpty() {
 		t.Fatal("returning from BTW lost the parent sticky plan panel")
+	}
+}
+
+func TestBTWCommandUnavailableBlocksPlan(t *testing.T) {
+	if !btwCommandUnavailable(parsedCommand{kind: commandPlan, name: "/plan"}) {
+		t.Fatal("expected /plan to be unavailable inside a BTW conversation")
+	}
+	// Sanity: help stays available so the blocklist is not total.
+	if btwCommandUnavailable(parsedCommand{kind: commandHelp, name: "/help"}) {
+		t.Fatal("expected /help to remain available in BTW")
+	}
+}
+
+// Regression: enterBTW clears shared update_plan; leaveBTW must re-hydrate it
+// from the parent session plan file the way /resume does after a switch.
+func TestBTWLeaveResyncsSharedPlanFromParentFile(t *testing.T) {
+	isolatePlanConfig(t)
+	cwd := t.TempDir()
+	planTool := tools.NewUpdatePlanTool()
+	items := []tools.PlanItem{{Content: "draft step", Status: "pending"}}
+	planTool.SetPlan(items)
+	registry := tools.NewRegistry()
+	registry.Register(planTool)
+
+	m := newBTWTestModel(t)
+	m.cwd = cwd
+	m.registry = registry
+	m.permissionMode = agent.PermissionModePlan
+	m.permissionModeBeforePlan = agent.PermissionModeAsk
+	m.plan.updateFromItems(items, m.now())
+	if _, err := planmode.WritePlan(cwd, m.activeSession.SessionID, formatPlanItems(items)); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+
+	side, _ := m.handleBTWCommand("")
+	if len(planTool.CurrentPlan()) != 0 {
+		t.Fatalf("BTW side left shared update_plan state: %+v", planTool.CurrentPlan())
+	}
+
+	returned, _ := side.leaveBTW()
+	got := planTool.CurrentPlan()
+	if len(got) != 1 || got[0].Content != "draft step" {
+		t.Fatalf("leaveBTW did not re-sync shared update_plan from parent plan file: %+v", got)
+	}
+	if returned.plan.isEmpty() {
+		t.Fatal("leaveBTW left sticky plan panel empty after re-sync")
 	}
 }

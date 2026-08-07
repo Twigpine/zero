@@ -35,7 +35,9 @@ func (m model) handleSpecCommand(task string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	m = m.resetPlanForSessionSwitch().exitPlanMode()
+	// Match /resume ordering: switch/create the destination session first, then
+	// clear plan state that belonged to the previous session. Clearing before a
+	// failed create would drop plan mode on a session that never left.
 	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: "/spec " + task})
 	var err error
 	m, err = m.createSpecDraftSession(task)
@@ -43,6 +45,7 @@ func (m model) handleSpecCommand(task string) (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "session create error: " + err.Error()})
 		return m, nil
 	}
+	m = m.resetPlanForSessionSwitch().exitPlanMode()
 	m, err = m.appendSessionEvent(sessions.EventMessage, map[string]any{
 		"role":    "user",
 		"content": task,

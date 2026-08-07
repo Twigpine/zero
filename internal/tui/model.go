@@ -152,9 +152,9 @@ type model struct {
 	// entered PermissionModePlan, so /plan off can restore it exactly (mirrors
 	// the execProfile displaced/applied pattern below).
 	permissionModeBeforePlan agent.PermissionMode
-	selfCorrectTests bool
-	reasoningEffort  modelregistry.ReasoningEffort
-	serviceTier      string
+	selfCorrectTests         bool
+	reasoningEffort          modelregistry.ReasoningEffort
+	serviceTier              string
 	// Active execution profile (set by /profile; applies to the NEXT run).
 	// The displaced/applied pairs let a switch or /profile balanced restore
 	// exactly what the profile replaced while leaving later manual overrides
@@ -6357,8 +6357,11 @@ func toolResultSessionPayload(result agent.ToolResult) map[string]any {
 	if result.Redacted {
 		payload["redacted"] = true
 	}
-	if len(result.Meta) > 0 {
-		payload["meta"] = result.Meta
+	// Strip plan_snapshot from session event meta: WritePlan (or the durable
+	// plan file) is the plan source of truth; embedding the full snapshot
+	// again would store the plan twice on disk.
+	if meta := sessionToolResultMeta(result.Meta); len(meta) > 0 {
+		payload["meta"] = meta
 	}
 	if len(result.ChangedFiles) > 0 {
 		payload["changedFiles"] = result.ChangedFiles

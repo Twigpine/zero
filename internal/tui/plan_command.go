@@ -141,11 +141,14 @@ func planModeCommandUnavailable(command parsedCommand) bool {
 // entered plan mode. Shared by /plan off, the bare-/plan toggle, and session
 // switches (/new, /resume), which must not leave a stale plan-mode grant (or a
 // stale "restore to" mode) attached to a session other than the one that set it.
+// When no prior mode was recorded (legacy / incomplete state), fall back to Ask
+// rather than Auto so exit does not silently re-enable unrestricted tools.
 func (m model) exitPlanMode() model {
 	if m.permissionMode == agent.PermissionModePlan {
-		m.permissionMode = agent.PermissionModeAuto
 		if m.permissionModeBeforePlan != "" {
 			m.permissionMode = m.permissionModeBeforePlan
+		} else {
+			m.permissionMode = agent.PermissionModeAsk
 		}
 	}
 	m.permissionModeBeforePlan = ""
@@ -465,4 +468,24 @@ func planSnapshotFromResult(result agent.ToolResult) ([]tools.PlanItem, bool) {
 		return nil, false
 	}
 	return items, true
+}
+
+// sessionToolResultMeta copies result.Meta for session event logging, omitting
+// PlanSnapshotMeta so the plan body is not persisted twice (durable plan file
+// plus event log).
+func sessionToolResultMeta(meta map[string]string) map[string]string {
+	if len(meta) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(meta))
+	for k, v := range meta {
+		if k == tools.PlanSnapshotMeta {
+			continue
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
