@@ -347,18 +347,12 @@ func TestStageForEditorRejectsStagingInsideWorkspace(t *testing.T) {
 }
 
 func TestStageForEditorWritesUnderConfigStagingDir(t *testing.T) {
-	// Config must sit outside both the workspace and the real OS temp dir
-	// (sandbox default write roots). Build it as a sibling of os.TempDir(),
-	// matching TestEditorStagingDirIsPrivateAcceptsElsewhere.
-	tempDir := filepath.Clean(os.TempDir())
-	configDir := filepath.Join(filepath.Dir(tempDir), "zero-planmode-stage-test", t.Name())
-	if err := os.MkdirAll(configDir, 0o700); err != nil {
-		t.Fatalf("mkdir config: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(configDir) })
-	setUserConfigHomeEnv(t, configDir)
-	// Isolate plan WritePlan temp containment separately from staging privacy.
-	SetTempDirForTest(t, filepath.Join(t.TempDir(), "plan-tmp"))
+	// Config and the privacy-check temp root must both be redirectable. Build
+	// them under t.TempDir() and point SetTempDirForTest at a sibling so
+	// StageForEditor's effectiveTempDir() seam (and WritePlan containment)
+	// agree without planting a config root beside the real OS temp dir
+	// (which fails with permission denied on Linux CI and on Windows drive roots).
+	configDir := isolatePlanStorage(t)
 
 	workspace := t.TempDir()
 	if _, err := WritePlan(workspace, "session-1", "1. [pending] draft step\n"); err != nil {

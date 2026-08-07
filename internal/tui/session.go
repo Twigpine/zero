@@ -250,13 +250,17 @@ func (m model) handleResumeCommand(args string) (model, string) {
 	}
 	m.activeSession = *session
 	m.pendingSessionTitle = ""
+	var planReloadErr error
 	if session.SessionID != previousID {
 		// resetPlanForSessionSwitch cleared the previous session's plan; now
 		// hydrate the destination session's own persisted plan file (if any),
 		// so the sticky panel and update_plan reflect what THIS session had
 		// saved instead of starting empty and risking an overwrite on the
-		// next update_plan call.
-		if items, ok, _ := m.reloadPlanFromFile(); ok {
+		// next update_plan call. Surface I/O failures so a broken plan file
+		// does not leave the destination session silently plan-empty.
+		if items, ok, err := m.reloadPlanFromFile(); err != nil {
+			planReloadErr = err
+		} else if ok {
 			m.plan.updateFromItems(items, m.now())
 		}
 	}
@@ -277,6 +281,9 @@ func (m model) handleResumeCommand(args string) (model, string) {
 	rows = appendRow(rows, rowSystem, m.formatResumeSummary(*session, len(events)))
 	if loopsCleared > 0 {
 		rows = appendRow(rows, rowSystem, fmt.Sprintf("Stopped %d loop(s) tied to the previous session.", loopsCleared))
+	}
+	if planReloadErr != nil {
+		rows = appendRow(rows, rowError, "plan reload error: "+planReloadErr.Error())
 	}
 	rows = appendTranscriptRowsDedup(rows, transcriptRowsFromSessionEvents(events))
 	m.transcript = rows

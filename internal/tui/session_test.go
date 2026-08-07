@@ -14,6 +14,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/planmode"
 	"github.com/Twigpine/zero/internal/sandbox"
 	"github.com/Twigpine/zero/internal/sessions"
 	"github.com/Twigpine/zero/internal/tools"
@@ -906,6 +907,63 @@ func TestResumeDifferentSessionExitsPlanMode(t *testing.T) {
 	}
 	if m.permissionModeBeforePlan != "" {
 		t.Fatalf("expected permissionModeBeforePlan to be cleared, got %q", m.permissionModeBeforePlan)
+	}
+}
+
+// Regression: /resume must surface a durable plan reload failure for the
+// destination session instead of leaving sticky/shared plan state silently empty.
+func TestResumeDifferentSessionReportsPlanReloadError(t *testing.T) {
+	isolatePlanConfig(t)
+	store := testSessionStore(t)
+	active, err := store.Create(sessions.CreateInput{Title: "Active"})
+	if err != nil {
+		t.Fatalf("Create active: %v", err)
+	}
+	other, err := store.Create(sessions.CreateInput{Title: "Other"})
+	if err != nil {
+		t.Fatalf("Create other: %v", err)
+	}
+
+	cwd := t.TempDir()
+	// Plant an unreadable plan path for the destination session: a directory
+	// where the plan file should be so ReadPlan returns a real I/O error.
+	path, err := planmode.PlanFilePath(cwd, other.SessionID)
+	if err != nil {
+		t.Fatalf("PlanFilePath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("MkdirAll plan dir: %v", err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatalf("Mkdir over plan path: %v", err)
+	}
+
+	planTool := tools.NewUpdatePlanTool()
+	planTool.SetPlan([]tools.PlanItem{{Content: "stale step", Status: "pending"}})
+	registry := tools.NewRegistry()
+	registry.Register(planTool)
+
+	m := newModel(context.Background(), Options{SessionStore: store, Cwd: cwd, Registry: registry})
+	m.activeSession = active
+	m.permissionMode = agent.PermissionModePlan
+	m.permissionModeBeforePlan = agent.PermissionModeAsk
+	m.plan.updateFromItems(planTool.CurrentPlan(), m.now())
+
+	m, _ = m.handleResumeCommand(other.SessionID)
+
+	if m.activeSession.SessionID != other.SessionID {
+		t.Fatalf("expected to resume the other session, got %#v", m.activeSession)
+	}
+	if !transcriptContains(m.transcript, "plan reload error:") {
+		t.Fatalf("resume did not surface plan reload failure: %#v", m.transcript)
+	}
+	// Destination plan state stays empty after the switch + failed reload
+	// (shared tool cleared by resetPlanForSessionSwitch, panel not rehydrated).
+	if len(planTool.CurrentPlan()) != 0 {
+		t.Fatalf("expected shared update_plan cleared after failed resume reload, got %+v", planTool.CurrentPlan())
+	}
+	if !m.plan.isEmpty() {
+		t.Fatalf("expected sticky plan panel empty after failed resume reload, got %+v", m.plan)
 	}
 }
 
