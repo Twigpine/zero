@@ -108,8 +108,10 @@ func (tool *updatePlanTool) CurrentPlan() []PlanItem {
 // SetPlan replaces the in-memory plan with already-parsed items. It is used to
 // sync a user-edited plan file (opened via /plan open) back into the agent's
 // source of truth; the file is only ever the seed/target, the in-memory plan
-// drives execution.
+// drives execution. The caller's slice is copied so enforceSingleInProgress
+// cannot mutate the caller's storage when demoting extra in_progress items.
 func (tool *updatePlanTool) SetPlan(plan []PlanItem) {
+	plan = append([]PlanItem{}, plan...)
 	plan = enforceSingleInProgress(plan)
 	tool.mu.Lock()
 	tool.currentPlan = plan
