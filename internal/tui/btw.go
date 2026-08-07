@@ -221,6 +221,12 @@ func (m model) leaveBTW() (model, tea.Cmd) {
 		})
 	} else if ok {
 		parent.plan.updateFromItems(items, parent.now())
+	} else {
+		// Missing durable plan (ok=false, err=nil): enterBTW already cleared
+		// the shared update_plan tool. Clear the restored parent's sticky
+		// panel too so tool and panel stay consistent rather than leaving a
+		// stale panel with an empty tool.
+		parent = parent.resetPlanForSessionSwitch()
 	}
 	parent.resetFlushFrontier("· returned from btw ·")
 	var goalCmd tea.Cmd

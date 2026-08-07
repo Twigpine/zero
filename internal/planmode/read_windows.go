@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"unsafe"
 
@@ -56,6 +57,12 @@ func openPlanUnderBase(base, rel, displayPath string) (*os.File, error) {
 		if isWindowsSymlinkErr(err) {
 			return nil, errPlanSymlink(displayPath)
 		}
+		// FILE_NON_DIRECTORY_FILE fails with EISDIR when the final name is a
+		// directory; map it to the same regular-file refusal the attribute
+		// check below uses so callers see one stable message.
+		if err == syscall.EISDIR {
+			return nil, fmt.Errorf("plan file %s is not a regular file", displayPath)
+		}
 		return nil, err
 	}
 
@@ -81,11 +88,22 @@ func openPlanUnderBase(base, rel, displayPath string) (*os.File, error) {
 	return f, nil
 }
 
+// ntObjectPath builds the NT object manager path for an absolute Win32 path.
+// Drive-letter paths become `\??\C:\...`. UNC paths (`\\server\share\...`)
+// must go through the UNC device: `\??\UNC\server\share\...`. Concatenating
+// `\??\` alone yields `\??\\\server\...`, which NtCreateFile rejects. A
+// roaming %AppData% (plan storage base) can legitimately be a UNC path.
+func ntObjectPath(absPath string) string {
+	if strings.HasPrefix(absPath, `\\`) {
+		return `\??\UNC\` + strings.TrimPrefix(absPath, `\\`)
+	}
+	return `\??\` + absPath
+}
+
 // openWindowsBaseDir opens the storage base as a directory handle that can be
 // used as RootDirectory for subsequent relative NtCreateFile calls.
 func openWindowsBaseDir(absBase string) (windows.Handle, error) {
-	// NT object path: single leading backslash form `\??\C:\...` (not `\\??\`).
-	path := `\??\` + absBase
+	path := ntObjectPath(absBase)
 	objName, err := windows.NewNTUnicodeString(path)
 	if err != nil {
 		return 0, err
@@ -195,6 +213,8 @@ func mapWindowsOpenErr(err error) error {
 			windows.STATUS_OBJECT_PATH_NOT_FOUND,
 			windows.STATUS_NO_SUCH_FILE:
 			return os.ErrNotExist
+		case windows.STATUS_OBJECT_NAME_COLLISION:
+			return syscall.EEXIST
 		case windows.STATUS_REPARSE_POINT_ENCOUNTERED:
 			return st
 		case windows.STATUS_FILE_IS_A_DIRECTORY:

@@ -4052,13 +4052,15 @@ func TestRunSuppressesExecutableHooksInPlanMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAuditStore: %v", err)
 	}
-	marker := filepath.Join(t.TempDir(), "marker-dir")
+	// go mod init creates the -modfile path itself when the parent directory
+	// already exists; the file's appearance is the proof the hook ran.
+	marker := filepath.Join(t.TempDir(), "marker-go.mod")
 	dispatcher := hooks.NewDispatcher(hooks.DispatcherOptions{
 		Config: hooks.Config{
 			Enabled: true,
 			Hooks: []hooks.Definition{
 				// A hook that mutates the filesystem when executed.
-				{ID: "zero.session-start", Event: hooks.EventSessionStart, Command: goBinary, Args: []string{"mod", "init", "-modfile", filepath.Join(marker, "go.mod"), "marker"}, Enabled: true},
+				{ID: "zero.session-start", Event: hooks.EventSessionStart, Command: goBinary, Args: []string{"mod", "init", "-modfile", marker, "marker"}, Enabled: true},
 				{ID: "zero.session-end", Event: hooks.EventSessionEnd, Command: goBinary, Args: []string{"version"}, Enabled: true},
 			},
 		},

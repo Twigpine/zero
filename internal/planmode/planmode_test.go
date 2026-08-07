@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // setUserConfigHomeEnv points config.UserConfigDir at dir. os.UserConfigDir
@@ -521,6 +522,89 @@ func TestReadPlanFileRoundtripPlainFile(t *testing.T) {
 	}
 	if string(got) != want {
 		t.Fatalf("content = %q, want %q", got, want)
+	}
+}
+
+// TestReadPlanFileRejectsNonRegularFile pins the non-regular refusal:
+// Unix: a planted FIFO must not hang open (O_NONBLOCK) and must be refused
+// as "not a regular file". Windows: a directory at the plan path is refused
+// the same way (no FIFO create API).
+func TestReadPlanFileRejectsNonRegularFile(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "ws-key")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	path := filepath.Join(dir, "session.md")
+
+	if runtime.GOOS == "windows" {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatalf("mkdir plan path: %v", err)
+		}
+	} else {
+		if err := mkfifoForTest(path); err != nil {
+			t.Skipf("mkfifo unavailable: %v", err)
+		}
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := readPlanFile(base, path)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected a non-regular plan path to be refused")
+		}
+		if !strings.Contains(err.Error(), "not a regular file") {
+			t.Fatalf("expected the regular-file refusal, got: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("readPlanFile blocked on a non-regular target; O_NONBLOCK (or equivalent) is missing from the final open")
+	}
+}
+
+// TestWritePlanRefusesIntermediateSymlink pins that WritePlan's handle-bound
+// walk refuses an intermediate directory that is a symlink rather than
+// following it with pathname MkdirAll/OpenFile/Rename.
+func TestWritePlanRefusesIntermediateSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Creating directory symlinks requires elevated privileges on many
+		// Windows runners; skip rather than flake.
+		t.Skip("directory symlink creation is privileged on Windows CI")
+	}
+	cfg := isolatePlanStorage(t)
+	workspace := t.TempDir()
+	path, err := PlanFilePath(workspace, "session-1")
+	if err != nil {
+		t.Fatalf("PlanFilePath: %v", err)
+	}
+	// Create the plans root, then plant the workspace-key component as a
+	// symlink that points outside the storage tree.
+	plansRoot := filepath.Join(cfg, filepath.FromSlash(PlanDirName))
+	if err := os.MkdirAll(plansRoot, 0o700); err != nil {
+		t.Fatalf("mkdir plans root: %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.MkdirAll(outside, 0o700); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	wsKeyDir := filepath.Dir(path)
+	if err := os.Symlink(outside, wsKeyDir); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	_, err = WritePlan(workspace, "session-1", "notes")
+	if err == nil {
+		t.Fatal("expected WritePlan to refuse intermediate symlink")
+	}
+	if !strings.Contains(err.Error(), "is a symlink") {
+		t.Fatalf("expected symlink refusal, got: %v", err)
+	}
+	// Nothing should have been written through the link.
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Fatalf("write escaped through intermediate symlink into %s: %v", outside, entries)
 	}
 }
 

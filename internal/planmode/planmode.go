@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/Gitlawb/zero/internal/config"
 )
@@ -97,6 +96,12 @@ func ReadPlan(workspaceRoot, sessionID string) (string, bool, error) {
 // session and returns its path. The file is stored under the user config
 // directory, never inside the workspace, so an auto-allowed read-only tool
 // can persist without a workspace write grant.
+//
+// Containment is bound at create/rename time via a rooted, handle-relative
+// no-follow walk under the plan storage base (see writePlanFile). Pre-open
+// path checks alone are a check-to-use race: an intermediate directory can
+// be replaced with a symlink between resolve and create, and pathname
+// MkdirAll/OpenFile/Rename would then land outside the storage tree.
 func WritePlan(workspaceRoot, sessionID, content string) (string, error) {
 	path, err := PlanFilePath(workspaceRoot, sessionID)
 	if err != nil {
@@ -105,54 +110,17 @@ func WritePlan(workspaceRoot, sessionID, content string) (string, error) {
 	if err := ensurePlanPathContained(workspaceRoot, path); err != nil {
 		return "", err
 	}
-
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("create plan directory: %w", err)
-	}
-	// MkdirAll's mode only applies at creation: it does not tighten an
-	// already-existing, more permissive directory (e.g. one predating this
-	// restriction, or created some other way). Chmod unconditionally so a
-	// pre-existing 0755 directory is brought back to owner-only on every
-	// write, matching the storage contract.
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return "", fmt.Errorf("restrict plan directory permissions: %w", err)
-	}
-	// Re-check containment after creation: MkdirAll follows intermediate
-	// symlinks, so a planted link under the config plans root could otherwise
-	// land the durable file inside the workspace or elsewhere.
-	if err := ensurePlanPathContained(workspaceRoot, path); err != nil {
+	base, _, err := planStorageBase(workspaceRoot)
+	if err != nil {
 		return "", err
 	}
-	// Refuse a symlinked plan file. A `<session>.md -> victim` planted during
-	// an earlier run would otherwise turn a plan write into an overwrite of
-	// an arbitrary user-writable target.
-	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("plan file %s is a symlink; refusing to write through it", path)
-	}
-	// Write an owner-only temporary sibling and rename it into place: a
-	// disk-full failure, short write, or interruption must never leave the
-	// durable plan empty or partial. The suffix is PID plus nanoseconds
-	// (predictable, not random); O_EXCL is what refuses a colliding or
-	// pre-planted path. The rename target was verified above not to be a
-	// symlink (rename replaces the name itself).
-	tmpPath := fmt.Sprintf("%s.tmp-%d-%d", path, os.Getpid(), time.Now().UnixNano())
-	file, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return "", fmt.Errorf("write plan file: %w", err)
-	}
-	if _, err := file.WriteString(strings.TrimRight(content, "\n") + "\n"); err != nil {
-		file.Close()
-		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("write plan file: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("write plan file: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("replace plan file: %w", err)
+	body := strings.TrimRight(content, "\n") + "\n"
+	if err := writePlanFile(base, path, body); err != nil {
+		// Symlink refusals from the writer are already fully formed.
+		if strings.Contains(err.Error(), "is a symlink") {
+			return "", err
+		}
+		return "", err
 	}
 	return path, nil
 }

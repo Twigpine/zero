@@ -591,8 +591,14 @@ func TestBTWExitsPlanModeOnSideAndPreservesParent(t *testing.T) {
 	if returned.permissionModeBeforePlan != agent.PermissionModeAsk {
 		t.Fatalf("returning from BTW lost permissionModeBeforePlan: %q", returned.permissionModeBeforePlan)
 	}
-	if returned.plan.isEmpty() {
-		t.Fatal("returning from BTW lost the parent sticky plan panel")
+	// No durable plan file was written: leaveBTW sees ok=false and clears the
+	// panel so it stays consistent with the shared tool enterBTW wiped.
+	// Durable-file rehydrate is covered by TestBTWLeaveResyncsSharedPlanFromParentFile.
+	if !returned.plan.isEmpty() {
+		t.Fatalf("returning from BTW left a stale sticky plan panel with empty tool: %+v", returned.plan)
+	}
+	if len(planTool.CurrentPlan()) != 0 {
+		t.Fatalf("expected shared update_plan empty without a durable plan file, got %+v", planTool.CurrentPlan())
 	}
 }
 
@@ -639,6 +645,50 @@ func TestBTWLeaveResyncsSharedPlanFromParentFile(t *testing.T) {
 	}
 	if returned.plan.isEmpty() {
 		t.Fatal("leaveBTW left sticky plan panel empty after re-sync")
+	}
+}
+
+// Regression: when the durable plan file is gone (ok=false, err=nil), leaveBTW
+// must clear the restored sticky panel to match the shared update_plan tool
+// that enterBTW already wiped, rather than leave a stale panel + empty tool.
+func TestBTWLeaveClearsPanelWhenPlanFileMissing(t *testing.T) {
+	isolatePlanConfig(t)
+	cwd := t.TempDir()
+	planTool := tools.NewUpdatePlanTool()
+	items := []tools.PlanItem{{Content: "draft step", Status: "pending"}}
+	planTool.SetPlan(items)
+	registry := tools.NewRegistry()
+	registry.Register(planTool)
+
+	m := newBTWTestModel(t)
+	m.cwd = cwd
+	m.registry = registry
+	m.permissionMode = agent.PermissionModePlan
+	m.permissionModeBeforePlan = agent.PermissionModeAsk
+	m.plan.updateFromItems(items, m.now())
+	if _, err := planmode.WritePlan(cwd, m.activeSession.SessionID, formatPlanItems(items)); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+
+	side, _ := m.handleBTWCommand("")
+	if len(planTool.CurrentPlan()) != 0 {
+		t.Fatalf("BTW side left shared update_plan state: %+v", planTool.CurrentPlan())
+	}
+
+	path, err := planmode.PlanFilePath(cwd, m.activeSession.SessionID)
+	if err != nil {
+		t.Fatalf("PlanFilePath: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("Remove plan file: %v", err)
+	}
+
+	returned, _ := side.leaveBTW()
+	if len(planTool.CurrentPlan()) != 0 {
+		t.Fatalf("expected shared update_plan empty after missing plan file, got %+v", planTool.CurrentPlan())
+	}
+	if !returned.plan.isEmpty() {
+		t.Fatalf("expected sticky plan panel cleared when plan file is missing, got %+v", returned.plan)
 	}
 }
 
