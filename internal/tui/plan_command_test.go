@@ -402,7 +402,22 @@ func TestUpdatePlanPersistsToPlanFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PlanFilePath: %v", err)
 	}
-	if strings.HasPrefix(path, cwd+string(os.PathSeparator)) || path == cwd {
+	// Canonicalize both sides: on macOS t.TempDir() is under /var while
+	// resolved paths live under /private/var, so a raw HasPrefix check can
+	// pass even when the plan file is inside the workspace.
+	resolvedCwd, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		t.Fatalf("EvalSymlinks cwd: %v", err)
+	}
+	// Plan path itself may not exist yet on a pure path check; resolve the
+	// deepest existing ancestor (the plans root or its parent) via Dir.
+	resolvedPlanDir, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil {
+		// Fall back to physicalPath-style resolve of the parent only when the
+		// plan dir was never created (ReadPlan above already confirmed it exists).
+		t.Fatalf("EvalSymlinks plan dir: %v", err)
+	}
+	if resolvedPlanDir == resolvedCwd || strings.HasPrefix(resolvedPlanDir, resolvedCwd+string(os.PathSeparator)) {
 		t.Fatalf("durable plan path %q must not live under the workspace %q", path, cwd)
 	}
 	if _, err := os.Stat(filepath.Join(cwd, ".zero")); !os.IsNotExist(err) {
