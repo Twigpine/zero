@@ -51,13 +51,6 @@ func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
 	switch arg {
 	case "":
 		// Bare /plan: the toggle logic below the switch handles it.
-	default:
-		// An unrecognized subcommand (a typo like "openx", or "status") must
-		// not fall through to the bare toggle: while plan mode is active that
-		// would silently exit the read-only boundary and re-enable
-		// implementation.
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: fmt.Sprintf("Unknown /plan subcommand %q. Usage: /plan, /plan open, /plan off", arg)})
-		return m, nil
 	case "off", "exit":
 		if m.permissionMode != agent.PermissionModePlan {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan mode is not active."})
@@ -85,6 +78,13 @@ func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return updated.openPlanInEditor()
+	default:
+		// An unrecognized subcommand (a typo like "openx", or "status") must
+		// not fall through to the bare toggle: while plan mode is active that
+		// would silently exit the read-only boundary and re-enable
+		// implementation.
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: fmt.Sprintf("Unknown /plan subcommand %q. Usage: /plan, /plan open, /plan off", arg)})
+		return m, nil
 	}
 
 	// No subcommand: toggle plan mode. A bare /plan while already in plan mode
@@ -321,12 +321,13 @@ func parsePlanFileLines(content string) []tools.PlanItem {
 			inNotes = false
 			continue
 		}
-		lineBody := raw
-		if strings.HasPrefix(raw, "   ") {
+		var lineBody string
+		switch {
+		case strings.HasPrefix(raw, "   "):
 			lineBody = raw[3:]
-		} else if strings.HasPrefix(raw, "\t") {
+		case strings.HasPrefix(raw, "\t"):
 			lineBody = raw[1:]
-		} else {
+		default:
 			lineBody = strings.TrimLeft(raw, " \t")
 		}
 

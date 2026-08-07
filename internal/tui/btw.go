@@ -208,7 +208,14 @@ func (m model) leaveBTW() (model, tea.Cmd) {
 	// update_plan tool state. Re-sync from the parent session's plan file the
 	// same way /resume does after a session switch, so the restored surface
 	// matches the durable plan and not whatever the side conversation left.
-	if items, ok, _ := parent.reloadPlanFromFile(); ok {
+	// Surface I/O/parse failures so the restored panel and shared update_plan
+	// state are not silently left out of sync with the durable file.
+	if items, ok, err := parent.reloadPlanFromFile(); err != nil {
+		parent.transcript = reduceTranscript(parent.transcript, transcriptAction{
+			kind: actionAppendError,
+			text: "plan reload error: " + err.Error(),
+		})
+	} else if ok {
 		parent.plan.updateFromItems(items, parent.now())
 	}
 	parent.resetFlushFrontier("· returned from btw ·")

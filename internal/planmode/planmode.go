@@ -62,6 +62,10 @@ func PlanFilePath(workspaceRoot, sessionID string) (string, error) {
 
 // ReadPlan reads the plan file for a session. The bool reports whether a plan
 // file exists; a missing file is not an error.
+//
+// Containment is bound at open time on Unix (O_NOFOLLOW) so a symlink planted
+// between path resolution and the open cannot redirect the read. On platforms
+// without O_NOFOLLOW, a pre-open Lstat check is used instead.
 func ReadPlan(workspaceRoot, sessionID string) (string, bool, error) {
 	path, err := PlanFilePath(workspaceRoot, sessionID)
 	if err != nil {
@@ -70,15 +74,14 @@ func ReadPlan(workspaceRoot, sessionID string) (string, bool, error) {
 	if err := ensurePlanPathContained(workspaceRoot, path); err != nil {
 		return "", false, err
 	}
-	// Refuse a symlinked plan file so a planted link cannot redirect the read
-	// to an arbitrary target.
-	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return "", false, fmt.Errorf("plan file %s is a symlink; refusing to read through it", path)
-	}
-	data, err := os.ReadFile(path)
+	data, err := readPlanFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", false, nil
+		}
+		// Symlink refusals from the platform helper are already fully formed.
+		if strings.Contains(err.Error(), "is a symlink") {
+			return "", false, err
 		}
 		return "", false, fmt.Errorf("read plan file: %w", err)
 	}
@@ -206,7 +209,9 @@ func StageForEditor(workspaceRoot, sessionID string) (stagedPath string, cleanup
 	if err != nil {
 		return "", nil, fmt.Errorf("resolve plan editor staging directory: %w", err)
 	}
-	if !editorStagingDirIsPrivate(resolvedDir, workspaceRoot, os.TempDir()) {
+	// Use effectiveTempDir (not os.TempDir) so SetTempDirForTest can redirect
+	// the privacy check the same way ensurePlanPathContained does.
+	if !editorStagingDirIsPrivate(resolvedDir, workspaceRoot, effectiveTempDir()) {
 		return "", nil, fmt.Errorf("plan editor staging directory %s resolves into a default sandbox-writable root (the workspace or the OS temp directory); check XDG_CONFIG_HOME", dir)
 	}
 	// Verify the resolved directory after chmod: refuse anything that is not

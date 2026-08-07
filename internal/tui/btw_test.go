@@ -641,3 +641,48 @@ func TestBTWLeaveResyncsSharedPlanFromParentFile(t *testing.T) {
 		t.Fatal("leaveBTW left sticky plan panel empty after re-sync")
 	}
 }
+
+// Regression: leaveBTW must surface a durable plan reload failure rather than
+// silently restoring with a cleared shared update_plan after the side surface
+// wiped it.
+func TestBTWLeaveReportsPlanReloadError(t *testing.T) {
+	isolatePlanConfig(t)
+	cwd := t.TempDir()
+	planTool := tools.NewUpdatePlanTool()
+	items := []tools.PlanItem{{Content: "draft step", Status: "pending"}}
+	planTool.SetPlan(items)
+	registry := tools.NewRegistry()
+	registry.Register(planTool)
+
+	m := newBTWTestModel(t)
+	m.cwd = cwd
+	m.registry = registry
+	m.permissionMode = agent.PermissionModePlan
+	m.permissionModeBeforePlan = agent.PermissionModeAsk
+	m.plan.updateFromItems(items, m.now())
+	if _, err := planmode.WritePlan(cwd, m.activeSession.SessionID, formatPlanItems(items)); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+
+	// Replace the plan file with a directory so ReadPlan fails with a real
+	// I/O error (missing file is not an error).
+	path, err := planmode.PlanFilePath(cwd, m.activeSession.SessionID)
+	if err != nil {
+		t.Fatalf("PlanFilePath: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("Remove plan file: %v", err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatalf("Mkdir over plan path: %v", err)
+	}
+
+	side, _ := m.handleBTWCommand("")
+	returned, _ := side.leaveBTW()
+	if !transcriptContains(returned.transcript, "plan reload error:") {
+		t.Fatalf("leaveBTW did not surface plan reload failure: %#v", returned.transcript)
+	}
+	if len(planTool.CurrentPlan()) != 0 {
+		t.Fatalf("expected shared update_plan to stay empty after failed reload, got %+v", planTool.CurrentPlan())
+	}
+}

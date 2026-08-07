@@ -4244,3 +4244,41 @@ func TestBeforeToolStillRunsInPlanMode(t *testing.T) {
 		t.Fatal("expected a beforeTool hook_execution_started audit event in plan mode")
 	}
 }
+
+// TestAfterToolSuppressedInPlanMode pins that hooksSuppressed gates afterTool:
+// a plan-mode turn must not execute a configured afterTool host command.
+func TestAfterToolSuppressedInPlanMode(t *testing.T) {
+	audit, err := hooks.NewAuditStore(hooks.AuditStoreOptions{AuditPath: filepath.Join(t.TempDir(), "audit.jsonl")})
+	if err != nil {
+		t.Fatalf("NewAuditStore: %v", err)
+	}
+	dispatcher := hooks.NewDispatcher(hooks.DispatcherOptions{
+		Config: hooks.Config{
+			Enabled: true,
+			Hooks: []hooks.Definition{
+				{ID: "zero.after-read", Event: hooks.EventAfterTool, Matcher: "read_file", Command: "zero-missing-hook-command", Enabled: true},
+			},
+		},
+		Audit: audit,
+	})
+
+	feedback := dispatchAfterTool(context.Background(), Options{
+		SessionID:      "session-plan",
+		Cwd:            t.TempDir(),
+		Hooks:          dispatcher,
+		PermissionMode: PermissionModePlan,
+	}, ToolCall{ID: "call-1", Name: "read_file"}, map[string]any{"path": "README.md"}, tools.Result{Status: tools.StatusOK})
+	if feedback != "" {
+		t.Fatalf("afterTool must be suppressed in plan mode, got feedback %q", feedback)
+	}
+
+	events, err := audit.ReadEvents()
+	if err != nil {
+		t.Fatalf("ReadEvents: %v", err)
+	}
+	for _, event := range events {
+		if event.Type == "hook_execution_started" {
+			t.Fatalf("afterTool hook %q executed during a plan-mode turn", event.Event)
+		}
+	}
+}
