@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -295,5 +297,50 @@ func TestSpecCommandExitsPlanMode(t *testing.T) {
 	next := updated.(model)
 	if next.permissionMode == agent.PermissionModePlan {
 		t.Fatalf("expected /spec to exit plan mode, got %s", next.permissionMode)
+	}
+}
+
+// Regression: /spec used to clear plan mode before createSpecDraftSession.
+// On create failure the user stayed on the original session with plan mode
+// already wiped. Create first; only reset plan state after success.
+func TestSpecCommandCreateFailurePreservesPlanMode(t *testing.T) {
+	root := t.TempDir()
+	// Point the session store root at a regular file so Create fails on MkdirAll.
+	badRoot := filepath.Join(root, "not-a-dir")
+	if err := os.WriteFile(badRoot, []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: badRoot})
+	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{
+		submitSpecScript("call-1", "Review Flow", "# Goal\n\nAdd review flow."),
+	}}
+	m := newSpecModeTestModel(root, provider, store)
+	planTool := tools.NewUpdatePlanTool()
+	planTool.SetPlan([]tools.PlanItem{{Content: "keep me", Status: "pending"}})
+	m.registry.Register(planTool)
+	m.permissionMode = agent.PermissionModePlan
+	m.permissionModeBeforePlan = agent.PermissionModeAsk
+	m.plan.updateFromItems(planTool.CurrentPlan(), m.now())
+	m.input.SetValue("/spec add review flow")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("expected no agent run when session create fails")
+	}
+	if next.permissionMode != agent.PermissionModePlan {
+		t.Fatalf("expected plan mode preserved after failed /spec create, got %s", next.permissionMode)
+	}
+	if next.permissionModeBeforePlan != agent.PermissionModeAsk {
+		t.Fatalf("expected permissionModeBeforePlan preserved, got %q", next.permissionModeBeforePlan)
+	}
+	if len(planTool.CurrentPlan()) != 1 || planTool.CurrentPlan()[0].Content != "keep me" {
+		t.Fatalf("expected shared plan preserved after failed /spec create, got %+v", planTool.CurrentPlan())
+	}
+	if next.plan.isEmpty() {
+		t.Fatal("expected sticky plan panel preserved after failed /spec create")
+	}
+	if !transcriptContains(next.transcript, "session create error") {
+		t.Fatalf("expected session create error in transcript, got %#v", next.transcript)
 	}
 }

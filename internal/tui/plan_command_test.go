@@ -584,6 +584,42 @@ func TestPlanModeWiresDraftSystemPrompt(t *testing.T) {
 	}
 }
 
+// Regression: when permissionModeBeforePlan is empty (legacy/incomplete state),
+// exitPlanMode must fall back to Ask, not Auto, so leaving plan mode does not
+// silently re-enable unrestricted tools.
+func TestExitPlanModeFallsBackToAsk(t *testing.T) {
+	m := newPlanModeTestModel(t, t.TempDir(), agent.PermissionModePlan)
+	m.permissionModeBeforePlan = ""
+
+	next := m.exitPlanMode()
+	if next.permissionMode != agent.PermissionModeAsk {
+		t.Fatalf("expected empty permissionModeBeforePlan to fall back to Ask, got %s", next.permissionMode)
+	}
+	if next.permissionModeBeforePlan != "" {
+		t.Fatalf("expected permissionModeBeforePlan to be cleared, got %q", next.permissionModeBeforePlan)
+	}
+}
+
+func TestSessionToolResultMetaStripsPlanSnapshot(t *testing.T) {
+	meta := map[string]string{
+		tools.PlanSnapshotMeta: `[{"content":"step","status":"pending"}]`,
+		"other":                "keep",
+	}
+	got := sessionToolResultMeta(meta)
+	if _, ok := got[tools.PlanSnapshotMeta]; ok {
+		t.Fatalf("expected plan_snapshot stripped from session meta, got %#v", got)
+	}
+	if got["other"] != "keep" {
+		t.Fatalf("expected other meta keys preserved, got %#v", got)
+	}
+	if sessionToolResultMeta(map[string]string{tools.PlanSnapshotMeta: "x"}) != nil {
+		t.Fatal("expected nil when only plan_snapshot was present")
+	}
+	if sessionToolResultMeta(nil) != nil {
+		t.Fatal("expected nil for empty meta")
+	}
+}
+
 func TestReenteringPlanModePreservesExistingPlanFile(t *testing.T) {
 	dir := t.TempDir()
 	m := newPlanModeTestModel(t, dir, agent.PermissionModeAsk)

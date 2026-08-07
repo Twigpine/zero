@@ -204,6 +204,13 @@ func (m model) leaveBTW() (model, tea.Cmd) {
 		kind: actionAppendSystem,
 		text: "Returned from the isolated BTW conversation. Its messages were not added to this session.",
 	})
+	// Entering BTW clears (or the side conversation may replace) the shared
+	// update_plan tool state. Re-sync from the parent session's plan file the
+	// same way /resume does after a session switch, so the restored surface
+	// matches the durable plan and not whatever the side conversation left.
+	if items, ok := parent.reloadPlanFromFile(); ok {
+		parent.plan.updateFromItems(items, parent.now())
+	}
 	parent.resetFlushFrontier("· returned from btw ·")
 	var goalCmd tea.Cmd
 	parent, goalCmd = parent.launchGoalContinuationIfReady()
@@ -213,7 +220,7 @@ func (m model) leaveBTW() (model, tea.Cmd) {
 func btwCommandUnavailable(command parsedCommand) bool {
 	arg := strings.ToLower(strings.TrimSpace(command.text))
 	switch command.kind {
-	case commandNew, commandResume, commandRename, commandSpec, commandLoop, commandGoal,
+	case commandNew, commandResume, commandRename, commandSpec, commandPlan, commandLoop, commandGoal,
 		commandRewind, commandCompact, commandSTTModel, commandMCP:
 		return true
 	case commandModel:
