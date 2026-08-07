@@ -354,6 +354,90 @@ func TestReadPlanFileRejectsFinalSymlink(t *testing.T) {
 	}
 }
 
+// TestReadPlanFileRejectsInRootFinalSymlink covers the os.Root.Open race that
+// root.Lstat-then-root.Open cannot close: when the final name is replaced with
+// a symlink whose target remains inside the storage base, os.Root.Open follows
+// it via checkSymlink after O_NOFOLLOW fails. The no-follow walker must refuse
+// without returning the in-root target's contents.
+//
+// This is the sequential stand-in for the Lstat/Open TOCTOU: plant the final
+// symlink before open and prove we never follow it, even in-root.
+func TestReadPlanFileRejectsInRootFinalSymlink(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "ws-key")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	other := filepath.Join(dir, "other-plan.md")
+	if err := os.WriteFile(other, []byte("other-plan\n"), 0o600); err != nil {
+		t.Fatalf("write other plan: %v", err)
+	}
+	path := filepath.Join(dir, "requested.md")
+	// Relative target stays inside the base, which is exactly the case
+	// os.Root.Open would follow.
+	if err := os.Symlink("other-plan.md", path); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	data, err := readPlanFile(base, path)
+	if err == nil {
+		t.Fatalf("expected in-root final symlink to be refused, got %q", data)
+	}
+	if !strings.Contains(err.Error(), "is a symlink") {
+		t.Fatalf("expected symlink refusal, got: %v", err)
+	}
+	if len(data) > 0 {
+		t.Fatalf("refused read must not return bytes, got %q", data)
+	}
+	// Victim in-root target must be untouched and must not have been returned.
+	got, err := os.ReadFile(other)
+	if err != nil {
+		t.Fatalf("read other plan: %v", err)
+	}
+	if string(got) != "other-plan\n" {
+		t.Fatalf("other plan was modified: %q", got)
+	}
+}
+
+// TestReadPlanFileRefusesAfterReplaceWithSymlink simulates the Lstat/Open
+// replace-with-symlink race: a regular plan is swapped for an in-root symlink
+// before readPlanFile runs. The open must refuse rather than follow.
+func TestReadPlanFileRefusesAfterReplaceWithSymlink(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "ws-key")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	path := filepath.Join(dir, "session.md")
+	if err := os.WriteFile(path, []byte("requested-plan\n"), 0o600); err != nil {
+		t.Fatalf("write plan: %v", err)
+	}
+	other := filepath.Join(dir, "other.md")
+	if err := os.WriteFile(other, []byte("other-plan\n"), 0o600); err != nil {
+		t.Fatalf("write other: %v", err)
+	}
+
+	// Sequential stand-in for the race window: remove the regular file and
+	// plant an in-root symlink at the same name before the open.
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove plan: %v", err)
+	}
+	if err := os.Symlink("other.md", path); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	data, err := readPlanFile(base, path)
+	if err == nil {
+		t.Fatalf("expected replaced-with-symlink plan to be refused, got %q", data)
+	}
+	if !strings.Contains(err.Error(), "is a symlink") {
+		t.Fatalf("expected symlink refusal, got: %v", err)
+	}
+	if string(data) == "other-plan\n" {
+		t.Fatal("open followed the in-root symlink planted after the regular file existed")
+	}
+}
+
 func TestReadPlanFileRoundtripPlainFile(t *testing.T) {
 	base := t.TempDir()
 	dir := filepath.Join(base, "ws-key")
