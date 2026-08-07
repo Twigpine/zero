@@ -967,6 +967,63 @@ func TestResumeDifferentSessionReportsPlanReloadError(t *testing.T) {
 	}
 }
 
+// Regression: /resume into a session that has a durable plan must restore
+// the sticky panel and shared update_plan (including Status and Notes).
+func TestResumeDifferentSessionReloadsDestinationPlan(t *testing.T) {
+	isolatePlanConfig(t)
+	store := testSessionStore(t)
+	active, err := store.Create(sessions.CreateInput{Title: "Active"})
+	if err != nil {
+		t.Fatalf("Create active: %v", err)
+	}
+	other, err := store.Create(sessions.CreateInput{Title: "Other"})
+	if err != nil {
+		t.Fatalf("Create other: %v", err)
+	}
+
+	cwd := t.TempDir()
+	destItems := []tools.PlanItem{
+		{Content: "wire catalog", Status: "completed", Notes: "done in review"},
+		{Content: "ship it", Status: "pending", Notes: "wait for CI"},
+	}
+	if _, err := planmode.WritePlan(cwd, other.SessionID, formatPlanItems(destItems)); err != nil {
+		t.Fatalf("WritePlan destination: %v", err)
+	}
+
+	planTool := tools.NewUpdatePlanTool()
+	planTool.SetPlan([]tools.PlanItem{{Content: "stale step", Status: "pending"}})
+	registry := tools.NewRegistry()
+	registry.Register(planTool)
+
+	m := newModel(context.Background(), Options{SessionStore: store, Cwd: cwd, Registry: registry})
+	m.activeSession = active
+	m.permissionMode = agent.PermissionModePlan
+	m.permissionModeBeforePlan = agent.PermissionModeAsk
+	m.plan.updateFromItems(planTool.CurrentPlan(), m.now())
+
+	m, _ = m.handleResumeCommand(other.SessionID)
+
+	if m.activeSession.SessionID != other.SessionID {
+		t.Fatalf("expected to resume the other session, got %#v", m.activeSession)
+	}
+	got := planTool.CurrentPlan()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 restored update_plan items, got %+v", got)
+	}
+	if got[0].Content != "wire catalog" || got[0].Status != "completed" || got[0].Notes != "done in review" {
+		t.Fatalf("first restored item mismatch: %+v", got[0])
+	}
+	if got[1].Content != "ship it" || got[1].Status != "pending" || got[1].Notes != "wait for CI" {
+		t.Fatalf("second restored item mismatch: %+v", got[1])
+	}
+	if m.plan.isEmpty() {
+		t.Fatal("expected sticky plan panel restored after destination reload")
+	}
+	if len(m.plan.steps) != 2 || m.plan.steps[0].content != "wire catalog" || m.plan.steps[0].status != "completed" || m.plan.steps[0].notes != "done in review" {
+		t.Fatalf("sticky panel mismatch: %+v", m.plan.steps)
+	}
+}
+
 // A session that never entered plan mode has an explicit, non-Plan
 // permissionMode with no permissionModeBeforePlan to restore. /new and
 // /resume must not reset that choice to Auto just because they

@@ -46,7 +46,9 @@ func openPlanUnderBase(base, rel, displayPath string) (*os.File, error) {
 	}
 
 	final := parts[len(parts)-1]
-	fd, err := openatRetry(dirfd, final, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	// O_NONBLOCK so a planted FIFO cannot hang the open; the regular-file
+	// check below still rejects non-regular targets after open succeeds.
+	fd, err := openatRetry(dirfd, final, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 	if err != nil {
 		if isNoFollowErr(err) {
 			return nil, errPlanSymlink(displayPath)
