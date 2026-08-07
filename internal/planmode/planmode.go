@@ -63,9 +63,10 @@ func PlanFilePath(workspaceRoot, sessionID string) (string, error) {
 // ReadPlan reads the plan file for a session. The bool reports whether a plan
 // file exists; a missing file is not an error.
 //
-// Containment is bound at open time on Unix (O_NOFOLLOW) so a symlink planted
-// between path resolution and the open cannot redirect the read. On platforms
-// without O_NOFOLLOW, a pre-open Lstat check is used instead.
+// Containment is bound at open time via a rooted, handle-relative open under
+// the plan storage base (see readPlanFile). Pre-open path checks alone are a
+// check-to-use race: an intermediate directory can be replaced with a symlink
+// or reparse point between resolve and open.
 func ReadPlan(workspaceRoot, sessionID string) (string, bool, error) {
 	path, err := PlanFilePath(workspaceRoot, sessionID)
 	if err != nil {
@@ -74,12 +75,16 @@ func ReadPlan(workspaceRoot, sessionID string) (string, bool, error) {
 	if err := ensurePlanPathContained(workspaceRoot, path); err != nil {
 		return "", false, err
 	}
-	data, err := readPlanFile(path)
+	base, _, err := planStorageBase(workspaceRoot)
+	if err != nil {
+		return "", false, err
+	}
+	data, err := readPlanFile(base, path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", false, nil
 		}
-		// Symlink refusals from the platform helper are already fully formed.
+		// Symlink refusals from the reader are already fully formed.
 		if strings.Contains(err.Error(), "is a symlink") {
 			return "", false, err
 		}
