@@ -258,6 +258,72 @@ func TestReadPlanMissingFileIsNotAnError(t *testing.T) {
 	}
 }
 
+// TestReadPlanMissingSessionWithBasePresent covers the NtCreateFile /
+// openat walk when the plan storage base exists (another session already
+// wrote a plan) but this session's path is absent. Missing-file NTSTATUS
+// values must map to os.ErrNotExist so ReadPlan returns ("", false, nil).
+func TestReadPlanMissingSessionWithBasePresent(t *testing.T) {
+	isolatePlanStorage(t)
+	root := t.TempDir()
+	if _, err := WritePlan(root, "other-session", "notes"); err != nil {
+		t.Fatalf("WritePlan other: %v", err)
+	}
+	content, ok, err := ReadPlan(root, "no-such-session")
+	if err != nil {
+		t.Fatalf("ReadPlan missing session: %v", err)
+	}
+	if ok {
+		t.Fatal("expected missing session plan to report ok=false")
+	}
+	if content != "" {
+		t.Fatalf("expected empty content for missing plan, got %q", content)
+	}
+}
+
+func TestPathKeyLongWorkspaceWithinNameMax(t *testing.T) {
+	// slugify keeps one output character per path character, so a workspace
+	// path longer than NAME_MAX would produce an oversized directory component
+	// without the pathKey slug cap. The hash suffix keeps injectivity.
+	isolatePlanStorage(t)
+	longSeg := strings.Repeat("deepseg", 40) // 280 chars
+	root := filepath.Join(t.TempDir(), longSeg, longSeg)
+	if len(root) <= 255 {
+		t.Fatalf("setup: expected workspace path >255 chars, got %d", len(root))
+	}
+	path, err := PlanFilePath(root, "session-1")
+	if err != nil {
+		t.Fatalf("PlanFilePath: %v", err)
+	}
+	for _, part := range strings.Split(path, string(os.PathSeparator)) {
+		if part == "" {
+			continue
+		}
+		if len(part) > 255 {
+			t.Fatalf("path component %q exceeds NAME_MAX (255), len=%d", part, len(part))
+		}
+	}
+	// Write/read must succeed: MkdirAll would ENAMETOOLONG without the cap.
+	if _, err := WritePlan(root, "session-1", "long path plan"); err != nil {
+		t.Fatalf("WritePlan long workspace: %v", err)
+	}
+	content, ok, err := ReadPlan(root, "session-1")
+	if err != nil {
+		t.Fatalf("ReadPlan long workspace: %v", err)
+	}
+	if !ok || content != "long path plan\n" {
+		t.Fatalf("unexpected plan after long-workspace write: ok=%v content=%q", ok, content)
+	}
+	// Distinct long workspaces still get distinct keys (hash injectivity).
+	other := root + "-other"
+	pathOther, err := PlanFilePath(other, "session-1")
+	if err != nil {
+		t.Fatalf("PlanFilePath other: %v", err)
+	}
+	if path == pathOther {
+		t.Fatalf("long workspaces must not share a plan path: %q", path)
+	}
+}
+
 func TestWritePlanRejectsSymlinkedPlanFile(t *testing.T) {
 	isolatePlanStorage(t)
 	root := t.TempDir()

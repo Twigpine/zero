@@ -145,6 +145,79 @@ func TestPlanOpenBlockedWhileRunActive(t *testing.T) {
 	}
 }
 
+func TestPlanOffBlockedWhileRunActive(t *testing.T) {
+	// Mid-run /plan off would flip permissionMode before agentResponseMsg,
+	// so completeRemaining would mark every plan step completed for a
+	// planning turn. Exit must wait for the run to finish (or cancel).
+	m := newPlanModeTestModel(t, t.TempDir(), agent.PermissionModePlan)
+	m.pending = true
+
+	updated, cmd := m.handlePlanCommand("off")
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("expected /plan off to return no command while a run is active")
+	}
+	if next.permissionMode != agent.PermissionModePlan {
+		t.Fatalf("expected plan mode preserved while run pending, got %s", next.permissionMode)
+	}
+	if !transcriptContains(next.transcript, "Cannot exit plan mode while a run is active") {
+		t.Fatalf("expected a blocked-exit notice in the transcript, got %#v", next.transcript)
+	}
+
+	// Bare toggle-off is the same exit path.
+	m.transcript = nil
+	updated, cmd = m.handlePlanCommand("")
+	next = updated.(model)
+	if cmd != nil {
+		t.Fatal("expected bare /plan toggle-off to return no command while a run is active")
+	}
+	if next.permissionMode != agent.PermissionModePlan {
+		t.Fatalf("expected bare toggle to keep plan mode while pending, got %s", next.permissionMode)
+	}
+	if !transcriptContains(next.transcript, "Cannot exit plan mode while a run is active") {
+		t.Fatalf("expected a blocked-exit notice for bare toggle, got %#v", next.transcript)
+	}
+}
+
+func TestSplitEditorCommandWindowsPaths(t *testing.T) {
+	// shell.Fields treats unquoted backslash as a POSIX escape, so
+	// C:\Windows\notepad.exe becomes C:Windowsnotepad.exe. Windows-style
+	// absolute paths must keep separators literal.
+	parts, err := splitEditorCommandFor("windows", `C:\Windows\System32\notepad.exe`)
+	if err != nil {
+		t.Fatalf("split unquoted drive path: %v", err)
+	}
+	if len(parts) != 1 || parts[0] != `C:\Windows\System32\notepad.exe` {
+		t.Fatalf("unquoted Windows path: got %#v", parts)
+	}
+
+	parts, err = splitEditorCommandFor("windows", `"C:\Program Files\Git\bin\vim.exe" --wait`)
+	if err != nil {
+		t.Fatalf("split quoted Windows path: %v", err)
+	}
+	if len(parts) != 2 || parts[0] != `C:\Program Files\Git\bin\vim.exe` || parts[1] != "--wait" {
+		t.Fatalf("quoted Windows path with args: got %#v", parts)
+	}
+
+	// Quoted Unix paths still use POSIX shell.Fields (spaces preserved).
+	parts, err = splitEditorCommandFor("linux", `"/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" --wait`)
+	if err != nil {
+		t.Fatalf("split quoted Unix path: %v", err)
+	}
+	if len(parts) != 2 || !strings.Contains(parts[0], "Visual Studio Code") || parts[1] != "--wait" {
+		t.Fatalf("quoted Unix path: got %#v", parts)
+	}
+
+	// Unquoted simple command on any OS.
+	parts, err = splitEditorCommandFor("linux", "code --wait")
+	if err != nil {
+		t.Fatalf("split simple command: %v", err)
+	}
+	if len(parts) != 2 || parts[0] != "code" || parts[1] != "--wait" {
+		t.Fatalf("simple command: got %#v", parts)
+	}
+}
+
 func TestBarePlanTogglesOff(t *testing.T) {
 	// Regression: a second bare /plan used to just re-print the current plan
 	// and leave PermissionModePlan active, contradicting the advertised

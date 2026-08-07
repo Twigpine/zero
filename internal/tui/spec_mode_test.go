@@ -289,14 +289,27 @@ func TestSpecCommandExitsPlanMode(t *testing.T) {
 		submitSpecScript("call-1", "Review Flow", "# Goal\n\nAdd review flow."),
 	}}
 	m := newSpecModeTestModel(t.TempDir(), provider, store)
+	planTool := tools.NewUpdatePlanTool()
+	planTool.SetPlan([]tools.PlanItem{{Content: "prior draft", Status: "pending"}})
+	m.registry.Register(planTool)
 	m.permissionMode = agent.PermissionModePlan
 	m.permissionModeBeforePlan = agent.PermissionModeAuto
+	m.plan.updateFromItems(planTool.CurrentPlan(), m.now())
 	m.input.SetValue("/spec add review flow")
 
 	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if next.permissionMode == agent.PermissionModePlan {
 		t.Fatalf("expected /spec to exit plan mode, got %s", next.permissionMode)
+	}
+	if next.permissionModeBeforePlan != "" {
+		t.Fatalf("expected permissionModeBeforePlan cleared after /spec, got %q", next.permissionModeBeforePlan)
+	}
+	if len(planTool.CurrentPlan()) != 0 {
+		t.Fatalf("expected shared update_plan cleared after successful /spec, got %+v", planTool.CurrentPlan())
+	}
+	if !next.plan.isEmpty() {
+		t.Fatalf("expected sticky plan panel cleared after successful /spec, got %+v", next.plan)
 	}
 }
 

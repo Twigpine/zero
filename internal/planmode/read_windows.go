@@ -188,7 +188,12 @@ func mapWindowsOpenErr(err error) error {
 	}
 	if st, ok := err.(windows.NTStatus); ok {
 		switch st {
-		case windows.STATUS_OBJECT_NAME_NOT_FOUND, windows.STATUS_OBJECT_PATH_NOT_FOUND:
+		// Missing final name, missing intermediate component, and the
+		// filesystem "file not found" status all mean the plan is absent.
+		// ReadPlan maps os.ErrNotExist to ("", false, nil).
+		case windows.STATUS_OBJECT_NAME_NOT_FOUND,
+			windows.STATUS_OBJECT_PATH_NOT_FOUND,
+			windows.STATUS_NO_SUCH_FILE:
 			return os.ErrNotExist
 		case windows.STATUS_REPARSE_POINT_ENCOUNTERED:
 			return st

@@ -211,6 +211,10 @@ func (m model) leaveBTW() (model, tea.Cmd) {
 	// Surface I/O/parse failures so the restored panel and shared update_plan
 	// state are not silently left out of sync with the durable file.
 	if items, ok, err := parent.reloadPlanFromFile(); err != nil {
+		// Side surface cleared shared update_plan on enter; do not restore a
+		// stale sticky panel when the durable reload fails (empty tool + old
+		// panel would desync). Clear parent plan state, then surface the error.
+		parent = parent.resetPlanForSessionSwitch()
 		parent.transcript = reduceTranscript(parent.transcript, transcriptAction{
 			kind: actionAppendError,
 			text: "plan reload error: " + err.Error(),

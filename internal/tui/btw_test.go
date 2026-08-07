@@ -685,4 +685,7 @@ func TestBTWLeaveReportsPlanReloadError(t *testing.T) {
 	if len(planTool.CurrentPlan()) != 0 {
 		t.Fatalf("expected shared update_plan to stay empty after failed reload, got %+v", planTool.CurrentPlan())
 	}
+	if !returned.plan.isEmpty() {
+		t.Fatalf("expected sticky plan panel cleared after failed reload, got %+v", returned.plan)
+	}
 }

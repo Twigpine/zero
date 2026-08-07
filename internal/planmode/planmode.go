@@ -417,6 +417,11 @@ func ensurePlanPathContained(workspaceRoot, path string) error {
 	return nil
 }
 
+// maxPathKeySlug is the max length of the human-readable slug prefix in a
+// pathKey component. The SHA-256 suffix (32 hex chars) plus separator keep the
+// full component well under NAME_MAX (255) even for very deep workspace paths.
+const maxPathKeySlug = 64
+
 // pathKey builds a filesystem-safe, collision-resistant directory or file
 // stem from an arbitrary workspace path or session ID. The human-readable
 // slug prefix is for operator convenience only; the SHA-256 suffix makes the
@@ -433,7 +438,16 @@ func pathKey(id string) string {
 		rawID = "\x00no-session"
 	}
 	sum := sha256.Sum256([]byte(rawID))
-	return slugify(id) + "-" + hex.EncodeToString(sum[:16])
+	// Truncate the slug so a deep workspace path cannot produce a single
+	// directory component over NAME_MAX. The hash keeps the key injective.
+	slug := slugify(id)
+	if len(slug) > maxPathKeySlug {
+		slug = strings.Trim(slug[:maxPathKeySlug], "-")
+		if slug == "" {
+			slug = "plan"
+		}
+	}
+	return slug + "-" + hex.EncodeToString(sum[:16])
 }
 
 // slugify turns an arbitrary session identifier into a filesystem-safe slug.

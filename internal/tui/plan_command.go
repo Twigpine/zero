@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -56,6 +57,13 @@ func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan mode is not active."})
 			return m, nil
 		}
+		// Same gate as entry: mid-run exit would flip m.permissionMode before
+		// agentResponseMsg, so completeRemaining would mark every step done
+		// for a planning turn that never finished.
+		if m.pending || m.exiting {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot exit plan mode while a run is active. Press Esc to cancel it first."})
+			return m, nil
+		}
 		m = m.exitPlanMode()
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Exited plan mode. The agent can now implement."})
 		return m, nil
@@ -91,6 +99,10 @@ func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
 	// exits it (matching the advertised on/off toggle); entering it shows the
 	// plan that was just seeded.
 	if m.permissionMode == agent.PermissionModePlan {
+		if m.pending || m.exiting {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot exit plan mode while a run is active. Press Esc to cancel it first."})
+			return m, nil
+		}
 		m = m.exitPlanMode()
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Exited plan mode. The agent can now implement."})
 		return m, nil
@@ -218,8 +230,10 @@ func (m model) openPlanInEditor() (tea.Model, tea.Cmd) {
 	// (e.g. `"/Applications/Visual Studio Code.app/.../code" --wait`);
 	// strings.Fields would split that mid-path. shell.Fields applies POSIX
 	// shell word-splitting, so quoted segments and any $VAR references in the
-	// value are handled the way a shell would.
-	parts, err := shell.Fields(editor, os.Getenv)
+	// value are handled the way a shell would. Unquoted Windows paths such as
+	// C:\Windows\notepad.exe must not go through POSIX escapes (backslash
+	// would drop path separators); see splitEditorCommand.
+	parts, err := splitEditorCommand(editor)
 	if err != nil || len(parts) == 0 {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "invalid $VISUAL/$EDITOR value: " + editor})
 		cleanup()
@@ -247,6 +261,75 @@ func (m model) openPlanInEditor() (tea.Model, tea.Cmd) {
 // /plan open so the transcript can surface it.
 type planEditorFinishedMsg struct {
 	err error
+}
+
+// splitEditorCommand parses $VISUAL/$EDITOR into argv. Quoted values and Unix
+// paths use POSIX shell.Fields (spaces inside quotes, $VAR expansion). Unquoted
+// Windows drive/UNC paths keep backslashes literal so C:\Windows\notepad.exe
+// is not mangled by POSIX escape processing.
+func splitEditorCommand(editor string) ([]string, error) {
+	return splitEditorCommandFor(runtime.GOOS, editor)
+}
+
+func splitEditorCommandFor(goos, editor string) ([]string, error) {
+	editor = strings.TrimSpace(editor)
+	if editor == "" {
+		return nil, fmt.Errorf("empty editor")
+	}
+	if goos == "windows" && isUnquotedWindowsEditorPath(editor) {
+		parts := windowsEditorFields(editor)
+		if len(parts) == 0 {
+			return nil, fmt.Errorf("empty editor")
+		}
+		return parts, nil
+	}
+	return shell.Fields(editor, os.Getenv)
+}
+
+// isUnquotedWindowsEditorPath reports an absolute Windows path (drive letter
+// or UNC) that is not already quote-wrapped. Quoted forms go through shell.Fields,
+// which preserves backslashes inside double quotes.
+func isUnquotedWindowsEditorPath(s string) bool {
+	if s == "" {
+		return false
+	}
+	switch s[0] {
+	case '"', '\'':
+		return false
+	}
+	if len(s) >= 3 {
+		drive := s[0]
+		if (drive >= 'A' && drive <= 'Z' || drive >= 'a' && drive <= 'z') && s[1] == ':' && (s[2] == '\\' || s[2] == '/') {
+			return true
+		}
+	}
+	return strings.HasPrefix(s, `\\`)
+}
+
+// windowsEditorFields splits a Windows command line with literal backslashes.
+// Double-quoted segments keep internal spaces; outside quotes, whitespace splits.
+func windowsEditorFields(s string) []string {
+	var parts []string
+	var b strings.Builder
+	inQuote := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '"':
+			inQuote = !inQuote
+		case (c == ' ' || c == '\t') && !inQuote:
+			if b.Len() > 0 {
+				parts = append(parts, b.String())
+				b.Reset()
+			}
+		default:
+			b.WriteByte(c)
+		}
+	}
+	if b.Len() > 0 {
+		parts = append(parts, b.String())
+	}
+	return parts
 }
 
 // reloadPlanFromFile reads the session plan file (if any) and syncs its
