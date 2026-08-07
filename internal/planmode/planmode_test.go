@@ -292,6 +292,88 @@ func TestWritePlanRejectsSymlinkedPlanFile(t *testing.T) {
 	}
 }
 
+// TestReadPlanFileRejectsIntermediateSymlink covers the bind-at-open property
+// that final-component-only O_NOFOLLOW does not provide: a parent component
+// replaced with a symlink (or Windows reparse point) to a directory outside
+// the plan storage base must not yield the outside file's contents.
+//
+// Called against readPlanFile directly so the pre-open EvalSymlinks check in
+// ensurePlanPathContained cannot mask a weak open. On Windows, os.Symlink for
+// a directory creates a reparse point when the privilege is available.
+func TestReadPlanFileRejectsIntermediateSymlink(t *testing.T) {
+	base := t.TempDir()
+	outside := t.TempDir()
+	secret := []byte("outside-secret\n")
+	if err := os.WriteFile(filepath.Join(outside, "plan.md"), secret, 0o600); err != nil {
+		t.Fatalf("write outside plan: %v", err)
+	}
+	parentLink := filepath.Join(base, "ws-key")
+	if err := os.Symlink(outside, parentLink); err != nil {
+		t.Skipf("directory symlinks/reparse points unavailable: %v", err)
+	}
+	path := filepath.Join(parentLink, "plan.md")
+
+	data, err := readPlanFile(base, path)
+	if err == nil {
+		t.Fatalf("expected intermediate symlink to be refused, got content %q", data)
+	}
+	if len(data) > 0 {
+		t.Fatalf("refused read must not return bytes, got %q", data)
+	}
+	// Victim outside the base must be untouched and must not have been
+	// returned as a successful plan read.
+	got, err := os.ReadFile(filepath.Join(outside, "plan.md"))
+	if err != nil {
+		t.Fatalf("read outside plan: %v", err)
+	}
+	if string(got) != string(secret) {
+		t.Fatalf("outside plan was modified: %q", got)
+	}
+}
+
+func TestReadPlanFileRejectsFinalSymlink(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "ws-key")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	outsideFile := filepath.Join(t.TempDir(), "exfil.md")
+	if err := os.WriteFile(outsideFile, []byte("secret"), 0o600); err != nil {
+		t.Fatalf("write outside: %v", err)
+	}
+	path := filepath.Join(dir, "session.md")
+	if err := os.Symlink(outsideFile, path); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	data, err := readPlanFile(base, path)
+	if err == nil {
+		t.Fatalf("expected final symlink to be refused, got %q", data)
+	}
+	if !strings.Contains(err.Error(), "is a symlink") {
+		t.Fatalf("expected symlink refusal, got: %v", err)
+	}
+}
+
+func TestReadPlanFileRoundtripPlainFile(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "ws-key")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	path := filepath.Join(dir, "session.md")
+	want := "# plan\n\nstep one\n"
+	if err := os.WriteFile(path, []byte(want), 0o600); err != nil {
+		t.Fatalf("write plan: %v", err)
+	}
+	got, err := readPlanFile(base, path)
+	if err != nil {
+		t.Fatalf("readPlanFile: %v", err)
+	}
+	if string(got) != want {
+		t.Fatalf("content = %q, want %q", got, want)
+	}
+}
+
 func TestWritePlanRejectsStorageInsideWorkspace(t *testing.T) {
 	// If the user config root is pointed at the workspace, plan storage would
 	// become a silent workspace write. Refuse rather than undermine the
