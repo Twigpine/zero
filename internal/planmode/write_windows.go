@@ -3,6 +3,7 @@
 package planmode
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -122,7 +123,7 @@ func ensureDirNoFollowWindows(parent windows.Handle, name string) (windows.Handl
 		}
 		// Missing: create then reopen. EEXIST means a concurrent creator won;
 		// loop back to open. Other create errors are fatal.
-		if err != os.ErrNotExist && !os.IsNotExist(err) {
+		if !errors.Is(err, os.ErrNotExist) && !os.IsNotExist(err) {
 			return 0, err
 		}
 		if mkdirErr := mkdiratNoFollow(parent, name); mkdirErr != nil && !isWindowsExistErr(mkdirErr) {

@@ -10,8 +10,10 @@ import (
 
 // writePlanUnderBase is a best-effort fallback for platforms without openat /
 // OBJ_DONT_REPARSE primitives. It uses os.Root for create and rename so the
-// walk stays rooted at base, but intermediate in-root symlink following of
-// Root.MkdirAll remains. Zero's supported targets are Unix and Windows.
+// walk stays rooted at base and each intermediate component is created with a
+// single Root.Mkdir. os.Root still resolves in-root symlinks, so this is
+// weaker than the openat / OBJ_DONT_REPARSE paths. Zero's supported targets
+// are Unix and Windows.
 func writePlanUnderBase(base, rel, displayPath, content string) error {
 	parts, err := relComponents(rel)
 	if err != nil {
