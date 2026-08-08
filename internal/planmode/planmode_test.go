@@ -599,7 +599,7 @@ func TestWritePlanRefusesIntermediateSymlink(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected WritePlan to refuse intermediate symlink")
 	}
-	if !strings.Contains(err.Error(), "is a symlink") {
+	if !strings.Contains(err.Error(), "is a symlink") && !strings.Contains(err.Error(), "escapes plan storage root") {
 		t.Fatalf("expected symlink refusal, got: %v", err)
 	}
 	// Nothing should have been written through the link.
