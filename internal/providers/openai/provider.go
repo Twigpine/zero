@@ -316,8 +316,10 @@ func (provider *Provider) emitPayload(ctx context.Context, data string, state *t
 			}
 		}
 		sendEvent(ctx, events, zeroruntime.StreamEvent{
-			Type:  zeroruntime.StreamEventError,
-			Error: provider.classifiedError(statusCode, chunk.Error.Message),
+			Type:       zeroruntime.StreamEventError,
+			Error:      provider.classifiedError(statusCode, chunk.Error.Message),
+			StatusCode: statusCode,
+			Cause:      provider.redact(chunk.Error.Message),
 		})
 		state.done = true
 		return false
@@ -408,8 +410,10 @@ func (provider *Provider) emitHTTPError(ctx context.Context, response *http.Resp
 		return
 	}
 	sendEvent(ctx, events, zeroruntime.StreamEvent{
-		Type:  zeroruntime.StreamEventError,
-		Error: provider.classifiedError(response.StatusCode, message),
+		Type:       zeroruntime.StreamEventError,
+		Error:      provider.classifiedError(response.StatusCode, message),
+		StatusCode: response.StatusCode,
+		Cause:      provider.redact(message),
 	})
 }
 

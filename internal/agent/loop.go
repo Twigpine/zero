@@ -542,7 +542,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			}
 			if collected.Error != "" {
 				result.Messages = copyMessages(messages)
-				return result, errors.New(collected.Error)
+				return result, &zeroruntime.StreamError{Message: collected.Error, StatusCode: collected.ErrorStatusCode, Cause: collected.ErrorCause}
 			}
 		}
 

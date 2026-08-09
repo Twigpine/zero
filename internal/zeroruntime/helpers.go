@@ -12,6 +12,11 @@ type CollectedStream struct {
 	ToolCalls        []ToolCall
 	Usage            Usage
 	Error            string
+	// ErrorStatusCode and ErrorCause mirror StreamEvent.StatusCode/Cause for a
+	// StreamEventError — see those fields for what each carries. Both are zero
+	// value when Error came from a context cancellation or other non-HTTP source.
+	ErrorStatusCode  int
+	ErrorCause       string
 	DroppedToolCalls int // malformed tool calls the provider could not dispatch
 	// FinishReason is the provider's normalized terminal stop reason when the
 	// response did not end normally (FinishReasonLength / FinishReasonContentFilter).
@@ -153,6 +158,8 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 				usageSeen = true
 			case StreamEventError:
 				collected.Error = event.Error
+				collected.ErrorStatusCode = event.StatusCode
+				collected.ErrorCause = event.Cause
 				return finish()
 			case StreamEventDone:
 				return finish()
