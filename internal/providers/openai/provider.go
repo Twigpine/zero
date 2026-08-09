@@ -406,7 +406,12 @@ func (provider *Provider) emitHTTPError(ctx context.Context, response *http.Resp
 	// localhost but returns a gateway error when it cannot reach its own backend.
 	// Surface that as a clear connectivity message instead of the raw proxied body.
 	if humanized, ok := providerio.UpstreamUnreachable(message); ok {
-		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact(humanized)})
+		sendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type:       zeroruntime.StreamEventError,
+			Error:      provider.redact(humanized),
+			StatusCode: response.StatusCode,
+			Cause:      provider.redact(message),
+		})
 		return
 	}
 	sendEvent(ctx, events, zeroruntime.StreamEvent{

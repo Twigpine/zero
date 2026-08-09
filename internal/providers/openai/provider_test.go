@@ -555,6 +555,15 @@ func TestStreamCompletionHumanizesUpstreamUnreachableGatewayError(t *testing.T) 
 			t.Fatalf("error = %q, want it to contain %q", got, want)
 		}
 	}
+	// The humanized "upstream unreachable" message must not drop the response
+	// metadata a session error event needs — StatusCode/Cause must still reflect
+	// the real HTTP response, matching the classified-error path below it (#674).
+	if events[0].StatusCode != http.StatusBadGateway {
+		t.Fatalf("StatusCode = %d, want %d", events[0].StatusCode, http.StatusBadGateway)
+	}
+	if !strings.Contains(events[0].Cause, "TLS handshake timeout") {
+		t.Fatalf("Cause = %q, want it to contain the raw upstream detail", events[0].Cause)
+	}
 }
 
 func TestStreamCompletionEmitsStreamErrorObject(t *testing.T) {
@@ -618,8 +627,8 @@ func TestStreamCompletionClassifiesStreamErrorCode(t *testing.T) {
 // path: an error arriving inside a 200 OK SSE payload's "code" field rather
 // than the HTTP status (#674).
 func TestStreamCompletionStreamedErrorCarriesStatusCodeAndCause(t *testing.T) {
-	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
-		writeSSE(w, `{"error":{"message":"rate limited, see Bearer token docs","code":"429"}}`)
+	provider := newTestProviderWithKey(t, "sk-secret", func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"error":{"message":"rate limited sk-secret, see Bearer token docs","code":"429"}}`)
 	})
 
 	events := collectProviderEvents(t, provider)
@@ -632,6 +641,9 @@ func TestStreamCompletionStreamedErrorCarriesStatusCodeAndCause(t *testing.T) {
 	}
 	if !strings.Contains(event.Cause, "rate limited") {
 		t.Fatalf("Cause = %q, want it to contain the upstream detail", event.Cause)
+	}
+	if strings.Contains(event.Cause, "sk-secret") {
+		t.Fatalf("Cause leaked token: %q", event.Cause)
 	}
 }
 

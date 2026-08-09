@@ -4464,3 +4464,43 @@ func TestCancellingASandboxRetryAbortsWithoutRetrying(t *testing.T) {
 		})
 	}
 }
+
+// TestRunReturnsStreamErrorWithStatusCodeAndCause covers the collector-to-agent
+// propagation boundary: a provider stream that terminates with a StreamEventError
+// carrying StatusCode/Cause must have Run return an error that errors.As can
+// still recover those fields from — the detail a session's "error" event needs
+// to actually diagnose why a provider call failed (#674).
+func TestRunReturnsStreamErrorWithStatusCodeAndCause(t *testing.T) {
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{{
+		{
+			Type:       zeroruntime.StreamEventError,
+			Error:      "provider error: provider returned error",
+			StatusCode: 500,
+			Cause:      "upstream returned an empty completion",
+		},
+	}}}
+
+	_, err := Run(context.Background(), "hi", provider, Options{
+		SessionID:    "stream-error-session",
+		Cwd:          t.TempDir(),
+		ProviderName: "test-provider",
+		Model:        "test-model",
+	})
+	if err == nil {
+		t.Fatal("Run: expected an error, got nil")
+	}
+
+	var streamErr *zeroruntime.StreamError
+	if !errors.As(err, &streamErr) {
+		t.Fatalf("Run error %v (%T) does not unwrap to *zeroruntime.StreamError", err, err)
+	}
+	if streamErr.StatusCode != 500 {
+		t.Fatalf("StatusCode = %d, want 500", streamErr.StatusCode)
+	}
+	if streamErr.Cause != "upstream returned an empty completion" {
+		t.Fatalf("Cause = %q, want %q", streamErr.Cause, "upstream returned an empty completion")
+	}
+	if err.Error() != "provider error: provider returned error" {
+		t.Fatalf("Error() = %q, want the flattened message unchanged", err.Error())
+	}
+}
