@@ -8,10 +8,10 @@ import (
 
 // CollectedStream is the non-streaming summary of provider events.
 type CollectedStream struct {
-	Text             string
-	ToolCalls        []ToolCall
-	Usage            Usage
-	Error            string
+	Text      string
+	ToolCalls []ToolCall
+	Usage     Usage
+	Error     string
 	// ErrorStatusCode and ErrorCause mirror StreamEvent.StatusCode/Cause for a
 	// StreamEventError — see those fields for what each carries. Both are zero
 	// value when Error came from a context cancellation or other non-HTTP source.
