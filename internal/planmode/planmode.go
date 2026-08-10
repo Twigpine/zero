@@ -116,10 +116,6 @@ func WritePlan(workspaceRoot, sessionID, content string) (string, error) {
 	}
 	body := strings.TrimRight(content, "\n") + "\n"
 	if err := writePlanFile(base, path, body); err != nil {
-		// Symlink refusals from the writer are already fully formed.
-		if strings.Contains(err.Error(), "is a symlink") {
-			return "", err
-		}
 		return "", err
 	}
 	return path, nil

@@ -216,6 +216,28 @@ func TestSplitEditorCommandWindowsPaths(t *testing.T) {
 	if len(parts) != 2 || parts[0] != "code" || parts[1] != "--wait" {
 		t.Fatalf("simple command: got %#v", parts)
 	}
+
+	// Regression: a Windows command containing backslashes but not beginning
+	// with a drive or UNC path (e.g. a relative .\tools\editor.exe) used to
+	// fall through to shell.Fields, which drops the separators as POSIX
+	// escapes. It must keep backslashes literal too.
+	parts, err = splitEditorCommandFor("windows", `.\tools\editor.exe --wait`)
+	if err != nil {
+		t.Fatalf("split relative Windows path: %v", err)
+	}
+	if len(parts) != 2 || parts[0] != `.\tools\editor.exe` || parts[1] != "--wait" {
+		t.Fatalf("relative Windows path: got %#v", parts)
+	}
+
+	// Single-quoted values still go through POSIX shell.Fields (literal
+	// content, backslashes preserved), matching the quoted-path contract.
+	parts, err = splitEditorCommandFor("windows", `'C:\Program Files\editor.exe' --wait`)
+	if err != nil {
+		t.Fatalf("split single-quoted Windows path: %v", err)
+	}
+	if len(parts) != 2 || parts[0] != `C:\Program Files\editor.exe` || parts[1] != "--wait" {
+		t.Fatalf("single-quoted Windows path: got %#v", parts)
+	}
 }
 
 func TestBarePlanTogglesOff(t *testing.T) {
@@ -506,6 +528,55 @@ func TestPlanEditorFinishedMsgReloadsPanelAndConfirms(t *testing.T) {
 	// A completion message reaches the transcript.
 	if !transcriptContains(next.transcript, "Reloaded the edited plan.") {
 		t.Fatalf("expected an editor-reload completion message, got %#v", next.transcript)
+	}
+}
+
+func TestPlanEditorFinishedMsgReloadErrorSurfaces(t *testing.T) {
+	// Failure path: if ReadPlan fails after the editor exits (e.g. the durable
+	// plan file was deleted or became unreadable), the reload error must surface
+	// in the transcript instead of failing silently.
+	isolatePlanConfig(t)
+	registry := tools.NewRegistry()
+	planTool := tools.NewUpdatePlanTool()
+	registry.Register(planTool)
+
+	cwd := t.TempDir()
+	m := newModel(context.Background(), Options{
+		Cwd:            cwd,
+		SessionStore:   testSessionStore(t),
+		Registry:       registry,
+		PermissionMode: agent.PermissionModePlan,
+	})
+	m, err := m.ensureActiveSession("plan editor completion failure")
+	if err != nil {
+		t.Fatalf("ensureActiveSession: %v", err)
+	}
+	// Write a plan file, then replace it with a directory at the same path so
+	// ReadPlan fails (refused as a non-regular file) between editor exit and
+	// reload. A plain deletion would not do: ReadPlan treats a missing file as
+	// ok=false, not an error, so the reload would silently no-op instead of
+	// surfacing a failure.
+	if _, err := planmode.WritePlan(cwd, m.activeSession.SessionID, "1. [in_progress] step"); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+	path, err := planmode.PlanFilePath(cwd, m.activeSession.SessionID)
+	if err != nil {
+		t.Fatalf("PlanFilePath: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove plan file: %v", err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatalf("replace plan file with directory: %v", err)
+	}
+
+	// Simulate editor completion with the plan file now missing
+	updated, _ := m.Update(planEditorFinishedMsg{err: nil})
+	next := updated.(model)
+
+	// The reload error should appear in the transcript
+	if !transcriptContains(next.transcript, "plan reload error:") {
+		t.Fatalf("expected a plan reload error message in transcript, got %#v", next.transcript)
 	}
 }
 
