@@ -1,6 +1,7 @@
 package sessions
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -75,5 +76,52 @@ func TestErrorEventPayloadZeroStatusCodeOmitted(t *testing.T) {
 	}
 	if _, ok := payload["cause"]; ok {
 		t.Fatalf("cause should be omitted when empty, got %v", payload["cause"])
+	}
+}
+
+func TestStoreAppendEventPersistsErrorEventStatusCodeAndCause(t *testing.T) {
+	// Closes the seam between ErrorEventPayload (unit tested above) and Run
+	// returning a *StreamError (tested in internal/agent): this asserts the
+	// two actually meet at the Store, i.e. a *StreamError survives a real
+	// AppendEvent/ReadEvents round trip with statusCode/cause intact.
+	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: fixedClock("2026-08-10T12:00:00Z")})
+	session, err := store.Create(CreateInput{SessionID: "error_join"})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+
+	streamErr := &zeroruntime.StreamError{
+		Message:    "provider error: provider returned error",
+		StatusCode: 503,
+		Cause:      "upstream returned an empty completion",
+	}
+
+	if _, err := store.AppendEvent(session.SessionID, AppendEventInput{
+		Type:    EventError,
+		Payload: ErrorEventPayload(streamErr),
+	}); err != nil {
+		t.Fatalf("AppendEvent returned error: %v", err)
+	}
+
+	events, err := store.ReadEvents(session.SessionID)
+	if err != nil {
+		t.Fatalf("ReadEvents returned error: %v", err)
+	}
+	if len(events) != 1 || events[0].Type != EventError {
+		t.Fatalf("expected a single error event, got %#v", events)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(events[0].Payload, &payload); err != nil {
+		t.Fatalf("failed to unmarshal persisted payload: %v", err)
+	}
+	if got, want := payload["message"], "provider error: provider returned error"; got != want {
+		t.Fatalf("persisted message = %v, want %v", got, want)
+	}
+	if got, want := payload["statusCode"], float64(503); got != want {
+		t.Fatalf("persisted statusCode = %v, want %v", got, want)
+	}
+	if got, want := payload["cause"], "upstream returned an empty completion"; got != want {
+		t.Fatalf("persisted cause = %v, want %v", got, want)
 	}
 }
