@@ -916,3 +916,72 @@ func TestVerifyPrivateDirectoryAcceptsOwnerOnly(t *testing.T) {
 		t.Fatalf("verifyPrivateDirectory: %v", err)
 	}
 }
+
+func TestStageForEditorCommitStagedEditReadPlanRoundTrip(t *testing.T) {
+	// End-to-end test covering the full editor round-trip:
+	// 1. Write a plan to durable storage
+	// 2. Stage it for editor (copies to private staging dir)
+	// 3. Rewrite the staged file (simulate user editing in $EDITOR)
+	// 4. Commit the staged edit back to durable storage
+	// 5. Read the plan back and verify it matches the edited content
+	isolatePlanStorage(t)
+
+	workspace := t.TempDir()
+	sessionID := "e2e-roundtrip-session"
+
+	// Step 1: Write initial plan
+	initial := "1. [pending] original step\n"
+	if _, err := WritePlan(workspace, sessionID, initial); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+
+	// Step 2: Stage for editor
+	stagedPath, cleanup, err := StageForEditor(workspace, sessionID)
+	if err != nil {
+		t.Fatalf("StageForEditor: %v", err)
+	}
+	defer cleanup()
+
+	// Step 3: Simulate user editing the staged file
+	editedContent := "1. [completed] edited step one\n2. [in_progress] edited step two\n   Notes: from editor\n"
+	if err := os.WriteFile(stagedPath, []byte(editedContent), 0o600); err != nil {
+		t.Fatalf("rewrite staged file: %v", err)
+	}
+
+	// Step 4: Commit staged edit back to durable storage
+	if err := CommitStagedEdit(workspace, sessionID, stagedPath); err != nil {
+		t.Fatalf("CommitStagedEdit: %v", err)
+	}
+
+	// Step 5: Read plan back and verify it matches edited content (normalized with trailing newline)
+	content, ok, err := ReadPlan(workspace, sessionID)
+	if err != nil {
+		t.Fatalf("ReadPlan: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected plan file to exist after commit")
+	}
+	// WritePlan normalizes to single trailing newline
+	expected := strings.TrimRight(editedContent, "\n") + "\n"
+	if content != expected {
+		t.Fatalf("round-trip content mismatch:\ngot:      %q\nexpected: %q", content, expected)
+	}
+}
+
+func TestCommitStagedEditReturnsErrorForMissingStagedFile(t *testing.T) {
+	// Cover the write-back failure path: CommitStagedEdit must return an error
+	// when the staged pathname does not exist.
+	isolatePlanStorage(t)
+	workspace := t.TempDir()
+	sessionID := "missing-staged"
+
+	// Point to a non-existent staged file path (under a temp dir we control)
+	stagedPath := filepath.Join(t.TempDir(), "does-not-exist.md")
+	err := CommitStagedEdit(workspace, sessionID, stagedPath)
+	if err == nil {
+		t.Fatal("expected CommitStagedEdit to error for missing staged file")
+	}
+	if !strings.Contains(err.Error(), "read staged plan file") {
+		t.Fatalf("expected read error context, got: %v", err)
+	}
+}

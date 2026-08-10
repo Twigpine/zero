@@ -92,6 +92,10 @@ func writePlanUnderBase(base, rel, displayPath, content string) error {
 		_ = file.Close()
 		return fmt.Errorf("write plan file: %w", err)
 	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write plan file: %w", err)
+	}
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("write plan file: %w", err)
 	}

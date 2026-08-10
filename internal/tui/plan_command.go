@@ -263,10 +263,11 @@ type planEditorFinishedMsg struct {
 	err error
 }
 
-// splitEditorCommand parses $VISUAL/$EDITOR into argv. Quoted values and Unix
-// paths use POSIX shell.Fields (spaces inside quotes, $VAR expansion). Unquoted
-// Windows drive/UNC paths keep backslashes literal so C:\Windows\notepad.exe
-// is not mangled by POSIX escape processing.
+// splitEditorCommand parses $VISUAL/$EDITOR into argv. Quoted values and
+// backslash-free values use POSIX shell.Fields (spaces inside quotes, $VAR
+// expansion). Unquoted Windows commands containing backslashes keep the
+// separators literal via windowsEditorFields so `C:\Windows\notepad.exe` (or a
+// relative `.\tools\editor.exe`) is not mangled by POSIX escape processing.
 func splitEditorCommand(editor string) ([]string, error) {
 	return splitEditorCommandFor(runtime.GOOS, editor)
 }
@@ -276,7 +277,7 @@ func splitEditorCommandFor(goos, editor string) ([]string, error) {
 	if editor == "" {
 		return nil, fmt.Errorf("empty editor")
 	}
-	if goos == "windows" && isUnquotedWindowsEditorPath(editor) {
+	if goos == "windows" && strings.Contains(editor, `\`) && !isQuoteWrapped(editor) {
 		parts := windowsEditorFields(editor)
 		if len(parts) == 0 {
 			return nil, fmt.Errorf("empty editor")
@@ -286,24 +287,11 @@ func splitEditorCommandFor(goos, editor string) ([]string, error) {
 	return shell.Fields(editor, os.Getenv)
 }
 
-// isUnquotedWindowsEditorPath reports an absolute Windows path (drive letter
-// or UNC) that is not already quote-wrapped. Quoted forms go through shell.Fields,
-// which preserves backslashes inside double quotes.
-func isUnquotedWindowsEditorPath(s string) bool {
-	if s == "" {
-		return false
-	}
-	switch s[0] {
-	case '"', '\'':
-		return false
-	}
-	if len(s) >= 3 {
-		drive := s[0]
-		if (drive >= 'A' && drive <= 'Z' || drive >= 'a' && drive <= 'z') && s[1] == ':' && (s[2] == '\\' || s[2] == '/') {
-			return true
-		}
-	}
-	return strings.HasPrefix(s, `\\`)
+// isQuoteWrapped reports whether the value is wrapped in a leading quote, in
+// which case POSIX shell.Fields owns parsing (single quotes keep everything
+// literal; double quotes preserve backslashes before ordinary characters).
+func isQuoteWrapped(s string) bool {
+	return len(s) > 0 && (s[0] == '"' || s[0] == '\'')
 }
 
 // windowsEditorFields splits a Windows command line with literal backslashes.
