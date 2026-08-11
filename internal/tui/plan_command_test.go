@@ -53,7 +53,7 @@ func isolatePlanConfig(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", root)
 }
 
-func newPlanModeTestModel(t *testing.T, cwd string, permissionMode agent.PermissionMode) model {
+func newPlanCommandTestModel(t *testing.T, cwd string, permissionMode agent.PermissionMode) model {
 	t.Helper()
 	isolatePlanConfig(t)
 	registry := tools.NewRegistry()
@@ -71,8 +71,8 @@ func newPlanModeTestModel(t *testing.T, cwd string, permissionMode agent.Permiss
 }
 
 func TestShiftTabDoesNotExitPlanMode(t *testing.T) {
-	m := newPlanModeTestModel(t, t.TempDir(), agent.PermissionModeAsk)
-	m.input.SetValue("/plan")
+	m := newPlanCommandTestModel(t, t.TempDir(), agent.PermissionModeAsk)
+	m.input.SetValue("/plan on")
 	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if next.permissionMode != agent.PermissionModePlan {
@@ -87,8 +87,8 @@ func TestShiftTabDoesNotExitPlanMode(t *testing.T) {
 }
 
 func TestPlanOffRestoresPreviousPermissionMode(t *testing.T) {
-	m := newPlanModeTestModel(t, t.TempDir(), agent.PermissionModeAsk)
-	m.input.SetValue("/plan")
+	m := newPlanCommandTestModel(t, t.TempDir(), agent.PermissionModeAsk)
+	m.input.SetValue("/plan on")
 	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if next.permissionMode != agent.PermissionModePlan {
@@ -123,7 +123,7 @@ func TestPlanOpenOutsidePlanModeDoesNotCreateSession(t *testing.T) {
 	if next.activeSession.SessionID != "" {
 		t.Fatalf("expected no session to be created for an invalid /plan open, got %+v", next.activeSession)
 	}
-	if !transcriptContains(next.transcript, "Enter plan mode (/plan) before opening the plan file.") {
+	if !transcriptContains(next.transcript, "Enter plan mode (/plan on) before opening the plan file.") {
 		t.Fatalf("expected a plan-mode-required notice in the transcript, got %#v", next.transcript)
 	}
 }
@@ -132,7 +132,7 @@ func TestPlanOpenBlockedWhileRunActive(t *testing.T) {
 	// Regression: the bare /plan toggle refused to run while m.pending (a run
 	// in flight), but "/plan open" had no such guard, letting it race a live
 	// run to suspend the TUI into $EDITOR.
-	m := newPlanModeTestModel(t, t.TempDir(), agent.PermissionModePlan)
+	m := newPlanCommandTestModel(t, t.TempDir(), agent.PermissionModePlan)
 	m.pending = true
 
 	updated, cmd := m.handlePlanCommand("open")
@@ -149,7 +149,7 @@ func TestPlanOffBlockedWhileRunActive(t *testing.T) {
 	// Mid-run /plan off would flip permissionMode before agentResponseMsg,
 	// so completeRemaining would mark every plan step completed for a
 	// planning turn. Exit must wait for the run to finish (or cancel).
-	m := newPlanModeTestModel(t, t.TempDir(), agent.PermissionModePlan)
+	m := newPlanCommandTestModel(t, t.TempDir(), agent.PermissionModePlan)
 	m.pending = true
 
 	updated, cmd := m.handlePlanCommand("off")
@@ -164,19 +164,6 @@ func TestPlanOffBlockedWhileRunActive(t *testing.T) {
 		t.Fatalf("expected a blocked-exit notice in the transcript, got %#v", next.transcript)
 	}
 
-	// Bare toggle-off is the same exit path.
-	m.transcript = nil
-	updated, cmd = m.handlePlanCommand("")
-	next = updated.(model)
-	if cmd != nil {
-		t.Fatal("expected bare /plan toggle-off to return no command while a run is active")
-	}
-	if next.permissionMode != agent.PermissionModePlan {
-		t.Fatalf("expected bare toggle to keep plan mode while pending, got %s", next.permissionMode)
-	}
-	if !transcriptContains(next.transcript, "Cannot exit plan mode while a run is active") {
-		t.Fatalf("expected a blocked-exit notice for bare toggle, got %#v", next.transcript)
-	}
 }
 
 func TestSplitEditorCommandWindowsPaths(t *testing.T) {
@@ -240,37 +227,27 @@ func TestSplitEditorCommandWindowsPaths(t *testing.T) {
 	}
 }
 
-func TestBarePlanTogglesOff(t *testing.T) {
-	// Regression: a second bare /plan used to just re-print the current plan
-	// and leave PermissionModePlan active, contradicting the advertised
-	// on/off toggle and stranding the user in read-only mode until they
-	// discovered /plan off.
-	m := newPlanModeTestModel(t, t.TempDir(), agent.PermissionModeAsk)
-	m.input.SetValue("/plan")
+func TestBarePlanReportsStatusWithoutExiting(t *testing.T) {
+	m := newPlanCommandTestModel(t, t.TempDir(), agent.PermissionModeAsk)
+	m.input.SetValue("/plan on")
 	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if next.permissionMode != agent.PermissionModePlan {
-		t.Fatalf("expected /plan to enter plan mode, got %s", next.permissionMode)
+		t.Fatalf("expected /plan on to enter plan mode, got %s", next.permissionMode)
 	}
 
 	next.input.SetValue("/plan")
 	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
-	if next.permissionMode != agent.PermissionModeAsk {
-		t.Fatalf("expected a second bare /plan to toggle plan mode off, got %s", next.permissionMode)
-	}
-	if !transcriptContains(next.transcript, "Exited plan mode") {
-		t.Fatalf("expected an exit notice in the transcript, got %#v", next.transcript)
+	if next.permissionMode != agent.PermissionModePlan {
+		t.Fatalf("expected bare /plan to preserve plan mode, got %s", next.permissionMode)
 	}
 }
-
-func TestPlanCommandCreatesSessionBeforeWritingPlanFile(t *testing.T) {
+func TestPlanOpenCreatesSessionBeforeWritingPlanFile(t *testing.T) {
 	// Regression: on a fresh TUI (or after /new) the session ID is empty
-	// until the first prompt lazily creates it. /plan open used to write the
-	// plan file under the empty-session slug ("plan.md"), which every other
-	// fresh session would also reuse and which orphaned its content once the
-	// real session ID appeared. Entering plan mode must create the session
-	// first so the plan file is named for it from the start.
+	// until the first prompt lazily creates it. /plan open must create the
+	// session before writing its plan file so fresh sessions do not share the
+	// empty-session plan path.
 	isolatePlanConfig(t)
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewUpdatePlanTool())
@@ -284,19 +261,24 @@ func TestPlanCommandCreatesSessionBeforeWritingPlanFile(t *testing.T) {
 		t.Fatal("setup: expected a fresh model to have no active session")
 	}
 
-	m.input.SetValue("/plan")
+	t.Setenv("VISUAL", "")
+	t.Setenv("EDITOR", "")
+	m.input.SetValue("/plan on")
 	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
+	next.input.SetValue("/plan open")
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
 
 	if next.activeSession.SessionID == "" {
-		t.Fatal("expected /plan to create a session before entering plan mode")
+		t.Fatal("expected /plan open to create a session before writing the plan file")
 	}
 	path, err := planmode.PlanFilePath(cwd, next.activeSession.SessionID)
 	if err != nil {
 		t.Fatalf("PlanFilePath: %v", err)
 	}
-	if !transcriptContains(next.transcript, path) {
-		t.Fatalf("expected the plan-enter text to reference the real session's plan file %q, got %#v", path, next.transcript)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected plan file for the active session: %v", err)
 	}
 }
 
@@ -306,7 +288,7 @@ func TestPlanOpenLaunchesEditorCommand(t *testing.T) {
 	// open always took the "no live program" fallback and never actually
 	// suspended the TUI to run $EDITOR.
 	t.Setenv("EDITOR", "true")
-	m := newPlanModeTestModel(t, t.TempDir(), agent.PermissionModePlan)
+	m := newPlanCommandTestModel(t, t.TempDir(), agent.PermissionModePlan)
 
 	m.input.SetValue("/plan open")
 	updated, cmd := m.Update(testKey(tea.KeyEnter))
@@ -709,7 +691,7 @@ func TestPlanModeWiresDraftSystemPrompt(t *testing.T) {
 		{Type: zeroruntime.StreamEventText, Content: "planning"},
 		{Type: zeroruntime.StreamEventDone},
 	}}
-	m := newPlanModeTestModel(t, t.TempDir(), agent.PermissionModePlan)
+	m := newPlanCommandTestModel(t, t.TempDir(), agent.PermissionModePlan)
 	// Embedders set product policy via agentOptions.SystemPrompt. Plan mode
 	// must layer its restriction onto that prompt rather than replace it.
 	const configuredPrompt = "Custom product policy for this embedder."
@@ -747,7 +729,7 @@ func TestPlanModeWiresDraftSystemPrompt(t *testing.T) {
 // exitPlanMode must fall back to Ask, not Auto, so leaving plan mode does not
 // silently re-enable unrestricted tools.
 func TestExitPlanModeFallsBackToAsk(t *testing.T) {
-	m := newPlanModeTestModel(t, t.TempDir(), agent.PermissionModePlan)
+	m := newPlanCommandTestModel(t, t.TempDir(), agent.PermissionModePlan)
 	m.permissionModeBeforePlan = ""
 
 	next := m.exitPlanMode()
@@ -781,17 +763,17 @@ func TestSessionToolResultMetaStripsPlanSnapshot(t *testing.T) {
 
 func TestReenteringPlanModePreservesExistingPlanFile(t *testing.T) {
 	dir := t.TempDir()
-	m := newPlanModeTestModel(t, dir, agent.PermissionModeAsk)
+	m := newPlanCommandTestModel(t, dir, agent.PermissionModeAsk)
 	const initialPlan = "1. [pending] Step one from disk\n2. [completed] Step two from disk"
 	if _, err := planmode.WritePlan(dir, m.activeSession.SessionID, initialPlan); err != nil {
 		t.Fatalf("WritePlan: %v", err)
 	}
 
-	m.input.SetValue("/plan")
+	m.input.SetValue("/plan on")
 	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if next.permissionMode != agent.PermissionModePlan {
-		t.Fatalf("expected /plan to enter plan mode, got %s", next.permissionMode)
+		t.Fatalf("expected /plan on to enter plan mode, got %s", next.permissionMode)
 	}
 	if len(next.plan.steps) != 2 {
 		t.Fatalf("expected 2 plan items reloaded from disk, got %d", len(next.plan.steps))

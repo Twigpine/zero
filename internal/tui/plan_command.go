@@ -43,41 +43,60 @@ type planFileReloader interface {
 // only exposes read tools, update_plan, and ask_user, so the agent cannot
 // mutate the workspace while planning.
 func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
-	if _, ok := m.registry.Get("update_plan"); !ok {
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "No plan is active."})
-		return m, nil
-	}
-
 	arg := strings.ToLower(strings.TrimSpace(text))
 	switch arg {
-	case "":
-		// Bare /plan: the toggle logic below the switch handles it.
-	case "off", "exit":
-		if m.permissionMode != agent.PermissionModePlan {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan mode is not active."})
+	case "", "status":
+		if _, ok := m.registry.Get("update_plan"); !ok {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "No plan is active."})
 			return m, nil
 		}
-		// Same gate as entry: mid-run exit would flip m.permissionMode before
-		// agentResponseMsg, so completeRemaining would mark every step done
-		// for a planning turn that never finished.
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.planText()})
+		return m, nil
+	case "on":
+		if m.pending || m.exiting {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot enter plan mode while a run is active."})
+			return m, nil
+		}
+		if m.permissionMode == agent.PermissionModePlan {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan mode\nAlready active. Write and shell tools stay hidden until /plan off."})
+			return m, nil
+		}
+		updated, err := m.ensureActiveSession("")
+		if err != nil {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "session error: " + err.Error()})
+			return m, nil
+		}
+		m = updated
+		m.permissionModeBeforePlan = m.permissionMode
+		m.permissionMode = agent.PermissionModePlan
+		if items, ok, _ := m.reloadPlanFromFile(); ok {
+			m.plan.updateFromItems(items, m.now())
+		}
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan mode\nActive: read-only planning. Write and shell tools are hidden until /plan off."})
+		return m, nil
+	case "off", "exit":
+		if m.permissionMode != agent.PermissionModePlan {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan mode\nNot currently active."})
+			return m, nil
+		}
 		if m.pending || m.exiting {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot exit plan mode while a run is active. Press Esc to cancel it first."})
 			return m, nil
 		}
+		restored := m.permissionModeBeforePlan
+		if restored == "" {
+			restored = agent.PermissionModeAuto
+		}
 		m = m.exitPlanMode()
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Exited plan mode. The agent can now implement."})
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan mode\nExited. Permission mode restored to " + string(restored) + "."})
 		return m, nil
 	case "open":
 		if m.pending || m.exiting {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot open the plan file while a run is active."})
 			return m, nil
 		}
-		// Validate plan mode is active before ensureActiveSession, not after:
-		// openPlanInEditor rejects this same condition, but by then a session
-		// would already have been created for what should be a pure no-op
-		// error, leaving a persistent empty session behind in /resume.
 		if m.permissionMode != agent.PermissionModePlan {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Enter plan mode (/plan) before opening the plan file."})
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Enter plan mode (/plan on) before opening the plan file."})
 			return m, nil
 		}
 		updated, err := m.ensureActiveSession("")
@@ -87,62 +106,18 @@ func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
 		}
 		return updated.openPlanInEditor()
 	default:
-		// An unrecognized subcommand (a typo like "openx", or "status") must
-		// not fall through to the bare toggle: while plan mode is active that
-		// would silently exit the read-only boundary and re-enable
-		// implementation.
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: fmt.Sprintf("Unknown /plan subcommand %q. Usage: /plan, /plan open, /plan off", arg)})
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: fmt.Sprintf("Unknown /plan subcommand %q. Usage: /plan [status|on|open|off]", arg)})
 		return m, nil
 	}
-
-	// No subcommand: toggle plan mode. A bare /plan while already in plan mode
-	// exits it (matching the advertised on/off toggle); entering it shows the
-	// plan that was just seeded.
-	if m.permissionMode == agent.PermissionModePlan {
-		if m.pending || m.exiting {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot exit plan mode while a run is active. Press Esc to cancel it first."})
-			return m, nil
-		}
-		m = m.exitPlanMode()
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Exited plan mode. The agent can now implement."})
-		return m, nil
-	}
-	if m.pending || m.exiting {
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot enter plan mode while a run is active."})
-		return m, nil
-	}
-	updated, err := m.ensureActiveSession("")
-	if err != nil {
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "session error: " + err.Error()})
-		return m, nil
-	}
-	m = updated
-	m.permissionModeBeforePlan = m.permissionMode
-	m.permissionMode = agent.PermissionModePlan
-	if items, ok, _ := m.reloadPlanFromFile(); ok {
-		m.plan.updateFromItems(items, m.now())
-	}
-	textToShow := planEnterText(m) + "\n\n" + m.planText()
-	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: textToShow})
-	return m, nil
 }
 
-// planModeCommandUnavailable reports whether a local (non-tool) TUI command
-// must be blocked while plan mode is active. Plan mode's tool-advertisement
-// gate only covers agent tool calls; these commands run entirely inside the
-// TUI process and would mutate the workspace or spawn a host process outside
-// that gate: /rewind restores files from a checkpoint, /export writes a
-// transcript file to disk, /sandbox-setup runs native platform setup,
-// /spec forks a drafting session, /mcp <sub> mutates server configuration, and
-// /init's whole job is writing AGENTS.md (which plan mode then denies).
-// Bare /mcp (empty text) only opens the read-only manager view, so it stays
-// available. Modeled on btwCommandUnavailable's shape for the analogous BTW guard.
+// planModeCommandUnavailable reports whether a local TUI command would mutate
+// the workspace or start a host process outside the plan-mode tool gate.
 func planModeCommandUnavailable(command parsedCommand) bool {
 	switch command.kind {
-	case commandRewind, commandExport, commandSandboxSetup, commandSpec, commandInit:
+	case commandRewind, commandExport, commandSandboxSetup, commandInit:
 		return true
 	case commandMCP:
-		// Bare /mcp only opens the read-only manager view; subcommands mutate config.
 		return strings.TrimSpace(command.text) != ""
 	default:
 		return false
@@ -449,7 +424,6 @@ func planEnterText(m model) string {
 	}
 	return "Entered plan mode. The agent can inspect the workspace and shape the plan with update_plan, but cannot edit files or run commands until you exit.\n" +
 		"Use /plan open to edit the plan, or /plan (again) / /plan off to implement." + planNote
-}
 }
 
 func (m model) planText() string {
