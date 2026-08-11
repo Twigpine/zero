@@ -148,6 +148,9 @@ type model struct {
 	agentOptions                agent.Options
 	notifier                    *notify.Notifier
 	permissionMode              agent.PermissionMode
+	// program is the live Bubble Tea program, set right before Run so /plan open
+	// can suspend the TUI, launch $EDITOR, and resume on exit.
+	program *tea.Program
 	// permissionModeBeforePlan holds whatever mode was active when /plan on
 	// entered PermissionModePlan, so /plan off can restore it exactly (mirrors
 	// the execProfile displaced/applied pattern below).
