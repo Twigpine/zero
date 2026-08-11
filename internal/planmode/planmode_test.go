@@ -701,6 +701,35 @@ func TestStageForEditorWritesUnderConfigStagingDir(t *testing.T) {
 	}
 }
 
+func TestCommitStagedEditWritesBackEditedPlan(t *testing.T) {
+	isolatePlanStorage(t)
+	workspace := t.TempDir()
+	if _, err := WritePlan(workspace, "session-1", "1. [pending] draft step\n"); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+	staged, cleanup, err := StageForEditor(workspace, "session-1")
+	if err != nil {
+		t.Fatalf("StageForEditor: %v", err)
+	}
+	t.Cleanup(cleanup)
+	if err := os.WriteFile(staged, []byte("1. [completed] edited step\n\n"), 0o600); err != nil {
+		t.Fatalf("rewrite staged plan: %v", err)
+	}
+	if err := CommitStagedEdit(workspace, "session-1", staged); err != nil {
+		t.Fatalf("CommitStagedEdit: %v", err)
+	}
+	content, exists, err := ReadPlan(workspace, "session-1")
+	if err != nil {
+		t.Fatalf("ReadPlan: %v", err)
+	}
+	if !exists || content != "1. [completed] edited step\n" {
+		t.Fatalf("ReadPlan = (%q, %t), want edited normalized plan", content, exists)
+	}
+	if err := CommitStagedEdit(workspace, "session-1", filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Fatal("expected CommitStagedEdit to reject a missing staged path")
+	}
+}
+
 func TestEditorStagingDirIsPrivateRejectsOSTempDir(t *testing.T) {
 	workspaceRoot := t.TempDir()
 	// t.TempDir() itself lives under os.TempDir(), so it doubles as a stand-in

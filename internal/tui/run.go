@@ -106,7 +106,6 @@ func Run(ctx context.Context, options Options) int {
 			peerStarted = true
 		}
 	}
-	initialModel.program = program
 
 	_, runErr := program.Run()
 	clearErr := petOutput.clearImage()
