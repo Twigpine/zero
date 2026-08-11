@@ -429,7 +429,7 @@ func planEnterText(m model) string {
 		planNote = "\nPlan file: " + path
 	}
 	return "Entered plan mode. The agent can inspect the workspace and shape the plan with update_plan, but cannot edit files or run commands until you exit.\n" +
-		"Use /plan open to edit the plan, or /plan off to implement." + planNote
+		"Use /plan on to enter plan mode, then /plan open to edit the plan, or /plan off to implement." + planNote
 }
 
 func (m model) planText() string {
