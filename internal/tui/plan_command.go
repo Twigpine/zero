@@ -33,9 +33,10 @@ type planFileReloader interface {
 	SetPlan([]tools.PlanItem)
 }
 
-// handlePlanCommand toggles plan mode on the current session:
+// handlePlanCommand manages the current session's plan mode:
 //
-//	/plan            toggle plan mode on/off; entering shows the current plan
+//	/plan            show the current plan status
+//	/plan on         enter read-only plan mode
 //	/plan open       open the session's plan file in $VISUAL/$EDITOR
 //	/plan off        exit plan mode (alias: /plan exit)
 //
@@ -69,10 +70,19 @@ func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
 		m = updated
 		m.permissionModeBeforePlan = m.permissionMode
 		m.permissionMode = agent.PermissionModePlan
-		if items, ok, _ := m.reloadPlanFromFile(); ok {
+		reloadWarning := ""
+		if items, ok, reloadErr := m.reloadPlanFromFile(); reloadErr != nil {
+			if writer, ok := m.registry.Get("update_plan"); ok {
+				if reloader, ok := writer.(planFileReloader); ok {
+					reloader.SetPlan(nil)
+				}
+			}
+			m.plan.clear()
+			reloadWarning = "\nplan reload error: " + reloadErr.Error()
+		} else if ok {
 			m.plan.updateFromItems(items, m.now())
 		}
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan mode\nActive: read-only planning. Write and shell tools are hidden until /plan off."})
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan mode\nActive: read-only planning. Write and shell tools are hidden until /plan off." + reloadWarning})
 		return m, nil
 	case "off", "exit":
 		if m.permissionMode != agent.PermissionModePlan {
@@ -83,12 +93,8 @@ func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot exit plan mode while a run is active. Press Esc to cancel it first."})
 			return m, nil
 		}
-		restored := m.permissionModeBeforePlan
-		if restored == "" {
-			restored = agent.PermissionModeAuto
-		}
 		m = m.exitPlanMode()
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan mode\nExited. Permission mode restored to " + string(restored) + "."})
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan mode\nExited. Permission mode restored to " + string(m.permissionMode) + "."})
 		return m, nil
 	case "open":
 		if m.pending || m.exiting {
@@ -162,7 +168,7 @@ func (m model) resetPlanForSessionSwitch() model {
 // TUI to launch $VISUAL/$EDITOR on it, resuming on exit.
 func (m model) openPlanInEditor() (tea.Model, tea.Cmd) {
 	if m.permissionMode != agent.PermissionModePlan {
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Enter plan mode (/plan) before opening the plan file."})
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Enter plan mode (/plan on) before opening the plan file."})
 		return m, nil
 	}
 	path, err := planmode.PlanFilePath(m.cwd, m.activeSession.SessionID)
@@ -423,7 +429,7 @@ func planEnterText(m model) string {
 		planNote = "\nPlan file: " + path
 	}
 	return "Entered plan mode. The agent can inspect the workspace and shape the plan with update_plan, but cannot edit files or run commands until you exit.\n" +
-		"Use /plan open to edit the plan, or /plan (again) / /plan off to implement." + planNote
+		"Use /plan open to edit the plan, or /plan off to implement." + planNote
 }
 
 func (m model) planText() string {
