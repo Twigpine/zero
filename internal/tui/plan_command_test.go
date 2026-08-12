@@ -36,12 +36,13 @@ func isolatePlanConfig(t *testing.T) {
 			return r
 		}
 	}, t.Name())
-	root := filepath.Join(home, ".cache", "zero-planmode-test", name)
-	if err := os.RemoveAll(root); err != nil {
-		t.Fatalf("RemoveAll plan config: %v", err)
+	parent := filepath.Join(home, ".cache", "zero-planmode-test")
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		t.Fatalf("MkdirAll plan config parent: %v", err)
 	}
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		t.Fatalf("MkdirAll plan config: %v", err)
+	root, err := os.MkdirTemp(parent, name+"-")
+	if err != nil {
+		t.Fatalf("MkdirTemp plan config: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	// os.UserConfigDir (which config.UserConfigDir defers to outside darwin)
@@ -214,6 +215,11 @@ func TestSplitEditorCommandWindowsPaths(t *testing.T) {
 	}
 	if len(parts) != 2 || parts[0] != `.\tools\editor.exe` || parts[1] != "--wait" {
 		t.Fatalf("relative Windows path: got %#v", parts)
+	}
+
+	parts, err = splitEditorCommandFor("windows", `"C:\Program Files\editor.exe --wait`)
+	if err == nil {
+		t.Fatal("expected unterminated Windows quote to fail")
 	}
 
 	// Single-quoted values still go through POSIX shell.Fields (literal

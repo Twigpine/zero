@@ -3,6 +3,7 @@ package planmode
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -84,7 +85,7 @@ func ReadPlan(workspaceRoot, sessionID string) (string, bool, error) {
 			return "", false, nil
 		}
 		// Symlink refusals from the reader are already fully formed.
-		if strings.Contains(err.Error(), "is a symlink") {
+		if errors.Is(err, errPlanSymlinkRefusal) {
 			return "", false, err
 		}
 		return "", false, fmt.Errorf("read plan file: %w", err)
@@ -165,15 +166,6 @@ func StageForEditor(workspaceRoot, sessionID string) (stagedPath string, cleanup
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", nil, fmt.Errorf("create plan editor staging directory: %w", err)
 	}
-	// MkdirAll's mode only applies at creation: it does not tighten an
-	// already-existing, more permissive directory (e.g. one predating this
-	// restriction). Chmod unconditionally, matching WritePlan's plan
-	// directory handling, so a pre-existing 0755 staging directory can't
-	// leave a closed staged file visible to another local user before the
-	// editor reopens it.
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return "", nil, fmt.Errorf("restrict plan editor staging directory permissions: %w", err)
-	}
 	resolvedDir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
 		return "", nil, fmt.Errorf("resolve plan editor staging directory: %w", err)
@@ -182,6 +174,11 @@ func StageForEditor(workspaceRoot, sessionID string) (stagedPath string, cleanup
 	// the privacy check the same way ensurePlanPathContained does.
 	if !editorStagingDirIsPrivate(resolvedDir, workspaceRoot, effectiveTempDir()) {
 		return "", nil, fmt.Errorf("plan editor staging directory %s resolves into a default sandbox-writable root (the workspace or the OS temp directory); check XDG_CONFIG_HOME", dir)
+	}
+	// MkdirAll's mode only applies at creation: tighten an existing directory
+	// only after validating its resolved target is safe to use.
+	if err := os.Chmod(resolvedDir, 0o700); err != nil {
+		return "", nil, fmt.Errorf("restrict plan editor staging directory permissions: %w", err)
 	}
 	// Verify the resolved directory after chmod: refuse anything that is not
 	// a plain directory or that is still group/world-writable. A pre-existing

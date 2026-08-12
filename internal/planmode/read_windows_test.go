@@ -2,7 +2,10 @@
 
 package planmode
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNtObjectPathDriveAndUNC(t *testing.T) {
 	// Drive-letter form: `\??\` + absolute path.
@@ -22,14 +25,10 @@ func TestNtObjectPathDriveAndUNC(t *testing.T) {
 	// Already-trimmed leading slashes must not produce a double UNC prefix
 	// when only one leading pair is present.
 	got = ntObjectPath(`\\fileserver\profiles\user`)
-	if !hasPrefix(got, `\??\UNC\`) {
+	if !strings.HasPrefix(got, `\??\UNC\`) {
 		t.Fatalf("UNC path missing UNC device prefix: %q", got)
 	}
-	if hasPrefix(got, `\??\UNC\\`) {
+	if strings.HasPrefix(got, `\??\UNC\\`) {
 		t.Fatalf("UNC path has doubled separators: %q", got)
 	}
-}
-
-func hasPrefix(s, prefix string) bool {
-	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
 }

@@ -1080,6 +1080,9 @@ func TestResumeSameSessionKeepsPlanMode(t *testing.T) {
 	if m.permissionMode != agent.PermissionModePlan {
 		t.Fatalf("expected resuming the same session to leave plan mode active, got %s", m.permissionMode)
 	}
+	if m.permissionModeBeforePlan != agent.PermissionModeAsk {
+		t.Fatalf("expected the saved restore mode preserved on a same-session resume, got %q", m.permissionModeBeforePlan)
+	}
 }
 
 func TestResumePickerExcludesSubRunSessions(t *testing.T) {

@@ -187,9 +187,6 @@ func isWindowsSymlinkErr(err error) bool {
 	if err == nil {
 		return false
 	}
-	if err == windows.STATUS_REPARSE_POINT_ENCOUNTERED {
-		return true
-	}
 	// Some paths surface the mapped errno instead of the raw NT status.
 	if err == syscall.ELOOP || err == windows.ERROR_CANT_RESOLVE_FILENAME {
 		return true
