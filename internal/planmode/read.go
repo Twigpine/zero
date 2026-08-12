@@ -1,6 +1,7 @@
 package planmode
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -33,10 +34,12 @@ func readPlanFile(base, path string) ([]byte, error) {
 	return io.ReadAll(file)
 }
 
+var errPlanSymlinkRefusal = errors.New("is a symlink")
+
 // errPlanSymlink is the stable refusal message for final and intermediate
 // symlink / reparse-point components. ReadPlan matches on "is a symlink".
 func errPlanSymlink(path string) error {
-	return fmt.Errorf("plan file %s is a symlink; refusing to read through it", path)
+	return fmt.Errorf("plan file %s %w; refusing to read through it", path, errPlanSymlinkRefusal)
 }
 
 // relWithinBase returns path relative to base after both are cleaned to

@@ -259,7 +259,10 @@ func splitEditorCommandFor(goos, editor string) ([]string, error) {
 		return nil, fmt.Errorf("empty editor")
 	}
 	if goos == "windows" && strings.Contains(editor, `\`) && !isQuoteWrapped(editor) {
-		parts := windowsEditorFields(editor)
+		parts, err := windowsEditorFields(editor)
+		if err != nil {
+			return nil, err
+		}
 		if len(parts) == 0 {
 			return nil, fmt.Errorf("empty editor")
 		}
@@ -277,7 +280,7 @@ func isQuoteWrapped(s string) bool {
 
 // windowsEditorFields splits a Windows command line with literal backslashes.
 // Double-quoted segments keep internal spaces; outside quotes, whitespace splits.
-func windowsEditorFields(s string) []string {
+func windowsEditorFields(s string) ([]string, error) {
 	var parts []string
 	var b strings.Builder
 	inQuote := false
@@ -295,10 +298,13 @@ func windowsEditorFields(s string) []string {
 			b.WriteByte(c)
 		}
 	}
+	if inQuote {
+		return nil, fmt.Errorf("unterminated double quote")
+	}
 	if b.Len() > 0 {
 		parts = append(parts, b.String())
 	}
-	return parts
+	return parts, nil
 }
 
 // reloadPlanFromFile reads the session plan file (if any) and syncs its

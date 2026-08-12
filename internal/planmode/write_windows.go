@@ -261,7 +261,7 @@ func renameatWindows(h windows.Handle, newdirfd windows.Handle, newname string) 
 	bufferSize := int(unsafe.Offsetof(dummy.FileName)) + fileNameLen
 	buffer := make([]byte, bufferSize)
 	info := (*fileRenameInformation)(unsafe.Pointer(&buffer[0]))
-	info.ReplaceIfExists = windows.FILE_RENAME_REPLACE_IF_EXISTS | windows.FILE_RENAME_POSIX_SEMANTICS
+	info.ReplaceIfExists = 1 // BOOLEAN + padding under FileRenameInformation
 	info.RootDirectory = newdirfd
 	info.FileNameLength = uint32(fileNameLen)
 	copy((*[windows.MAX_LONG_PATH]uint16)(unsafe.Pointer(&info.FileName[0]))[:fileNameLen/2:fileNameLen/2], newNameUTF16)
@@ -287,7 +287,7 @@ func deleteAtWindows(dirfd windows.Handle, name string) error {
 	// FileDispositionInformation = 13: mark handle for delete-on-close.
 	type dispositionInfo struct{ DeleteFile uint8 }
 	disp := dispositionInfo{DeleteFile: 1}
-	return windows.NtSetInformationFile(h, &iosb, (*byte)(unsafe.Pointer(&disp)), uint32(unsafe.Sizeof(disp)), 13)
+	return windows.NtSetInformationFile(h, &iosb, (*byte)(unsafe.Pointer(&disp)), uint32(unsafe.Sizeof(disp)), windows.FileDispositionInformation)
 }
 
 func openForDelete(dirfd windows.Handle, name string) (windows.Handle, error) {
