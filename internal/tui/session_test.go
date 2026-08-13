@@ -883,6 +883,7 @@ func TestNewSessionClearsPreviousPlan(t *testing.T) {
 }
 
 func TestResumeDifferentSessionExitsPlanMode(t *testing.T) {
+	isolatePlanConfig(t)
 	store := testSessionStore(t)
 	active, err := store.Create(sessions.CreateInput{Title: "Active"})
 	if err != nil {

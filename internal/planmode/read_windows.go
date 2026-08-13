@@ -93,9 +93,20 @@ func openPlanUnderBase(base, rel, displayPath string) (*os.File, error) {
 // must go through the UNC device: `\??\UNC\server\share\...`. Concatenating
 // `\??\` alone yields `\??\\\server\...`, which NtCreateFile rejects. A
 // roaming %AppData% (plan storage base) can legitimately be a UNC path.
+//
+// The extended-length (`\\?\C:\...`) and device (`\\.\...`) prefixes also
+// begin with two backslashes but are not UNC. `\\?\` is stripped because
+// `\??\` is its NT equivalent; `\\?\UNC\` is already UNC-qualified.
 func ntObjectPath(absPath string) string {
-	if strings.HasPrefix(absPath, `\\`) {
-		return `\??\UNC\` + strings.TrimPrefix(absPath, `\\`)
+	if rest, ok := strings.CutPrefix(absPath, `\\?\`); ok {
+		// `\\?\UNC\server\share` -> `\??\UNC\server\share`.
+		return `\??\` + rest
+	}
+	if rest, ok := strings.CutPrefix(absPath, `\\.\`); ok {
+		return `\??\` + rest
+	}
+	if rest, ok := strings.CutPrefix(absPath, `\\`); ok {
+		return `\??\UNC\` + rest
 	}
 	return `\??\` + absPath
 }

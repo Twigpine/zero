@@ -11,11 +11,12 @@ import (
 // TestToolAdvertisedInPlanExcludesRequestPermissions guards against
 // request_permissions leaking into plan mode's read-only allowlist. It is
 // classified SideEffectNone + PermissionAllow (control-only, no filesystem or
-// network access of its own), but toolAdvertisedInPlan only admits
-// SideEffectRead + PermissionAllow tools (plus no process-spawning exceptions).
-// SideEffectNone tools are therefore excluded, including request_permissions.
+// network access of its own), but tools.ToolAdvertisedForPermissionMode only
+// admits SideEffectRead + PermissionAllow tools (plus no process-spawning
+// exceptions) for plan mode. SideEffectNone tools are therefore excluded,
+// including request_permissions.
 func TestToolAdvertisedInPlanExcludesRequestPermissions(t *testing.T) {
-	if toolAdvertisedInPlan(tools.NewRequestPermissionsTool()) {
+	if tools.ToolAdvertisedForPermissionMode(tools.NewRequestPermissionsTool(), tools.PlanMode) {
 		t.Fatal("request_permissions must not be advertised in plan mode: it would let the model obtain a user-approved permission grant during a supposedly read-only planning turn, which then outlives plan mode")
 	}
 }

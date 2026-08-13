@@ -595,14 +595,29 @@ func TestWritePlanRefusesIntermediateSymlink(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
+	// WritePlan resolves the planted symlink in ensurePlanPathContained and
+	// refuses before writePlanFile's own handle-relative walk ever runs, so
+	// this only pins the outer containment check.
 	_, err = WritePlan(workspace, "session-1", "notes")
 	if err == nil {
 		t.Fatal("expected WritePlan to refuse intermediate symlink")
 	}
-	if !strings.Contains(err.Error(), "is a symlink") && !strings.Contains(err.Error(), "escapes plan storage root") {
-		t.Fatalf("expected symlink refusal, got: %v", err)
+	if !strings.Contains(err.Error(), "escapes plan storage root") {
+		t.Fatalf("expected the containment refusal, got: %v", err)
 	}
 	// Nothing should have been written through the link.
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Fatalf("write escaped through intermediate symlink into %s: %v", outside, entries)
+	}
+
+	// Exercise the handle-relative writer directly, bypassing the containment
+	// pre-check above, so the no-follow walk's own symlink refusal is what
+	// this test actually pins.
+	if err := writePlanFile(plansRoot, path, "notes\n"); err == nil {
+		t.Fatal("expected writePlanFile to refuse the intermediate symlink")
+	} else if !strings.Contains(err.Error(), "is a symlink") {
+		t.Fatalf("expected symlink refusal from the handle-relative writer, got: %v", err)
+	}
 	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
 		t.Fatalf("write escaped through intermediate symlink into %s: %v", outside, entries)
 	}
@@ -645,11 +660,37 @@ func TestPlanFilePathBlankIDDiffersFromLiteralPlan(t *testing.T) {
 }
 
 func TestStageForEditorRejectsStagingInsideWorkspace(t *testing.T) {
-	// StageForEditor must refuse a config root inside the workspace: that is
-	// the same silent sandbox-writable staging boundary as WritePlan.
+	// StageForEditor must refuse when the staging directory itself resolves
+	// into the workspace, even with plan storage otherwise valid.
+	//
+	// Pointing XDG_CONFIG_HOME/AppData at the workspace does not isolate this:
+	// plan storage and the staging directory both derive from the same
+	// UserConfigDir, so that setup makes ReadPlan's own workspace-containment
+	// check fire first (same error as TestWritePlanRejectsStorageInsideWorkspace)
+	// and StageForEditor never reaches editorStagingDirIsPrivate at all. Keep
+	// storage isolated and valid, and instead swap the staging leaf itself for
+	// a symlink into the workspace, so only the staging-specific check fires.
+	if runtime.GOOS == "windows" {
+		t.Skip("directory symlink creation is privileged on Windows CI")
+	}
+	cfg := isolatePlanStorage(t)
 	workspace := t.TempDir()
-	SetTempDirForTest(t, filepath.Join(t.TempDir(), "unrelated-temp"))
-	setUserConfigHomeEnv(t, workspace)
+	if _, err := WritePlan(workspace, "session-1", "notes"); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+
+	insideWorkspace := filepath.Join(workspace, "staged")
+	if err := os.MkdirAll(insideWorkspace, 0o700); err != nil {
+		t.Fatalf("mkdir inside workspace: %v", err)
+	}
+	stagingLink := filepath.Join(cfg, "zero", "plan-edit")
+	if err := os.MkdirAll(filepath.Dir(stagingLink), 0o700); err != nil {
+		t.Fatalf("mkdir staging parent: %v", err)
+	}
+	if err := os.Symlink(insideWorkspace, stagingLink); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
 	_, cleanup, err := StageForEditor(workspace, "session-1")
 	if cleanup != nil {
 		cleanup()
@@ -657,8 +698,8 @@ func TestStageForEditorRejectsStagingInsideWorkspace(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected StageForEditor to reject staging inside the workspace")
 	}
-	if !strings.Contains(err.Error(), "sandbox-writable") && !strings.Contains(err.Error(), "workspace") {
-		t.Fatalf("expected workspace/staging containment error, got: %v", err)
+	if !strings.Contains(err.Error(), "sandbox-writable") {
+		t.Fatalf("expected the staging-privacy error, got: %v", err)
 	}
 }
 
@@ -698,6 +739,43 @@ func TestStageForEditorWritesUnderConfigStagingDir(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "draft step") {
 		t.Fatalf("staged content missing plan body: %q", data)
+	}
+}
+
+// Regression: tea.ExecProcess's cleanup callback only runs if the caller's
+// Bubble Tea program lives long enough to invoke it, so an abrupt shutdown
+// while the editor is open leaks the staged file (see the sweep call in
+// StageForEditor). The next StageForEditor call must reclaim it.
+func TestStageForEditorSweepsAbandonedStagedFiles(t *testing.T) {
+	isolatePlanStorage(t)
+	workspace := t.TempDir()
+	if _, err := WritePlan(workspace, "session-1", "1. [pending] draft step\n"); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+
+	// Simulate a staged file abandoned by a dropped tea.ExecProcess command:
+	// stage normally, then backdate its mtime past the sweep threshold instead
+	// of running its cleanup.
+	abandoned, _, err := StageForEditor(workspace, "session-1")
+	if err != nil {
+		t.Fatalf("StageForEditor (abandoned): %v", err)
+	}
+	old := time.Now().Add(-staleStagedEditThreshold - time.Hour)
+	if err := os.Chtimes(abandoned, old, old); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+
+	fresh, cleanup, err := StageForEditor(workspace, "session-1")
+	if err != nil {
+		t.Fatalf("StageForEditor (fresh): %v", err)
+	}
+	t.Cleanup(cleanup)
+
+	if _, err := os.Stat(abandoned); !os.IsNotExist(err) {
+		t.Fatalf("expected abandoned staged file to be swept, stat err = %v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatalf("expected fresh staged file to survive the sweep: %v", err)
 	}
 }
 
