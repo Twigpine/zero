@@ -568,6 +568,58 @@ func TestReadPlanFileRejectsNonRegularFile(t *testing.T) {
 // TestWritePlanRefusesIntermediateSymlink pins that WritePlan's handle-bound
 // walk refuses an intermediate directory that is a symlink rather than
 // following it with pathname MkdirAll/OpenFile/Rename.
+// TestPlanStorageBaseSymlinkRefused covers a symlink or reparse point at the
+// plan storage root itself, as opposed to a component under it.
+// ensurePlanPathContained resolves the base and the plan path through the same
+// link, so containment passes unless the target happens to be the workspace or
+// temp directory. Before the base was opened no-follow, the handle-relative
+// walk was simply rooted inside the link's target, so every read, create, and
+// rename landed there while each individual component check still passed.
+func TestPlanStorageBaseSymlinkRefused(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Directory symlink creation is privileged on many Windows runners.
+		t.Skip("directory symlink creation is privileged on Windows CI")
+	}
+	cfg := isolatePlanStorage(t)
+	workspace := t.TempDir()
+
+	// Seed a real plan so the read path has something to find if it followed
+	// the link, rather than failing for an unrelated missing-file reason.
+	if _, err := WritePlan(workspace, "session-1", "1. [pending] real step\n"); err != nil {
+		t.Fatalf("WritePlan (seed): %v", err)
+	}
+	plansRoot := filepath.Join(cfg, filepath.FromSlash(PlanDirName))
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o700); err != nil {
+		t.Fatalf("mkdir elsewhere: %v", err)
+	}
+	// Move the real storage aside and replace the root with a link, the shape
+	// an attacker or a bad restore leaves behind.
+	if err := os.RemoveAll(plansRoot); err != nil {
+		t.Fatalf("remove plans root: %v", err)
+	}
+	if err := os.Symlink(elsewhere, plansRoot); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	if _, _, err := ReadPlan(workspace, "session-1"); err == nil {
+		t.Fatal("expected ReadPlan to refuse a symlinked plan storage root")
+	} else if !strings.Contains(err.Error(), "is a symlink") {
+		t.Fatalf("expected a symlink refusal from ReadPlan, got: %v", err)
+	}
+
+	if _, err := WritePlan(workspace, "session-1", "1. [pending] redirected\n"); err == nil {
+		t.Fatal("expected WritePlan to refuse a symlinked plan storage root")
+	} else if !strings.Contains(err.Error(), "is a symlink") {
+		t.Fatalf("expected a symlink refusal from WritePlan, got: %v", err)
+	}
+
+	// Nothing may have been written through the link.
+	if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {
+		t.Fatalf("write escaped through the storage-root symlink into %s: %v", elsewhere, entries)
+	}
+}
+
 func TestWritePlanRefusesIntermediateSymlink(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		// Creating directory symlinks requires elevated privileges on many

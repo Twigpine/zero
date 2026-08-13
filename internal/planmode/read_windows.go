@@ -121,7 +121,14 @@ func openWindowsBaseDir(absBase string) (windows.Handle, error) {
 	}
 	oa := &windows.OBJECT_ATTRIBUTES{
 		ObjectName: objName,
-		Attributes: windows.OBJ_CASE_INSENSITIVE,
+		// OBJ_DONT_REPARSE on the base too, not just on the components walked
+		// under it. ensurePlanPathContained resolves the base and the plan path
+		// through the same links, so a reparse point at the plans root passes
+		// containment (it only fails when the target is the workspace or temp
+		// directory). Following it here would root the whole no-follow walk in
+		// the target directory, which is precisely the redirection the walk
+		// exists to prevent.
+		Attributes: windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
 	}
 	oa.Length = uint32(unsafe.Sizeof(*oa))
 
@@ -141,7 +148,11 @@ func openWindowsBaseDir(absBase string) (windows.Handle, error) {
 		0,
 	)
 	if err != nil {
-		return 0, mapWindowsOpenErr(err)
+		mapped := mapWindowsOpenErr(err)
+		if isWindowsSymlinkErr(mapped) {
+			return 0, errPlanBaseSymlink(absBase)
+		}
+		return 0, mapped
 	}
 	return h, nil
 }

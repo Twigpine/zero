@@ -42,6 +42,17 @@ func errPlanSymlink(path string) error {
 	return fmt.Errorf("plan file %s %w; refusing to read through it", path, errPlanSymlinkRefusal)
 }
 
+// errPlanBaseSymlink refuses a symlink or reparse point at the storage root
+// itself, the directory the no-follow walk is rooted in. ensurePlanPathContained
+// resolves the base and the plan path through the same links, so a link there
+// passes containment (it only fails when the target is the workspace or the
+// temp directory). Opening through it would anchor the whole walk inside the
+// link's target, so every later handle-relative read, create, and rename would
+// land there. Shared by the read and write walkers.
+func errPlanBaseSymlink(base string) error {
+	return fmt.Errorf("plan storage root %s %w; refusing to open through it", base, errPlanSymlinkRefusal)
+}
+
 // relWithinBase returns path relative to base after both are cleaned to
 // absolute form, rejecting any lexical escape. The relative name is what the
 // no-follow walk opens; absolute pathname open is intentionally not used.

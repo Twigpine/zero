@@ -21,8 +21,15 @@ func writePlanUnderBase(base, rel, displayPath, content string) error {
 		return err
 	}
 
-	dirfd, err := openatRetry(unix.AT_FDCWD, base, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	// O_NOFOLLOW on the base as well as on every component under it: see
+	// errPlanBaseSymlink. MkdirAll above happily accepts a base whose final
+	// component is a symlink to a directory, so without this the writer would
+	// create and rename inside the link's target.
+	dirfd, err := openatRetry(unix.AT_FDCWD, base, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
+		if isNoFollowErr(err) || isSymlinkDisguisedAsENOTDIR(unix.AT_FDCWD, base, err) {
+			return errPlanBaseSymlink(base)
+		}
 		return fmt.Errorf("create plan directory: %w", err)
 	}
 	defer func() {
