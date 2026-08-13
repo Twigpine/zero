@@ -564,6 +564,53 @@ func TestPlanEditorFinishedMsgReloadsPanelAndConfirms(t *testing.T) {
 	}
 }
 
+// TestPlanEditorFinishedMsgNoOpEditRecordsNothing covers quitting $EDITOR
+// without changing anything. The session event the handler writes is phrased as
+// the user's own words ("I edited the plan file directly"), so recording it for
+// an untouched file puts a false statement into the next turn's context, and
+// repeated opens would each restate the whole plan into the session log.
+func TestPlanEditorFinishedMsgNoOpEditRecordsNothing(t *testing.T) {
+	isolatePlanConfig(t)
+	registry := tools.NewRegistry()
+	planTool := tools.NewUpdatePlanTool()
+	registry.Register(planTool)
+
+	cwd := t.TempDir()
+	m := newModel(context.Background(), Options{
+		Cwd:            cwd,
+		SessionStore:   testSessionStore(t),
+		Registry:       registry,
+		PermissionMode: agent.PermissionModePlan,
+	})
+	m, err := m.ensureActiveSession("plan editor no-op")
+	if err != nil {
+		t.Fatalf("ensureActiveSession: %v", err)
+	}
+	if _, err := planmode.WritePlan(cwd, m.activeSession.SessionID, "1. [in_progress] untouched step\n   Notes: keep"); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+	// Load that plan in, so the tool state already matches the file exactly:
+	// the editor opened it and quit without saving a change.
+	if _, _, err := m.reloadPlanFromFile(); err != nil {
+		t.Fatalf("reloadPlanFromFile: %v", err)
+	}
+	eventsBefore := len(m.sessionEvents)
+
+	updated, _ := m.Update(planEditorFinishedMsg{err: nil})
+	next := updated.(model)
+
+	if len(next.sessionEvents) != eventsBefore {
+		t.Fatalf("an unchanged plan file must not record a session event: before=%d after=%d", eventsBefore, len(next.sessionEvents))
+	}
+	if transcriptContains(next.transcript, "Reloaded the edited plan.") {
+		t.Fatalf("an unchanged plan file must not claim a reload, got %#v", next.transcript)
+	}
+	// The plan itself must survive untouched.
+	if got := planTool.CurrentPlan(); len(got) != 1 || got[0].Content != "untouched step" || got[0].Status != "in_progress" {
+		t.Fatalf("no-op edit changed the plan: %+v", got)
+	}
+}
+
 func TestPlanEditorFinishedMsgReloadErrorSurfaces(t *testing.T) {
 	// Failure path: if ReadPlan fails after the editor exits (e.g. the durable
 	// plan file was deleted or became unreadable), the reload error must surface

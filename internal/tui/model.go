@@ -1550,6 +1550,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "plan editor error: " + msg.err.Error()})
 			return m, nil
 		}
+		// Capture what the editor started from, before reloadPlanFromFile
+		// replaces it, so an editor session that changed nothing (open, read,
+		// quit) can be told apart from a real edit below.
+		var beforeEdit []tools.PlanItem
+		if tool, found := m.registry.Get("update_plan"); found {
+			if reader, isReader := tool.(currentPlanReader); isReader {
+				beforeEdit = reader.CurrentPlan()
+			}
+		}
 		// The user may have edited the plan file in $EDITOR; sync it back into
 		// the in-memory update_plan so the edited plan drives execution, and
 		// refresh the sticky plan panel to match.
@@ -1559,6 +1568,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if !ok {
+			return m, nil
+		}
+		// Quitting the editor without touching anything must not claim an edit
+		// happened. The session event below is written as the user's own words,
+		// so recording it unchanged would put a false statement into the next
+		// turn's context, and repeated opens would each restate the whole plan.
+		if planItemsEqual(beforeEdit, items) {
 			return m, nil
 		}
 		m.plan.updateFromItems(items, m.now())

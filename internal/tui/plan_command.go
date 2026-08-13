@@ -26,6 +26,24 @@ type currentPlanReader interface {
 	CurrentPlan() []tools.PlanItem
 }
 
+// planItemsEqual reports whether two plan snapshots carry the same content.
+// ID is deliberately excluded: parsePlanFileLines rebuilds items from the file
+// text and does not preserve the in-memory IDs, so comparing them would report
+// every reload as a change even when the user edited nothing.
+func planItemsEqual(left, right []tools.PlanItem) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index].Content != right[index].Content ||
+			left[index].Status != right[index].Status ||
+			left[index].Notes != right[index].Notes {
+			return false
+		}
+	}
+	return true
+}
+
 // planFileReloader syncs a user-edited plan file back into the in-memory plan.
 // The in-memory update_plan is the execution source of truth; the file is its
 // seed and on-disk target, so after /plan open the edited file is reloaded here.
