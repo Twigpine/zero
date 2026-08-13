@@ -217,7 +217,7 @@ func TestSplitEditorCommandWindowsPaths(t *testing.T) {
 		t.Fatalf("relative Windows path: got %#v", parts)
 	}
 
-	parts, err = splitEditorCommandFor("windows", `"C:\Program Files\editor.exe --wait`)
+	_, err = splitEditorCommandFor("windows", `"C:\Program Files\editor.exe --wait`)
 	if err == nil {
 		t.Fatal("expected unterminated Windows quote to fail")
 	}

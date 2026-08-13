@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/config"
 )
@@ -187,7 +188,41 @@ func StageForEditor(workspaceRoot, sessionID string) (stagedPath string, cleanup
 	if err := verifyPrivateDirectory(resolvedDir); err != nil {
 		return "", nil, fmt.Errorf("plan editor staging directory: %w", err)
 	}
+	// tea.ExecProcess's cleanup closure only runs if the caller's Bubble Tea
+	// program lives long enough to invoke it: a shutdown that drops the
+	// pending command (e.g. the terminal or parent process dying while the
+	// editor is open) skips the callback, and the staged file it would have
+	// removed leaks. Sweep those abandoned files on the next stage instead of
+	// relying on every shutdown path to run cleanup.
+	sweepStaleStagedFiles(resolvedDir)
 	return stageContentForEditor(resolvedDir, sessionID, content)
+}
+
+// staleStagedEditThreshold bounds how long an abandoned staged plan file can
+// linger before sweepStaleStagedFiles reclaims it. The window must comfortably
+// outlast any real interactive edit so a slow user never loses the file out
+// from under their open editor.
+const staleStagedEditThreshold = 6 * time.Hour
+
+// sweepStaleStagedFiles removes staged plan files in dir whose mtime is older
+// than staleStagedEditThreshold. Best-effort: errors are ignored, since a
+// failed sweep must not block staging a new file.
+func sweepStaleStagedFiles(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-staleStagedEditThreshold)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, entry.Name()))
+	}
 }
 
 // stageContentForEditor creates a fresh, uniquely-named file under dir

@@ -544,12 +544,14 @@ func TestBTWCtrlCDuringRunDoesNotClearDraft(t *testing.T) {
 // side conversation must exit plan mode and clear plan state, while the hidden
 // parent keeps plan mode for restore.
 func TestBTWExitsPlanModeOnSideAndPreservesParent(t *testing.T) {
+	isolatePlanConfig(t)
 	planTool := tools.NewUpdatePlanTool()
 	planTool.SetPlan([]tools.PlanItem{{Content: "draft step", Status: "pending"}})
 	registry := tools.NewRegistry()
 	registry.Register(planTool)
 
 	m := newBTWTestModel(t)
+	m.cwd = t.TempDir()
 	m.registry = registry
 	m.permissionMode = agent.PermissionModePlan
 	m.permissionModeBeforePlan = agent.PermissionModeAsk

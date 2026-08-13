@@ -40,9 +40,10 @@ type planFileReloader interface {
 //	/plan open       open the session's plan file in $VISUAL/$EDITOR
 //	/plan off        exit plan mode (alias: /plan exit)
 //
-// Plan mode is read-only: tool advertisement (see agent.toolAdvertisedInPlan)
-// only exposes read tools, update_plan, and ask_user, so the agent cannot
-// mutate the workspace while planning.
+// Plan mode is read-only: tool advertisement (see
+// tools.ToolAdvertisedForPermissionMode) only exposes read tools,
+// update_plan, and ask_user, so the agent cannot mutate the workspace while
+// planning.
 func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
 	arg := strings.ToLower(strings.TrimSpace(text))
 	switch arg {
@@ -82,7 +83,7 @@ func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
 		} else if ok {
 			m.plan.updateFromItems(items, m.now())
 		}
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan mode\nActive: read-only planning. Write and shell tools are hidden until /plan off." + reloadWarning})
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan mode\n" + planEnterText(m) + reloadWarning})
 		return m, nil
 	case "off", "exit":
 		if m.permissionMode != agent.PermissionModePlan {
@@ -434,8 +435,7 @@ func planEnterText(m model) string {
 	if path, err := planmode.PlanFilePath(m.cwd, m.activeSession.SessionID); err == nil {
 		planNote = "\nPlan file: " + path
 	}
-	return "Entered plan mode. The agent can inspect the workspace and shape the plan with update_plan, but cannot edit files or run commands until you exit.\n" +
-		"Use /plan on to enter plan mode, then /plan open to edit the plan, or /plan off to implement." + planNote
+	return "Active: read-only planning. Write and shell tools are hidden until /plan off." + planNote
 }
 
 func (m model) planText() string {
