@@ -288,6 +288,51 @@ func TestPlanOpenCreatesSessionBeforeWritingPlanFile(t *testing.T) {
 	}
 }
 
+// TestPlanOnCreatesSessionAndNamesItsPlanFile covers plan-mode entry on its
+// own, without the /plan open that follows it in the test above. On a fresh
+// TUI (or after /new) the session ID is empty until the first prompt lazily
+// creates it, and PlanFilePath maps an empty ID onto a single shared
+// no-session slug. Entering plan mode must create the session first, so the
+// banner names that session's own plan file rather than the shared fallback
+// that every other fresh session would also resolve to.
+func TestPlanOnCreatesSessionAndNamesItsPlanFile(t *testing.T) {
+	isolatePlanConfig(t)
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewUpdatePlanTool())
+	cwd := t.TempDir()
+	m := newModel(context.Background(), Options{
+		Cwd:          cwd,
+		SessionStore: testSessionStore(t),
+		Registry:     registry,
+	})
+	if m.activeSession.SessionID != "" {
+		t.Fatal("setup: expected a fresh model to have no active session")
+	}
+
+	m.input.SetValue("/plan on")
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+
+	if next.activeSession.SessionID == "" {
+		t.Fatal("expected /plan on to create a session before entering plan mode")
+	}
+	path, err := planmode.PlanFilePath(cwd, next.activeSession.SessionID)
+	if err != nil {
+		t.Fatalf("PlanFilePath: %v", err)
+	}
+	if !transcriptContains(next.transcript, path) {
+		t.Fatalf("expected the plan-entry banner to name the real session's plan file %q, got %#v", path, next.transcript)
+	}
+	// The shared no-session path must never be what the user is pointed at.
+	fallback, err := planmode.PlanFilePath(cwd, "")
+	if err != nil {
+		t.Fatalf("PlanFilePath(empty): %v", err)
+	}
+	if transcriptContains(next.transcript, fallback) {
+		t.Fatalf("plan-entry banner named the shared no-session plan file %q", fallback)
+	}
+}
+
 func TestPlanOpenLaunchesEditorCommand(t *testing.T) {
 	// Regression for the model being copied by value into tea.NewProgram
 	// before the (now-removed) m.program field was assigned in run.go: /plan
