@@ -21,8 +21,15 @@ func openPlanUnderBase(base, rel, displayPath string) (*os.File, error) {
 		return nil, err
 	}
 
-	dirfd, err := openatRetry(unix.AT_FDCWD, base, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	// O_NOFOLLOW on the base as well as on every component under it: see
+	// errPlanBaseSymlink for why a link here defeats the whole walk. It applies
+	// to the final component only, so a legitimately symlinked ~/.config above
+	// the storage root is still fine.
+	dirfd, err := openatRetry(unix.AT_FDCWD, base, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
+		if isNoFollowErr(err) || isSymlinkDisguisedAsENOTDIR(unix.AT_FDCWD, base, err) {
+			return nil, errPlanBaseSymlink(base)
+		}
 		return nil, err
 	}
 	// Own dirfd until the final file is successfully handed to os.NewFile.
