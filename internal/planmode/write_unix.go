@@ -120,6 +120,11 @@ func ensureDirNoFollow(dirfd int, name string) (int, error) {
 		if isNoFollowErr(err) {
 			return -1, err
 		}
+		if isSymlinkDisguisedAsENOTDIR(dirfd, name, err) {
+			// Translate to ELOOP so the caller's isNoFollowErr check reaches
+			// the same refusal every other platform's symlink hit gives.
+			return -1, syscall.ELOOP
+		}
 		if err != syscall.ENOENT && !os.IsNotExist(err) {
 			// EEXIST without open succeeding means a non-directory is present.
 			return -1, err

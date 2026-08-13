@@ -36,7 +36,7 @@ func openPlanUnderBase(base, rel, displayPath string) (*os.File, error) {
 	for i := 0; i < len(parts)-1; i++ {
 		next, err := openatRetry(dirfd, parts[i], unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 		if err != nil {
-			if isNoFollowErr(err) {
+			if isNoFollowErr(err) || isSymlinkDisguisedAsENOTDIR(dirfd, parts[i], err) {
 				return nil, errPlanSymlink(displayPath)
 			}
 			return nil, err
@@ -95,4 +95,22 @@ func openatRetry(dirfd int, path string, flags int, mode uint32) (int, error) {
 // FreeBSD/Dragonfly).
 func isNoFollowErr(err error) bool {
 	return err == syscall.ELOOP || err == syscall.EMLINK
+}
+
+// isSymlinkDisguisedAsENOTDIR reports whether err is the ENOTDIR that
+// openat(..., O_DIRECTORY|O_NOFOLLOW) returns on Linux and Darwin when name
+// is actually a symlink: the kernel never dereferences the symlink to see
+// the O_DIRECTORY mismatch it would otherwise report as ELOOP/EMLINK (what
+// isNoFollowErr checks). A genuine non-symlink, non-directory component (a
+// plain file blocking the path) also returns ENOTDIR, so this disambiguates
+// with a no-follow stat instead of trusting the errno alone.
+func isSymlinkDisguisedAsENOTDIR(dirfd int, name string, err error) bool {
+	if err != syscall.ENOTDIR {
+		return false
+	}
+	var st unix.Stat_t
+	if statErr := unix.Fstatat(dirfd, name, &st, unix.AT_SYMLINK_NOFOLLOW); statErr != nil {
+		return false
+	}
+	return st.Mode&unix.S_IFMT == unix.S_IFLNK
 }
