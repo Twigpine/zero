@@ -242,3 +242,52 @@ func TestALocalWriteRefusesAnIneffectiveIgnore(t *testing.T) {
 		t.Errorf("the ignore this store installs does not cover everything: %q", written)
 	}
 }
+
+// GIT DOES NOT READ A SYMLINKED .gitignore, SO NEITHER DOES THE GATE.
+//
+// keepLocalScopePrivate saw O_EXCL return EEXIST and then read through the link,
+// accepting the target's "*" as proof of a rule git warns about and does not
+// apply. An in-workspace RELATIVE link is followed by os.Root — an absolute one
+// is refused, which is why an earlier check of exactly this looked clean and was
+// not.
+func TestALinkedIgnoreIsNotProofOfPrivacy(t *testing.T) {
+	root := t.TempDir()
+	paths := DefaultPaths(root)
+	if err := os.MkdirAll(paths.LocalDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(paths.LocalDir, "decoy"), []byte("*\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkDir(t, "decoy", filepath.Join(paths.LocalDir, ".gitignore"))
+	if _, err := Write(paths, ScopeLocal, "private", "d", "secret"); !errors.Is(err, ErrNotPrivate) {
+		t.Errorf("a symlinked ignore was accepted as privacy: %v", err)
+	}
+}
+
+// THE GATE FOLLOWS GIT'S WHITESPACE RULES, and trimming each line had both
+// backwards. Every expectation here was measured against git 2.55.0, not read
+// off the spec.
+func TestTheIgnoreGateAgreesWithGit(t *testing.T) {
+	for name, tc := range map[string]struct {
+		content string
+		covered bool
+	}{
+		// LEADING whitespace is part of the pattern, so this ignores nothing —
+		// and the gate said it did, which let a note the user was told stays on
+		// this machine be picked up by a routine `git add -A`.
+		"leading spaces": {"  *\n", false},
+		"leading tab":    {"\t*\n", false},
+		// A BOM is stripped by git, so this rule works and must be accepted.
+		"utf-8 bom": {"\xef\xbb\xbf*\n", true},
+		// TRAILING whitespace is not significant to git.
+		"trailing spaces":   {"*   \n", true},
+		"plain":             {"*\n", true},
+		"comment then star": {"# mine\n*\n", true},
+		"cancelled":         {"*\n!keep.md\n", false},
+	} {
+		if got := ignoresEverything(tc.content); got != tc.covered {
+			t.Errorf("%s: ignoresEverything(%q) = %v, want %v (git's answer)", name, tc.content, got, tc.covered)
+		}
+	}
+}
