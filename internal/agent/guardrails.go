@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -185,13 +186,23 @@ var inabilityStems = []string{
 	"i cannot ", "i can't ", "i can not ", "i could not ", "i couldn't ",
 	"i am unable to", "i'm unable to", "i was unable to", "i wasn't able to",
 	"i was not able to", "i do not have", "i don't have",
-	// "unable to " WITHOUT A SUBJECT WAS REMOVED. It is the only stem here that
-	// does not name who was unable, and it fired on a report's own section
-	// heading — "**Unable to verify (1):** - MCP #3 claim was truncated" — in a
-	// verification task that had completed and was categorising its findings.
-	// The first-person forms above still catch every genuine admission; a
-	// heading is not one.
 	"we are unable to", "we were unable to",
+	// THE SUBJECTLESS STEM IS KEPT, and the heading it fired on is handled where
+	// the heading is, not by deleting the stem.
+	//
+	// It was removed once because a completed audit's own section heading —
+	// "**Unable to verify (1):** - MCP #3 claim was truncated" — reads as an
+	// admission. But it is the ONLY stem that catches an admission with no
+	// first-person subject, and removing it lost every one of those:
+	//
+	//	"Unable to complete the task; the build never succeeded."
+	//	"The agent was unable to finish the migration."
+	//	"Unable to verify the fix, so the change is unverified."
+	//
+	// None name "i" or "we", so no other stem sees them. That traded one false
+	// positive for three false negatives, in the direction this guard exists to
+	// prevent. countedLabelSentence drops the heading shape instead.
+	"unable to ",
 	"without being able to",
 }
 
@@ -351,9 +362,23 @@ var objectiveFailureMarkers = []string{
 // So the allowance now yields when the sentence ALSO says the work is blocked.
 // "I could not find where X is set in production code" still passes, because
 // nothing in it claims the objective was left undone; the three above do not.
+// strongAbsenceTails are the allowance tails carrying an explicit "any": the
+// model asserting it looked and found NOTHING. That is a finding whatever the
+// rest of the sentence says, so blockedWorkMarkers does not override them.
+var strongAbsenceTails = []string{
+	"find any", "found any", "see any", "detect any", "identify any",
+	"spot any", "locate any", "confirm any", "observe any",
+}
+
 var blockedWorkMarkers = []string{
 	"unverified", "not verified", "cannot verify", "could not verify",
 	"someone else", "will need to", "needs someone", "handed off", "hand off",
+	// "someone else" and "will need to" are the two that also appear in
+	// SUCCESSFUL reports, describing somebody else's future work — "I could not
+	// find any remaining issues, though a follow-up will need to cover the
+	// Windows path" is a finding. They are kept because they do carry a genuine
+	// handoff-because-blocked ("someone else will need to pick this up"), and the
+	// strongAbsenceTails exemption above is what stops them flipping a finding.
 	"ran out of", "run out of", "out of time", "in the time available",
 	"stopped there", "stopping here", "gave up", "giving up",
 	"nothing was modified", "no changes were made", "left unchanged", "left undone",
@@ -361,9 +386,36 @@ var blockedWorkMarkers = []string{
 	"so i cannot", "so i could not",
 }
 
+// countedLabelSentence reports whether a sentence is a markdown LABEL that
+// introduces and counts a bucket of findings, rather than a claim about the
+// objective.
+//
+// "**Unable to verify (1):** - MCP #3 claim was truncated" is a section heading
+// in a COMPLETED audit. Read as a sentence it is indistinguishable from an
+// admission, which is why the subjectless stem was once deleted to silence it.
+//
+// NARROW ON PURPOSE: the sentence must BEGIN with the inability phrase, after
+// markdown emphasis, AND carry a parenthesised count. "Unable to complete the
+// task; the build never succeeded" begins the same way and has no count, so it
+// still fires — which is the whole reason this is preferable to dropping the
+// stem.
+func countedLabelSentence(sentence string) bool {
+	trimmed := strings.TrimLeft(strings.TrimSpace(sentence), "-*#> \t")
+	if !strings.HasPrefix(trimmed, "unable to ") {
+		return false
+	}
+	return countedLabelSuffix.MatchString(sentence)
+}
+
+var countedLabelSuffix = regexp.MustCompile(`\(\s*\d+\s*\)`)
+
 func selfReportedIncompletion(text string) string {
 	for _, sentence := range admissionSentences(strings.ToLower(stripQuoted(text))) {
 		if containsAny(sentence, narrativeMarkers) {
+			continue
+		}
+		// A counted label is a heading, not a claim about the objective.
+		if countedLabelSentence(sentence) {
 			continue
 		}
 		// A sentence about the tool grant is about CAPABILITY, not about the
@@ -398,7 +450,8 @@ func selfReportedIncompletion(text string) string {
 				// blocked: "could not reproduce the crash" is a finding, "could not
 				// reproduce the crash, so the fix is unverified" is an admission,
 				// and the tail prefix alone cannot tell them apart.
-				if !hasAnyPrefix(tail, successNegationTails) || containsAny(sentence, blockedWorkMarkers) {
+				strong := hasAnyPrefix(tail, strongAbsenceTails)
+				if !hasAnyPrefix(tail, successNegationTails) || (!strong && containsAny(sentence, blockedWorkMarkers)) {
 					return selfReportReason(strings.TrimSpace(stem) + " …")
 				}
 				start = abs + len(stem)

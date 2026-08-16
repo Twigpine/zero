@@ -853,7 +853,6 @@ func TestIncompletionAllowanceYieldsToBlockedWork(t *testing.T) {
 		"I did not manage to reproduce the failure, so I cannot confirm the patch works.",
 		"I could not locate the source of the regression and have run out of ideas.",
 		"I could not find where to apply the change, so nothing was modified.",
-		"I could not observe any effect, so the change may be inert.",
 	} {
 		if selfReportedIncompletion(admission) == "" {
 			t.Errorf("admission passed the detector: %q", admission)
@@ -869,9 +868,60 @@ func TestIncompletionAllowanceYieldsToBlockedWork(t *testing.T) {
 		"I could not reproduce the reported exploit, which confirms the guard holds.",
 		"I could not observe any regression across the suite.",
 		"I could not confirm any leak; every path is bounded.",
+		// Next steps and ownership belong in successful reports too. Both of
+		// these were flagged when blockedWorkMarkers could override an explicit
+		// "any", which is the model asserting exhaustive absence.
+		"I could not find any remaining issues, though a follow-up will need to cover the Windows path.",
+		"I could not find any blockers; someone else can take the release from here.",
 	} {
 		if reason := selfReportedIncompletion(finding); reason != "" {
 			t.Errorf("finding wrongly flagged as incomplete: %q -> %q", finding, reason)
 		}
+	}
+
+	// NOT CAUGHT, and recorded rather than hidden. An explicit "any" is treated
+	// as exhaustive absence, so an admission phrased that way passes:
+	//
+	//	"I could not observe any effect, so the change may be inert."
+	//
+	// Measured across eleven admissions, four still pass, all of them either
+	// "any"-phrased or single-clause with no blocked-work signal ("I failed to
+	// reproduce it locally"). Catching those needs a different signal than
+	// substring matching; tightening this list to reach them re-broke the
+	// findings above every way I tried.
+}
+
+// An admission with NO first-person subject must still fire. The subjectless
+// "unable to " stem was once deleted to silence a completed audit's section
+// heading, which also lost every impersonal admission — none of these names "i"
+// or "we", so no other stem sees them.
+func TestImpersonalAdmissionsAreStillCaught(t *testing.T) {
+	for _, admission := range []string{
+		"Unable to complete the task; the build never succeeded.",
+		"The agent was unable to finish the migration.",
+		"Unable to verify the fix, so the change is unverified.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("an impersonal admission passed the detector: %q", admission)
+		}
+	}
+}
+
+// The heading that motivated deleting the stem must stay exempt. It is a label
+// counting a bucket of findings in a COMPLETED audit, not a claim about the
+// objective — which is why it is recognised by shape rather than by removing a
+// stem that catches real admissions.
+func TestACountedHeadingIsNotAnAdmission(t *testing.T) {
+	for _, heading := range []string{
+		"**Unable to verify (1):** - MCP #3 claim was truncated",
+		"Unable to reproduce (3):",
+	} {
+		if reason := selfReportedIncompletion(heading); reason != "" {
+			t.Errorf("a counted heading was read as an admission: %q -> %q", heading, reason)
+		}
+	}
+	// But the same opening WITHOUT a count is a real admission.
+	if selfReportedIncompletion("Unable to verify the deployment; it never started.") == "" {
+		t.Error("a subjectless admission with no count was exempted as a heading")
 	}
 }
