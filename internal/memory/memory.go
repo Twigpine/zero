@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -47,6 +48,11 @@ const (
 // fileExt is the stored extension. Markdown with frontmatter, because a note is
 // meant to be readable by the person whose repo it is sitting in.
 const fileExt = ".md"
+
+// gitignoreName and localIgnoreContent are what makes the local store private.
+const gitignoreName = ".gitignore"
+
+const localIgnoreContent = "# Notes saved to the local scope stay on this machine.\n*\n"
 
 // tempExt is what an in-progress write carries. Deliberately not fileExt, so a
 // temp file a crash left behind is never listed as a note.
@@ -102,6 +108,11 @@ var (
 	ErrTooLarge = fmt.Errorf("a memory note may be at most %d bytes", maxNoteBytes)
 	ErrNotFound = errors.New("no such memory")
 	ErrBadScope = errors.New(`scope must be "project" or "local"`)
+	// ErrNotPrivate is returned rather than writing a local note the repository
+	// would then track. The local scope's whole promise is that the note stays on
+	// this machine, and a promise that degrades quietly is worse than one that
+	// refuses.
+	ErrNotPrivate = errors.New("the local memory store is not ignored by git, so a note saved there would not stay on this machine")
 	// ErrIsSymlink is pathjail's refusal, kept under this package's own name so
 	// callers testing for it keep working. It now covers a Windows junction as
 	// well as a symlink, which the old ModeSymlink-only check did not.
@@ -187,7 +198,44 @@ func (paths Paths) openScope(scope Scope) (*os.Root, string, error) {
 	if strings.TrimSpace(paths.Root) == "" {
 		return nil, "", ErrNoStore
 	}
-	return pathjail.Open(paths.Root, dir)
+	handle, relative, err := pathjail.Open(paths.Root, dir)
+	if err != nil {
+		return nil, "", err
+	}
+	// EVERY COMPONENT, not only the note. os.Root refuses to traverse OUT of the
+	// workspace, which is what the comment above was relying on — but it happily
+	// follows a link that resolves back INSIDE it, and the store path is checked
+	// in. A repository shipping ".zero -> redirected" redirected every read and
+	// write to another directory in the same tree while each individual check
+	// passed, because the only component ever inspected was the note file at the
+	// end.
+	if err := refuseReparseChain(handle, relative); err != nil {
+		handle.Close()
+		return nil, "", err
+	}
+	return handle, relative, nil
+}
+
+// refuseReparseChain refuses a link or reparse point at every component of
+// relative, outermost first.
+//
+// Built on pathjail.RefuseReparse rather than reimplementing the test, so the
+// Windows junction handling and the trailing-separator care stay in one place.
+// Outermost first because that is the component whose redirection decides where
+// everything below it lands, and it makes the error name the link the caller can
+// actually act on.
+func refuseReparseChain(handle *os.Root, relative string) error {
+	relative = filepath.Clean(relative)
+	if relative == "." || relative == string(filepath.Separator) {
+		return nil
+	}
+	parts := strings.Split(relative, string(filepath.Separator))
+	for i := range parts {
+		if err := pathjail.RefuseReparse(handle, filepath.Join(parts[:i+1]...)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Note is one stored memory.
@@ -355,8 +403,8 @@ func Read(paths Paths, scope Scope, name string) (Note, error) {
 	return Note{Name: name, Description: description, Scope: scope, Body: text}, nil
 }
 
-// keepLocalScopePrivate drops a self-ignoring .gitignore into the local store
-// the first time one is written.
+// keepLocalScopePrivate installs, or verifies, the ignore that keeps local notes
+// out of the repository.
 //
 // "local" promises the note stays on this machine, and it did not: the store
 // lives at <workspace>/.zero/memory/local, inside the working tree, so a default
@@ -369,27 +417,66 @@ func Read(paths Paths, scope Scope, name string) (Note, error) {
 // that makes itself private travels with every one. "*" covers the notes and the
 // ignore file itself, so the directory contributes nothing to the index.
 //
-// Best effort by design: a store that cannot hold an ignore file is still a
-// working store, and failing the write would trade a privacy improvement for an
-// outage.
-// NO ERROR RETURN, because there is no failure here a caller should act on: the
-// store works whether or not the ignore file exists, and failing a note's write
-// over it would trade a privacy improvement for an outage. A signature that
-// cannot fail says that plainly, rather than asking every caller to check a
-// value that is always nil.
-func keepLocalScopePrivate(handle *os.Root, scope Scope, relative string) {
+// IT FAILS CLOSED, and used to fail open. This was best-effort with no error
+// return, on the reasoning that a store which cannot hold an ignore file is
+// still a working store and failing the write would trade privacy for an outage.
+// That reasoning is wrong for this particular function, because O_EXCL cannot
+// tell "a previous run wrote the ignore" from "something else is already there":
+// precreating an empty .gitignore made every subsequent local write succeed with
+// the store fully tracked. The promise is the feature here — a note the user was
+// told stays on this machine, sitting in git status, is worse than a refused
+// write, because the refusal is visible and the leak is not.
+func keepLocalScopePrivate(handle *os.Root, scope Scope, relative string) error {
 	if scope != ScopeLocal {
-		return
+		return nil
 	}
-	// O_EXCL alone decides whether this is the first write: an existing file
-	// fails the create, which is the same answer a prior Stat would have given
-	// and one syscall rather than two.
-	file, err := handle.OpenFile(filepath.Join(relative, ".gitignore"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	ignorePath := filepath.Join(relative, gitignoreName)
+	// O_EXCL still decides whether this is the first write, in one syscall — but
+	// now the "already exists" answer leads to a check rather than to silence.
+	file, err := handle.OpenFile(ignorePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	switch {
+	case err == nil:
+		defer file.Close()
+		if _, writeErr := file.WriteString(localIgnoreContent); writeErr != nil {
+			return fmt.Errorf("write %s: %w", ignorePath, writeErr)
+		}
+		return nil
+	case !errors.Is(err, fs.ErrExist):
+		return fmt.Errorf("create %s: %w", ignorePath, err)
+	}
+	existing, err := readBounded(handle, ignorePath)
 	if err != nil {
-		return
+		return fmt.Errorf("read %s: %w", ignorePath, err)
 	}
-	defer file.Close()
-	_, _ = file.WriteString("# Notes saved to the local scope stay on this machine.\n*\n")
+	if !ignoresEverything(string(existing)) {
+		return fmt.Errorf("%w: %s", ErrNotPrivate, ignorePath)
+	}
+	return nil
+}
+
+// ignoresEverything reports whether an existing ignore file actually excludes the
+// whole directory.
+//
+// A bare "*" is what this store writes, so that is what is recognised; anything
+// narrower is treated as not covering, because guessing at the effect of an
+// arbitrary pattern set is how a privacy check ends up agreeing with a file that
+// does not protect anything. A re-inclusion line cancels the cover no matter
+// where it sits, so one "!" is enough to fail the whole file.
+func ignoresEverything(content string) bool {
+	covered := false
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "!") {
+			return false
+		}
+		if line == "*" {
+			covered = true
+		}
+	}
+	return covered
 }
 
 // readBounded reads at most maxNoteBytes, refusing anything larger rather than
@@ -444,7 +531,9 @@ func Write(paths Paths, scope Scope, name, description, body string) (string, er
 	if err := handle.MkdirAll(relative, 0o700); err != nil {
 		return "", fmt.Errorf("create %s: %w", dir, err)
 	}
-	keepLocalScopePrivate(handle, scope, relative)
+	if err := keepLocalScopePrivate(handle, scope, relative); err != nil {
+		return "", err
+	}
 	path := filepath.Join(dir, name+fileExt)
 	relativePath := filepath.Join(relative, name+fileExt)
 	if err := pathjail.RefuseReparse(handle, relativePath); err != nil {
