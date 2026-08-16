@@ -96,7 +96,7 @@ func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
 			m.plan.updateFromItems(items, m.now())
 		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan mode\n" + planEnterText(m) + reloadWarning})
-		return m, nil
+		return m.syncPeerIdentity(), nil
 	case "off", "exit":
 		if m.permissionMode != agent.PermissionModePlan {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan mode\nNot currently active."})
@@ -158,7 +158,7 @@ func (m model) exitPlanMode() model {
 		}
 	}
 	m.permissionModeBeforePlan = ""
-	return m
+	return m.syncPeerIdentity()
 }
 
 // resetPlanForSessionSwitch clears the in-memory plan (both the update_plan
