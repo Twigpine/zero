@@ -362,34 +362,48 @@ func clauseEnd(line string, from int, known map[string][]float64) int {
 // clauseSeparators end a measurement clause without starting a new name.
 var clauseSeparators = []string{";", ",", " and ", " but ", " while ", " whereas ", " though "}
 
-// nextNameShaped returns the offset of the next token that looks like something
-// `go test` would print a timing for — a Test/Benchmark/Fuzz/Example function, or
-// an import path — or -1.
+// nextNameShaped returns the offset of the next token that looks like a name
+// `go test` would print a timing for — a Test, Benchmark, Fuzz or Example
+// function — or -1.
 //
 // SHAPE, not membership. The ledger only knows what this session measured, and a
 // claim may name a test that was never run; that name still ends the clause it
 // starts, because the number after it belongs to it and not to the name before.
+//
+// THE PREFIXES ARE CAPITALISED, and the first version's were not. Nothing here
+// lowercases the claim — unlike the guardrails, this package compares against
+// recorded names and must preserve their case — so "test" never matched
+// "TestUnrecorded" and this function returned -1 for every realistic input. The
+// tests that were supposed to cover it all contained a comma or a semicolon, so
+// the clause-separator bound caught them and the dead branch looked alive. A
+// bleed with no separator at all went straight through.
+//
+// The character after the prefix must be uppercase, a digit or an underscore,
+// which is how `go test` spells these names and what separates TestFoo from the
+// ordinary words "test", "testing" and "tested".
 func nextNameShaped(line string, from int) int {
 	for index := from; index < len(line); index++ {
 		if index > from && !isNameSeparator(line[index-1]) {
 			continue
 		}
 		rest := line[index:]
-		for _, prefix := range []string{"test", "benchmark", "fuzz", "example"} {
+		for _, prefix := range []string{"Test", "Benchmark", "Fuzz", "Example"} {
 			if len(rest) <= len(prefix) || !strings.HasPrefix(rest, prefix) {
 				continue
 			}
-			// A bare "test" or "testing" is an ordinary word; a name continues
-			// with something that is not a lowercase letter, which is how
-			// go test spells them.
-			next := rest[len(prefix)]
-			if next >= 'a' && next <= 'z' {
+			if next := rest[len(prefix)]; !isNameContinuation(next) {
 				continue
 			}
 			return index
 		}
 	}
 	return -1
+}
+
+// isNameContinuation reports whether b continues a go test name rather than
+// ending the word.
+func isNameContinuation(b byte) bool {
+	return (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
 }
 
 func isNameSeparator(b byte) bool {

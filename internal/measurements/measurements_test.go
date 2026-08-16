@@ -425,6 +425,15 @@ func TestAnUnrecordedNeighbourStillEndsTheClause(t *testing.T) {
 		"TestFoo was fine, BenchmarkThing took 4.20s",
 		// Not name-shaped at all — the separator is what ends this one.
 		"TestFoo passed, the suite took 4.20s",
+		// NO SEPARATOR ANYWHERE. These can only be stopped by the name-shape
+		// bound, which is the point: every case above contains a comma, a
+		// semicolon or an " and ", so they all passed while nextNameShaped was
+		// returning -1 for every realistic input and the dead branch looked
+		// alive. A bound that only its neighbours can certify is not covered.
+		"TestFoo passed TestUnrecorded took 4.20s",
+		"TestFoo was fine BenchmarkThing took 4.20s",
+		"TestFoo ok FuzzParse took 4.20s",
+		"TestFoo ok Example_usage took 4.20s",
 	} {
 		ledger := NewLedger()
 		ledger.Record(Run{}, "--- PASS: TestFoo (0.10s)\n")
@@ -438,12 +447,26 @@ func TestAnUnrecordedNeighbourStillEndsTheClause(t *testing.T) {
 		"TestFoo took 9.90s",
 		"TestFoo took 9.90s and TestBar took 1.00s",
 		"TestFoo took 9.90s; TestUnrecorded took 4.20s",
+		"TestFoo took 9.90s TestBar took 1.00s",
 	} {
 		ledger := NewLedger()
 		ledger.Record(Run{}, "--- PASS: TestFoo (0.10s)\n")
 		conflicts := ledger.Conflicts(Run{}, claim)
 		if len(conflicts) != 1 || conflicts[0].Claimed != 9.9 {
 			t.Errorf("a fabricated number beside a neighbour was not caught: %q -> %+v", claim, conflicts)
+		}
+	}
+
+	// "testing", "tested" and a bare "test" are ordinary words, not names, and
+	// must not cut the clause short.
+	for _, claim := range []string{
+		"TestFoo took 9.90s after testing the parser",
+		"TestFoo took 9.90s, tested twice",
+	} {
+		ledger := NewLedger()
+		ledger.Record(Run{}, "--- PASS: TestFoo (0.10s)\n")
+		if conflicts := ledger.Conflicts(Run{}, claim); len(conflicts) != 1 {
+			t.Errorf("an ordinary word beginning with a name prefix ended the clause: %q -> %+v", claim, conflicts)
 		}
 	}
 
