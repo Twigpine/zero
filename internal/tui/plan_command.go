@@ -91,12 +91,6 @@ func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
 		m.permissionMode = agent.PermissionModePlan
 		reloadWarning := ""
 		if items, ok, reloadErr := m.reloadPlanFromFile(); reloadErr != nil {
-			if writer, ok := m.registry.Get("update_plan"); ok {
-				if reloader, ok := writer.(planFileReloader); ok {
-					reloader.SetPlan(nil)
-				}
-			}
-			m.plan.clear()
 			reloadWarning = "\nplan reload error: " + reloadErr.Error()
 		} else if ok {
 			m.plan.updateFromItems(items, m.now())

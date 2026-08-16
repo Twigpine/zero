@@ -23,9 +23,6 @@ func writePlanFile(base, path, content string) error {
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		return fmt.Errorf("create plan directory: %w", err)
 	}
-	if err := os.Chmod(base, 0o700); err != nil {
-		return fmt.Errorf("restrict plan directory permissions: %w", err)
-	}
 	rel, err := relWithinBase(base, path)
 	if err != nil {
 		return err

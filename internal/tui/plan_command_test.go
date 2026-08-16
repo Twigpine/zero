@@ -660,6 +660,53 @@ func TestPlanEditorFinishedMsgReloadErrorSurfaces(t *testing.T) {
 	}
 }
 
+func TestPlanOnReloadErrorPreservesExistingPlan(t *testing.T) {
+	isolatePlanConfig(t)
+	registry := tools.NewRegistry()
+	planTool := tools.NewUpdatePlanTool()
+	planTool.SetPlan([]tools.PlanItem{{Content: "in-memory step", Status: "pending"}})
+	registry.Register(planTool)
+
+	cwd := t.TempDir()
+	store := testSessionStore(t)
+	m := newModel(context.Background(), Options{
+		Cwd:          cwd,
+		SessionStore: store,
+		Registry:     registry,
+	})
+	m, err := m.ensureActiveSession("plan reload failure test")
+	if err != nil {
+		t.Fatalf("ensureActiveSession: %v", err)
+	}
+	m.plan.updateFromItems(planTool.CurrentPlan(), m.now())
+
+	if _, err := planmode.WritePlan(cwd, m.activeSession.SessionID, "1. [pending] on disk"); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+	path, err := planmode.PlanFilePath(cwd, m.activeSession.SessionID)
+	if err != nil {
+		t.Fatalf("PlanFilePath: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove plan file: %v", err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatalf("replace plan file with directory: %v", err)
+	}
+
+	updated, _ := m.handlePlanCommand("on")
+	next := updated.(model)
+	if len(planTool.CurrentPlan()) != 1 || planTool.CurrentPlan()[0].Content != "in-memory step" {
+		t.Fatalf("expected in-memory plan preserved after /plan on reload error, got %+v", planTool.CurrentPlan())
+	}
+	if next.plan.isEmpty() {
+		t.Fatal("expected sticky plan panel preserved after /plan on reload error")
+	}
+	if !transcriptContains(next.transcript, "plan reload error:") {
+		t.Fatalf("expected a plan reload error message in transcript, got %#v", next.transcript)
+	}
+}
+
 func TestPlanOpenEditorReloadPreservesStatusAndNotes(t *testing.T) {
 	// Regression: parsePlanFileLines used to discard the "[status]" bracket
 	// (resetting every reloaded item to "pending") and treat a "Notes: ..."

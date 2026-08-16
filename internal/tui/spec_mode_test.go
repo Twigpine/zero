@@ -284,6 +284,7 @@ func TestSpecLaunchesSeedElapsedClock(t *testing.T) {
 }
 
 func TestSpecCommandExitsPlanMode(t *testing.T) {
+	isolatePlanConfig(t)
 	store := testSessionStore(t)
 	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{
 		submitSpecScript("call-1", "Review Flow", "# Goal\n\nAdd review flow."),
@@ -336,10 +337,10 @@ func TestSpecCommandCreateFailurePreservesPlanMode(t *testing.T) {
 	m.plan.updateFromItems(planTool.CurrentPlan(), m.now())
 	m.input.SetValue("/spec add review flow")
 
-	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
-	if cmd != nil {
-		t.Fatal("expected no agent run when session create fails")
+	if next.pending || next.activeRunID != 0 {
+		t.Fatalf("expected no agent run when session create fails, pending=%v activeRunID=%d", next.pending, next.activeRunID)
 	}
 	if next.permissionMode != agent.PermissionModePlan {
 		t.Fatalf("expected plan mode preserved after failed /spec create, got %s", next.permissionMode)

@@ -565,9 +565,6 @@ func TestReadPlanFileRejectsNonRegularFile(t *testing.T) {
 	}
 }
 
-// TestWritePlanRefusesIntermediateSymlink pins that WritePlan's handle-bound
-// walk refuses an intermediate directory that is a symlink rather than
-// following it with pathname MkdirAll/OpenFile/Rename.
 // TestPlanStorageBaseSymlinkRefused covers a symlink or reparse point at the
 // plan storage root itself, as opposed to a component under it.
 // ensurePlanPathContained resolves the base and the plan path through the same
@@ -620,6 +617,9 @@ func TestPlanStorageBaseSymlinkRefused(t *testing.T) {
 	}
 }
 
+// TestWritePlanRefusesIntermediateSymlink pins that WritePlan's handle-bound
+// walk refuses an intermediate directory that is a symlink rather than
+// following it with pathname MkdirAll/OpenFile/Rename.
 func TestWritePlanRefusesIntermediateSymlink(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		// Creating directory symlinks requires elevated privileges on many

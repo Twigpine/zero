@@ -843,6 +843,7 @@ func TestResumeCommandIsBlockedWhileRunPending(t *testing.T) {
 // session switch — silently making the fresh session read-only, and letting
 // its eventual /plan off restore the OLD session's permission mode into it.
 func TestNewSessionExitsPlanMode(t *testing.T) {
+	isolatePlanConfig(t)
 	store := testSessionStore(t)
 	m := newModel(context.Background(), Options{SessionStore: store})
 	m.permissionMode = agent.PermissionModePlan
@@ -1031,6 +1032,7 @@ func TestResumeDifferentSessionReloadsDestinationPlan(t *testing.T) {
 // /resume must not reset that choice to Auto just because they
 // unconditionally call exitPlanMode on every session switch.
 func TestNewSessionPreservesNonPlanPermissionMode(t *testing.T) {
+	isolatePlanConfig(t)
 	store := testSessionStore(t)
 	m := newModel(context.Background(), Options{SessionStore: store})
 	m.permissionMode = agent.PermissionModeAsk
@@ -1043,6 +1045,7 @@ func TestNewSessionPreservesNonPlanPermissionMode(t *testing.T) {
 }
 
 func TestResumeDifferentSessionPreservesNonPlanPermissionMode(t *testing.T) {
+	isolatePlanConfig(t)
 	store := testSessionStore(t)
 	active, err := store.Create(sessions.CreateInput{Title: "Active"})
 	if err != nil {
@@ -1067,6 +1070,7 @@ func TestResumeDifferentSessionPreservesNonPlanPermissionMode(t *testing.T) {
 // `/resume <currentID>`) is not a switch, so it must leave plan mode alone —
 // matching the existing loopsCleared guard just below.
 func TestResumeSameSessionKeepsPlanMode(t *testing.T) {
+	isolatePlanConfig(t)
 	store := testSessionStore(t)
 	active, err := store.Create(sessions.CreateInput{Title: "Active"})
 	if err != nil {
