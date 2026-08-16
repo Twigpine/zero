@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/peermsg"
 	"github.com/Gitlawb/zero/internal/planmode"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -69,6 +70,40 @@ func newPlanCommandTestModel(t *testing.T, cwd string, permissionMode agent.Perm
 	})
 	m.activeSession = sessions.Metadata{SessionID: "plan-test-session"}
 	return m
+}
+
+func TestHandlePlanCommandSyncsPeerIdentityOnEnterAndExit(t *testing.T) {
+	isolatePlanConfig(t)
+	svc, err := peermsg.New(peermsg.Options{
+		RootDir: t.TempDir(),
+		Identity: peermsg.Identity{
+			Name:            "zero",
+			Cwd:             t.TempDir(),
+			PermissionClass: peermsg.PermissionBypass,
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := svc.Start(func(peermsg.InboundMessage) bool { return true }); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = svc.Close() })
+
+	m := newPlanCommandTestModel(t, t.TempDir(), agent.PermissionModeUnsafe)
+	m.peerService = svc
+
+	updated, _ := m.handlePlanCommand("on")
+	next := updated.(model)
+	if got := next.peerService.Self().PermissionClass; got != peermsg.PermissionPrompting {
+		t.Fatalf("after /plan on PermissionClass = %q, want %q", got, peermsg.PermissionPrompting)
+	}
+
+	updated, _ = next.handlePlanCommand("off")
+	next = updated.(model)
+	if got := next.peerService.Self().PermissionClass; got != peermsg.PermissionBypass {
+		t.Fatalf("after /plan off PermissionClass = %q, want %q", got, peermsg.PermissionBypass)
+	}
 }
 
 func TestShiftTabDoesNotExitPlanMode(t *testing.T) {
