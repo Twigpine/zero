@@ -40,6 +40,10 @@ func TestParseGoTestReadsBothLineShapes(t *testing.T) {
 		"TestWallBackstop":                        1.00,
 		// Indented subtests count: they are what a per-test table is built from.
 		"TestNested/subcase": 0.02,
+		// And the parent alongside it. The subtest alone left the prefix-trimming
+		// unpinned from this side: a change that dropped parent lines, or folded
+		// the parent's time into the child, passed every assertion here.
+		"TestNested": 0.03,
 	} {
 		if byName[name] != want {
 			t.Errorf("%s = %v, want %v", name, byName[name], want)
