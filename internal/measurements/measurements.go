@@ -422,6 +422,80 @@ func parseClaimedDuration(tail string) (float64, bool) {
 	return value, true
 }
 
+// ConflictsAcrossRuns reports numbers in claim that contradict EVERY run this
+// session recorded.
+//
+// For a caller that cannot say which run a claim is about — the agent loop
+// checking a final answer that may summarise several commands — this is the
+// honest question to ask. A value the model could have read off any of them is
+// not evidence of invention, and accusing it of inventing a number one of the
+// commands really printed is the failure this package must never produce.
+//
+// Callers that DO know the command should use Conflicts, which holds the claim
+// to that run's own numbers: a claim about an ordinary run is not answered by a
+// value only `go test -race` printed. The difference between the two is not a
+// convenience, it is how much the caller actually knows, so it is two functions
+// rather than a flag.
+//
+// The Conflict reports the run whose values it quotes, picking the run with a
+// recording for that name so the nudge names a command the model can repeat.
+func (l *Ledger) ConflictsAcrossRuns(claim string) []Conflict {
+	if l == nil || strings.TrimSpace(claim) == "" {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	// Names are gathered across runs first, so a name recorded by two commands
+	// is considered once against everything either of them saw.
+	type sighting struct {
+		values []float64
+		run    Run
+	}
+	merged := map[string]*sighting{}
+	names := map[string][]float64{}
+	for key, byName := range l.observed {
+		for name, values := range byName {
+			seen := merged[name]
+			if seen == nil {
+				seen = &sighting{run: l.runs[key]}
+				merged[name] = seen
+			}
+			seen.values = append(seen.values, values...)
+			names[name] = append(names[name], values...)
+		}
+	}
+
+	var out []Conflict
+	for name, seen := range merged {
+		claimed, ok := claimedSecondsFor(claim, name, names)
+		if !ok {
+			continue
+		}
+		if l.raised[newRaisedKey(seen.run, name, claimed)] {
+			continue
+		}
+		agrees := false
+		for _, value := range seen.values {
+			if tolerance(claimed, value) {
+				agrees = true
+				break
+			}
+		}
+		if agrees {
+			continue
+		}
+		values := append([]float64(nil), seen.values...)
+		sort.Float64s(values)
+		out = append(out, Conflict{Name: name, Claimed: claimed, Recorded: values, Run: seen.run})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	for _, conflict := range out {
+		l.raised[newRaisedKey(conflict.Run, conflict.Name, conflict.Claimed)] = true
+	}
+	return out
+}
+
 // Nudge renders conflicts as the correction a model is asked to act on. Empty
 // when there is nothing to say, so the caller can test the string itself.
 func Nudge(conflicts []Conflict) string {

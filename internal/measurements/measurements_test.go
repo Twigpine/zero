@@ -357,3 +357,44 @@ func TestAClaimIsCheckedAgainstItsOwnRun(t *testing.T) {
 		t.Errorf("the zero Run has a label: %q", label)
 	}
 }
+
+// A CALLER THAT CANNOT NAME THE RUN ASKS A DIFFERENT QUESTION.
+//
+// The agent loop checks a final answer that may summarise several commands, so
+// it has no single run to hold the claim to. Quoting a number one of those
+// commands really printed is not invention, and accusing it would be the false
+// accusation this package must never produce — so across runs, a value that
+// matches ANY of them agrees.
+func TestAcrossRunsAcceptsAValueAnyRunPrinted(t *testing.T) {
+	plain := Run{Command: "go", Args: []string{"test", "./..."}}
+	race := Run{Command: "go", Args: []string{"test", "-race", "./..."}}
+
+	ledger := NewLedger()
+	ledger.Record(plain, "--- PASS: TestSlow (1.00s)\n")
+	ledger.Record(race, "--- PASS: TestSlow (9.00s)\n")
+
+	// Either number is one this session really printed.
+	if got := ledger.ConflictsAcrossRuns("TestSlow took 9.00s"); len(got) != 0 {
+		t.Errorf("a value the -race run printed was called a fabrication: %+v", got)
+	}
+	if got := ledger.ConflictsAcrossRuns("TestSlow took 1.00s"); len(got) != 0 {
+		t.Errorf("a value the plain run printed was called a fabrication: %+v", got)
+	}
+	// A number NO run printed is still caught, and both runs' values are quoted.
+	conflicts := ledger.ConflictsAcrossRuns("TestSlow took 45.00s")
+	if len(conflicts) != 1 {
+		t.Fatalf("a number no run printed was not caught: %+v", conflicts)
+	}
+	if len(conflicts[0].Recorded) != 2 {
+		t.Errorf("the conflict quoted %v; both runs' values belong in it", conflicts[0].Recorded)
+	}
+
+	// And the strict, per-run check still holds a claim to its own run — that is
+	// the whole difference between the two entry points.
+	strict := NewLedger()
+	strict.Record(plain, "--- PASS: TestSlow (1.00s)\n")
+	strict.Record(race, "--- PASS: TestSlow (9.00s)\n")
+	if got := strict.Conflicts(plain, "TestSlow took 9.00s"); len(got) != 1 {
+		t.Errorf("the per-run check accepted another run's value: %+v", got)
+	}
+}
