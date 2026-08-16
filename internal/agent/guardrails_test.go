@@ -837,3 +837,41 @@ func TestRunInjectsToolFailureHintWithSchema(t *testing.T) {
 		t.Fatalf("expected a tool-failure hint on the 3rd turn, messages: %+v", provider.requests[2].Messages)
 	}
 }
+
+// An absence-establishing sentence is a finding; the same sentence that also
+// says the work is blocked is an admission. The allowance stems ("find the",
+// "reproduce ", "confirm any" …) head both, so the tail prefix alone cannot
+// separate them — measured against real phrasings, TEN of eleven genuine
+// admissions passed the detector before blockedWorkMarkers existed.
+func TestIncompletionAllowanceYieldsToBlockedWork(t *testing.T) {
+	// Must FIRE: the inability is reported as leaving work undone.
+	for _, admission := range []string{
+		"I could not reproduce the crash, so the fix is unverified.",
+		"I was unable to reproduce the reported behaviour and stopped there.",
+		"I could not find the root cause; someone else will need to pick this up.",
+		"I could not find the bug in the time available.",
+		"I did not manage to reproduce the failure, so I cannot confirm the patch works.",
+		"I could not locate the source of the regression and have run out of ideas.",
+		"I could not find where to apply the change, so nothing was modified.",
+		"I could not observe any effect, so the change may be inert.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("admission passed the detector: %q", admission)
+		}
+	}
+
+	// Must NOT fire: establishing that something is absent is the job, and the
+	// motivating case is the audit that spent 53 tool calls proving a negative.
+	for _, finding := range []string{
+		"I could not find any remaining issues.",
+		"I could NOT find where AllowManifestToolAutoApproval is set to true in production code.",
+		"I could not find the flag being set anywhere outside tests, so the concern does not apply.",
+		"I could not reproduce the reported exploit, which confirms the guard holds.",
+		"I could not observe any regression across the suite.",
+		"I could not confirm any leak; every path is bounded.",
+	} {
+		if reason := selfReportedIncompletion(finding); reason != "" {
+			t.Errorf("finding wrongly flagged as incomplete: %q -> %q", finding, reason)
+		}
+	}
+}

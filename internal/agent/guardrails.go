@@ -184,7 +184,14 @@ var selfReportPhrases = []string{
 var inabilityStems = []string{
 	"i cannot ", "i can't ", "i can not ", "i could not ", "i couldn't ",
 	"i am unable to", "i'm unable to", "i was unable to", "i wasn't able to",
-	"i was not able to", "i do not have", "i don't have", "unable to ",
+	"i was not able to", "i do not have", "i don't have",
+	// "unable to " WITHOUT A SUBJECT WAS REMOVED. It is the only stem here that
+	// does not name who was unable, and it fired on a report's own section
+	// heading — "**Unable to verify (1):** - MCP #3 claim was truncated" — in a
+	// verification task that had completed and was categorising its findings.
+	// The first-person forms above still catch every genuine admission; a
+	// heading is not one.
+	"we are unable to", "we were unable to",
 	"without being able to",
 }
 
@@ -195,6 +202,19 @@ var inabilityStems = []string{
 var successNegationTails = []string{
 	"find any", "found any", "find a ", "see any", "detect any", "identify any",
 	"reproduce", "spot any", "locate any",
+	// A NEGATIVE SEARCH RESULT IS THE ANSWER, not a failure to produce one.
+	//
+	// The list above already encodes this — "I could not find any remaining
+	// issues" is success — but only for the "any" phrasings. A finder reporting
+	// "I could NOT find where AllowManifestToolAutoApproval is set to true in
+	// production code" was marked INCOMPLETE after 53 tool calls and a 19,145
+	// character audit, for doing precisely the job it was given: establishing
+	// that something is not there.
+	"find where", "find the", "find it", "find that", "find this",
+	"found where", "found the",
+	"locate where", "locate the", "locate it",
+	"determine where", "identify where", "see where",
+	"reproduce ", "confirm any", "observe any",
 }
 
 // narrativeMarkers flag a sentence as RETELLING a past exchange rather than
@@ -263,9 +283,99 @@ func admissionSentences(lower string) []string {
 // retells a past exchange (narrativeMarkers) is skipped entirely — an admission
 // must be the model's own report about the CURRENT objective, not general
 // language that merely resembles one.
+// toolGrantMarkers flag a sentence as reporting WHICH TOOLS this run was given,
+// not whether the work was done.
+//
+// A read-only plan task is SUPPOSED to say this. One wrote "I don't have an
+// update_plan tool available in this specialist context (only read-only
+// exploration tools were provided)" and then delivered the complete answer —
+// helper name, file, line 214, full source — and was marked INCOMPLETE on the
+// "i don't have" stem. The prompt asks tasks to name their limits plainly; a
+// detector that punishes exactly that teaches the opposite.
+//
+// NARROW ON PURPOSE: the sentence must name a TOOL or a GRANT. "I do not have
+// enough evidence" is still an admission and still fires.
+// NARROWED AFTER AN AUDIT OF THIS VERY FIX. The first version listed a bare
+// " tool", which exempts any inability sentence that merely mentions one —
+// measured at 5/5 on ordinary phrasings:
+//
+//	"I cannot run the build tool, so the change is unverified"
+//	"I could not use the migration tool and the data is untouched"
+//	"I was unable to invoke the formatting tool on the output"
+//
+// Those are genuine admissions, and silently exempting them is the WORSE
+// direction: a false positive costs a re-run, a false negative reports
+// unfinished work as done. The markers now have to be about what the run WAS
+// GIVEN, not about a tool being mentioned at all.
+var toolGrantMarkers = []string{
+	"tool available", "tools available", "no such tool", "not available in this",
+	"read-only tools", "read only tools", "only read-only", "only read only",
+	"tools were provided", "tools were given", "toolset provided",
+	"in this specialist context", "in this context only",
+	"is not in my toolset", "not in my toolset", "not in this toolset",
+}
+
+// objectiveFailureMarkers name the OBJECTIVE rather than a capability. A
+// sentence carrying one is about whether the job got done, so the tool-grant
+// exemption above does not apply to it however many tools it mentions.
+// VERB-ANCHORED, not bare nouns. "this task" alone was too crude: a task that
+// finished wrote "so i could not record a plan; the task is a single
+// read-and-report step and is now complete" — it names the task in order to
+// report SUCCESS, and a bare-noun override read that as failure. The marker has
+// to be the objective NOT BEING DONE, which needs the verb.
+var objectiveFailureMarkers = []string{
+	"complete this task", "complete the task", "completing this task", "completing the task",
+	"finish this task", "finish the task", "finishing this task",
+	"complete it", "completing it", "finish it", "finishing it",
+	"the objective", "the assignment", "as requested", "what was asked",
+	"do this task", "perform this task", "carry out this task",
+}
+
+// blockedWorkMarkers are what turns an absence-establishing sentence back into
+// an admission of failure.
+//
+// MEASURED, NOT ARGUED. The successNegationTails list above exists so a finder
+// reporting "I could not find where X is set" is not marked incomplete for doing
+// its job. But the stems it added — "find the", "reproduce ", "confirm any",
+// "observe any" — also head the most ordinary way of admitting defeat, and the
+// allowance fired on the whole sentence regardless of how it ended. Measured
+// against eleven genuine admissions, TEN passed the detector undetected:
+//
+//	"I could not reproduce the crash, so the fix is unverified."
+//	"I could not find the root cause; someone else will need to pick this up."
+//	"I could not locate the source of the regression and have run out of ideas."
+//
+// That is the guard's entire purpose defeated — it is the last thing between a
+// stalled run and a report that reads like success.
+//
+// So the allowance now yields when the sentence ALSO says the work is blocked.
+// "I could not find where X is set in production code" still passes, because
+// nothing in it claims the objective was left undone; the three above do not.
+var blockedWorkMarkers = []string{
+	"unverified", "not verified", "cannot verify", "could not verify",
+	"someone else", "will need to", "needs someone", "handed off", "hand off",
+	"ran out of", "run out of", "out of time", "in the time available",
+	"stopped there", "stopping here", "gave up", "giving up",
+	"nothing was modified", "no changes were made", "left unchanged", "left undone",
+	"may be inert", "is unresolved", "remains unresolved", "still broken",
+	"so i cannot", "so i could not",
+}
+
 func selfReportedIncompletion(text string) string {
 	for _, sentence := range admissionSentences(strings.ToLower(stripQuoted(text))) {
 		if containsAny(sentence, narrativeMarkers) {
+			continue
+		}
+		// A sentence about the tool grant is about CAPABILITY, not about the
+		// objective — UNLESS it also says the task itself could not be done.
+		//
+		// THE OVERRIDE IS NOT OPTIONAL. Without it the exemption swallowed a
+		// genuine failure: "I am unable to complete this task with the current
+		// tool set … Only write_file is enabled … so I cannot inspect the
+		// codebase." That task really did fail, and it mentions tools, so a bare
+		// tool-marker check waved it through. Naming the task is what separates
+		// "I lack a tool I did not need" from "I lack the tools this needed".
+		if containsAny(sentence, toolGrantMarkers) && !containsAny(sentence, objectiveFailureMarkers) {
 			continue
 		}
 		for _, phrase := range selfReportPhrases {
@@ -284,7 +394,11 @@ func selfReportedIncompletion(text string) string {
 				}
 				abs := start + rel
 				tail := strings.TrimSpace(sentence[abs+len(stem):])
-				if !hasAnyPrefix(tail, successNegationTails) {
+				// The allowance yields to a sentence that also says the work is
+				// blocked: "could not reproduce the crash" is a finding, "could not
+				// reproduce the crash, so the fix is unverified" is an admission,
+				// and the tail prefix alone cannot tell them apart.
+				if !hasAnyPrefix(tail, successNegationTails) || containsAny(sentence, blockedWorkMarkers) {
 					return selfReportReason(strings.TrimSpace(stem) + " …")
 				}
 				start = abs + len(stem)
