@@ -155,9 +155,12 @@ func TestALinkAboveTheStoreIsRefused(t *testing.T) {
 				if err := os.MkdirAll(filepath.Dir(linkPath), 0o700); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.Symlink(target, linkPath); err != nil {
-					t.Skipf("cannot create a symlink here: %v", err)
-				}
+				// linkDir, not os.Symlink: on Windows this has to be a JUNCTION,
+				// which is a reparse point but not a symlink — the exact case
+				// RefuseReparse tests ModeIrregular for. Calling os.Symlink
+				// directly skipped the whole test there, so the guard's Windows
+				// behaviour went unasserted while the run reported green.
+				linkDir(t, target, linkPath)
 				if note, err := Read(paths, store.scope, "secret"); err == nil {
 					t.Fatalf("a link at %s redirected the read: got %q", ancestor, note.Body)
 				} else if !errors.Is(err, ErrIsSymlink) {
