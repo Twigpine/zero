@@ -264,7 +264,7 @@ func renameatWindows(h windows.Handle, newdirfd windows.Handle, newname string) 
 	info.ReplaceIfExists = 1 // BOOLEAN + padding under FileRenameInformation
 	info.RootDirectory = newdirfd
 	info.FileNameLength = uint32(fileNameLen)
-	copy((*[windows.MAX_LONG_PATH]uint16)(unsafe.Pointer(&info.FileName[0]))[:fileNameLen/2:fileNameLen/2], newNameUTF16)
+	copy(unsafe.Slice(&info.FileName[0], fileNameLen/2), newNameUTF16)
 
 	var iosb windows.IO_STATUS_BLOCK
 	err = windows.NtSetInformationFile(h, &iosb, &buffer[0], uint32(bufferSize), windows.FileRenameInformation)

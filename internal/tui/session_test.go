@@ -863,6 +863,7 @@ func TestNewSessionExitsPlanMode(t *testing.T) {
 // update_plan tool state and sticky panel, leaking it into a session that
 // never drafted it.
 func TestNewSessionClearsPreviousPlan(t *testing.T) {
+	isolatePlanConfig(t)
 	store := testSessionStore(t)
 	planTool := tools.NewUpdatePlanTool()
 	planTool.SetPlan([]tools.PlanItem{{Content: "leftover step", Status: "pending"}})
