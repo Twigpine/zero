@@ -43,8 +43,45 @@ type Conflict struct {
 	Name string
 	// Claimed is the value the answer gave, in seconds.
 	Claimed float64
-	// Recorded is every value this session actually observed for Name, sorted.
+	// Recorded is every value this session actually observed for Name UNDER THE
+	// SAME RUN, sorted.
 	Recorded []float64
+	// Run is the command those values came from.
+	Run Run
+}
+
+// Run is the command a set of timings came from.
+//
+// TIMINGS FROM DIFFERENT COMMANDS ARE DIFFERENT MEASUREMENTS. Everything used to
+// pool into map[name][]seconds, so a claim about an ordinary run was satisfied by
+// a value only the -race run ever produced — and -race is routinely several times
+// slower, which is exactly the size of discrepancy this package exists to catch.
+// The pooling made the check agree with a number the stated command never
+// printed, silently, which is the failure mode that is hardest to notice.
+//
+// A zero Run is a legitimate value meaning "this caller does not distinguish
+// runs"; everything it records and asks about lives in one group, which is how
+// this behaved before provenance existed.
+type Run struct {
+	Command string
+	Args    []string
+	Dir     string
+}
+
+// key identifies the run for grouping. Args are joined with a separator that
+// cannot appear inside a single argument boundary ambiguously, so ["a b"] and
+// ["a","b"] are different runs rather than the same one.
+func (r Run) key() string {
+	return r.Dir + "\x00" + r.Command + "\x00" + strings.Join(r.Args, "\x00")
+}
+
+// Label renders the run for a reader. Empty for the zero Run, so a caller that
+// does not distinguish runs gets the same wording it always had.
+func (r Run) Label() string {
+	if r.Command == "" && len(r.Args) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(r.Command + " " + strings.Join(r.Args, " "))
 }
 
 var (
@@ -93,18 +130,51 @@ func ParseGoTest(text string) []Measurement {
 // A nil Ledger is a working no-op, so a caller that does not want the check
 // holds nil and still calls every method unconditionally.
 type Ledger struct {
-	mu       sync.Mutex
-	observed map[string][]float64
-	raised   map[string]bool
+	mu sync.Mutex
+	// observed is keyed by run FIRST, so a lookup can only ever see the values
+	// the asked-about command produced. Making that structural rather than a
+	// filter applied at read time means a future caller cannot reintroduce the
+	// pooling by forgetting to pass the run.
+	observed map[string]map[string][]float64
+	runs     map[string]Run
+	// raised keys on the name AND the value that was wrong, not the name alone.
+	// Keying on the name switched the check off for that name permanently: after
+	// one bad 4.20s, a later, differently wrong 9.90s for the same test was
+	// silent. The point of the dedupe is that re-reading the SAME answer says
+	// nothing twice, which per-value still gives, while a new wrong number is a
+	// new thing to say.
+	raised map[raisedKey]bool
+}
+
+// raisedKey identifies one conflict already reported: which name, and which
+// claimed value. The value is rounded to milliseconds so that re-stating the
+// same number in a different precision is still the same conflict.
+type raisedKey struct {
+	run          string
+	name         string
+	claimedMilli int64
+}
+
+func newRaisedKey(run Run, name string, claimed float64) raisedKey {
+	return raisedKey{run: run.key(), name: name, claimedMilli: int64(math.Round(claimed * 1000))}
 }
 
 func NewLedger() *Ledger {
-	return &Ledger{observed: map[string][]float64{}, raised: map[string]bool{}}
+	return &Ledger{
+		observed: map[string]map[string][]float64{},
+		runs:     map[string]Run{},
+		raised:   map[raisedKey]bool{},
+	}
 }
 
-// Record reads any timings out of a command's output and remembers them.
-// Returns how many it took, which is what a test asserts on.
-func (l *Ledger) Record(text string) int {
+// Record reads any timings out of a command's output and remembers them against
+// the run that produced it. Returns how many it took, which is what a test
+// asserts on.
+//
+// Pass the command actually executed. A zero Run says this caller does not
+// distinguish runs, which is a legitimate answer — but it is now said out loud at
+// the call site rather than being the only thing the type could express.
+func (l *Ledger) Record(run Run, text string) int {
 	if l == nil {
 		return 0
 	}
@@ -114,8 +184,15 @@ func (l *Ledger) Record(text string) int {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	key := run.key()
+	byName := l.observed[key]
+	if byName == nil {
+		byName = map[string][]float64{}
+		l.observed[key] = byName
+		l.runs[key] = run
+	}
 	for _, m := range found {
-		l.observed[m.Name] = append(l.observed[m.Name], m.Seconds)
+		byName[m.Name] = append(byName[m.Name], m.Seconds)
 	}
 	return len(found)
 }
@@ -142,20 +219,29 @@ func tolerance(a, b float64) bool {
 // Each name is reported at most once per Ledger. A second pass over the same
 // answer is silent, so the caller can feed a correction back to the model
 // without the possibility of a loop.
-func (l *Ledger) Conflicts(claim string) []Conflict {
+func (l *Ledger) Conflicts(run Run, claim string) []Conflict {
 	if l == nil || strings.TrimSpace(claim) == "" {
 		return nil
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	// ONLY THIS RUN'S VALUES. A claim about `go test ./...` is not answered by a
+	// number that only `go test -race ./...` ever printed.
+	observed := l.observed[run.key()]
+	if len(observed) == 0 {
+		return nil
+	}
 	var out []Conflict
-	for name, recorded := range l.observed {
-		if l.raised[name] || len(recorded) == 0 {
+	for name, recorded := range observed {
+		if len(recorded) == 0 {
 			continue
 		}
-		claimed, ok := claimedSecondsFor(claim, name)
+		claimed, ok := claimedSecondsFor(claim, name, observed)
 		if !ok {
+			continue
+		}
+		if l.raised[newRaisedKey(run, name, claimed)] {
 			continue
 		}
 		agrees := false
@@ -170,22 +256,35 @@ func (l *Ledger) Conflicts(claim string) []Conflict {
 		}
 		values := append([]float64(nil), recorded...)
 		sort.Float64s(values)
-		out = append(out, Conflict{Name: name, Claimed: claimed, Recorded: values})
+		out = append(out, Conflict{Name: name, Claimed: claimed, Recorded: values, Run: run})
 	}
 	// Deterministic order: this text reaches a model, and a set that reshuffles
 	// between identical runs is a diff nobody can read.
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	for _, conflict := range out {
-		l.raised[conflict.Name] = true
+		l.raised[newRaisedKey(run, conflict.Name, conflict.Claimed)] = true
 	}
 	return out
 }
 
 // claimedSecondsFor finds the duration an answer puts beside a name, searching
-// the remainder of each line the name appears on. Same line only: a number three
-// paragraphs away is not this name's timing, and pairing them would invent a
-// disagreement rather than find one.
-func claimedSecondsFor(claim, name string) (float64, bool) {
+// this name's own clause on each line it appears on. Same line only: a number
+// three paragraphs away is not this name's timing, and pairing them would invent
+// a disagreement rather than find one.
+//
+// THE CLAUSE ENDS WHERE THE NEXT NAME BEGINS. Searching the whole remainder of
+// the line let one name borrow another's number:
+//
+//	recorded: TestFoo 0.10s, TestBar 4.20s
+//	claim:    "TestFoo passed; TestBar took 4.20s"
+//	  -> [{Name:TestFoo Claimed:4.2 Recorded:[0.1]}]
+//
+// Every word of that claim is true. TestFoo reached past its own clause, took the
+// number belonging to TestBar, and was told it had invented it — the same failure
+// as reading a package total as a test's own timing, arrived at through the name
+// binding rather than the pattern order. Cutting at the next known name is the
+// bound, and the ledger is what knows those names, so they are passed in.
+func claimedSecondsFor(claim, name string, known map[string][]float64) (float64, bool) {
 	for _, line := range strings.Split(claim, "\n") {
 		for start := 0; start < len(line); {
 			index := strings.Index(line[start:], name)
@@ -198,12 +297,44 @@ func claimedSecondsFor(claim, name string) (float64, bool) {
 			if !nameBoundary(line, absolute, end) {
 				continue
 			}
-			if value, ok := parseClaimedDuration(line[end:]); ok {
+			if value, ok := parseClaimedDuration(line[end:clauseEnd(line, end, known)]); ok {
 				return value, true
 			}
 		}
 	}
 	return 0, false
+}
+
+// clauseEnd returns the offset in line at which this name's clause stops: the
+// start of the next recorded name that appears as a whole token, or the end of
+// the line.
+//
+// Every recorded name is considered, INCLUDING the one being searched for: a
+// second mention starts a second clause, and the caller's loop visits it on its
+// own turn.
+func clauseEnd(line string, from int, known map[string][]float64) int {
+	cut := len(line)
+	for other := range known {
+		if other == "" {
+			continue
+		}
+		for start := from; start < len(line); {
+			index := strings.Index(line[start:], other)
+			if index < 0 {
+				break
+			}
+			absolute := start + index
+			start = absolute + 1
+			if !nameBoundary(line, absolute, absolute+len(other)) {
+				continue
+			}
+			if absolute < cut {
+				cut = absolute
+			}
+			break
+		}
+	}
+	return cut
 }
 
 // nameBoundary reports whether line[from:to] is a whole token rather than the
@@ -308,7 +439,14 @@ func Nudge(conflicts []Conflict) string {
 		b.WriteString(conflict.Name)
 		b.WriteString(": your answer says ")
 		b.WriteString(formatSeconds(conflict.Claimed))
-		b.WriteString("; the commands actually run in this session reported ")
+		b.WriteString("; ")
+		if label := conflict.Run.Label(); label != "" {
+			b.WriteString("`")
+			b.WriteString(label)
+			b.WriteString("` in this session reported ")
+		} else {
+			b.WriteString("the commands actually run in this session reported ")
+		}
 		for i, value := range conflict.Recorded {
 			if i > 0 {
 				b.WriteString(", ")
