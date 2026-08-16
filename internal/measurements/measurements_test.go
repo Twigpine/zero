@@ -531,3 +531,84 @@ func TestAnUnrecordedNeighbourStillEndsTheClause(t *testing.T) {
 		t.Errorf("a package claim stopped being read: %+v", conflicts)
 	}
 }
+
+// A FULL STOP ENDS A CLAUSE.
+//
+// The separator list had no sentence terminator, so when the next sentence's
+// subject was an ordinary noun phrase — not a recorded name, not name-shaped —
+// nothing bounded the clause and its number was charged to the previous
+// sentence's test. Both sentences true, both numbers really measured, each
+// attached by the writer to the right subject, and the report accused of
+// fabricating one of them.
+func TestASentenceTerminatorEndsTheClause(t *testing.T) {
+	for _, claim := range []string{
+		"TestNested is green. The full run took 34.249s.",
+		"TestNested passed! The full run took 34.249s.",
+		"TestNested is green? The full run took 34.249s.",
+		"TestNested ok: package total 34.249s.",
+	} {
+		ledger := NewLedger()
+		ledger.Record(Run{}, "--- PASS: TestNested (0.03s)\n")
+		if conflicts := ledger.Conflicts(Run{}, claim); len(conflicts) != 0 {
+			t.Errorf("the next sentence's number was charged to this test: %q -> %+v", claim, conflicts)
+		}
+	}
+
+	// A DECIMAL POINT IS NOT A TERMINATOR, and neither is the dot in an import
+	// path — otherwise this bound would silence every claim it is meant to read.
+	for _, tc := range []struct {
+		recorded, claim string
+		want            float64
+	}{
+		{"--- PASS: TestNested (0.03s)\n", "TestNested took 9.90s.", 9.9},
+		{"--- PASS: TestNested (0.03s)\n", "TestNested took 9.90s. The full run took 34.249s.", 9.9},
+		{"ok  \tgithub.com/x/y\t8.00s\n", "github.com/x/y took 30.00s.", 30},
+	} {
+		ledger := NewLedger()
+		ledger.Record(Run{}, tc.recorded)
+		conflicts := ledger.Conflicts(Run{}, tc.claim)
+		if len(conflicts) != 1 || conflicts[0].Claimed != tc.want {
+			t.Errorf("a fabricated number stopped being read: %q -> %+v", tc.claim, conflicts)
+		}
+	}
+
+	// The first duration in the clause still wins, so an honest report that gives
+	// its own timing before the total is untouched.
+	honest := NewLedger()
+	honest.Record(Run{}, "--- PASS: TestNested (0.03s)\n")
+	if conflicts := honest.Conflicts(Run{}, "TestNested passed in 0.03s. The full run took 34.249s."); len(conflicts) != 0 {
+		t.Errorf("an honest report carrying both numbers was flagged: %+v", conflicts)
+	}
+}
+
+// A COMMAND IS NAMED ONLY WHEN THAT COMMAND PRINTED ALL OF THESE VALUES.
+//
+// ConflictsAcrossRuns merges every run's values for a name. Labelling that union
+// with one run said the command reported a number it never printed —
+// "`go test ./a` in this session reported 0.1s, 0.2s" where 0.2s came only from
+// ./b. Choosing the run deterministically fixed the reshuffling and left the
+// attribution just as untrue.
+func TestAMergedResultIsNotAttributedToOneCommand(t *testing.T) {
+	merged := NewLedger()
+	merged.Record(Run{Command: "go", Args: []string{"test", "./a"}}, "--- PASS: TestFoo (0.10s)\n")
+	merged.Record(Run{Command: "go", Args: []string{"test", "./b"}}, "--- PASS: TestFoo (0.20s)\n")
+	conflicts := merged.ConflictsAcrossRuns("TestFoo took 9.90s")
+	if len(conflicts) != 1 {
+		t.Fatalf("expected one conflict, got %+v", conflicts)
+	}
+	if label := conflicts[0].Run.Label(); label != "" {
+		t.Errorf("values from two runs were attributed to %q", label)
+	}
+	if nudge := Nudge(conflicts); strings.Contains(nudge, "go test ./a") || strings.Contains(nudge, "go test ./b") {
+		t.Errorf("the nudge names one command for a merged set: %q", nudge)
+	}
+
+	// One run behind the values keeps the label, which is the useful case: the
+	// model is told exactly which command to re-run.
+	single := NewLedger()
+	single.Record(Run{Command: "go", Args: []string{"test", "./a"}}, "--- PASS: TestFoo (0.10s)\n")
+	one := single.ConflictsAcrossRuns("TestFoo took 9.90s")
+	if len(one) != 1 || one[0].Run.Label() != "go test ./a" {
+		t.Errorf("a single-run result lost its command label: %+v", one)
+	}
+}

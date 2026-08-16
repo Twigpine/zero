@@ -374,11 +374,50 @@ func clauseEnd(line string, from int, known map[string][]float64) int {
 			consider(from + index)
 		}
 	}
+	consider(sentenceEnd(line, from))
 	return cut
 }
 
 // clauseSeparators end a measurement clause without starting a new name.
-var clauseSeparators = []string{";", ",", " and ", " but ", " while ", " whereas ", " though "}
+var clauseSeparators = []string{";", ":", ",", " and ", " but ", " while ", " whereas ", " though "}
+
+// sentenceEnd returns the offset of the first sentence terminator at or after
+// from, or -1.
+//
+// A FULL STOP ENDS A CLAUSE. The separator list had none, so when the next
+// sentence's subject was an ordinary noun phrase — not a recorded name and not
+// name-shaped — nothing bounded the clause and its number was charged to the
+// previous sentence's test:
+//
+//	"TestNested is green. The full run took 34.249s."
+//	  -> [{Name:TestNested Claimed:34.249 Recorded:[0.03]}]
+//
+// Both sentences are true, both numbers were really measured, and the writer
+// attached each to the right subject. Accusing a correct report is the failure
+// that gets a tripwire switched off.
+//
+// A decimal point is not a terminator, and neither is the dot inside an import
+// path: a terminator is followed by whitespace or the end of the line, and never
+// sits between two digits.
+func sentenceEnd(line string, from int) int {
+	for index := from; index < len(line); index++ {
+		switch line[index] {
+		case '.', '!', '?':
+		default:
+			continue
+		}
+		if line[index] == '.' && index > 0 && index+1 < len(line) &&
+			isDigitByte(line[index-1]) && isDigitByte(line[index+1]) {
+			continue
+		}
+		if index+1 >= len(line) || line[index+1] == ' ' || line[index+1] == '\t' {
+			return index
+		}
+	}
+	return -1
+}
+
+func isDigitByte(b byte) bool { return b >= '0' && b <= '9' }
 
 // nextNameShaped returns the offset of the next token that looks like a name
 // `go test` would print a timing for — a Test, Benchmark, Fuzz or Example
@@ -546,6 +585,7 @@ func (l *Ledger) ConflictsAcrossRuns(claim string) []Conflict {
 	type sighting struct {
 		values []float64
 		run    Run
+		runs   int
 	}
 	// THE RUN QUOTED IS CHOSEN DETERMINISTICALLY. Map iteration order is
 	// randomised per range, so taking whichever run came first made the nudge
@@ -569,6 +609,7 @@ func (l *Ledger) ConflictsAcrossRuns(claim string) []Conflict {
 				merged[name] = seen
 			}
 			seen.values = append(seen.values, values...)
+			seen.runs++
 			names[name] = append(names[name], values...)
 		}
 	}
@@ -594,7 +635,21 @@ func (l *Ledger) ConflictsAcrossRuns(claim string) []Conflict {
 		}
 		values := append([]float64(nil), seen.values...)
 		sort.Float64s(values)
-		out = append(out, Conflict{Name: name, Claimed: claimed, Recorded: values, Run: seen.run})
+		// NAME A COMMAND ONLY WHEN ONE COMMAND PRINTED ALL OF THESE. Merging two
+		// runs' values and then labelling the union with one of them said that
+		// command reported a number it never printed:
+		//
+		//	`go test ./a` in this session reported 0.1s, 0.2s
+		//
+		// where 0.2s came only from ./b. Choosing the run deterministically fixed
+		// the reshuffling and left the attribution just as untrue. With more than
+		// one run behind the values the label is dropped, and Nudge falls back to
+		// naming the session rather than a command.
+		attributed := seen.run
+		if seen.runs > 1 {
+			attributed = Run{}
+		}
+		out = append(out, Conflict{Name: name, Claimed: claimed, Recorded: values, Run: attributed})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	for _, conflict := range out {
