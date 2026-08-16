@@ -305,15 +305,31 @@ func claimedSecondsFor(claim, name string, known map[string][]float64) (float64,
 	return 0, false
 }
 
-// clauseEnd returns the offset in line at which this name's clause stops: the
-// start of the next recorded name that appears as a whole token, or the end of
-// the line.
+// clauseEnd returns the offset in line at which this name's clause stops.
 //
-// Every recorded name is considered, INCLUDING the one being searched for: a
-// second mention starts a second clause, and the caller's loop visits it on its
-// own turn.
+// Three bounds, whichever comes first:
+//
+//   - the next RECORDED name, as a whole token. Every recorded name is
+//     considered, including the one being searched for: a second mention starts
+//     a second clause, and the caller's loop visits it on its own turn.
+//   - the next name-SHAPED token, recorded or not. Cutting only at names the
+//     ledger knows left "TestFoo passed; TestUnrecorded took 4.20s" fabricating
+//     a conflict for TestFoo, because the neighbour holding the number was never
+//     recorded and so never bounded anything. Whether a number belongs to this
+//     name cannot depend on whether some OTHER name happened to be measured.
+//   - a clause separator. "and", a semicolon or a comma end the clause as surely
+//     as a new name does, and catch the neighbours that are not name-shaped.
+//
+// All three only ever SHORTEN the search, so each can cost a detection but none
+// can invent one — the right direction for a check whose worst failure is
+// accusing a correct number of being wrong.
 func clauseEnd(line string, from int, known map[string][]float64) int {
 	cut := len(line)
+	consider := func(at int) {
+		if at >= 0 && at < cut {
+			cut = at
+		}
+	}
 	for other := range known {
 		if other == "" {
 			continue
@@ -328,13 +344,60 @@ func clauseEnd(line string, from int, known map[string][]float64) int {
 			if !nameBoundary(line, absolute, absolute+len(other)) {
 				continue
 			}
-			if absolute < cut {
-				cut = absolute
-			}
+			consider(absolute)
 			break
 		}
 	}
+	if at := nextNameShaped(line, from); at >= 0 {
+		consider(at)
+	}
+	for _, separator := range clauseSeparators {
+		if index := strings.Index(line[from:], separator); index >= 0 {
+			consider(from + index)
+		}
+	}
 	return cut
+}
+
+// clauseSeparators end a measurement clause without starting a new name.
+var clauseSeparators = []string{";", ",", " and ", " but ", " while ", " whereas ", " though "}
+
+// nextNameShaped returns the offset of the next token that looks like something
+// `go test` would print a timing for — a Test/Benchmark/Fuzz/Example function, or
+// an import path — or -1.
+//
+// SHAPE, not membership. The ledger only knows what this session measured, and a
+// claim may name a test that was never run; that name still ends the clause it
+// starts, because the number after it belongs to it and not to the name before.
+func nextNameShaped(line string, from int) int {
+	for index := from; index < len(line); index++ {
+		if index > from && !isNameSeparator(line[index-1]) {
+			continue
+		}
+		rest := line[index:]
+		for _, prefix := range []string{"test", "benchmark", "fuzz", "example"} {
+			if len(rest) <= len(prefix) || !strings.HasPrefix(rest, prefix) {
+				continue
+			}
+			// A bare "test" or "testing" is an ordinary word; a name continues
+			// with something that is not a lowercase letter, which is how
+			// go test spells them.
+			next := rest[len(prefix)]
+			if next >= 'a' && next <= 'z' {
+				continue
+			}
+			return index
+		}
+	}
+	return -1
+}
+
+func isNameSeparator(b byte) bool {
+	switch b {
+	case ' ', '\t', ';', ',', '(', ')', '[', ']', '`', '"', '\'', '-', '*':
+		return true
+	}
+	return false
 }
 
 // nameBoundary reports whether line[from:to] is a whole token rather than the

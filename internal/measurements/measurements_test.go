@@ -194,7 +194,13 @@ func TestTheLedgerIsSafeUnderConcurrentRecording(t *testing.T) {
 func TestAPrefixNameDoesNotAccuseAnHonestClaim(t *testing.T) {
 	ledger := NewLedger()
 	// Exactly what go test -v emits: parent first, subtest indented under it.
-	ledger.Record(Run{}, "--- PASS: TestNested (0.03s)\n    --- PASS: TestNested/subcase (0.01s)\n")
+	//
+	// THE TWO DURATIONS MUST BE FAR APART. At 0.03s and 0.01s they sit inside
+	// tolerance of each other, so a subtest claim matching the PARENT's entry
+	// reads as agreement and this test passes whether or not the prefix boundary
+	// works — it certified nothing. Five seconds against a hundredth cannot be
+	// confused for the same measurement.
+	ledger.Record(Run{}, "--- PASS: TestNested (5.00s)\n    --- PASS: TestNested/subcase (0.01s)\n")
 	if conflicts := ledger.Conflicts(Run{}, "TestNested/subcase took 0.01s"); len(conflicts) != 0 {
 		t.Errorf("an honest subtest claim was reported as a conflict: %+v", conflicts)
 	}
@@ -208,7 +214,7 @@ func TestAPrefixNameDoesNotAccuseAnHonestClaim(t *testing.T) {
 	// And the check still bites: a genuinely wrong subtest number is caught, and
 	// attributed to the subtest rather than to its parent.
 	caught := NewLedger()
-	caught.Record(Run{}, "--- PASS: TestNested (0.03s)\n    --- PASS: TestNested/subcase (0.01s)\n")
+	caught.Record(Run{}, "--- PASS: TestNested (5.00s)\n    --- PASS: TestNested/subcase (0.01s)\n")
 	conflicts := caught.Conflicts(Run{}, "TestNested/subcase took 4.20s")
 	if len(conflicts) != 1 || conflicts[0].Name != "TestNested/subcase" {
 		t.Errorf("a fabricated subtest number was not caught against its own name: %+v", conflicts)
@@ -396,5 +402,55 @@ func TestAcrossRunsAcceptsAValueAnyRunPrinted(t *testing.T) {
 	strict.Record(race, "--- PASS: TestSlow (9.00s)\n")
 	if got := strict.Conflicts(plain, "TestSlow took 9.00s"); len(got) != 1 {
 		t.Errorf("the per-run check accepted another run's value: %+v", got)
+	}
+}
+
+// A NEIGHBOUR BOUNDS THE CLAUSE WHETHER OR NOT IT WAS MEASURED.
+//
+// Cutting only at names the ledger knows left an unrecorded neighbour holding
+// the number, and the name before it took the blame:
+//
+//	recorded: TestFoo 0.10s
+//	claim:    "TestFoo passed; TestUnrecorded took 4.20s"
+//	  -> [{Name:TestFoo Claimed:4.2 Recorded:[0.1]}]
+//
+// Whether a number belongs to a name cannot depend on whether some OTHER name
+// happened to be measured this session. Name shape and clause separators bound
+// it too, and all three only ever shorten the search — each can cost a
+// detection, none can invent one.
+func TestAnUnrecordedNeighbourStillEndsTheClause(t *testing.T) {
+	for _, claim := range []string{
+		"TestFoo passed; TestUnrecorded took 4.20s",
+		"TestFoo passed and TestUnrecorded took 4.20s",
+		"TestFoo was fine, BenchmarkThing took 4.20s",
+		// Not name-shaped at all — the separator is what ends this one.
+		"TestFoo passed, the suite took 4.20s",
+	} {
+		ledger := NewLedger()
+		ledger.Record(Run{}, "--- PASS: TestFoo (0.10s)\n")
+		if conflicts := ledger.Conflicts(Run{}, claim); len(conflicts) != 0 {
+			t.Errorf("a truthful claim was blamed for a neighbour's number: %q -> %+v", claim, conflicts)
+		}
+	}
+
+	// The name's own number is still read, with a neighbour present and without.
+	for _, claim := range []string{
+		"TestFoo took 9.90s",
+		"TestFoo took 9.90s and TestBar took 1.00s",
+		"TestFoo took 9.90s; TestUnrecorded took 4.20s",
+	} {
+		ledger := NewLedger()
+		ledger.Record(Run{}, "--- PASS: TestFoo (0.10s)\n")
+		conflicts := ledger.Conflicts(Run{}, claim)
+		if len(conflicts) != 1 || conflicts[0].Claimed != 9.9 {
+			t.Errorf("a fabricated number beside a neighbour was not caught: %q -> %+v", claim, conflicts)
+		}
+	}
+
+	// A package name is a name too, and its own claim still lands.
+	packages := NewLedger()
+	packages.Record(Run{}, "ok  \tgithub.com/x/y\t8.00s\n")
+	if conflicts := packages.Conflicts(Run{}, "github.com/x/y took 30.00s"); len(conflicts) != 1 {
+		t.Errorf("a package claim stopped being read: %+v", conflicts)
 	}
 }
