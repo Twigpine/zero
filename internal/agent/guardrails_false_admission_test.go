@@ -306,3 +306,50 @@ func TestAnAbsenceIsAFindingOnlyWhenTheObjectMakesItOne(t *testing.T) {
 		}
 	}
 }
+
+// A FULL STOP IS NOT A CLAIM THAT THE WORK FINISHED.
+//
+// The blocked-work override only ever saw the sentence the allowance fired in,
+// so the SAME admission was caught or missed on its punctuation alone:
+//
+//	"I could not reproduce the crash, so the fix is unverified."  caught
+//	"I could not reproduce the crash. The fix is unverified."     missed
+//
+// Writing the consequence as its own sentence is how most people write, and half
+// of a reviewer's corpus of ordinary admissions escaped through it.
+//
+// Only the blocked-work question looks ahead. A stem in one sentence is still
+// never paired with an allowance tail in another.
+func TestTheConsequenceMayBeTheNextSentence(t *testing.T) {
+	for _, admission := range []string{
+		"I could not reproduce the crash, so the fix is unverified.",
+		"I could not reproduce the crash. The fix is unverified.",
+		"I could not locate the source of the regression and have run out of ideas.",
+		"I could not locate the source of the regression. I have run out of ideas.",
+		// "the work is blocked" says it in as many words, and every marker was a
+		// SYMPTOM of being blocked rather than the thing itself.
+		"I could not find the root cause, so the work is blocked.",
+		"I could not find the root cause. The work is blocked.",
+		"I could not get the integration test to run. The behaviour is therefore unverified.",
+		"I could not apply the patch cleanly. Nothing was modified.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("an admission escaped by putting its consequence in a second sentence: %q", admission)
+		}
+	}
+
+	// THE LOOKAHEAD'S OWN COST, guarded. A message that turns to other work must
+	// not have that work's blocked state read as this result's consequence.
+	for _, finding := range []string{
+		"I searched the tree and could not find any other call sites. The rename is complete.",
+		"I could not find any remaining usages of the deprecated helper. A future cleanup is blocked until the API freeze lifts.",
+		"I could not reproduce any failure in the parser. The CI flake in the network suite remains unresolved and belongs to another team.",
+		"I could not find any issues in the diff. Documentation for the new flag is unfinished, which was never part of this request.",
+		"I could not reproduce the crash. Separately, the deploy step is unverified because it needs prod access.",
+		"I could not find any other call sites. The follow-up work is blocked on a design decision, which is out of scope here.",
+	} {
+		if reason := selfReportedIncompletion(finding); reason != "" {
+			t.Errorf("the lookahead read another subject's blocked state as this result's: %q -> %s", finding, reason)
+		}
+	}
+}

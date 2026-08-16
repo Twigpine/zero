@@ -378,6 +378,13 @@ var objectiveFailureMarkers = []string{
 var strongAbsenceTails = []string{
 	"find any", "found any", "see any", "detect any", "identify any",
 	"spot any", "locate any", "confirm any", "observe any",
+	// The OBSERVATION family. Looking for a failure and not producing one is the
+	// same kind of result as looking for an issue and not finding one, and
+	// leaving these out meant "I could not reproduce any failure in the parser"
+	// was not a strong absence — so an unrelated blocked statement in the next
+	// sentence flipped a clean negative result into an admission.
+	"reproduce any", "trigger any", "produce any", "hit any",
+	"encounter any", "provoke any", "surface any", "measure any",
 }
 
 // strongAbsenceObjects are the things whose ABSENCE IS THE RESULT: you go
@@ -409,6 +416,8 @@ var strongAbsenceObjects = []string{
 	"sign", "signs", "trace", "traces", "mention", "mentions", "difference", "differences",
 	"blocker", "blockers", "gap", "gaps", "omission", "omissions", "discrepancy", "discrepancies",
 	"conflict", "conflicts", "violation", "violations", "warning", "warnings",
+	"call", "calls", "site", "sites", "callsite", "callsites", "consumer", "consumers",
+	"dependency", "dependencies", "user", "users", "path", "paths",
 }
 
 // absenceQualifiers sit between "any" and the object without changing it.
@@ -480,6 +489,14 @@ var blockedWorkMarkers = []string{
 	"nothing was modified", "no changes were made", "left unchanged", "left undone",
 	"may be inert", "is unresolved", "remains unresolved", "still broken",
 	"so i cannot", "so i could not",
+	// Saying the work is BLOCKED, in as many words. "I could not find the root
+	// cause, so the work is blocked" carries the statement in the same sentence
+	// and still passed, because every marker above names a symptom of being
+	// blocked and none named the thing itself.
+	"is blocked", "are blocked", "remains blocked", "stays blocked",
+	"cannot proceed", "could not proceed", "can not proceed", "unable to proceed",
+	"is unfinished", "remains unfinished", "left unfinished",
+	"is incomplete", "remains incomplete",
 }
 
 // bareInabilityStems are the two entries above that are STEMS rather than
@@ -510,6 +527,30 @@ var blockedStateMarkers = func() []string {
 	return out
 }()
 
+// carriesTheConsequence reports whether the sentence after an allowance should
+// be read as that allowance's consequence.
+//
+// The lookahead exists because the consequence usually IS the next sentence, but
+// "usually" is not "always" — a message can turn to something else, and reading
+// a blocked statement about a different subject as this one's consequence is the
+// cost of the lookahead. A sentence that announces the change of subject, or
+// disclaims the thing as out of scope, is taken at its word.
+//
+// This does not catch every unrelated follow-on, and deliberately errs toward
+// reading the next sentence: an admission reported as success is the failure this
+// guard exists to prevent, and a message that says something is unverified has
+// said it whether or not it is the same something.
+func carriesTheConsequence(next string) bool {
+	return !containsAny(next, topicShiftMarkers)
+}
+
+// topicShiftMarkers say the message has moved on to something else.
+var topicShiftMarkers = []string{
+	"separately", "unrelatedly", "unrelated", "as an aside", "aside from",
+	"out of scope", "outside the scope", "not in scope", "for a different",
+	"in a different", "on another", "elsewhere in", "in other news",
+}
+
 // countedLabelSentence reports whether a sentence is a markdown LABEL that
 // introduces and counts a bucket of findings, rather than a claim about the
 // objective.
@@ -534,7 +575,24 @@ func countedLabelSentence(sentence string) bool {
 var countedLabelSuffix = regexp.MustCompile(`\(\s*\d+\s*\)`)
 
 func selfReportedIncompletion(text string) string {
-	for _, sentence := range admissionSentences(strings.ToLower(stripQuoted(text))) {
+	sentences := admissionSentences(strings.ToLower(stripQuoted(text)))
+	for index, sentence := range sentences {
+		// THE CONSEQUENCE IS OFTEN THE NEXT SENTENCE. The blocked-work override
+		// only ever saw the sentence the allowance fired in, so the same
+		// admission escaped or was caught purely on its punctuation:
+		//
+		//	"I could not reproduce the crash, so the fix is unverified."  caught
+		//	"I could not reproduce the crash. The fix is unverified."     missed
+		//
+		// A full stop is not a claim that the work finished, and writing the
+		// consequence as its own sentence is how most people write. The
+		// blocked-work question is asked of this sentence AND the one after it;
+		// everything else is still decided on the sentence alone, so a stem in
+		// one sentence cannot be paired with an allowance tail in another.
+		blockedContext := sentence
+		if index+1 < len(sentences) && carriesTheConsequence(sentences[index+1]) {
+			blockedContext += " " + sentences[index+1]
+		}
 		if containsAny(sentence, narrativeMarkers) {
 			continue
 		}
@@ -590,7 +648,7 @@ func selfReportedIncompletion(text string) string {
 				// reproduce the crash, so the fix is unverified" is an admission,
 				// and the tail prefix alone cannot tell them apart.
 				strong := strongAbsence(tail)
-				if !hasAnyPrefix(tail, successNegationTails) || (!strong && containsAny(sentence, blockedWorkMarkers)) {
+				if !hasAnyPrefix(tail, successNegationTails) || (!strong && containsAny(blockedContext, blockedWorkMarkers)) {
 					return selfReportReason(strings.TrimSpace(stem) + " …")
 				}
 				start = abs + len(stem)
