@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -109,5 +110,132 @@ func TestAnOrdinaryWorkspaceStoreStillRoundTrips(t *testing.T) {
 	}
 	if _, err := Read(paths, ScopeProject, "note"); err == nil {
 		t.Error("the note survived Forget")
+	}
+}
+
+// A LINK ABOVE THE STORE REDIRECTS EVERYTHING BELOW IT.
+//
+// os.Root refuses to traverse OUT of the workspace, and the note file itself was
+// checked — but a link that resolves back INSIDE the workspace is followed, and
+// the store path is checked in. A repository shipping ".zero -> redirected"
+// served notes from a directory nobody asked for, with every individual check
+// passing, because the only component inspected was the note at the end.
+//
+// The components are derived from Paths rather than spelled out, so this keeps
+// testing every ancestor if the layout moves.
+func TestALinkAboveTheStoreIsRefused(t *testing.T) {
+	layout := DefaultPaths(string(filepath.Separator) + "workspace")
+	for _, store := range []struct {
+		scope Scope
+		dir   string
+	}{{ScopeProject, layout.ProjectDir}, {ScopeLocal, layout.LocalDir}} {
+		relative, err := filepath.Rel(layout.Root, store.dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parts := strings.Split(relative, string(filepath.Separator))
+		for i := range parts {
+			ancestor := filepath.Join(parts[:i+1]...)
+			t.Run(string(store.scope)+"/"+ancestor, func(t *testing.T) {
+				root := t.TempDir()
+				paths := DefaultPaths(root)
+				// The target carries a complete store rooted where the link
+				// lands, so the ONLY thing between the caller and the planted
+				// note is the ancestor check.
+				target := filepath.Join(root, "redirected")
+				planted := filepath.Join(target, filepath.Join(parts[i+1:]...))
+				if err := os.MkdirAll(planted, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(planted, "secret"+fileExt),
+					[]byte("---\nname: secret\ndescription: planted\n---\n\nplanted body\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				linkPath := filepath.Join(root, ancestor)
+				if err := os.MkdirAll(filepath.Dir(linkPath), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, linkPath); err != nil {
+					t.Skipf("cannot create a symlink here: %v", err)
+				}
+				if note, err := Read(paths, store.scope, "secret"); err == nil {
+					t.Fatalf("a link at %s redirected the read: got %q", ancestor, note.Body)
+				} else if !errors.Is(err, ErrIsSymlink) {
+					t.Errorf("read through a link at %s failed with %v, want ErrIsSymlink", ancestor, err)
+				}
+				// Writes and deletes go through the same door.
+				if _, err := Write(paths, store.scope, "secret", "d", "body"); !errors.Is(err, ErrIsSymlink) {
+					t.Errorf("write through a link at %s = %v, want ErrIsSymlink", ancestor, err)
+				}
+				if err := Forget(paths, store.scope, "secret"); !errors.Is(err, ErrIsSymlink) {
+					t.Errorf("forget through a link at %s = %v, want ErrIsSymlink", ancestor, err)
+				}
+			})
+		}
+	}
+}
+
+// THE PRIVACY PROMISE FAILS CLOSED.
+//
+// O_EXCL cannot tell "a previous run wrote the ignore" from "something else got
+// there first", and the old code read every failure as the former. Precreating
+// an empty .gitignore made every local write succeed with the store fully
+// tracked — the note the user was told stays on this machine, sitting in git
+// status.
+func TestALocalWriteRefusesAnIneffectiveIgnore(t *testing.T) {
+	for name, content := range map[string]string{
+		"empty":                       "",
+		"comments only":               "# nothing here\n\n",
+		"narrower than all":           "*.md\n",
+		"cancelled by a re-inclusion": "*\n!keep.md\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			paths := DefaultPaths(root)
+			if err := os.MkdirAll(paths.LocalDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(paths.LocalDir, ".gitignore"), []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Write(paths, ScopeLocal, "private", "d", "secret body"); !errors.Is(err, ErrNotPrivate) {
+				t.Errorf("Write with a %s ignore = %v, want ErrNotPrivate — the note would be tracked", name, err)
+			}
+		})
+	}
+
+	// An ignore that DOES cover everything is accepted, including one this store
+	// did not write itself.
+	for name, content := range map[string]string{
+		"exactly what we write": "# Notes saved to the local scope stay on this machine.\n*\n",
+		"bare star":             "*\n",
+		"star with a comment":   "# mine\n*\n",
+	} {
+		t.Run("accepted/"+name, func(t *testing.T) {
+			root := t.TempDir()
+			paths := DefaultPaths(root)
+			if err := os.MkdirAll(paths.LocalDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(paths.LocalDir, ".gitignore"), []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Write(paths, ScopeLocal, "private", "d", "secret body"); err != nil {
+				t.Errorf("Write with a %s ignore = %v, want success", name, err)
+			}
+		})
+	}
+
+	// And the first write into a clean store still installs one.
+	clean := t.TempDir()
+	if _, err := Write(DefaultPaths(clean), ScopeLocal, "private", "d", "body"); err != nil {
+		t.Fatal(err)
+	}
+	written, err := os.ReadFile(filepath.Join(DefaultPaths(clean).LocalDir, ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ignoresEverything(string(written)) {
+		t.Errorf("the ignore this store installs does not cover everything: %q", written)
 	}
 }
