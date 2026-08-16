@@ -236,3 +236,32 @@ func TestAMinuteDurationIsReadWhole(t *testing.T) {
 		t.Errorf("a fabricated 5m00s was not caught as 300s: %+v", conflicts)
 	}
 }
+
+// The nearest duration is the claim, whichever form it is written in. Every case
+// above puts the minute figure FIRST, so trying that pattern over the whole tail
+// ahead of the seconds pattern passed them all while reaching past a nearer
+// seconds figure to claim a later one — inventing a conflict against a number the
+// model had right, the one failure this package must never produce.
+func TestTheNearestDurationIsTheClaim(t *testing.T) {
+	honest := NewLedger()
+	honest.Record("--- PASS: TestChattyChild (0.86s)\n")
+	// The package total trails the test's own timing, exactly as `go test` prints it.
+	if conflicts := honest.Conflicts("TestChattyChild took 0.86s (package total 1m20s)"); len(conflicts) != 0 {
+		t.Errorf("a correct 0.86s claim was reported as a conflict because a later 1m20s was read instead: %+v", conflicts)
+	}
+
+	ms := NewLedger()
+	ms.Record("--- PASS: TestQuick (0.45s)\n")
+	if conflicts := ms.Conflicts("TestQuick took 450ms, well under the 2m budget"); len(conflicts) != 0 {
+		t.Errorf("a correct 450ms claim was reported as a conflict: %+v", conflicts)
+	}
+
+	// And a seconds figure sitting nearby does not rescue a wrong minute claim
+	// when the minute figure is the one being stated.
+	wrong := NewLedger()
+	wrong.Record("--- PASS: TestSlow (70.00s)\n")
+	conflicts := wrong.Conflicts("TestSlow took 5m00s, not the 70s you might expect")
+	if len(conflicts) != 1 || conflicts[0].Claimed != 300 {
+		t.Errorf("a fabricated 5m00s was not caught as 300s: %+v", conflicts)
+	}
+}

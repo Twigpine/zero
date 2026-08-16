@@ -240,22 +240,40 @@ func nameBoundary(line string, from, to int) bool {
 	return true
 }
 
-// parseClaimedDuration reads the first duration in tail, in seconds.
+// parseClaimedDuration reads the FIRST duration in tail, in seconds.
 //
 // MINUTES COUNT. The pattern was ms-or-s only, so "1m10s" failed on "1m", the
 // scan moved on, and "10s" won: a truthful restatement of a recorded 70 seconds
 // was reported as a conflict, and the nudge then quoted 10s back at the model — a
 // number its answer never contained. Anything over a minute is ordinary in this
 // repo's own suite.
+//
+// POSITION DECIDES, NOT PATTERN ORDER. Trying the minute form over the whole
+// tail first reached past a nearer seconds figure to claim a later one:
+//
+//	"took 0.86s (package total 1m20s)"  ->  80, not 0.86
+//
+// The claim being checked is the test's own 0.86s; 1m20s is the package total
+// that happens to trail it. Reading the far number as the claim invented a
+// conflict against a number the model got right, which is the one failure this
+// package must never produce. Both patterns are located, and the minute form
+// wins only when it starts no later than the seconds form.
 func parseClaimedDuration(tail string) (float64, bool) {
-	if match := claimedMinuteDuration.FindStringSubmatch(tail); match != nil {
-		minutes, err := strconv.ParseFloat(match[1], 64)
+	minute := claimedMinuteDuration.FindStringSubmatchIndex(tail)
+	plain := claimedDuration.FindStringSubmatchIndex(tail)
+	switch {
+	case minute == nil && plain == nil:
+		return 0, false
+	case minute != nil && (plain == nil || minute[0] <= plain[0]):
+		minutes, err := strconv.ParseFloat(tail[minute[2]:minute[3]], 64)
 		if err != nil {
 			return 0, false
 		}
 		seconds := 0.0
-		if strings.TrimSpace(match[2]) != "" {
-			parsed, secErr := strconv.ParseFloat(match[2], 64)
+		// Group 2 is optional: "1m" alone leaves it unset, which regexp reports
+		// as index -1 rather than an empty span.
+		if minute[4] >= 0 {
+			parsed, secErr := strconv.ParseFloat(tail[minute[4]:minute[5]], 64)
 			if secErr != nil {
 				return 0, false
 			}
@@ -263,15 +281,11 @@ func parseClaimedDuration(tail string) (float64, bool) {
 		}
 		return minutes*60 + seconds, true
 	}
-	match := claimedDuration.FindStringSubmatch(tail)
-	if match == nil {
-		return 0, false
-	}
-	value, err := strconv.ParseFloat(match[1], 64)
+	value, err := strconv.ParseFloat(tail[plain[2]:plain[3]], 64)
 	if err != nil {
 		return 0, false
 	}
-	if match[2] == "ms" {
+	if tail[plain[4]:plain[5]] == "ms" {
 		value /= 1000
 	}
 	return value, true
