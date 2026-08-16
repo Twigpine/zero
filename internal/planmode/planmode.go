@@ -235,6 +235,9 @@ func stageContentForEditor(dir, sessionID, content string) (stagedPath string, c
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", nil, fmt.Errorf("create plan editor staging directory: %w", err)
 	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return "", nil, fmt.Errorf("restrict plan editor staging directory permissions: %w", err)
+	}
 	file, err := os.CreateTemp(dir, slugify(sessionID)+"-*.md")
 	if err != nil {
 		return "", nil, fmt.Errorf("stage plan file for editor: %w", err)
