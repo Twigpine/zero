@@ -3,6 +3,7 @@
 package planmode
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"syscall"
@@ -90,7 +91,7 @@ func openPlanUnderBase(base, rel, displayPath string) (*os.File, error) {
 func openatRetry(dirfd int, path string, flags int, mode uint32) (int, error) {
 	for {
 		fd, err := unix.Openat(dirfd, path, flags, mode)
-		if err == syscall.EINTR {
+		if errors.Is(err, syscall.EINTR) {
 			continue
 		}
 		return fd, err
@@ -101,7 +102,7 @@ func openatRetry(dirfd int, path string, flags int, mode uint32) (int, error) {
 // when openat(..., O_NOFOLLOW) hits a symlink (ELOOP on most Unix, EMLINK on
 // FreeBSD/Dragonfly).
 func isNoFollowErr(err error) bool {
-	return err == syscall.ELOOP || err == syscall.EMLINK
+	return errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.EMLINK)
 }
 
 // isSymlinkDisguisedAsENOTDIR reports whether err is the ENOTDIR that
@@ -112,7 +113,7 @@ func isNoFollowErr(err error) bool {
 // plain file blocking the path) also returns ENOTDIR, so this disambiguates
 // with a no-follow stat instead of trusting the errno alone.
 func isSymlinkDisguisedAsENOTDIR(dirfd int, name string, err error) bool {
-	if err != syscall.ENOTDIR {
+	if !errors.Is(err, syscall.ENOTDIR) {
 		return false
 	}
 	var st unix.Stat_t

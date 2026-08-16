@@ -235,9 +235,6 @@ func stageContentForEditor(dir, sessionID, content string) (stagedPath string, c
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", nil, fmt.Errorf("create plan editor staging directory: %w", err)
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return "", nil, fmt.Errorf("restrict plan editor staging directory permissions: %w", err)
-	}
 	file, err := os.CreateTemp(dir, slugify(sessionID)+"-*.md")
 	if err != nil {
 		return "", nil, fmt.Errorf("stage plan file for editor: %w", err)
@@ -341,7 +338,7 @@ func isUnderOrEqual(path, root string) bool {
 
 // CommitStagedEdit reads a file staged by StageForEditor (now edited by the
 // user's $EDITOR) and writes its content back into the durable plan store
-// via WritePlan.
+// via WritePlan. stagedPath must be a path produced by StageForEditor.
 func CommitStagedEdit(workspaceRoot, sessionID, stagedPath string) error {
 	data, err := os.ReadFile(stagedPath)
 	if err != nil {
