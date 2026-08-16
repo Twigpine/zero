@@ -150,13 +150,31 @@ type Ledger struct {
 // claimed value. The value is rounded to milliseconds so that re-stating the
 // same number in a different precision is still the same conflict.
 type raisedKey struct {
-	run          string
+	run string
+	// acrossRuns separates the two entry points' bookkeeping. A cross-run report
+	// is not about any single run, so keying it on one was wrong twice over: the
+	// run it picked came from map iteration, which Go randomises, so the SAME
+	// conflict was reported again on a later pass one time in four — and the
+	// dedupe exists precisely so a correction fed back to the model cannot loop.
+	acrossRuns   bool
 	name         string
 	claimedMilli int64
 }
 
 func newRaisedKey(run Run, name string, claimed float64) raisedKey {
-	return raisedKey{run: run.key(), name: name, claimedMilli: int64(math.Round(claimed * 1000))}
+	return raisedKey{run: run.key(), name: name, claimedMilli: claimedMilli(claimed)}
+}
+
+// newAcrossRunsKey identifies a conflict raised against every run at once.
+// Independent of which run the report happens to quote, and in its own namespace
+// so the two entry points cannot suppress each other's reports — they answer
+// different questions, and a caller uses one or the other.
+func newAcrossRunsKey(name string, claimed float64) raisedKey {
+	return raisedKey{acrossRuns: true, name: name, claimedMilli: claimedMilli(claimed)}
+}
+
+func claimedMilli(claimed float64) int64 {
+	return int64(math.Round(claimed * 1000))
 }
 
 func NewLedger() *Ledger {
@@ -529,10 +547,22 @@ func (l *Ledger) ConflictsAcrossRuns(claim string) []Conflict {
 		values []float64
 		run    Run
 	}
+	// THE RUN QUOTED IS CHOSEN DETERMINISTICALLY. Map iteration order is
+	// randomised per range, so taking whichever run came first made the nudge
+	// name a different command between identical passes — and this text reaches
+	// a model, where a message that reshuffles is the same problem the sorted
+	// output below exists to avoid. The lowest run key that recorded the name
+	// wins, which is stable and does not depend on how the map was built.
+	keys := make([]string, 0, len(l.observed))
+	for key := range l.observed {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
 	merged := map[string]*sighting{}
 	names := map[string][]float64{}
-	for key, byName := range l.observed {
-		for name, values := range byName {
+	for _, key := range keys {
+		for name, values := range l.observed[key] {
 			seen := merged[name]
 			if seen == nil {
 				seen = &sighting{run: l.runs[key]}
@@ -549,7 +579,7 @@ func (l *Ledger) ConflictsAcrossRuns(claim string) []Conflict {
 		if !ok {
 			continue
 		}
-		if l.raised[newRaisedKey(seen.run, name, claimed)] {
+		if l.raised[newAcrossRunsKey(name, claimed)] {
 			continue
 		}
 		agrees := false
@@ -568,7 +598,7 @@ func (l *Ledger) ConflictsAcrossRuns(claim string) []Conflict {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	for _, conflict := range out {
-		l.raised[newRaisedKey(conflict.Run, conflict.Name, conflict.Claimed)] = true
+		l.raised[newAcrossRunsKey(conflict.Name, conflict.Claimed)] = true
 	}
 	return out
 }

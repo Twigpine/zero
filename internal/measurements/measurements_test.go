@@ -395,6 +395,60 @@ func TestAcrossRunsAcceptsAValueAnyRunPrinted(t *testing.T) {
 		t.Errorf("the conflict quoted %v; both runs' values belong in it", conflicts[0].Recorded)
 	}
 
+	// THE SAME CONFLICT IS RAISED ONCE, however the map happened to iterate.
+	//
+	// The dedupe key was built from whichever run map iteration picked first, and
+	// Go randomises that per range, so a name recorded under two commands was
+	// re-reported on a later pass one time in four. The agent loop feeds this
+	// back to the model as a correction; raising it again is how that loops.
+	//
+	// Repeated 200 times because a key that depends on map order fails
+	// intermittently, and a single pass would call it fixed.
+	for attempt := 0; attempt < 200; attempt++ {
+		repeat := NewLedger()
+		repeat.Record(plain, "--- PASS: TestSlow (1.00s)\n")
+		repeat.Record(race, "--- PASS: TestSlow (9.00s)\n")
+		if first := repeat.ConflictsAcrossRuns("TestSlow took 45.00s"); len(first) != 1 {
+			t.Fatalf("attempt %d: the first pass did not report: %+v", attempt, first)
+		}
+		if again := repeat.ConflictsAcrossRuns("TestSlow took 45.00s"); len(again) != 0 {
+			t.Fatalf("attempt %d: the same conflict was raised twice: %+v", attempt, again)
+		}
+	}
+
+	// AND THE RUN IT QUOTES IS STABLE. This text reaches a model; naming a
+	// different command between identical passes is the same problem the sorted
+	// output exists to avoid.
+	labels := map[string]bool{}
+	for attempt := 0; attempt < 200; attempt++ {
+		stable := NewLedger()
+		stable.Record(plain, "--- PASS: TestSlow (1.00s)\n")
+		stable.Record(race, "--- PASS: TestSlow (9.00s)\n")
+		reported := stable.ConflictsAcrossRuns("TestSlow took 45.00s")
+		if len(reported) != 1 {
+			t.Fatalf("attempt %d: expected one conflict, got %+v", attempt, reported)
+		}
+		labels[reported[0].Run.Label()] = true
+	}
+	if len(labels) != 1 {
+		t.Errorf("the quoted run varies between identical passes: %v", labels)
+	}
+
+	// THE TWO ENTRY POINTS KEEP SEPARATE BOOKS, deliberately. They answer
+	// different questions, so neither suppresses the other — asking both on one
+	// ledger reports the same number twice, once per question. No caller does:
+	// the agent loop and the specialist each use ConflictsAcrossRuns, and the
+	// per-run form is for a caller that knows its command. Pinned because it is a
+	// real consequence of the split rather than an accident.
+	shared := NewLedger()
+	shared.Record(plain, "--- PASS: TestSlow (1.00s)\n")
+	if got := shared.Conflicts(plain, "TestSlow took 45.00s"); len(got) != 1 {
+		t.Errorf("the per-run question was not answered: %+v", got)
+	}
+	if got := shared.ConflictsAcrossRuns("TestSlow took 45.00s"); len(got) != 1 {
+		t.Errorf("the cross-run question was suppressed by the per-run one: %+v", got)
+	}
+
 	// And the strict, per-run check still holds a claim to its own run — that is
 	// the whole difference between the two entry points.
 	strict := NewLedger()
