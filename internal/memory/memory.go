@@ -230,12 +230,44 @@ func refuseReparseChain(handle *os.Root, relative string) error {
 		return nil
 	}
 	parts := strings.Split(relative, string(filepath.Separator))
+	absentAt := ""
 	for i := range parts {
-		if err := pathjail.RefuseReparse(handle, filepath.Join(parts[:i+1]...)); err != nil {
+		component := filepath.Join(parts[:i+1]...)
+		if err := pathjail.RefuseReparse(handle, component); err != nil {
 			return err
+		}
+		// A COMPONENT CANNOT EXIST INSIDE ONE THAT DOES NOT. RefuseReparse reports
+		// absence as fine, which is right on its own — a store that has not been
+		// created yet is what a first write is for. But absence must then hold all
+		// the way down, and where it does not, the handle is refusing to traverse
+		// something rather than telling us the path is empty: a Windows junction
+		// at an ancestor reports that way, and the store beneath it then read as
+		// simply having no notes. "Refused" and "absent" are different answers,
+		// and only one of them should let a caller conclude its notes are gone.
+		exists, err := componentExists(handle, component)
+		if err != nil {
+			return err
+		}
+		switch {
+		case !exists && absentAt == "":
+			absentAt = component
+		case exists && absentAt != "":
+			return fmt.Errorf("%w: %s is unreadable, so %s cannot be inspected",
+				ErrIsSymlink, absentAt, component)
 		}
 	}
 	return nil
+}
+
+// componentExists reports whether relative is present, without following a link.
+func componentExists(handle *os.Root, relative string) (bool, error) {
+	if _, err := handle.Lstat(relative); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect %s: %w", relative, err)
+	}
+	return true, nil
 }
 
 // Note is one stored memory.
@@ -444,6 +476,15 @@ func keepLocalScopePrivate(handle *os.Root, scope Scope, relative string) error 
 	case !errors.Is(err, fs.ErrExist):
 		return fmt.Errorf("create %s: %w", ignorePath, err)
 	}
+	// THE IGNORE FILE ITSELF MUST NOT BE A LINK. git does not follow a symlinked
+	// .gitignore — it warns and treats the rule as absent — so reading through
+	// one and accepting the target's "*" certified a privacy rule that is not in
+	// force. An in-workspace RELATIVE link is followed by os.Root (an absolute
+	// one is refused, which is why an earlier check of this looked clean), so the
+	// bypass needed nothing outside the workspace.
+	if err := pathjail.RefuseReparse(handle, ignorePath); err != nil {
+		return fmt.Errorf("%w: %s is a link, and git does not read one: %v", ErrNotPrivate, ignorePath, err)
+	}
 	existing, err := readBounded(handle, ignorePath)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", ignorePath, err)
@@ -462,10 +503,27 @@ func keepLocalScopePrivate(handle *os.Root, scope Scope, relative string) error 
 // arbitrary pattern set is how a privacy check ends up agreeing with a file that
 // does not protect anything. A re-inclusion line cancels the cover no matter
 // where it sits, so one "!" is enough to fail the whole file.
+//
+// IT FOLLOWS GIT'S WHITESPACE RULES, and trimming each line got both of them
+// backwards. Verified against git 2.55.0 rather than read off the spec:
+//
+//	"  *"    gate said covered; git does NOT ignore, because LEADING whitespace
+//	         is part of the pattern — so a note the user was told stays on this
+//	         machine was picked up by a routine `git add -A`, which is the exact
+//	         outcome this function exists to prevent, arrived at silently
+//	"\ufeff*"  gate said not covered; git strips a UTF-8 BOM and honours the rule
+//	         — so an ignore written by an ordinary editor failed every local write
+//
+// Leading whitespace is therefore significant and is NOT stripped; trailing
+// whitespace is not significant to git and is; a BOM is stripped once, at the
+// start of the file, exactly as git does.
 func ignoresEverything(content string) bool {
+	content = strings.TrimPrefix(content, "\ufeff")
 	covered := false
 	for _, line := range strings.Split(content, "\n") {
-		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		// TrimRight, not TrimSpace: git drops trailing whitespace from a pattern
+		// and keeps leading whitespace as part of it.
+		line = strings.TrimRight(strings.TrimSuffix(line, "\r"), " \t")
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
