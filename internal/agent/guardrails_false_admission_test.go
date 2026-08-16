@@ -353,3 +353,68 @@ func TestTheConsequenceMayBeTheNextSentence(t *testing.T) {
 		}
 	}
 }
+
+// AN UNAMBIGUOUS STATE THAT IS NOT ALSO A MARKER IS DEAD.
+//
+// unambiguousFailureStates only decides whether a recognised absence object
+// stops protecting the sentence; something still has to FIRE, and that is
+// blockedWorkMarkers. Adding "still blocked" to the first list and not the
+// second left it doing nothing at all, and the case looked handled because the
+// phrase appeared in the code.
+//
+// Two hand-maintained lists that must agree is the shape that drifts, so the
+// agreement is asserted rather than remembered.
+func TestEveryUnambiguousStateIsAlsoABlockedWorkMarker(t *testing.T) {
+	for _, state := range unambiguousFailureStates {
+		found := false
+		for _, marker := range blockedWorkMarkers {
+			if state == marker {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("%q outranks a strong absence but is not a blockedWorkMarker, so nothing fires on it", state)
+		}
+	}
+}
+
+// EXPLICIT FAILURE STATES OUTRANK A RECOGNISED ABSENCE OBJECT.
+//
+// strongAbsence returns true for objects like "evidence", and that suppressed
+// every blocked-work marker in the sentence — so a message saying in as many
+// words that the work is unverified reported success. The absence protection is
+// for ownership and follow-up wording; it was never meant to cover a sentence
+// that states the outcome.
+func TestAnExplicitFailureStateOutranksTheAbsenceObject(t *testing.T) {
+	for _, admission := range []string{
+		"I could not find any evidence supporting the fix, so it remains unverified.",
+		"I could not find any evidence for the cause, so the bug is unresolved.",
+		"I could not find any way to make it work, so I gave up.",
+		"I could not find any working approach; it is still broken.",
+		"I could not find any issues, but the migration is still blocked.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("an explicit failure state was overruled by the absence object: %q", admission)
+		}
+	}
+
+	// AMBIGUOUS wording still yields to the absence, which is the whole reason
+	// the protection exists: ownership and follow-up read two ways, an explicit
+	// state reads one.
+	for _, finding := range []string{
+		"I could not find any evidence that the flag is read in production.",
+		"I could not find any remaining issues, though a follow-up will need to cover the Windows path.",
+		"I could not find any blockers; someone else can take the release from here.",
+		"I could not find any evidence of a leak, so nothing was modified.",
+		"I could not detect any races, and nothing was modified.",
+		// A state in the NEXT sentence may belong to another subject, so
+		// same-sentence only.
+		"I could not reproduce any failure in the parser. The CI flake in the network suite remains unresolved and belongs to another team.",
+		"I could not find any issues in the diff. Documentation for the new flag is unfinished, which was never part of this request.",
+	} {
+		if reason := selfReportedIncompletion(finding); reason != "" {
+			t.Errorf("a finding was flagged by ambiguous or another subject's wording: %q -> %s", finding, reason)
+		}
+	}
+}

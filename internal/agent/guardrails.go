@@ -493,10 +493,11 @@ var blockedWorkMarkers = []string{
 	// cause, so the work is blocked" carries the statement in the same sentence
 	// and still passed, because every marker above names a symptom of being
 	// blocked and none named the thing itself.
-	"is blocked", "are blocked", "remains blocked", "stays blocked",
+	"is blocked", "are blocked", "remains blocked", "stays blocked", "still blocked",
 	"cannot proceed", "could not proceed", "can not proceed", "unable to proceed",
-	"is unfinished", "remains unfinished", "left unfinished",
+	"is unfinished", "remains unfinished", "left unfinished", "still unfinished",
 	"is incomplete", "remains incomplete",
+	"still unresolved", "still unverified",
 }
 
 // bareInabilityStems are the two entries above that are STEMS rather than
@@ -505,6 +506,35 @@ var blockedWorkMarkers = []string{
 // success: "so i could not record a plan; the task is a single read-and-report
 // step and is now complete" is a finished task that did not need the plan.
 var bareInabilityStems = []string{"so i cannot", "so i could not"}
+
+// unambiguousFailureStates say the work is in a bad state, with no reading on
+// which it is a result.
+//
+// AN OBJECT CANNOT OUTRANK AN EXPLICIT STATE. strongAbsence returns true for
+// "evidence", and that suppressed every blocked-work marker in the sentence — so
+// "I could not find any evidence supporting the fix, so it remains unverified"
+// reported success while saying in as many words that the work is unverified.
+// The absence protection exists for ownership and follow-up wording, where "I
+// could not find any remaining issues, though a follow-up will need to cover the
+// Windows path" really is a finding. It was never meant to cover a sentence that
+// states the outcome.
+//
+// So this is the SHORT list: "unverified" and "still broken" have one reading,
+// while "someone else", "will need to" and "nothing was modified" have two and
+// stay ambiguous. Same-sentence only — a state in the NEXT sentence may belong
+// to another subject, which is what the lookahead's topic-shift guard is for.
+var unambiguousFailureStates = []string{
+	"unverified", "not verified",
+	"is unresolved", "remains unresolved",
+	"still broken",
+	"is blocked", "are blocked", "remains blocked", "stays blocked", "still blocked",
+	"is unfinished", "remains unfinished", "left unfinished", "still unfinished",
+	"still unresolved", "still unverified",
+	"is incomplete", "remains incomplete",
+	"cannot proceed", "could not proceed", "unable to proceed",
+	"gave up", "giving up", "ran out of", "run out of",
+	"left undone",
+}
 
 // blockedStateMarkers describe WORK LEFT BLOCKED — unverified, unresolved,
 // handed off, abandoned for time. Only these break the tool-grant exemption:
@@ -648,6 +678,12 @@ func selfReportedIncompletion(text string) string {
 				// reproduce the crash, so the fix is unverified" is an admission,
 				// and the tail prefix alone cannot tell them apart.
 				strong := strongAbsence(tail)
+				// The object decides whether finding nothing is a result; an
+				// explicit failure state in the SAME sentence decides that it is
+				// not, whatever the object.
+				if strong && containsAny(sentence, unambiguousFailureStates) {
+					strong = false
+				}
 				if !hasAnyPrefix(tail, successNegationTails) || (!strong && containsAny(blockedContext, blockedWorkMarkers)) {
 					return selfReportReason(strings.TrimSpace(stem) + " …")
 				}
