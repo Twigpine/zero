@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 )
 
 func testPaths(t *testing.T) Paths {
@@ -410,5 +412,60 @@ func TestADescriptionCannotConsumeTheListing(t *testing.T) {
 	// The body is untouched: only the summary is bounded.
 	if !strings.Contains(note.Body, "body") {
 		t.Errorf("the body was disturbed: %q", note.Body)
+	}
+}
+
+// The cap has to be LINEAR. The first version dropped one rune per iteration and
+// re-encoded the slice to measure it, taking 13.3s on a 64 KiB description —
+// which maxNoteBytes permits, so it was slowest on exactly the input it exists
+// to handle.
+func TestTheDescriptionCapIsLinear(t *testing.T) {
+	for _, size := range []int{1 << 10, 16 << 10, 64 << 10} {
+		start := time.Now()
+		got := boundedDescription(strings.Repeat("verbose ", size/8))
+		elapsed := time.Since(start)
+		if len(got) > maxDescriptionBytes {
+			t.Errorf("%d bytes in: result is %d bytes, over the %d cap", size, len(got), maxDescriptionBytes)
+		}
+		if elapsed > time.Second {
+			t.Errorf("%d bytes in: took %v — the cap is not linear", size, elapsed)
+		}
+	}
+	// Multi-byte runes must not be split, and must not be slow either.
+	multi := strings.Repeat("é", 16<<10)
+	start := time.Now()
+	got := boundedDescription(multi)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("multi-byte input took %v", elapsed)
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("the cap split a multi-byte rune: %q", got)
+	}
+	if len(got) > maxDescriptionBytes {
+		t.Errorf("multi-byte result is %d bytes, over the %d cap", len(got), maxDescriptionBytes)
+	}
+}
+
+// A note that arrives with a CLONE never passed through this process's write
+// path, so the bound has to run where the description is parsed. Otherwise a
+// checked-in note crowds the listing everyone shares.
+func TestACheckedInDescriptionIsBoundedOnRead(t *testing.T) {
+	paths := testPaths(t)
+	if err := os.MkdirAll(paths.ProjectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Written directly to disk, as a clone would deliver it.
+	huge := strings.Repeat("noise ", 4000)
+	content := "---\nname: cloned\ndescription: " + huge + "\n---\n\nbody\n"
+	if err := os.WriteFile(filepath.Join(paths.ProjectDir, "cloned"+fileExt), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	note, err := Read(paths, ScopeProject, "cloned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(note.Description) > maxDescriptionBytes {
+		t.Errorf("a checked-in description reached the listing at %d bytes, over the %d cap",
+			len(note.Description), maxDescriptionBytes)
 	}
 }
