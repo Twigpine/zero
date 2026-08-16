@@ -338,7 +338,17 @@ var objectiveFailureMarkers = []string{
 	"complete this task", "complete the task", "completing this task", "completing the task",
 	"finish this task", "finish the task", "finishing this task",
 	"complete it", "completing it", "finish it", "finishing it",
-	"the objective", "the assignment", "as requested", "what was asked",
+	// The objective and the assignment need the verb too, for the same reason
+	// "this task" did. "the objective is met" and "the assignment is complete"
+	// name the objective in order to report SUCCESS, and a bare noun read both
+	// as failure — so a finished answer carrying a tool caveat was told it had
+	// not finished, which is the worst thing this detector can do.
+	"complete the objective", "completing the objective",
+	"finish the objective", "finishing the objective",
+	"meet the objective", "meeting the objective", "achieve the objective",
+	"complete the assignment", "completing the assignment",
+	"finish the assignment", "finishing the assignment",
+	"as requested", "what was asked",
 	"do this task", "perform this task", "carry out this task",
 }
 
@@ -386,6 +396,34 @@ var blockedWorkMarkers = []string{
 	"so i cannot", "so i could not",
 }
 
+// bareInabilityStems are the two entries above that are STEMS rather than
+// descriptions of a blocked state. The stem loop below already scans them with
+// its own tail logic, and a sentence can carry one on its way to reporting
+// success: "so i could not record a plan; the task is a single read-and-report
+// step and is now complete" is a finished task that did not need the plan.
+var bareInabilityStems = []string{"so i cannot", "so i could not"}
+
+// blockedStateMarkers describe WORK LEFT BLOCKED — unverified, unresolved,
+// handed off, abandoned for time. Only these break the tool-grant exemption:
+// they say something about the state the work is in, which a tool caveat cannot
+// excuse, whereas a bare stem says only that one step did not happen.
+//
+// DERIVED, not copied. Two hand-maintained lists that must stay in step drift,
+// and the drift here would be silent in both directions.
+var blockedStateMarkers = func() []string {
+	bare := make(map[string]bool, len(bareInabilityStems))
+	for _, stem := range bareInabilityStems {
+		bare[stem] = true
+	}
+	out := make([]string, 0, len(blockedWorkMarkers))
+	for _, marker := range blockedWorkMarkers {
+		if !bare[marker] {
+			out = append(out, marker)
+		}
+	}
+	return out
+}()
+
 // countedLabelSentence reports whether a sentence is a markdown LABEL that
 // introduces and counts a bucket of findings, rather than a claim about the
 // objective.
@@ -427,7 +465,22 @@ func selfReportedIncompletion(text string) string {
 		// codebase." That task really did fail, and it mentions tools, so a bare
 		// tool-marker check waved it through. Naming the task is what separates
 		// "I lack a tool I did not need" from "I lack the tools this needed".
-		if containsAny(sentence, toolGrantMarkers) && !containsAny(sentence, objectiveFailureMarkers) {
+		// BLOCKED WORK BREAKS THE EXEMPTION TOO, not just a named objective. The
+		// override above asks whether the sentence names the task, which a whole
+		// class of real admissions never does:
+		//
+		//	"No write tool is available in this context, so the fix is unverified."
+		//	"There is no edit tool available here, so the change remains unapplied."
+		//	"Write tools are not available in this setup, so the tests were never run."
+		//
+		// Every one mentions tools, none names the objective, and all four were
+		// waved through. The tool caveat is the REASON the work is blocked, not a
+		// reason to stop reading — so a sentence that also says something is
+		// unverified, unapplied or untested goes on to the blocked-work handling
+		// below instead of being exempted here.
+		if containsAny(sentence, toolGrantMarkers) &&
+			!containsAny(sentence, objectiveFailureMarkers) &&
+			!containsAny(sentence, blockedStateMarkers) {
 			continue
 		}
 		for _, phrase := range selfReportPhrases {

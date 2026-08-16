@@ -206,3 +206,65 @@ func TestTheGrantExemptionStillCoversWhatItWasBuiltFor(t *testing.T) {
 		}
 	}
 }
+
+// NAMING THE OBJECTIVE TO REPORT SUCCESS, same trap as naming the task.
+//
+// "the objective" and "the assignment" were bare nouns in objectiveFailureMarkers
+// while "this task" had already been verb-anchored for exactly this reason. A
+// message that mentions a tool it lacked and then says the objective IS met was
+// read as saying the objective was not met — a finished answer told it had not
+// finished, which is the worst outcome this detector has.
+func TestNamingTheObjectiveWhileReportingSuccessIsNotAnAdmission(t *testing.T) {
+	for _, done := range []string{
+		"I do not have write tools available, but the objective is met: the config already sets the flag.",
+		"No write tool is available to me, so the objective was achieved by reading alone.",
+		"The assignment is complete; no shell was needed.",
+		"I have no browser tool available here, yet the assignment is complete.",
+	} {
+		if reason := selfReportedIncompletion(done); reason != "" {
+			t.Errorf("a finished answer was marked incomplete for naming its objective: %q -> %s", done, reason)
+		}
+	}
+	// The failure forms differ only in the verb, and must still fire.
+	for _, failed := range []string{
+		"I could not complete the objective because the build never succeeded.",
+		"I was unable to finish the assignment.",
+	} {
+		if reason := selfReportedIncompletion(failed); reason == "" {
+			t.Errorf("an objective that was not met was passed as complete: %q", failed)
+		}
+	}
+}
+
+// A TOOL CAVEAT IS THE REASON WORK IS BLOCKED, NOT A REASON TO STOP READING.
+//
+// The tool-grant exemption asked only whether the sentence named the objective,
+// so an admission that named none was waved through on the strength of
+// mentioning tools:
+//
+//	"No write tools available, so I could not verify the change."
+//
+// It breaks now on a blocked STATE — unverified, unresolved, handed off — but
+// deliberately not on the two bare inability stems in that list, because a
+// sentence carrying one can still be on its way to reporting success (see
+// TestNamingTheTaskWhileReportingSuccessIsNotAnAdmission, which this broke when
+// the whole list was used).
+func TestAToolCaveatDoesNotExcuseBlockedWork(t *testing.T) {
+	for _, admission := range []string{
+		"No write tools available, so I could not verify the change.",
+		"There is no edit tool available here, so I could not verify the fix.",
+	} {
+		if reason := selfReportedIncompletion(admission); reason == "" {
+			t.Errorf("a tool caveat excused blocked work: %q", admission)
+		}
+	}
+	// The exemption still covers what it exists for: a tool that was not needed.
+	for _, exempt := range []string{
+		"No update_plan tool available in this specialist context, so I proceeded directly.",
+		"There is no update_plan tool available in this specialist context (only read-only tools), so I have written the plan into this answer instead.",
+	} {
+		if reason := selfReportedIncompletion(exempt); reason != "" {
+			t.Errorf("the blocked-state check broke the exemption it guards: %q -> %s", exempt, reason)
+		}
+	}
+}
