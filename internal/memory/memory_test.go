@@ -297,9 +297,19 @@ func TestReadingRefusesAnOversizedNoteWrittenOutOfBand(t *testing.T) {
 	if _, err := Read(paths, ScopeProject, "huge"); !errors.Is(err, ErrTooLarge) {
 		t.Errorf("Read(oversized) = %v, want ErrTooLarge", err)
 	}
-	// And the listing reports it rather than dropping the note in silence.
-	if _, listErr := List(paths, ScopeProject); listErr == nil {
+	// And the listing reports it BESIDE the notes it could read, rather than
+	// dropping the oversized one in silence or throwing away the readable ones.
+	// The memory tool renders whatever List returns and appends the error, so
+	// one bad file turning this into an empty result is an empty memory.
+	if _, err := Write(paths, ScopeProject, "fine", "readable", "body"); err != nil {
+		t.Fatal(err)
+	}
+	notes, listErr := List(paths, ScopeProject)
+	if listErr == nil {
 		t.Error("List silently skipped an oversized note instead of reporting it")
+	}
+	if len(notes) != 1 || notes[0].Name != "fine" {
+		t.Errorf("List returned %+v; the readable note must survive an unreadable neighbour", notes)
 	}
 }
 
@@ -310,10 +320,22 @@ func TestResolveScopesRefusesUnknownAndHonoursValid(t *testing.T) {
 	if err != nil || len(both) != 2 {
 		t.Errorf("ResolveScopes(\"\") = %v, %v; want both scopes", both, err)
 	}
-	for _, requested := range []string{"project", "PROJECT", " local "} {
+	// The VALUE, not just the count: resolving " local " to one scope is no use
+	// if that one scope is the project store, and a count-only assertion would
+	// pass either way.
+	for requested, want := range map[string]Scope{
+		"project": ScopeProject,
+		"PROJECT": ScopeProject,
+		" local ": ScopeLocal,
+		"LOCAL":   ScopeLocal,
+	} {
 		got, err := ResolveScopes(requested)
 		if err != nil || len(got) != 1 {
 			t.Errorf("ResolveScopes(%q) = %v, %v; want exactly one scope", requested, got, err)
+			continue
+		}
+		if got[0] != want {
+			t.Errorf("ResolveScopes(%q) = %v, want %v", requested, got[0], want)
 		}
 	}
 	for _, requested := range []string{"invalid", "both", "user", "../project"} {
@@ -338,6 +360,39 @@ func TestListHonoursTheRequestedScope(t *testing.T) {
 	}
 	if len(notes) != 1 || notes[0].Name != "shared" {
 		t.Errorf("List(project) = %+v, want only the project note", notes)
+	}
+}
+
+// The extension is matched EXACTLY. Only a comment held this in place, and the
+// reason is not obvious enough to survive a refactor that makes the match
+// case-insensitive to be helpful: Read reopens name+".md", so listing "note.MD"
+// offers the caller an entry that the very next Read cannot open on a
+// case-sensitive filesystem. Case-preserving directories mean the entry keeps
+// its spelling on every platform, so this reads the same everywhere.
+//
+// WHAT THIS DOES AND DOES NOT CATCH, measured rather than assumed. Loosening the
+// extension check ALONE does not fail this test: the case-sensitive TrimSuffix
+// below then leaves "shouty.MD" whole, the name pattern refuses it, and the entry
+// is dropped anyway — there is no defect there to catch. It fails on the refactor
+// that does reach the listing, where the extension check and the suffix strip are
+// made case-insensitive together.
+func TestListMatchesTheExtensionExactly(t *testing.T) {
+	paths := testPaths(t)
+	if err := os.MkdirAll(paths.ProjectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"shouty.MD", "sidecar.txt", "backup.md.bak"} {
+		if err := os.WriteFile(filepath.Join(paths.ProjectDir, name),
+			[]byte("---\nname: shouty\ndescription: d\n---\n\nbody\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	notes, err := List(paths, ScopeProject)
+	if err != nil {
+		t.Fatalf("List reported a problem for files it should have ignored: %v", err)
+	}
+	if len(notes) != 0 {
+		t.Errorf("List returned %+v; none of those filenames is a note this store would write", notes)
 	}
 }
 
@@ -408,6 +463,12 @@ func TestADescriptionCannotConsumeTheListing(t *testing.T) {
 	}
 	if note.Description == "" {
 		t.Error("the description was dropped entirely rather than truncated")
+	}
+	// Truncation has to be VISIBLE. A description silently cut at the cap reads
+	// as the author's own words ending there, and the ellipsis is the only thing
+	// that says otherwise.
+	if !strings.HasSuffix(note.Description, "…") {
+		t.Errorf("a truncated description carries no ellipsis: %q", note.Description)
 	}
 	// The body is untouched: only the summary is bounded.
 	if !strings.Contains(note.Body, "body") {
