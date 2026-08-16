@@ -268,3 +268,41 @@ func TestAToolCaveatDoesNotExcuseBlockedWork(t *testing.T) {
 		}
 	}
 }
+
+// WHAT FOLLOWS "any" DECIDES WHETHER FINDING NOTHING IS THE RESULT.
+//
+// The "any"-family was treated as a finding whatever the object, so an admission
+// wearing the same words walked through:
+//
+//	"I could not find any remaining issues"  -> a finding, the search succeeded
+//	"I could not find any solution"          -> an admission, the work did not
+//
+// Both carry the explicit "any"; only the object separates them. The object list
+// is an ALLOW-LIST because it grants the exemption — a deny-list of deliverables
+// would wave through every noun nobody thought of, which is the wrong direction
+// for this detector to fail in.
+func TestAnAbsenceIsAFindingOnlyWhenTheObjectMakesItOne(t *testing.T) {
+	for _, admission := range []string{
+		"I could not find any solution, so the migration remains unresolved.",
+		"I could not find any fix, so the build is still broken.",
+		"I could not find any workaround; someone else will need to pick this up.",
+		"I could not identify any approach, so this is unverified.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("an admission wearing the words of a finding passed as complete: %q", admission)
+		}
+	}
+	// The findings the allowance exists for are untouched, including the ones
+	// carrying a blocked-work marker about somebody else's future work.
+	for _, finding := range []string{
+		"I could not find any remaining issues, though a follow-up will need to cover the Windows path.",
+		"I could not find any blockers; someone else can take the release from here.",
+		"I could not find any evidence of a leak, so nothing was modified.",
+		"I did not see any further regressions, so someone else can ship it.",
+		"I could not detect any races, and nothing was modified.",
+	} {
+		if reason := selfReportedIncompletion(finding); reason != "" {
+			t.Errorf("a finding was reported as an admission: %q -> %s", finding, reason)
+		}
+	}
+}

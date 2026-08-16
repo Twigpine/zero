@@ -380,6 +380,92 @@ var strongAbsenceTails = []string{
 	"spot any", "locate any", "confirm any", "observe any",
 }
 
+// strongAbsenceObjects are the things whose ABSENCE IS THE RESULT: you go
+// looking for them precisely so you can report there are none, and finding none
+// is the work succeeding.
+//
+// WHAT FOLLOWS "any" DECIDES, and treating every "find any" as success was too
+// broad:
+//
+//	"I could not find any remaining issues"  -> a finding, the search succeeded
+//	"I could not find any solution"          -> an admission, the work did not
+//
+// Both carry the explicit "any". Only the object separates them, so only the
+// object can classify them.
+//
+// AN ALLOW-LIST, because this grants the exemption. A deny-list of deliverables
+// would have to anticipate every noun a model might reach for, and everything
+// forgotten would be waved through as success — the failure direction this
+// detector exists to prevent. An unrecognised object is simply not strong, which
+// leaves the sentence to the ordinary blocked-work handling rather than
+// flagging it outright.
+var strongAbsenceObjects = []string{
+	"issue", "issues", "problem", "problems", "bug", "bugs", "defect", "defects",
+	"error", "errors", "failure", "failures", "regression", "regressions",
+	"evidence", "example", "examples", "occurrence", "occurrences",
+	"instance", "instances", "reference", "references", "match", "matches",
+	"caller", "callers", "usage", "usages", "use", "uses", "case", "cases",
+	"vulnerability", "vulnerabilities", "leak", "leaks", "race", "races",
+	"sign", "signs", "trace", "traces", "mention", "mentions", "difference", "differences",
+	"blocker", "blockers", "gap", "gaps", "omission", "omissions", "discrepancy", "discrepancies",
+	"conflict", "conflicts", "violation", "violations", "warning", "warnings",
+}
+
+// absenceQualifiers sit between "any" and the object without changing it.
+var absenceQualifiers = []string{
+	"remaining", "other", "further", "more", "additional", "obvious", "such",
+	"outstanding", "new", "existing", "actual", "real", "clear", "direct",
+}
+
+// strongAbsence reports whether tail is an "any"-family absence whose OBJECT
+// makes finding nothing the result rather than the shortfall.
+func strongAbsence(tail string) bool {
+	for _, prefix := range strongAbsenceTails {
+		if !strings.HasPrefix(tail, prefix) {
+			continue
+		}
+		rest := strings.TrimSpace(tail[len(prefix):])
+		for trimmed := true; trimmed; {
+			trimmed = false
+			for _, qualifier := range absenceQualifiers {
+				if word, remainder, ok := cutFirstWord(rest); ok && word == qualifier {
+					rest, trimmed = remainder, true
+					break
+				}
+			}
+		}
+		word, _, ok := cutFirstWord(rest)
+		if !ok {
+			continue
+		}
+		for _, object := range strongAbsenceObjects {
+			if word == object {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// cutFirstWord returns the first bare word of text, lowercased by the caller's
+// own normalisation, with surrounding punctuation removed.
+func cutFirstWord(text string) (word string, rest string, ok bool) {
+	text = strings.TrimLeft(text, " \t")
+	end := 0
+	for end < len(text) {
+		c := text[end]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' {
+			end++
+			continue
+		}
+		break
+	}
+	if end == 0 {
+		return "", text, false
+	}
+	return text[:end], text[end:], true
+}
+
 var blockedWorkMarkers = []string{
 	"unverified", "not verified", "cannot verify", "could not verify",
 	"someone else", "will need to", "needs someone", "handed off", "hand off",
@@ -503,7 +589,7 @@ func selfReportedIncompletion(text string) string {
 				// blocked: "could not reproduce the crash" is a finding, "could not
 				// reproduce the crash, so the fix is unverified" is an admission,
 				// and the tail prefix alone cannot tell them apart.
-				strong := hasAnyPrefix(tail, strongAbsenceTails)
+				strong := strongAbsence(tail)
 				if !hasAnyPrefix(tail, successNegationTails) || (!strong && containsAny(sentence, blockedWorkMarkers)) {
 					return selfReportReason(strings.TrimSpace(stem) + " …")
 				}
