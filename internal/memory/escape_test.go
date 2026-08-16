@@ -251,18 +251,43 @@ func TestALocalWriteRefusesAnIneffectiveIgnore(t *testing.T) {
 // is refused, which is why an earlier check of exactly this looked clean and was
 // not.
 func TestALinkedIgnoreIsNotProofOfPrivacy(t *testing.T) {
-	root := t.TempDir()
-	paths := DefaultPaths(root)
-	if err := os.MkdirAll(paths.LocalDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(paths.LocalDir, "decoy"), []byte("*\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	linkDir(t, "decoy", filepath.Join(paths.LocalDir, ".gitignore"))
-	if _, err := Write(paths, ScopeLocal, "private", "d", "secret"); !errors.Is(err, ErrNotPrivate) {
-		t.Errorf("a symlinked ignore was accepted as privacy: %v", err)
-	}
+	// A FILE symlink, which is what a .gitignore would actually be. Windows needs
+	// a privilege for these, so the junction case below carries that platform.
+	t.Run("file symlink", func(t *testing.T) {
+		root := t.TempDir()
+		paths := DefaultPaths(root)
+		if err := os.MkdirAll(paths.LocalDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(paths.LocalDir, "decoy"), []byte("*\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("decoy", filepath.Join(paths.LocalDir, ".gitignore")); err != nil {
+			t.Skipf("cannot create a file symlink here: %v", err)
+		}
+		if _, err := Write(paths, ScopeLocal, "private", "d", "secret"); !errors.Is(err, ErrNotPrivate) {
+			t.Errorf("a symlinked ignore was accepted as privacy: %v", err)
+		}
+	})
+
+	// A DIRECTORY reparse point at the ignore path, which linkDir builds as a
+	// junction on Windows and a symlink elsewhere. The refusal arrives
+	// differently by platform — ErrNotPrivate where the link is inspected as a
+	// link, "is a directory" where the create simply cannot open it — so what is
+	// asserted is the property that matters on both: the write DOES NOT SUCCEED.
+	// Asserting the sentinel here is what turned this test red on Windows while
+	// the behaviour was correct.
+	t.Run("directory reparse point", func(t *testing.T) {
+		root := t.TempDir()
+		paths := DefaultPaths(root)
+		if err := os.MkdirAll(filepath.Join(paths.LocalDir, "decoy"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		linkDir(t, "decoy", filepath.Join(paths.LocalDir, ".gitignore"))
+		if _, err := Write(paths, ScopeLocal, "private", "d", "secret"); err == nil {
+			t.Error("a reparse point at the ignore path was accepted as privacy")
+		}
+	})
 }
 
 // THE GATE FOLLOWS GIT'S WHITESPACE RULES, and trimming each line had both
