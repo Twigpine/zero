@@ -316,3 +316,59 @@ func TestTheIgnoreGateAgreesWithGit(t *testing.T) {
 		}
 	}
 }
+
+// ABSENT TO THE HANDLE IS NOT ABSENT ON DISK.
+//
+// A component the confined handle will not open, while it is present on disk,
+// has been REFUSED — and a Windows junction whose target leaves the workspace
+// reports exactly that way. The chain read it and everything under it as
+// missing, the later open became ErrNotFound, and List drops ErrNotFound, so a
+// tampered store presented as an empty one. presentOnDisk is what tells the two
+// answers apart, so its own behaviour is pinned here.
+func TestPresentOnDiskDistinguishesAbsenceFromRefusal(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".zero", "memory"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !presentOnDisk(root, ".zero") {
+		t.Error("an existing directory was reported absent")
+	}
+	if !presentOnDisk(root, filepath.Join(".zero", "memory")) {
+		t.Error("an existing nested directory was reported absent")
+	}
+	if presentOnDisk(root, "never-created") {
+		t.Error("a missing path was reported present")
+	}
+	if presentOnDisk("", ".zero") {
+		t.Error("a blank root was treated as containing something")
+	}
+	// A LINK COUNTS AS PRESENT, without being followed — that is the whole case
+	// this exists for, since the junction's target is outside the workspace.
+	linkDir(t, filepath.Join(root, ".zero"), filepath.Join(root, "aliased"))
+	if !presentOnDisk(root, "aliased") {
+		t.Error("a reparse point was reported absent, so a refusal would read as absence")
+	}
+	// And a DANGLING link is still present: Lstat does not follow it.
+	if err := os.Symlink("nowhere-at-all", filepath.Join(root, "dangling")); err == nil {
+		if !presentOnDisk(root, "dangling") {
+			t.Error("a dangling link was reported absent")
+		}
+	}
+}
+
+// A clean workspace must keep working: absence really is absence there, and
+// treating it as a refusal would break every first write.
+func TestAnUncreatedStoreIsStillAbsence(t *testing.T) {
+	fresh := t.TempDir()
+	paths := DefaultPaths(fresh)
+	if _, err := Read(paths, ScopeProject, "nothing"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("a note in an uncreated store = %v, want ErrNotFound", err)
+	}
+	notes, err := List(paths, ScopeProject)
+	if err != nil || len(notes) != 0 {
+		t.Errorf("listing an uncreated store = %+v, %v; want empty and no error", notes, err)
+	}
+	if _, err := Write(paths, ScopeLocal, "first", "d", "b"); err != nil {
+		t.Errorf("the first write into a clean workspace failed: %v", err)
+	}
+}
