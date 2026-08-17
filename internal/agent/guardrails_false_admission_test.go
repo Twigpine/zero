@@ -456,3 +456,41 @@ func TestAStateInsideTheNegatedPropositionIsNotTheOutcome(t *testing.T) {
 		}
 	}
 }
+
+// THE COPULA FORMS OF A TOOL CAVEAT.
+//
+// toolGrantMarkers recognised "no update_plan tool available" but not "no
+// update_plan tool IS available" — the same statement with a verb in it. So a
+// message that named a tool it was not given AND delivered the work anyway was
+// reported as incomplete:
+//
+//	"I could not record a plan because no update_plan tool is available,
+//	 so I wrote it into this answer instead."
+//
+// Which verb a sentence uses to say a tool was absent is not a distinction this
+// detector should be drawing.
+func TestATooolCaveatIsRecognisedInItsCopulaForms(t *testing.T) {
+	for _, exempt := range []string{
+		"I could not record a plan because no update_plan tool is available, so I wrote it into this answer instead.",
+		"I could not run the formatter as no such tool is available, so I checked the style by hand.",
+		"No update_plan tool available in this specialist context, so I proceeded directly.",
+	} {
+		if reason := selfReportedIncompletion(exempt); reason != "" {
+			t.Errorf("a tool caveat with delivered work was reported incomplete: %q -> %s", exempt, reason)
+		}
+	}
+
+	// A HANDOFF IS STILL AN ADMISSION. CodeRabbit's suggestion was to drop
+	// "someone else" and "will need to" from the markers that break this
+	// exemption. Measured, that would exempt these — and a run that could not do
+	// the thing and passed it to someone else has not finished it, tool caveat or
+	// not. The exemption is for a tool that was NOT NEEDED.
+	for _, admission := range []string{
+		"I could not record a plan because no update_plan tool is available, so someone else can pick it up.",
+		"I could not run the linter as no such tool is available here; a follow-up will need to cover it.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("a handoff was excused by the tool caveat: %q", admission)
+		}
+	}
+}

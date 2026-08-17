@@ -320,6 +320,9 @@ func admissionSentences(lower string) []string {
 // GIVEN, not about a tool being mentioned at all.
 var toolGrantMarkers = []string{
 	"tool available", "tools available", "no such tool", "not available in this",
+	"tool is available", "tools are available", "tool was available", "tools were available",
+	"tool is not available", "tools are not available",
+	"tool isn'''t available", "tools aren'''t available",
 	"read-only tools", "read only tools", "only read-only", "only read only",
 	"tools were provided", "tools were given", "toolset provided",
 	"in this specialist context", "in this context only",
