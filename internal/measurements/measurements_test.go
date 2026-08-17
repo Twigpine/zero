@@ -612,3 +612,63 @@ func TestAMergedResultIsNotAttributedToOneCommand(t *testing.T) {
 		t.Errorf("a single-run result lost its command label: %+v", one)
 	}
 }
+
+// CLAUSE PUNCTUATION IS A CLOSED SET, and the plain hyphen was missing from it.
+//
+// Walking the shapes rather than reasoning about them found five that leaked,
+// not one: the ASCII hyphen everyone types, both typographic dashes, a
+// parenthetical and a pipe. Each let a following clause's number be charged to
+// the name in front of it.
+func TestEveryClausePunctuationEndsTheClause(t *testing.T) {
+	for _, claim := range []string{
+		"TestChattyChild passed. the suite took 34.249s.",
+		"TestChattyChild passed; the suite took 34.249s.",
+		"TestChattyChild passed: the suite took 34.249s.",
+		"TestChattyChild passed, the suite took 34.249s.",
+		"TestChattyChild passed - the suite took 34.249s.",
+		"TestChattyChild passed -- the suite took 34.249s.",
+		"TestChattyChild passed — the suite took 34.249s.",
+		"TestChattyChild passed – the suite took 34.249s.",
+		"TestChattyChild passed (the suite took 34.249s)",
+		"TestChattyChild passed | suite 34.249s",
+		"TestChattyChild - the suite took 34.249s.",
+	} {
+		ledger := NewLedger()
+		ledger.Record(Run{}, "--- PASS: TestChattyChild (0.86s)\n")
+		if conflicts := ledger.Conflicts(Run{}, claim); len(conflicts) != 0 {
+			t.Errorf("a following clause's number was charged to this test: %q -> %+v", claim, conflicts)
+		}
+	}
+}
+
+// PUNCTUATION ALONE DOES NOT END A CLAUSE — A NEW SUBJECT DOES.
+//
+// Treating the punctuation itself as the boundary cuts a test's own number away
+// from its name, which silences a real fabrication. "TestFoo (9.99s)" and
+// "TestFoo passed - 9.99s" are ordinary ways of stating one test's timing; what
+// makes the same punctuation a break is a subject named after it.
+//
+// The last two were MISSED before this rule existed, because the comma and colon
+// were already unconditional separators — so this recovers detections rather than
+// only adding bounds.
+func TestPunctuationCarryingThisTestsOwnNumberIsNotABoundary(t *testing.T) {
+	for _, claim := range []string{
+		"TestChattyChild (9.99s)",
+		"TestChattyChild - 9.99s",
+		"TestChattyChild — 9.99s",
+		"TestChattyChild | 9.99s",
+		"TestChattyChild took 9.99s",
+		"TestChattyChild passed in 9.99s",
+		"TestChattyChild passed (9.99s)",
+		"TestChattyChild passed - 9.99s",
+		"TestChattyChild passed, 9.99s",
+		"TestChattyChild passed: 9.99s",
+	} {
+		ledger := NewLedger()
+		ledger.Record(Run{}, "--- PASS: TestChattyChild (0.86s)\n")
+		conflicts := ledger.Conflicts(Run{}, claim)
+		if len(conflicts) != 1 || conflicts[0].Claimed != 9.99 {
+			t.Errorf("a test's own number stopped being read: %q -> %+v", claim, conflicts)
+		}
+	}
+}

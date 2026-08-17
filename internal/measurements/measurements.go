@@ -370,16 +370,60 @@ func clauseEnd(line string, from int, known map[string][]float64) int {
 		consider(at)
 	}
 	for _, separator := range clauseSeparators {
-		if index := strings.Index(line[from:], separator); index >= 0 {
-			consider(from + index)
+		index := strings.Index(line[from:], separator)
+		if index < 0 {
+			continue
 		}
+		// A SEPARATOR BREAKS THE CLAUSE ONLY WHEN A NEW SUBJECT FOLLOWS IT.
+		// Punctuation alone does not decide: "TestFoo (9.99s)",
+		// "TestFoo passed - 9.99s" and "TestFoo passed, 9.99s" are all ways of
+		// stating THIS test's own number, and bounding at the punctuation would
+		// cut the number off from the name it belongs to and silence a real
+		// fabrication. What makes it a break is a subject named after it —
+		// "TestFoo passed (the suite took 34.249s)" — so the test is whether any
+		// word appears between the separator and the next duration.
+		if !separatorBreaksClause(line[from+index+len(separator):]) {
+			continue
+		}
+		consider(from + index)
 	}
 	consider(sentenceEnd(line, from))
 	return cut
 }
 
+// separatorBreaksClause reports whether the text after a separator names a new
+// subject, rather than simply carrying the preceding name's own number.
+//
+// A word before the next duration means something else is being talked about. No
+// word — just the number — means the punctuation was only presentation, which is
+// how a table, a bullet list or an aside states one test's timing.
+func separatorBreaksClause(after string) bool {
+	end := len(after)
+	for _, pattern := range []*regexp.Regexp{claimedDuration, claimedMinuteDuration} {
+		if match := pattern.FindStringIndex(after); match != nil && match[0] < end {
+			end = match[0]
+		}
+	}
+	for index := 0; index < end; index++ {
+		if c := after[index]; (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+			return true
+		}
+	}
+	return false
+}
+
 // clauseSeparators end a measurement clause without starting a new name.
-var clauseSeparators = []string{";", ":", ",", " and ", " but ", " while ", " whereas ", " though "}
+//
+// CLAUSE PUNCTUATION IS A CLOSED SET, which is what makes enumerating it
+// finishable — unlike the ways a person can phrase an admission. Walking the
+// shapes rather than guessing found five that leaked, not one: the plain hyphen
+// everyone types, both typographic dashes, a parenthetical and a pipe. Each let
+// a following clause's number be charged to the name in front of it.
+var clauseSeparators = []string{
+	";", ":", ",", "(", "|", "—", "–",
+	" - ", " -- ",
+	" and ", " but ", " while ", " whereas ", " though ",
+}
 
 // sentenceEnd returns the offset of the first sentence terminator at or after
 // from, or -1.
