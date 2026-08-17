@@ -209,7 +209,7 @@ func (paths Paths) openScope(scope Scope) (*os.Root, string, error) {
 	// write to another directory in the same tree while each individual check
 	// passed, because the only component ever inspected was the note file at the
 	// end.
-	if err := refuseReparseChain(handle, relative); err != nil {
+	if err := refuseReparseChain(handle, paths.Root, relative); err != nil {
 		handle.Close()
 		return nil, "", err
 	}
@@ -224,7 +224,7 @@ func (paths Paths) openScope(scope Scope) (*os.Root, string, error) {
 // Outermost first because that is the component whose redirection decides where
 // everything below it lands, and it makes the error name the link the caller can
 // actually act on.
-func refuseReparseChain(handle *os.Root, relative string) error {
+func refuseReparseChain(handle *os.Root, root string, relative string) error {
 	relative = filepath.Clean(relative)
 	if relative == "." || relative == string(filepath.Separator) {
 		return nil
@@ -248,15 +248,48 @@ func refuseReparseChain(handle *os.Root, relative string) error {
 		if err != nil {
 			return err
 		}
-		switch {
-		case !exists && absentAt == "":
-			absentAt = component
-		case exists && absentAt != "":
+		if !exists {
+			// ABSENT TO THE HANDLE IS NOT ABSENT. A store that has not been
+			// created yet is what a first write is for, and reporting that as a
+			// problem would break every clean workspace. But a component the
+			// confined handle will not open while it is PRESENT ON DISK has been
+			// REFUSED, and a Windows junction whose target leaves the workspace
+			// reports exactly that way: the chain read it and everything under it
+			// as missing, the later open became ErrNotFound, and List drops
+			// ErrNotFound — so a tampered store presented as an empty one.
+			//
+			// That is the outcome memory.go's own contract forbids, because the
+			// model then concludes its notes are gone and writes over whatever is
+			// really there. Absence and refusal have to be different answers.
+			if presentOnDisk(root, component) {
+				return fmt.Errorf("%w: %s cannot be opened inside the workspace", ErrIsSymlink, component)
+			}
+			if absentAt == "" {
+				absentAt = component
+			}
+			continue
+		}
+		if absentAt != "" {
 			return fmt.Errorf("%w: %s is unreadable, so %s cannot be inspected",
 				ErrIsSymlink, absentAt, component)
 		}
 	}
 	return nil
+}
+
+// presentOnDisk reports whether relative exists under root by ordinary pathname.
+//
+// Deliberately NOT through the confined handle — the whole point is to ask a
+// different question than the handle answers, so that "the handle will not open
+// this" can be told apart from "there is nothing here". It stats and never
+// opens or reads, so nothing is traversed on the strength of this answer; it
+// only decides which ERROR the caller is given.
+func presentOnDisk(root string, relative string) bool {
+	if strings.TrimSpace(root) == "" {
+		return false
+	}
+	_, err := os.Lstat(filepath.Join(root, relative))
+	return err == nil
 }
 
 // componentExists reports whether relative is present, without following a link.
