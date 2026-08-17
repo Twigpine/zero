@@ -418,3 +418,41 @@ func TestAnExplicitFailureStateOutranksTheAbsenceObject(t *testing.T) {
 		}
 	}
 }
+
+// THE STATE MUST BE THE OUTCOME, NOT PART OF WHAT WAS NEGATED.
+//
+// The override matched a failure state anywhere in the sentence, which read the
+// negated PROPOSITION as the reported result:
+//
+//	"I could not find any evidence that the issue is unresolved."
+//
+// That is a successful negative finding — there is no evidence the issue remains
+// unresolved — and it was marked incomplete. Exactly the opposite polarity of the
+// case the override was added for, and the two have to be tested together or
+// fixing one just moves the error.
+func TestAStateInsideTheNegatedPropositionIsNotTheOutcome(t *testing.T) {
+	for _, finding := range []string{
+		"I could not find any evidence that the issue is unresolved.",
+		"I could not find any evidence that the build is still broken.",
+		"I could not find any evidence that the migration is incomplete.",
+		"I could not find any sign that the deploy is blocked.",
+	} {
+		if reason := selfReportedIncompletion(finding); reason != "" {
+			t.Errorf("a negated proposition was read as the reported outcome: %q -> %s", finding, reason)
+		}
+	}
+
+	// Both polarities together: after a consequence boundary the state IS the
+	// outcome and must still fire.
+	for _, admission := range []string{
+		"I could not find any evidence supporting the fix, so it remains unverified.",
+		"I could not find any evidence for the cause, so the bug is unresolved.",
+		"I could not find any way to make it work, so I gave up.",
+		"I could not find any working approach; it is still broken.",
+		"I could not find any issues, but the migration is still blocked.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("an outcome stated after a consequence boundary was missed: %q", admission)
+		}
+	}
+}

@@ -536,6 +536,38 @@ var unambiguousFailureStates = []string{
 	"left undone",
 }
 
+// consequenceBoundaries separate what was looked for from what followed.
+//
+// THE STATE HAS TO BE THE OUTCOME, NOT PART OF WHAT WAS NEGATED. Matching
+// "is unresolved" anywhere in the sentence read the negated PROPOSITION as the
+// reported result:
+//
+//	"I could not find any evidence that the issue is unresolved."
+//
+// That is a successful negative finding — there is no evidence the issue remains
+// unresolved — and it was marked incomplete, which is the opposite polarity of
+// the case the override was added for. What separates them is position: after a
+// consequence boundary the state is being asserted, inside a "that…" clause it is
+// the thing being denied.
+var consequenceBoundaries = []string{", so ", "; ", ", but ", ", therefore", ", leaving ", ", which "}
+
+// reportedConsequence returns the part of a sentence that states the OUTCOME,
+// or "" when the sentence never turns to one. Everything before the first
+// boundary is what was searched for.
+func reportedConsequence(sentence string) string {
+	earliest := -1
+	width := 0
+	for _, boundary := range consequenceBoundaries {
+		if index := strings.Index(sentence, boundary); index >= 0 && (earliest < 0 || index < earliest) {
+			earliest, width = index, len(boundary)
+		}
+	}
+	if earliest < 0 {
+		return ""
+	}
+	return sentence[earliest+width:]
+}
+
 // blockedStateMarkers describe WORK LEFT BLOCKED — unverified, unresolved,
 // handed off, abandoned for time. Only these break the tool-grant exemption:
 // they say something about the state the work is in, which a tool caveat cannot
@@ -681,7 +713,7 @@ func selfReportedIncompletion(text string) string {
 				// The object decides whether finding nothing is a result; an
 				// explicit failure state in the SAME sentence decides that it is
 				// not, whatever the object.
-				if strong && containsAny(sentence, unambiguousFailureStates) {
+				if strong && containsAny(reportedConsequence(sentence), unambiguousFailureStates) {
 					strong = false
 				}
 				if !hasAnyPrefix(tail, successNegationTails) || (!strong && containsAny(blockedContext, blockedWorkMarkers)) {
