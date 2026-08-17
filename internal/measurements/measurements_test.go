@@ -79,9 +79,6 @@ func TestAClaimThatContradictsTheTranscriptIsCaught(t *testing.T) {
 // ...and the honest cases stay silent. A tripwire that fires on ordinary
 // variation gets switched off, and then it catches nothing at all.
 func TestHonestReportingProducesNoConflict(t *testing.T) {
-	ledger := NewLedger()
-	ledger.Record(Run{}, goTestOutput)
-
 	for name, claim := range map[string]string{
 		"the number as recorded":         "TestChattyChild took 0.86s.",
 		"ordinary run-to-run variation":  "TestChattyChild took 0.91s.",
@@ -163,6 +160,10 @@ func TestANilLedgerIsSafe(t *testing.T) {
 	}
 	if got := ledger.Conflicts(Run{}, "TestChattyChild took 4.20s."); got != nil {
 		t.Errorf("Conflicts on a nil ledger returned %+v", got)
+	}
+	// BOTH entry points, since the loop calls this one and not the other.
+	if got := ledger.ConflictsAcrossRuns("TestChattyChild took 4.20s."); got != nil {
+		t.Errorf("ConflictsAcrossRuns on a nil ledger returned %+v", got)
 	}
 }
 
@@ -419,14 +420,24 @@ func TestAcrossRunsAcceptsAValueAnyRunPrinted(t *testing.T) {
 	// AND THE RUN IT QUOTES IS STABLE. This text reaches a model; naming a
 	// different command between identical passes is the same problem the sorted
 	// output exists to avoid.
+	// DIFFERENT NAMES PER RUN, deliberately. Recording the SAME name under both
+	// runs makes the report a merged one, which drops the label — so this
+	// assertion watched an always-empty string and could not have failed. That
+	// was introduced by the merged-attribution fix in this same PR: a change to
+	// production code silently disarmed a test guarding a different property.
+	// One name per run keeps a single run behind each conflict, which is the only
+	// case where a label is quoted at all.
 	labels := map[string]bool{}
 	for attempt := 0; attempt < 200; attempt++ {
 		stable := NewLedger()
-		stable.Record(plain, "--- PASS: TestSlow (1.00s)\n")
-		stable.Record(race, "--- PASS: TestSlow (9.00s)\n")
-		reported := stable.ConflictsAcrossRuns("TestSlow took 45.00s")
+		stable.Record(plain, "--- PASS: TestOnlyPlain (1.00s)\n")
+		stable.Record(race, "--- PASS: TestOnlyRace (9.00s)\n")
+		reported := stable.ConflictsAcrossRuns("TestOnlyPlain took 45.00s")
 		if len(reported) != 1 {
 			t.Fatalf("attempt %d: expected one conflict, got %+v", attempt, reported)
+		}
+		if reported[0].Run.Label() == "" {
+			t.Fatalf("attempt %d: a single-run conflict quoted no command, so this test observes nothing", attempt)
 		}
 		labels[reported[0].Run.Label()] = true
 	}
@@ -670,5 +681,45 @@ func TestPunctuationCarryingThisTestsOwnNumberIsNotABoundary(t *testing.T) {
 		if len(conflicts) != 1 || conflicts[0].Claimed != 9.99 {
 			t.Errorf("a test's own number stopped being read: %q -> %+v", claim, conflicts)
 		}
+	}
+}
+
+// HOURS COUNT, for the reason minutes did one round earlier. Without an hour
+// form "1h10m0s" matched only its minute remainder and read as 600s, so a
+// truthful restatement of a recorded 4200s was reported as a fabrication.
+//
+// The hour form is its OWN pattern rather than an optional prefix on the minute
+// one: making every part optional lets the expression match the EMPTY string,
+// which regexp finds at offset 0 ahead of any real duration — that version read
+// "1h10m0s" as 0s, which is worse than the bug it was fixing.
+func TestAnHourDurationIsReadWhole(t *testing.T) {
+	for claim, want := range map[string]float64{
+		" took 1h10m0s": 4200,
+		" took 1h":      3600,
+		" took 2h30m":   9000,
+		" took 1h30s":   3630,
+		" took 1h2m3s":  3723,
+		// The forms that already worked must keep working — an hour pattern that
+		// swallows these would trade one fabrication for another.
+		" took 1m10s":   70,
+		" took 2m":      120,
+		" took 0.86s":   0.86,
+		" took 450ms":   0.45,
+		" took 34.249s": 34.249,
+	} {
+		if got, ok := parseClaimedDuration(claim); !ok || got != want {
+			t.Errorf("parseClaimedDuration(%q) = %v, %v; want %v", claim, got, ok, want)
+		}
+	}
+
+	honest := NewLedger()
+	honest.Record(Run{}, "--- PASS: TestVerySlow (4200.00s)\n")
+	if conflicts := honest.Conflicts(Run{}, "TestVerySlow took 1h10m0s"); len(conflicts) != 0 {
+		t.Errorf("a truthful 1h10m0s claim was reported as a conflict: %+v", conflicts)
+	}
+	wrong := NewLedger()
+	wrong.Record(Run{}, "--- PASS: TestVerySlow (4200.00s)\n")
+	if conflicts := wrong.Conflicts(Run{}, "TestVerySlow took 9h"); len(conflicts) != 1 || conflicts[0].Claimed != 32400 {
+		t.Errorf("a fabricated 9h was not caught as 32400s: %+v", conflicts)
 	}
 }

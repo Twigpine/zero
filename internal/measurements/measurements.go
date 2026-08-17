@@ -93,8 +93,22 @@ var (
 	// A duration as an answer would write it, in seconds or milliseconds.
 	claimedDuration = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)\s*(ms|s)\b`)
 	// The compound Go duration form, tried FIRST: "1m10s" must not be read as its
-	// seconds remainder. The seconds group is optional so a bare "2m" also parses.
+	// seconds remainder. Every part is optional, so "2m", "1h10m0s", "1h30s" and
+	// a bare "2h" all parse — a match is only accepted when an hour or minute
+	// part is present, which is what separates this from the plain-seconds form.
+	//
+	// HOURS COUNT for the same reason minutes did. Without them "1h10m0s" matched
+	// only its minute remainder and read as 600s, so a truthful restatement of a
+	// recorded 4200s was reported as a conflict — the fabricated accusation this
+	// package exists to avoid, one unit further up.
 	claimedMinuteDuration = regexp.MustCompile(`([0-9]+)m(?:([0-9]+(?:\.[0-9]+)?)s)?\b`)
+	// The hour form, kept as its OWN pattern rather than an optional prefix on the
+	// minute one: every part optional makes the whole expression matchable by the
+	// EMPTY string, which regexp then finds at offset 0 ahead of any real
+	// duration — "1h10m0s" read as 0s that way, which is worse than the bug being
+	// fixed. Minutes and seconds are optional here, so "2h", "1h30s" and
+	// "1h10m0s" all parse.
+	claimedHourDuration = regexp.MustCompile(`([0-9]+)h(?:([0-9]+)m)?(?:([0-9]+(?:\.[0-9]+)?)s)?\b`)
 )
 
 // ParseGoTest pulls every timing out of `go test` output.
@@ -234,9 +248,10 @@ func tolerance(a, b float64) bool {
 // nothing — this check exists to catch a number that DISAGREES with the
 // transcript, not to demand that every number have one.
 //
-// Each name is reported at most once per Ledger. A second pass over the same
-// answer is silent, so the caller can feed a correction back to the model
-// without the possibility of a loop.
+// Each name AND CLAIMED VALUE is reported at most once per Ledger. A second pass
+// over the same answer is silent, so the caller can feed a correction back to the
+// model without the possibility of a loop — while a differently wrong number for
+// the same name is a new thing to say and is reported.
 func (l *Ledger) Conflicts(run Run, claim string) []Conflict {
 	if l == nil || strings.TrimSpace(claim) == "" {
 		return nil
@@ -549,6 +564,34 @@ func nameBoundary(line string, from, to int) bool {
 	return true
 }
 
+// startsFirst reports whether match begins no later than every other candidate.
+// Ties go to the caller's match, which is how the hour form wins over the minute
+// form inside "1h10m0s" — that string starts a minute match at "10m" only
+// because the hour part came first.
+func startsFirst(match []int, others ...[]int) bool {
+	for _, other := range others {
+		if other != nil && other[0] < match[0] {
+			return false
+		}
+	}
+	return true
+}
+
+// compoundPart reads one optional group of a compound duration match. An unset
+// group is reported by regexp as index -1 rather than an empty span, which is
+// how "1m" is told from "0m".
+func compoundPart(tail string, match []int, group int) (float64, bool) {
+	start, end := match[group*2], match[group*2+1]
+	if start < 0 {
+		return 0, false
+	}
+	value, err := strconv.ParseFloat(tail[start:end], 64)
+	if err != nil {
+		return 0, false
+	}
+	return value, true
+}
+
 // parseClaimedDuration reads the FIRST duration in tail, in seconds.
 //
 // MINUTES COUNT. The pattern was ms-or-s only, so "1m10s" failed on "1m", the
@@ -569,26 +612,27 @@ func nameBoundary(line string, from, to int) bool {
 // wins only when it starts no later than the seconds form.
 func parseClaimedDuration(tail string) (float64, bool) {
 	minute := claimedMinuteDuration.FindStringSubmatchIndex(tail)
+	hour := claimedHourDuration.FindStringSubmatchIndex(tail)
 	plain := claimedDuration.FindStringSubmatchIndex(tail)
 	switch {
-	case minute == nil && plain == nil:
+	case minute == nil && hour == nil && plain == nil:
 		return 0, false
+	case hour != nil && startsFirst(hour, minute, plain):
+		hours, _ := compoundPart(tail, hour, 1)
+		minutesPart, _ := compoundPart(tail, hour, 2)
+		secondsPart, _ := compoundPart(tail, hour, 3)
+		return hours*3600 + minutesPart*60 + secondsPart, true
 	case minute != nil && (plain == nil || minute[0] <= plain[0]):
-		minutes, err := strconv.ParseFloat(tail[minute[2]:minute[3]], 64)
-		if err != nil {
-			return 0, false
-		}
-		seconds := 0.0
-		// Group 2 is optional: "1m" alone leaves it unset, which regexp reports
-		// as index -1 rather than an empty span.
-		if minute[4] >= 0 {
-			parsed, secErr := strconv.ParseFloat(tail[minute[4]:minute[5]], 64)
-			if secErr != nil {
-				return 0, false
-			}
-			seconds = parsed
-		}
+		minutes, _ := compoundPart(tail, minute, 1)
+		seconds, _ := compoundPart(tail, minute, 2)
 		return minutes*60 + seconds, true
+	}
+	// Reachable only when the plain form matched — the guard above returns when
+	// all three are nil, and each compound branch handles the cases where it
+	// starts first. That is an argument, not a check, and this file has already
+	// paid once for a fall-through whose precondition was only implied.
+	if plain == nil {
+		return 0, false
 	}
 	value, err := strconv.ParseFloat(tail[plain[2]:plain[3]], 64)
 	if err != nil {
