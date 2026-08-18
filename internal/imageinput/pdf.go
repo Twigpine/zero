@@ -17,17 +17,17 @@ import (
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
-// Dependency posture: the DEFAULT build extracts a PDF's text layer in pure Go
-// via github.com/Detective-XH/gopdf (maintained replacement for the unfixed
-// github.com/ledongthuc/pdf lineage named by GO-2026-6115; BSD-licensed, no
-// CGO), so ZERO stays a single static cross-compilable binary with no runtime
-// tool dependencies for text extraction. Rasterizing pages to images for vision
-// models needs real font/graphics rendering, which no maintained pure-Go
-// library does well; that path is OPTIONAL and uses the poppler tools
-// (pdftotext / pdftoppm) only when they are already on PATH -- the same
-// "external tool the user may have" posture as the LSP language servers. When
-// poppler is absent, extraction silently degrades to the pure-Go text layer;
-// absence is never an error.
+// Dependency posture: LoadDocument prefers Poppler's pdftotext when it is on
+// PATH and disableExternalTools is false (it handles more font encodings).
+// github.com/Detective-XH/gopdf is the in-process fallback used when Poppler is
+// missing, fails, or tests disable external tools -- a maintained replacement
+// for the unfixed github.com/ledongthuc/pdf lineage named by GO-2026-6115
+// (BSD-licensed, no CGO). Rasterizing pages to images for vision models needs
+// real font/graphics rendering, which no maintained pure-Go library does well;
+// that path is OPTIONAL and uses pdftoppm only when it is already on PATH --
+// the same "external tool the user may have" posture as the LSP language
+// servers. Absence of Poppler is never an error: text extraction degrades to
+// the in-process reader.
 
 // MaxDocumentBytes is the per-document raw-file cap (32 MiB). PDFs are routinely
 // larger than the image cap, but we still bound the file before it is read into
@@ -165,14 +165,6 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 	if useExternal {
 		if t, ok := extractTextWithPoppler(data); ok {
 			text = t
-			// pdftotext does not report a page count; use the in-process reader
-			// (cheap structural read) so Document.Pages stays correct on the
-			// poppler text path.
-			pages = pdfPageCount(data)
-		} else {
-			// pdftotext missing/failed: still take a page count from pdfinfo when
-			// that tool can succeed independently.
-			pages = pdfPageCountWithPoppler(data)
 		}
 	}
 	if strings.TrimSpace(text) == "" {
@@ -184,15 +176,13 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 				return Document{}, terr
 			}
 		} else {
-			text = t
-			if pages == 0 {
-				pages = p
-			}
+			text, pages = t, p
 		}
 	}
-	if pages == 0 {
-		pages = pdfPageCount(data)
-	}
+	// Page count is independent of which text extractor won: try the in-process
+	// reader first, then pdfinfo when external tools are enabled, so a PDF that
+	// pdftotext can read still reports Pages when gopdf cannot count it.
+	pages = resolvePageCount(data, useExternal, pages)
 
 	text, truncated := capDocumentText(text)
 
@@ -323,6 +313,28 @@ func capDocumentText(text string) (string, bool) {
 func utf8RuneStart(b byte) bool {
 	return b&0xC0 != 0x80
 }
+
+// resolvePageCount fills Document.Pages from any available counter. already is
+// a count captured during text extraction (0 means unknown). The in-process
+// reader is tried first; pdfinfo is the fallback when external tools are on and
+// the in-process count is still zero.
+func resolvePageCount(data []byte, useExternal bool, already int) int {
+	if already > 0 {
+		return already
+	}
+	if pages := pageCountInProcess(data); pages > 0 {
+		return pages
+	}
+	if useExternal {
+		return pageCountPoppler(data)
+	}
+	return 0
+}
+
+var (
+	pageCountInProcess = pdfPageCount
+	pageCountPoppler   = pdfPageCountWithPoppler
+)
 
 func (o DocumentOptions) maxPages() int {
 	if o.MaxPages > 0 {

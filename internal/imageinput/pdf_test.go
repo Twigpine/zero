@@ -388,6 +388,33 @@ func TestPDFPageCountIndependentOfTextExtraction(t *testing.T) {
 	}
 }
 
+// pdftotext success does not record a page count, so Pages must still fall
+// through to pdfinfo when the in-process reader reports 0.
+func TestResolvePageCountFallsBackToPopplerWhenInProcessIsZero(t *testing.T) {
+	origIn, origPop := pageCountInProcess, pageCountPoppler
+	t.Cleanup(func() {
+		pageCountInProcess, pageCountPoppler = origIn, origPop
+	})
+
+	pageCountInProcess = func([]byte) int { return 0 }
+	pageCountPoppler = func([]byte) int { return 7 }
+
+	if got := resolvePageCount(nil, true, 0); got != 7 {
+		t.Fatalf("pdftotext-ok + in-process 0 + pdfinfo 7: Pages = %d, want 7", got)
+	}
+	if got := resolvePageCount(nil, false, 0); got != 0 {
+		t.Fatalf("external tools disabled: Pages = %d, want 0", got)
+	}
+	if got := resolvePageCount(nil, true, 3); got != 3 {
+		t.Fatalf("already-known count: Pages = %d, want 3", got)
+	}
+
+	pageCountInProcess = func([]byte) int { return 2 }
+	if got := resolvePageCount(nil, true, 0); got != 2 {
+		t.Fatalf("in-process count wins over pdfinfo: Pages = %d, want 2", got)
+	}
+}
+
 func TestLoadDocumentHostilePDFStaysBounded(t *testing.T) {
 	root := t.TempDir()
 	cases := map[string][]byte{
