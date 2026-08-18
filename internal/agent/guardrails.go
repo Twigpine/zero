@@ -213,6 +213,11 @@ var inabilityStems = []string{
 var successNegationTails = []string{
 	"find any", "found any", "find a ", "see any", "detect any", "identify any",
 	"reproduce", "spot any", "locate any",
+	// The OBSERVATION verbs. strongAbsence is only consulted after this list has
+	// already matched, so the observation-family strong tails added a round
+	// earlier were unreachable without these — seven of eight did nothing, and
+	// only "reproduce" worked because it was already here.
+	"trigger", "produce", "hit any", "encounter", "provoke", "surface", "measure",
 	// A NEGATIVE SEARCH RESULT IS THE ANSWER, not a failure to produce one.
 	//
 	// The list above already encodes this — "I could not find any remaining
@@ -322,7 +327,7 @@ var toolGrantMarkers = []string{
 	"tool available", "tools available", "no such tool", "not available in this",
 	"tool is available", "tools are available", "tool was available", "tools were available",
 	"tool is not available", "tools are not available",
-	"tool isn'''t available", "tools aren'''t available",
+	"tool isn't available", "tools aren't available",
 	"read-only tools", "read only tools", "only read-only", "only read only",
 	"tools were provided", "tools were given", "toolset provided",
 	"in this specialist context", "in this context only",
@@ -389,6 +394,13 @@ var strongAbsenceTails = []string{
 	"reproduce any", "trigger any", "produce any", "hit any",
 	"encounter any", "provoke any", "surface any", "measure any",
 }
+
+// EVERY STRONG TAIL MUST BE REACHABLE. strongAbsence is consulted only after
+// hasAnyPrefix(tail, successNegationTails) has already matched, so a strong tail
+// whose verb is missing from that list is never asked about. Seven of the eight
+// observation verbs added a round earlier were dead on arrival that way — only
+// "reproduce" was already a success-negation stem, which is why the corpus that
+// was supposed to cover them passed.
 
 // strongAbsenceObjects are the things whose ABSENCE IS THE RESULT: you go
 // looking for them precisely so you can report there are none, and finding none

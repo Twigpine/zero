@@ -1,6 +1,9 @@
 package agent
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // FOUR COMPLETED TASKS WERE MARKED INCOMPLETE, and the sentences below are
 // verbatim from those sessions.
@@ -469,7 +472,7 @@ func TestAStateInsideTheNegatedPropositionIsNotTheOutcome(t *testing.T) {
 //
 // Which verb a sentence uses to say a tool was absent is not a distinction this
 // detector should be drawing.
-func TestATooolCaveatIsRecognisedInItsCopulaForms(t *testing.T) {
+func TestAToolCaveatIsRecognisedInItsCopulaForms(t *testing.T) {
 	for _, exempt := range []string{
 		"I could not record a plan because no update_plan tool is available, so I wrote it into this answer instead.",
 		"I could not run the formatter as no such tool is available, so I checked the style by hand.",
@@ -491,6 +494,61 @@ func TestATooolCaveatIsRecognisedInItsCopulaForms(t *testing.T) {
 	} {
 		if selfReportedIncompletion(admission) == "" {
 			t.Errorf("a handoff was excused by the tool caveat: %q", admission)
+		}
+	}
+}
+
+// EVERY STRONG ABSENCE TAIL MUST BE REACHABLE.
+//
+// strongAbsence is consulted only after hasAnyPrefix(tail, successNegationTails)
+// has already matched, so a strong tail whose verb is missing from that list is
+// never asked about. Seven of the eight observation verbs added a round earlier
+// were dead that way — only "reproduce" worked, because it was already a
+// success-negation stem, and the corpus meant to cover the other seven passed
+// on the strength of that one.
+//
+// Same shape as the unambiguous-state invariant below it: two lists that must
+// agree, asserted rather than remembered.
+func TestEveryStrongAbsenceTailIsReachable(t *testing.T) {
+	for _, tail := range strongAbsenceTails {
+		reachable := false
+		for _, negation := range successNegationTails {
+			if strings.HasPrefix(tail, negation) || strings.HasPrefix(negation, tail) {
+				reachable = true
+				break
+			}
+		}
+		if !reachable {
+			t.Errorf("strongAbsenceTails entry %q has no successNegationTails prefix, so strongAbsence never sees it", tail)
+		}
+	}
+}
+
+// A CONTRACTED TOOL CAVEAT IS THE SAME CAVEAT.
+//
+// The contracted markers shipped as "tool isn\'\'\'t available" — shell quoting
+// from the commit that added them leaked into the Go source. Valid Go, so it
+// compiled and CI stayed green, and no message on earth matches it. The
+// observation-family entries above were dead for a different reason in the same
+// commit, which is why both are pinned now.
+func TestAContractedToolCaveatIsRecognised(t *testing.T) {
+	for _, exempt := range []string{
+		"I could not record a plan because the update_plan tool isn't available, so I wrote it into this answer instead.",
+		"I could not run the formatter because those tools aren't available, so I checked the style by hand.",
+	} {
+		if reason := selfReportedIncompletion(exempt); reason != "" {
+			t.Errorf("a contracted tool caveat with delivered work was reported incomplete: %q -> %s", exempt, reason)
+		}
+	}
+
+	// The observation family, now that its verbs reach strongAbsence at all.
+	for _, finding := range []string{
+		"I could not trigger any crash, so it looks resolved.",
+		"I could not surface any regressions, so nothing was modified.",
+		"I could not encounter any failures, and nothing was modified.",
+	} {
+		if reason := selfReportedIncompletion(finding); reason != "" {
+			t.Errorf("a negative observation result was reported as an admission: %q -> %s", finding, reason)
 		}
 	}
 }
