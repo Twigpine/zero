@@ -372,3 +372,64 @@ func TestAnUncreatedStoreIsStillAbsence(t *testing.T) {
 		t.Errorf("the first write into a clean workspace failed: %v", err)
 	}
 }
+
+// REFUSED IS NOT ABSENT, AND THE TEST FOR IT RUNS HERE.
+//
+// The first attempt at this keyed on the component being ABSENT to the handle
+// and only then compared against disk. A junction is not absent to it —
+// handle.Lstat does not traverse a reparse point, so it reports the junction as
+// being right there, the branch never ran, and the walk continued past the
+// component it was meant to refuse. The later open failed as ErrNotFound and
+// List dropped it, which is how a tampered store presented as an empty one.
+//
+// The question that separates the two is what the handle can OPEN, because
+// opening is what traverses. A directory that is present but cannot be entered
+// produces exactly that disagreement — Lstat sees it, Open refuses it — which is
+// the same shape as the junction and, unlike the junction, constructible here.
+func TestAPresentButUnopenableStoreIsReportedNotHidden(t *testing.T) {
+	root := t.TempDir()
+	paths := DefaultPaths(root)
+	if err := os.MkdirAll(paths.ProjectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Write(paths, ScopeProject, "note", "d", "body"); err != nil {
+		t.Fatal(err)
+	}
+	blocked := filepath.Join(root, ".zero")
+	if err := os.Chmod(blocked, 0o000); err != nil {
+		t.Skipf("cannot remove access here: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o700) })
+	if _, err := os.Open(filepath.Join(blocked, "memory")); err == nil {
+		t.Skip("this environment ignores directory permissions, so the refusal cannot be built")
+	}
+
+	_, readErr := Read(paths, ScopeProject, "note")
+	if errors.Is(readErr, ErrNotFound) {
+		t.Errorf("an unreadable store was reported as a missing note, which is what makes the model overwrite it: %v", readErr)
+	}
+	if !errors.Is(readErr, ErrUnreadable) {
+		t.Errorf("Read of an unreadable store = %v, want ErrUnreadable", readErr)
+	}
+	if _, listErr := List(paths, ScopeProject); listErr == nil {
+		t.Error("List presented an unreadable store as an empty one")
+	}
+}
+
+// And absence is still absence: a workspace that has never held a store must
+// read as missing, list empty without an error, and accept its first write.
+// Treating that as a refusal would break every clean checkout.
+func TestAnUncreatedStoreIsStillOrdinaryAbsence(t *testing.T) {
+	fresh := t.TempDir()
+	paths := DefaultPaths(fresh)
+	if _, err := Read(paths, ScopeProject, "nothing"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Read in a clean workspace = %v, want ErrNotFound", err)
+	}
+	notes, err := List(paths, ScopeProject)
+	if err != nil || len(notes) != 0 {
+		t.Errorf("List in a clean workspace = %+v, %v; want empty and no error", notes, err)
+	}
+	if _, err := Write(paths, ScopeLocal, "first", "d", "b"); err != nil {
+		t.Errorf("the first write into a clean workspace failed: %v", err)
+	}
+}

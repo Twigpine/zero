@@ -112,6 +112,13 @@ var (
 	// would then track. The local scope's whole promise is that the note stays on
 	// this machine, and a promise that degrades quietly is worse than one that
 	// refuses.
+	// ErrUnreadable is a path the confined handle will not open while it is
+	// plainly present on disk. Distinct from ErrNotFound, which is the answer
+	// that let a tampered store present as an empty one, and distinct from
+	// ErrIsSymlink, which names a reparse point this process could actually
+	// identify as one — a junction is not identifiable that way, and neither is
+	// a directory the process may not enter.
+	ErrUnreadable = errors.New("the memory store exists but could not be read")
 	ErrNotPrivate = errors.New("the local memory store is not ignored by git, so a note saved there would not stay on this machine")
 	// ErrIsSymlink is pathjail's refusal, kept under this package's own name so
 	// callers testing for it keep working. It now covers a Windows junction as
@@ -224,66 +231,13 @@ func (paths Paths) openScope(scope Scope) (*os.Root, string, error) {
 // Outermost first because that is the component whose redirection decides where
 // everything below it lands, and it makes the error name the link the caller can
 // actually act on.
-func refuseReparseChain(handle *os.Root, root string, relative string) error {
-	relative = filepath.Clean(relative)
-	if relative == "." || relative == string(filepath.Separator) {
-		return nil
-	}
-	parts := strings.Split(relative, string(filepath.Separator))
-	absentAt := ""
-	for i := range parts {
-		component := filepath.Join(parts[:i+1]...)
-		if err := pathjail.RefuseReparse(handle, component); err != nil {
-			return err
-		}
-		// A COMPONENT CANNOT EXIST INSIDE ONE THAT DOES NOT. RefuseReparse reports
-		// absence as fine, which is right on its own — a store that has not been
-		// created yet is what a first write is for. But absence must then hold all
-		// the way down, and where it does not, the handle is refusing to traverse
-		// something rather than telling us the path is empty: a Windows junction
-		// at an ancestor reports that way, and the store beneath it then read as
-		// simply having no notes. "Refused" and "absent" are different answers,
-		// and only one of them should let a caller conclude its notes are gone.
-		exists, err := componentExists(handle, component)
-		if err != nil {
-			return err
-		}
-		if !exists {
-			// ABSENT TO THE HANDLE IS NOT ABSENT. A store that has not been
-			// created yet is what a first write is for, and reporting that as a
-			// problem would break every clean workspace. But a component the
-			// confined handle will not open while it is PRESENT ON DISK has been
-			// REFUSED, and a Windows junction whose target leaves the workspace
-			// reports exactly that way: the chain read it and everything under it
-			// as missing, the later open became ErrNotFound, and List drops
-			// ErrNotFound — so a tampered store presented as an empty one.
-			//
-			// That is the outcome memory.go's own contract forbids, because the
-			// model then concludes its notes are gone and writes over whatever is
-			// really there. Absence and refusal have to be different answers.
-			if presentOnDisk(root, component) {
-				return fmt.Errorf("%w: %s cannot be opened inside the workspace", ErrIsSymlink, component)
-			}
-			if absentAt == "" {
-				absentAt = component
-			}
-			continue
-		}
-		if absentAt != "" {
-			return fmt.Errorf("%w: %s is unreadable, so %s cannot be inspected",
-				ErrIsSymlink, absentAt, component)
-		}
-	}
-	return nil
-}
-
 // presentOnDisk reports whether relative exists under root by ordinary pathname.
 //
 // Deliberately NOT through the confined handle — the whole point is to ask a
 // different question than the handle answers, so that "the handle will not open
-// this" can be told apart from "there is nothing here". It stats and never
-// opens or reads, so nothing is traversed on the strength of this answer; it
-// only decides which ERROR the caller is given.
+// this" can be told apart from "there is nothing here". It stats and never opens
+// or reads, so nothing is traversed on the strength of this answer; it only
+// decides which ERROR the caller is given.
 func presentOnDisk(root string, relative string) bool {
 	if strings.TrimSpace(root) == "" {
 		return false
@@ -292,15 +246,48 @@ func presentOnDisk(root string, relative string) bool {
 	return err == nil
 }
 
-// componentExists reports whether relative is present, without following a link.
-func componentExists(handle *os.Root, relative string) (bool, error) {
-	if _, err := handle.Lstat(relative); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return false, nil
-		}
-		return false, fmt.Errorf("inspect %s: %w", relative, err)
+func refuseReparseChain(handle *os.Root, root string, relative string) error {
+	relative = filepath.Clean(relative)
+	if relative == "." || relative == string(filepath.Separator) {
+		return nil
 	}
-	return true, nil
+	parts := strings.Split(relative, string(filepath.Separator))
+	for i := range parts {
+		component := filepath.Join(parts[:i+1]...)
+		if err := pathjail.RefuseReparse(handle, component); err != nil {
+			return err
+		}
+		// OPENABLE, NOT MERELY PRESENT. The previous version asked whether the
+		// component was ABSENT to the handle and only then compared against disk —
+		// and a junction is not absent to it. handle.Lstat does not traverse a
+		// reparse point, so it reports the junction as being right there, the
+		// !exists branch never ran, presentOnDisk was never consulted, and the walk
+		// continued straight past the component it was meant to refuse. The later
+		// open failed as ErrNotFound and List dropped it, exactly as before the
+		// fix.
+		//
+		// The question that separates absence from refusal is what the handle can
+		// OPEN, because opening is what traverses. A path the confined handle will
+		// not open while it is plainly present on disk has been REFUSED; a path
+		// that is absent from both is simply not there yet, which is what a first
+		// write is for.
+		//
+		// A Windows junction is not a symlink and does not answer like one:
+		// os.ModeSymlink misses it, EvalSymlinks returns it unchanged, and Lstat
+		// says it is there. Only the open disagrees.
+		opened, openErr := handle.Open(component)
+		if openErr == nil {
+			opened.Close()
+			continue
+		}
+		if presentOnDisk(root, component) {
+			return fmt.Errorf("%w: %s cannot be opened inside the workspace: %v", ErrUnreadable, component, openErr)
+		}
+		// Absent to both. Nothing below it can exist either, so there is nothing
+		// further to inspect.
+		return nil
+	}
+	return nil
 }
 
 // Note is one stored memory.
