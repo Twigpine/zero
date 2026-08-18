@@ -256,7 +256,8 @@ func TestPoolDrainKillsStraggler(t *testing.T) {
 		_, _ = pool.Run(context.Background(), WorkerSpec{Session: "a"}, &collectSink{})
 		close(runDone)
 	}()
-	testutil.WaitFor(t, "queue depth 1", func() bool { return pool.QueueDepth() == 1 })
+	// Wait until the worker is tracked; Drain reads the active set, not slot occupancy.
+	testutil.WaitFor(t, "worker tracked", func() bool { return len(pool.WorkerStats()) == 1 })
 
 	pool.Drain() // KillTimeout elapses, straggler is force-killed
 	if atomic.LoadInt32(&straggler.killed) != 1 {
