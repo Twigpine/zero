@@ -243,7 +243,7 @@ func TestLoadDocumentNoTextNoRaster(t *testing.T) {
 	}
 	// Force the pure-Go path with no external rasterizer so the no-text branch is
 	// deterministic regardless of what is installed on the test host.
-	_, err := LoadDocument("scan.pdf", root, DocumentOptions{disableExternalTools: true})
+	_, err := LoadDocument("scan.pdf", root, DocumentOptions{})
 	if err == nil {
 		t.Fatal("expected an error for a PDF with no extractable text and no raster")
 	}
@@ -292,7 +292,7 @@ func TestLoadDocumentMalformedDoesNotPanic(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "bad.pdf"), bad, 0o644); err != nil {
 		t.Fatalf("write bad: %v", err)
 	}
-	_, err := LoadDocument("bad.pdf", root, DocumentOptions{disableExternalTools: true})
+	_, err := LoadDocument("bad.pdf", root, DocumentOptions{})
 	if err == nil {
 		t.Fatal("expected an error for malformed PDF bytes")
 	}
@@ -306,7 +306,7 @@ func TestLoadDocumentFallsBackToPureGo(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "doc.pdf"), buildMinimalPDF(want), 0o644); err != nil {
 		t.Fatalf("write pdf: %v", err)
 	}
-	doc, err := LoadDocument("doc.pdf", root, DocumentOptions{disableExternalTools: true})
+	doc, err := LoadDocument("doc.pdf", root, DocumentOptions{})
 	if err != nil {
 		t.Fatalf("LoadDocument (pure-Go): %v", err)
 	}
@@ -315,23 +315,18 @@ func TestLoadDocumentFallsBackToPureGo(t *testing.T) {
 	}
 }
 
-// Vision-mode extraction without an available rasterizer must not error: it
-// degrades to the text layer (a vision model can still read the text block).
-func TestLoadDocumentVisionWithoutRasterizerUsesText(t *testing.T) {
+func TestLoadDocumentVisionUsesText(t *testing.T) {
 	root := t.TempDir()
 	want := "Vision degrade to text"
 	if err := os.WriteFile(filepath.Join(root, "doc.pdf"), buildMinimalPDF(want), 0o644); err != nil {
 		t.Fatalf("write pdf: %v", err)
 	}
-	doc, err := LoadDocument("doc.pdf", root, DocumentOptions{Vision: true, disableExternalTools: true})
+	doc, err := LoadDocument("doc.pdf", root, DocumentOptions{Vision: true})
 	if err != nil {
 		t.Fatalf("LoadDocument (vision, no raster): %v", err)
 	}
-	if len(doc.Images) != 0 {
-		t.Fatalf("no rasterizer available, expected 0 images, got %d", len(doc.Images))
-	}
 	if !strings.Contains(doc.Text, want) {
-		t.Fatalf("vision-without-raster should keep text, got %q", doc.Text)
+		t.Fatalf("vision extraction should keep text, got %q", doc.Text)
 	}
 }
 
@@ -367,10 +362,10 @@ func TestCapDocumentTextRespectsCap(t *testing.T) {
 // backs Document.Pages on the poppler text path, where pdftotext gives no count)
 // and must return 0 -- not panic -- on garbage.
 func TestPDFPageCount(t *testing.T) {
-	if got := pdfPageCount(buildMinimalPDF("one page")); got != 1 {
+	if got := pdfPageCountWithPoppler(buildMinimalPDF("one page")); got != 1 {
 		t.Fatalf("pdfPageCount = %d, want 1", got)
 	}
-	if got := pdfPageCount([]byte("not a pdf at all")); got != 0 {
+	if got := pdfPageCountWithPoppler([]byte("not a pdf at all")); got != 0 {
 		t.Fatalf("pdfPageCount on garbage = %d, want 0", got)
 	}
 }

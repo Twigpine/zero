@@ -15,7 +15,6 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/charmbracelet/x/term v0.2.2
 	github.com/coder/websocket v1.8.15
-	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	golang.org/x/image v0.45.0
 	golang.org/x/sys v0.47.0
 	gopkg.in/yaml.v3 v3.0.1

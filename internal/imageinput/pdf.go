@@ -14,13 +14,10 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/zeroruntime"
-	"github.com/ledongthuc/pdf"
 )
 
-// Dependency posture (see stage 12): the DEFAULT build extracts a PDF's text
-// layer in pure Go via github.com/ledongthuc/pdf (BSD-licensed, no CGO, no
-// transitive deps), so ZERO stays a single static cross-compilable binary with
-// no runtime dependencies. Rasterizing pages to images for vision models needs
+// Dependency posture: PDF processing uses Poppler's bounded tools. Rasterizing
+// pages to images for vision models needs
 // real font/graphics rendering, which no maintained pure-Go library does well;
 // that path is OPTIONAL and uses the poppler tools (pdftotext / pdftoppm) only
 // when they are already on PATH -- the same "external tool the user may have"
@@ -154,29 +151,13 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 		}
 	}
 
-	// Text path. Prefer poppler's pdftotext when present (it handles more font
-	// encodings); otherwise use the pure-Go extractor. Either way, absence of the
-	// external tool is not an error.
+	// Text path uses Poppler's pdftotext, which handles PDF parsing outside the
+	// process and is bounded by popplerTimeout.
 	text, pages := "", 0
 	if useExternal {
 		if t, ok := extractTextWithPoppler(data); ok {
 			text = t
-			// pdftotext does not report a page count, so derive it from the pure-Go
-			// reader (cheap structural read, no text extraction) to keep
-			// Document.Pages correct regardless of which text path wins.
-			pages = pdfPageCount(data)
-		}
-	}
-	if strings.TrimSpace(text) == "" {
-		t, p, terr := extractTextPureGo(data)
-		if terr != nil {
-			// Only surface the pure-Go error when we have nothing else (no poppler
-			// text and no rasterized pages) to offer.
-			if len(images) == 0 {
-				return Document{}, terr
-			}
-		} else {
-			text, pages = t, p
+			pages = pdfPageCountWithPoppler(data)
 		}
 	}
 
@@ -230,53 +211,6 @@ func readDocumentBytes(path string, workspaceRoot string) ([]byte, error) {
 		return nil, fmt.Errorf("document %s is larger than the 32 MiB limit", path)
 	}
 	return data, nil
-}
-
-// extractTextPureGo extracts the full text layer with the pure-Go parser. The
-// ledongthuc/pdf parser panics (not errors) on some malformed structures, so the
-// whole call is wrapped in a recover: a bad PDF becomes a clean error, never a
-// crash that escapes the package. It returns the joined text and the page count.
-func extractTextPureGo(data []byte) (text string, pages int, err error) {
-	defer func() {
-		if rec := recover(); rec != nil {
-			text, pages = "", 0
-			err = fmt.Errorf("could not parse PDF (malformed or unsupported): %v", rec)
-		}
-	}()
-
-	reader, rerr := pdf.NewReader(bytes.NewReader(data), int64(len(data)))
-	if rerr != nil {
-		return "", 0, fmt.Errorf("could not parse PDF: %w", rerr)
-	}
-	pages = reader.NumPage()
-
-	var buf strings.Builder
-	plain, perr := reader.GetPlainText()
-	if perr != nil {
-		return "", pages, fmt.Errorf("could not extract PDF text: %w", perr)
-	}
-	if _, cerr := io.Copy(&buf, plain); cerr != nil {
-		return "", pages, fmt.Errorf("could not read PDF text: %w", cerr)
-	}
-	return strings.TrimSpace(buf.String()), pages, nil
-}
-
-// pdfPageCount returns the page count via the pure-Go reader without extracting
-// any text. It backs Document.Pages on the poppler text path (pdftotext does not
-// report a count). Like extractTextPureGo it recovers from the parser's panics on
-// malformed input and reports 0 rather than crashing -- the page count is
-// informational, so an unreadable structure simply yields 0.
-func pdfPageCount(data []byte) (pages int) {
-	defer func() {
-		if recover() != nil {
-			pages = 0
-		}
-	}()
-	reader, err := pdf.NewReader(bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		return 0
-	}
-	return reader.NumPage()
 }
 
 // capDocumentText truncates text to MaxDocumentTextBytes on a UTF-8 rune
@@ -344,6 +278,29 @@ func extractTextWithPoppler(data []byte) (string, bool) {
 		return "", false
 	}
 	return strings.TrimSpace(stdout.String()), true
+}
+
+func pdfPageCountWithPoppler(data []byte) int {
+	if !popplerAvailable("pdfinfo") {
+		return 0
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), popplerTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "pdfinfo", "-")
+	cmd.Stdin = bytes.NewReader(data)
+	out, err := cmd.Output()
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if value, ok := strings.CutPrefix(strings.TrimSpace(line), "Pages:"); ok {
+			var pages int
+			if _, err := fmt.Sscan(value, &pages); err == nil {
+				return pages
+			}
+		}
+	}
+	return 0
 }
 
 // rasterizeWithPoppler renders the first maxPages pages to PNG via pdftoppm and
