@@ -165,8 +165,15 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 	if useExternal {
 		if t, ok := extractTextWithPoppler(data); ok {
 			text = t
+			// pdftotext does not report a page count; use the in-process reader
+			// (cheap structural read) so Document.Pages stays correct on the
+			// poppler text path.
+			pages = pdfPageCount(data)
+		} else {
+			// pdftotext missing/failed: still take a page count from pdfinfo when
+			// that tool can succeed independently.
+			pages = pdfPageCountWithPoppler(data)
 		}
-		pages = pdfPageCountWithPoppler(data)
 	}
 	if strings.TrimSpace(text) == "" {
 		t, p, terr := extractTextPureGo(data)

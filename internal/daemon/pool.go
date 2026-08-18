@@ -296,6 +296,9 @@ func (p *Pool) runOnce(ctx context.Context, id int, spec WorkerSpec, sink Sink) 
 	}
 	p.mu.Unlock()
 	if err != nil {
+		if draining {
+			return 0, ErrPoolDraining
+		}
 		return 0, err
 	}
 	if draining {
@@ -412,10 +415,12 @@ func (p *Pool) Drain() {
 			_ = h.Kill()
 		}
 
-		// Force-kill only covers handles already in active. A launcher that is
-		// still inside Launcher has no handle yet; keep Drain blocked until that
-		// late-launch path finishes its own kill+wait and decrements launching.
-		for {
+		// Force-kill only covers handles already in active. A launcher still
+		// inside Launcher has no handle yet; wait one more KillTimeout for that
+		// late-launch path to finish kill+wait. Do not wait forever: a Launcher
+		// that ignores ctx would otherwise wedge shutdown.
+		deadline = time.Now().Add(p.opts.KillTimeout)
+		for time.Now().Before(deadline) {
 			p.mu.Lock()
 			n := p.launching
 			p.mu.Unlock()
