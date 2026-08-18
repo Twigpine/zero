@@ -275,18 +275,24 @@ func (p *Pool) runOnce(ctx context.Context, id int, spec WorkerSpec, sink Sink) 
 	p.mu.Unlock()
 	handle, err := p.opts.Launcher(ctx, spec)
 	p.mu.Lock()
-	p.launching--
 	draining := p.draining
 	if err == nil && !draining {
 		p.active[id] = handle
+		p.launching--
 	}
 	p.mu.Unlock()
 	if err != nil {
+		p.mu.Lock()
+		p.launching--
+		p.mu.Unlock()
 		return 0, err
 	}
 	if draining {
 		_ = handle.Kill()
 		_, _ = handle.Wait()
+		p.mu.Lock()
+		p.launching--
+		p.mu.Unlock()
 		return 0, ErrPoolDraining
 	}
 	defer p.untrack(id)

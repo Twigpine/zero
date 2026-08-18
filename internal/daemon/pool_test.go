@@ -292,7 +292,12 @@ func TestPoolDrainKillsWorkerLaunchedAfterDrainStarts(t *testing.T) {
 	<-launchStarted
 	drained := make(chan struct{})
 	go func() { pool.Drain(); close(drained) }()
-	time.Sleep(20 * time.Millisecond)
+	waitFor(t, pool.isDraining)
+	select {
+	case <-drained:
+		t.Fatal("Drain returned while a launcher was still in progress")
+	default:
+	}
 	close(releaseLaunch)
 	select {
 	case <-drained:
