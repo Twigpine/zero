@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Twigpine/zero/internal/agent"
 	"github.com/Twigpine/zero/internal/sessions"
 	"github.com/Twigpine/zero/internal/tools"
 	"github.com/Twigpine/zero/internal/zeroruntime"
@@ -260,6 +261,35 @@ func TestActiveGoalLaunchesContinuation(t *testing.T) {
 	}
 	if !transcriptContains(next.transcript, "Continuing goal: Keep going") {
 		t.Fatalf("continuation was not surfaced: %#v", next.transcript)
+	}
+}
+
+func TestGoalContinuationSkippedInPlanMode(t *testing.T) {
+	// Regression: an armed /goal must not launch automatic turns while plan
+	// mode is active — those turns cannot make implementation progress.
+	store := testSessionStore(t)
+	session, err := store.Create(sessions.CreateInput{SessionID: "goal_plan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, _, err = store.CreateGoal(session.SessionID, "Keep going", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), Options{
+		Provider:       &scriptedProvider{},
+		Registry:       tools.NewRegistry(),
+		SessionStore:   store,
+		PermissionMode: agent.PermissionModePlan,
+	})
+	m.activeSession = session
+
+	next, cmd := m.launchGoalContinuationIfReady()
+	if cmd != nil || next.pending {
+		t.Fatal("an armed goal must not launch a continuation while plan mode is active")
+	}
+	if next.activeSession.Goal == nil || next.activeSession.Goal.Status != sessions.GoalStatusActive {
+		t.Fatalf("plan mode must leave the goal armed, got %#v", next.activeSession.Goal)
 	}
 }
 

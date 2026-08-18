@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -938,6 +939,64 @@ func TestSessionToolResultMetaStripsPlanSnapshot(t *testing.T) {
 	}
 	if sessionToolResultMeta(nil) != nil {
 		t.Fatal("expected nil for empty meta")
+	}
+}
+
+// Regression: entering plan mode must pause armed /loop ticks and /goal
+// continuations so they do not fire read-only turns that cannot make
+// progress. /plan off unpauses loops and may resume an active goal.
+func TestPlanCommandPausesArmedContinuations(t *testing.T) {
+	store := testSessionStore(t)
+	session, err := store.Create(sessions.CreateInput{SessionID: "plan_pause", Title: "plan pause", Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, _, err = store.CreateGoal(session.SessionID, "Keep shipping", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newPlanCommandTestModel(t, t.TempDir(), agent.PermissionModeAsk)
+	m.sessionStore = store
+	m.activeSession = session
+	m.provider = &scriptedProvider{}
+	m = startFixedLoop(m, "keep shipping", time.Minute)
+
+	updated, cmd := m.handlePlanCommand("on")
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("expected /plan on to be synchronous")
+	}
+	if next.permissionMode != agent.PermissionModePlan {
+		t.Fatalf("expected plan mode, got %s", next.permissionMode)
+	}
+	if len(next.loops) != 1 || !next.loops[0].paused {
+		t.Fatalf("expected the armed loop to be paused in plan mode, got %+v", next.loops)
+	}
+	if !transcriptContains(next.transcript, "Automatic /loop and /goal continuations are paused") {
+		t.Fatalf("expected a pause notice, got %#v", next.transcript)
+	}
+	idle, fireCmd := next.fireDueLoopIfIdle()
+	if fireCmd != nil || idle.activeLoopID != "" {
+		t.Fatal("paused loop must not fire while plan mode is active")
+	}
+	idle, goalCmd := idle.launchGoalContinuationIfReady()
+	if goalCmd != nil || idle.pending {
+		t.Fatal("armed goal must not continue while plan mode is active")
+	}
+
+	updated, cmd = idle.handlePlanCommand("off")
+	next = updated.(model)
+	if next.permissionMode != agent.PermissionModeAsk {
+		t.Fatalf("expected Ask restored, got %s", next.permissionMode)
+	}
+	if len(next.loops) != 1 || next.loops[0].paused {
+		t.Fatalf("expected the loop to resume after /plan off, got %+v", next.loops)
+	}
+	if cmd == nil || !next.pending {
+		t.Fatal("expected /plan off to resume the armed goal continuation")
+	}
+	if !transcriptContains(next.transcript, "Continuing goal: Keep shipping") {
+		t.Fatalf("expected goal continuation after /plan off, got %#v", next.transcript)
 	}
 }
 

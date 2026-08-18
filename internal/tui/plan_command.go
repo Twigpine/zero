@@ -95,6 +95,14 @@ func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
 		} else if ok {
 			m.plan.updateFromItems(items, m.now())
 		}
+		// Armed /loop ticks and /goal continuations cannot make progress
+		// while tools are read-only. Pause them here so the idle ticker and
+		// end-of-turn launcher do not spend tokens on no-op turns.
+		pausedLoops := 0
+		m, pausedLoops = m.pauseLoopsForPlan()
+		if pausedLoops > 0 || m.hasArmedGoalContinuation() {
+			reloadWarning += "\nAutomatic /loop and /goal continuations are paused until /plan off."
+		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan mode\n" + planEnterText(m) + reloadWarning})
 		return m.syncPeerIdentity(), nil
 	case "off", "exit":
@@ -107,8 +115,9 @@ func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m = m.exitPlanMode()
+		m = m.resumeLoopsAfterPlan()
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan mode\nExited. Permission mode restored to " + string(m.permissionMode) + "."})
-		return m, nil
+		return m.launchGoalContinuationIfReady()
 	case "open":
 		if m.pending || m.exiting {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Cannot open the plan file while a run is active."})
@@ -141,6 +150,13 @@ func planModeCommandUnavailable(command parsedCommand) bool {
 	default:
 		return false
 	}
+}
+
+// planModeBlocksContinuations reports whether automatic /loop ticks and
+// /goal continuations must stay idle. Plan mode cannot run implementation
+// turns, so firing them would only burn tokens.
+func (m model) planModeBlocksContinuations() bool {
+	return m.permissionMode == agent.PermissionModePlan
 }
 
 // exitPlanMode restores the permission mode that was active before /plan
