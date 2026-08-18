@@ -13,16 +13,21 @@ import (
 	"strings"
 	"time"
 
+	pdf "github.com/Detective-XH/gopdf"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
-// Dependency posture: PDF processing uses Poppler's bounded tools. Rasterizing
-// pages to images for vision models needs
-// real font/graphics rendering, which no maintained pure-Go library does well;
-// that path is OPTIONAL and uses the poppler tools (pdftotext / pdftoppm) only
-// when they are already on PATH -- the same "external tool the user may have"
-// posture as the LSP language servers. When poppler is absent, extraction
-// silently degrades to the pure-Go text layer; absence is never an error.
+// Dependency posture: the DEFAULT build extracts a PDF's text layer in pure Go
+// via github.com/Detective-XH/gopdf (maintained replacement for the unfixed
+// github.com/ledongthuc/pdf lineage named by GO-2026-6115; BSD-licensed, no
+// CGO), so ZERO stays a single static cross-compilable binary with no runtime
+// tool dependencies for text extraction. Rasterizing pages to images for vision
+// models needs real font/graphics rendering, which no maintained pure-Go
+// library does well; that path is OPTIONAL and uses the poppler tools
+// (pdftotext / pdftoppm) only when they are already on PATH -- the same
+// "external tool the user may have" posture as the LSP language servers. When
+// poppler is absent, extraction silently degrades to the pure-Go text layer;
+// absence is never an error.
 
 // MaxDocumentBytes is the per-document raw-file cap (32 MiB). PDFs are routinely
 // larger than the image cap, but we still bound the file before it is read into
@@ -151,14 +156,35 @@ func LoadDocument(path string, workspaceRoot string, opts DocumentOptions) (Docu
 		}
 	}
 
-	// Text path uses Poppler's pdftotext, which handles PDF parsing outside the
-	// process and is bounded by popplerTimeout.
+	// Text path. Prefer poppler's pdftotext when present (it handles more font
+	// encodings); otherwise use the pure-Go extractor. Either way, absence of the
+	// external tool is not an error. Page counting is independent of text
+	// extraction so a missing/failing pdftotext still reports Pages when pdfinfo
+	// or the in-process reader can.
 	text, pages := "", 0
 	if useExternal {
 		if t, ok := extractTextWithPoppler(data); ok {
 			text = t
-			pages = pdfPageCountWithPoppler(data)
 		}
+		pages = pdfPageCountWithPoppler(data)
+	}
+	if strings.TrimSpace(text) == "" {
+		t, p, terr := extractTextPureGo(data)
+		if terr != nil {
+			// Only surface the pure-Go error when we have nothing else (no poppler
+			// text and no rasterized pages) to offer.
+			if len(images) == 0 {
+				return Document{}, terr
+			}
+		} else {
+			text = t
+			if pages == 0 {
+				pages = p
+			}
+		}
+	}
+	if pages == 0 {
+		pages = pdfPageCount(data)
 	}
 
 	text, truncated := capDocumentText(text)
@@ -213,6 +239,55 @@ func readDocumentBytes(path string, workspaceRoot string) ([]byte, error) {
 	return data, nil
 }
 
+// extractTextPureGo extracts the full text layer with the pure-Go parser. The
+// underlying reader can still panic on some malformed structures, so the whole
+// call is wrapped in a recover: a bad PDF becomes a clean error, never a crash
+// that escapes the package. It returns the joined text and the page count.
+func extractTextPureGo(data []byte) (text string, pages int, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			text, pages = "", 0
+			err = fmt.Errorf("could not parse PDF (malformed or unsupported): %v", rec)
+		}
+	}()
+
+	reader, rerr := pdf.NewReader(bytes.NewReader(data), int64(len(data)))
+	if rerr != nil {
+		return "", 0, fmt.Errorf("could not parse PDF: %w", rerr)
+	}
+	pages = reader.NumPage()
+
+	var buf strings.Builder
+	ctx, cancel := context.WithTimeout(context.Background(), popplerTimeout)
+	defer cancel()
+	plain, perr := reader.GetPlainText(ctx)
+	if perr != nil {
+		return "", pages, fmt.Errorf("could not extract PDF text: %w", perr)
+	}
+	if _, cerr := io.Copy(&buf, plain); cerr != nil {
+		return "", pages, fmt.Errorf("could not read PDF text: %w", cerr)
+	}
+	return strings.TrimSpace(buf.String()), pages, nil
+}
+
+// pdfPageCount returns the page count via the pure-Go reader without extracting
+// any text. It backs Document.Pages when pdfinfo is absent (pdftotext does not
+// report a count). Like extractTextPureGo it recovers from parser panics on
+// malformed input and reports 0 rather than crashing -- the page count is
+// informational, so an unreadable structure simply yields 0.
+func pdfPageCount(data []byte) (pages int) {
+	defer func() {
+		if recover() != nil {
+			pages = 0
+		}
+	}()
+	reader, err := pdf.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return 0
+	}
+	return reader.NumPage()
+}
+
 // capDocumentText truncates text to MaxDocumentTextBytes on a UTF-8 rune
 // boundary and appends documentTruncatedMarker when it had to cut. The second
 // return reports whether truncation happened. The marker is counted against the
@@ -259,7 +334,7 @@ func popplerAvailable(name string) bool {
 
 // extractTextWithPoppler runs `pdftotext - -` (read stdin, write stdout) when
 // pdftotext is on PATH. The bool is false when the tool is absent or failed, so
-// the caller can fall back to the pure-Go extractor. Absence is never an error.
+// the caller falls back to the pure-Go extractor. Absence is never an error.
 func extractTextWithPoppler(data []byte) (string, bool) {
 	if !popplerAvailable("pdftotext") {
 		return "", false

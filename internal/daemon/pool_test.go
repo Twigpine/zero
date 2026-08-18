@@ -279,7 +279,7 @@ func TestPoolDrainKillsWorkerLaunchedAfterDrainStarts(t *testing.T) {
 	launchStarted := make(chan struct{})
 	releaseLaunch := make(chan struct{})
 	straggler := &fakeWorker{pid: 1, waitCh: make(chan struct{})}
-	pool, _ := NewPool(PoolOptions{Size: 1, KillTimeout: 10 * time.Millisecond, Launcher: func(context.Context, WorkerSpec) (WorkerHandle, error) {
+	pool, _ := NewPool(PoolOptions{Size: 1, MaxAttempts: 1, KillTimeout: 10 * time.Millisecond, Backoff: func(int) time.Duration { return 0 }, Launcher: func(context.Context, WorkerSpec) (WorkerHandle, error) {
 		close(launchStarted)
 		<-releaseLaunch
 		return straggler, nil

@@ -8,13 +8,14 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const minimalPDFTextChunkSize = 80
 
 // buildMinimalPDF assembles a tiny, single-page PDF whose content stream draws
 // the given text. It computes a real cross-reference table and trailer so a
-// pure-Go PDF parser (ledongthuc/pdf) accepts it. Generating the fixture in-test
+// pure-Go PDF parser (Detective-XH/gopdf) accepts it. Generating the fixture in-test
 // keeps the repo free of opaque binary blobs while still exercising the real
 // text-extraction path on real PDF bytes.
 func buildMinimalPDF(text string) []byte {
@@ -243,7 +244,7 @@ func TestLoadDocumentNoTextNoRaster(t *testing.T) {
 	}
 	// Force the pure-Go path with no external rasterizer so the no-text branch is
 	// deterministic regardless of what is installed on the test host.
-	_, err := LoadDocument("scan.pdf", root, DocumentOptions{})
+	_, err := LoadDocument("scan.pdf", root, DocumentOptions{disableExternalTools: true})
 	if err == nil {
 		t.Fatal("expected an error for a PDF with no extractable text and no raster")
 	}
@@ -292,7 +293,7 @@ func TestLoadDocumentMalformedDoesNotPanic(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "bad.pdf"), bad, 0o644); err != nil {
 		t.Fatalf("write bad: %v", err)
 	}
-	_, err := LoadDocument("bad.pdf", root, DocumentOptions{})
+	_, err := LoadDocument("bad.pdf", root, DocumentOptions{disableExternalTools: true})
 	if err == nil {
 		t.Fatal("expected an error for malformed PDF bytes")
 	}
@@ -306,7 +307,7 @@ func TestLoadDocumentFallsBackToPureGo(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "doc.pdf"), buildMinimalPDF(want), 0o644); err != nil {
 		t.Fatalf("write pdf: %v", err)
 	}
-	doc, err := LoadDocument("doc.pdf", root, DocumentOptions{})
+	doc, err := LoadDocument("doc.pdf", root, DocumentOptions{disableExternalTools: true})
 	if err != nil {
 		t.Fatalf("LoadDocument (pure-Go): %v", err)
 	}
@@ -321,12 +322,15 @@ func TestLoadDocumentVisionUsesText(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "doc.pdf"), buildMinimalPDF(want), 0o644); err != nil {
 		t.Fatalf("write pdf: %v", err)
 	}
-	doc, err := LoadDocument("doc.pdf", root, DocumentOptions{Vision: true})
+	doc, err := LoadDocument("doc.pdf", root, DocumentOptions{Vision: true, disableExternalTools: true})
 	if err != nil {
 		t.Fatalf("LoadDocument (vision, no raster): %v", err)
 	}
+	if len(doc.Images) != 0 {
+		t.Fatalf("no rasterizer available, expected 0 images, got %d", len(doc.Images))
+	}
 	if !strings.Contains(doc.Text, want) {
-		t.Fatalf("vision extraction should keep text, got %q", doc.Text)
+		t.Fatalf("vision-without-raster should keep text, got %q", doc.Text)
 	}
 }
 
@@ -362,11 +366,58 @@ func TestCapDocumentTextRespectsCap(t *testing.T) {
 // backs Document.Pages on the poppler text path, where pdftotext gives no count)
 // and must return 0 -- not panic -- on garbage.
 func TestPDFPageCount(t *testing.T) {
-	if got := pdfPageCountWithPoppler(buildMinimalPDF("one page")); got != 1 {
+	if got := pdfPageCount(buildMinimalPDF("one page")); got != 1 {
 		t.Fatalf("pdfPageCount = %d, want 1", got)
 	}
-	if got := pdfPageCountWithPoppler([]byte("not a pdf at all")); got != 0 {
+	if got := pdfPageCount([]byte("not a pdf at all")); got != 0 {
 		t.Fatalf("pdfPageCount on garbage = %d, want 0", got)
+	}
+}
+
+func TestPDFPageCountIndependentOfTextExtraction(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "doc.pdf"), buildMinimalPDF("pages without pdftotext"), 0o644); err != nil {
+		t.Fatalf("write pdf: %v", err)
+	}
+	doc, err := LoadDocument("doc.pdf", root, DocumentOptions{disableExternalTools: true})
+	if err != nil {
+		t.Fatalf("LoadDocument: %v", err)
+	}
+	if doc.Pages != 1 {
+		t.Fatalf("Pages = %d, want 1 when text extraction uses the in-process reader", doc.Pages)
+	}
+}
+
+func TestLoadDocumentHostilePDFStaysBounded(t *testing.T) {
+	root := t.TempDir()
+	cases := map[string][]byte{
+		"cycle.pdf": []byte("%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 1 0 R /Parent 1 0 R /Kids [1 0 R] /Count 999999999 /First 1 0 R /Next 1 0 R >>\nendobj\ntrailer\n<< /Root 1 0 R /Size 999999999 >>\nstartxref\n9\n%%EOF\n"),
+		"hex.pdf":   []byte("%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\nstream\n<" + strings.Repeat("A", 4096) + "\nendstream\n%%EOF\n"),
+	}
+	done := make(chan error, 1)
+	go func() {
+		var first error
+		for name, body := range cases {
+			path := filepath.Join(root, name)
+			if err := os.WriteFile(path, body, 0o644); err != nil {
+				first = err
+				break
+			}
+			_, err := LoadDocument(name, root, DocumentOptions{disableExternalTools: true})
+			if err == nil {
+				first = fmt.Errorf("%s: expected error for hostile PDF", name)
+				break
+			}
+		}
+		done <- first
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("hostile PDF parsing exceeded the resource bound")
 	}
 }
 

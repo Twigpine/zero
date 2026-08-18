@@ -227,6 +227,11 @@ func (p *Pool) Run(ctx context.Context, spec WorkerSpec, sink Sink) (int, error)
 			if ctx.Err() != nil {
 				return 0, ctx.Err()
 			}
+			// Drain is terminal: do not backoff/retry, and do not wrap the
+			// shutdown error as ErrPermanent when attempts are exhausted.
+			if errors.Is(err, ErrPoolDraining) {
+				return 0, ErrPoolDraining
+			}
 			p.logf("worker %d launch/run error: %v", stat.id, err)
 		case code == 0:
 			return 0, nil // clean success
@@ -402,6 +407,19 @@ func (p *Pool) Drain() {
 		for _, h := range handles {
 			p.logf("drain: killing straggler worker pid=%d", h.Pid())
 			_ = h.Kill()
+		}
+
+		// Force-kill only covers handles already in active. A launcher that is
+		// still inside Launcher has no handle yet; keep Drain blocked until that
+		// late-launch path finishes its own kill+wait and decrements launching.
+		for {
+			p.mu.Lock()
+			n := p.launching
+			p.mu.Unlock()
+			if n == 0 {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
 		}
 	})
 }
