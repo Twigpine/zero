@@ -291,6 +291,7 @@ func (m model) startLoop(cmd loopCommand) (model, tea.Cmd) {
 		interval:  cmd.interval,
 		createdAt: m.now(),
 		nextRunAt: m.now(), // fire the first iteration on the next idle tick
+		paused:    m.planModeBlocksContinuations(),
 	}
 	m.loops = append(m.loops, loop)
 	note := ""
@@ -334,10 +335,10 @@ func (m model) stopAllLoops() (model, tea.Cmd) {
 }
 
 // fireDueLoopIfIdle fires the earliest due loop when the session is idle. Called
-// from the poll tick; a no-op while a turn, modal, or queued user message is
-// pending (the loop simply waits for the next idle tick).
+// from the poll tick; a no-op while a turn, modal, queued user message, or plan
+// mode is pending (the loop simply waits for the next idle tick).
 func (m model) fireDueLoopIfIdle() (model, tea.Cmd) {
-	if m.loopBusy() || len(m.loops) == 0 {
+	if m.loopBusy() || len(m.loops) == 0 || m.planModeBlocksContinuations() {
 		return m, nil
 	}
 	now := m.now()
@@ -640,6 +641,33 @@ func (m model) validateLoopTarget(prompt string) (string, bool) {
 // the session that created them; carrying them across /new or /resume would fire the
 // old session's prompt into an unrelated conversation. Returns the count cleared so
 // the caller can note it. Pure state reset — no transcript writes.
+// pauseLoopsForPlan marks every active loop paused so the idle ticker cannot
+// fire implementation turns while plan mode is read-only. Returns how many
+// loops were newly paused.
+func (m model) pauseLoopsForPlan() (model, int) {
+	n := 0
+	for _, l := range m.loops {
+		if l == nil || l.paused {
+			continue
+		}
+		l.paused = true
+		n++
+	}
+	return m, n
+}
+
+// resumeLoopsAfterPlan unpauses loops that were held while plan mode was
+// active so the next idle tick can fire them again.
+func (m model) resumeLoopsAfterPlan() model {
+	for _, l := range m.loops {
+		if l == nil {
+			continue
+		}
+		l.paused = false
+	}
+	return m
+}
+
 func (m model) clearLoopsForSessionSwitch() (model, int) {
 	n := len(m.loops)
 	if n == 0 {
