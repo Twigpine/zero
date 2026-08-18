@@ -723,3 +723,40 @@ func TestAnHourDurationIsReadWhole(t *testing.T) {
 		t.Errorf("a fabricated 9h was not caught as 32400s: %+v", conflicts)
 	}
 }
+
+// A DURATION THIS PACKAGE CAN PARSE MUST BE ONE THE CLAUSE SCAN CAN SEE.
+//
+// separatorBreaksClause locates the next duration to decide whether a separator
+// introduces a new subject, and it did not know the hour form. So it read the
+// "h" of "9h" as the first letter of a new subject, turned the punctuation into
+// a clause boundary, and cut the test's own number away from its name. Four
+// ordinary spellings were missed; only the separator-free "took 9h" survived.
+func TestTheClauseScanSeesTheHourForm(t *testing.T) {
+	for _, claim := range []string{
+		"TestVerySlow - 9h",
+		"TestVerySlow passed - 9h",
+		"TestVerySlow (9h)",
+		"TestVerySlow: 9h",
+		"TestVerySlow took 9h",
+	} {
+		ledger := NewLedger()
+		ledger.Record(Run{}, "--- PASS: TestVerySlow (4200.00s)\n")
+		conflicts := ledger.Conflicts(Run{}, claim)
+		if len(conflicts) != 1 || conflicts[0].Claimed != 32400 {
+			t.Errorf("a fabricated hour figure was not read: %q -> %+v", claim, conflicts)
+		}
+	}
+
+	// And the bounds still bind: an hour figure belonging to another subject
+	// stays that subject's, and a truthful hour restatement is not a conflict.
+	bleed := NewLedger()
+	bleed.Record(Run{}, "--- PASS: TestVerySlow (4200.00s)\n")
+	if conflicts := bleed.Conflicts(Run{}, "TestVerySlow passed - the whole suite took 9h"); len(conflicts) != 0 {
+		t.Errorf("another subject's hour figure was charged to this test: %+v", conflicts)
+	}
+	honest := NewLedger()
+	honest.Record(Run{}, "--- PASS: TestVerySlow (4200.00s)\n")
+	if conflicts := honest.Conflicts(Run{}, "TestVerySlow - 1h10m0s"); len(conflicts) != 0 {
+		t.Errorf("a truthful 1h10m0s restatement was reported as a conflict: %+v", conflicts)
+	}
+}

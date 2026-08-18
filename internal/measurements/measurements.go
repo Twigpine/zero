@@ -414,7 +414,15 @@ func clauseEnd(line string, from int, known map[string][]float64) int {
 // how a table, a bullet list or an aside states one test's timing.
 func separatorBreaksClause(after string) bool {
 	end := len(after)
-	for _, pattern := range []*regexp.Regexp{claimedDuration, claimedMinuteDuration} {
+	// THE HOUR FORM COUNTS HERE TOO. Without it this scan cannot locate "9h" as a
+	// duration, so it reads the "h" as the first letter of a new subject and
+	// turns the punctuation into a clause boundary — cutting the test's own
+	// number off from its name. Four ordinary spellings were missed that way:
+	// "TestVerySlow - 9h", "…passed - 9h", "…(9h)" and "…: 9h", while the bare
+	// "took 9h" worked because no separator was involved. A duration this package
+	// can parse must be one this scan can see, or the two disagree about where a
+	// clause ends.
+	for _, pattern := range []*regexp.Regexp{claimedDuration, claimedMinuteDuration, claimedHourDuration} {
 		if match := pattern.FindStringIndex(after); match != nil && match[0] < end {
 			end = match[0]
 		}
