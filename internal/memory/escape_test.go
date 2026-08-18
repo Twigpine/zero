@@ -400,7 +400,12 @@ func TestAPresentButUnopenableStoreIsReportedNotHidden(t *testing.T) {
 		t.Skipf("cannot remove access here: %v", err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(blocked, 0o700) })
-	if _, err := os.Open(filepath.Join(blocked, "memory")); err == nil {
+	// CLOSE IT. Discarding the handle leaked an open descriptor, and on Windows
+	// an open handle blocks the directory's removal — so the skip below left
+	// t.TempDir's cleanup failing and the run red on the very platform this test
+	// is trying to stand in for.
+	if probe, err := os.Open(filepath.Join(blocked, "memory")); err == nil {
+		probe.Close()
 		t.Skip("this environment ignores directory permissions, so the refusal cannot be built")
 	}
 
