@@ -114,10 +114,11 @@ type Pool struct {
 	opts  PoolOptions
 	slots chan struct{}
 
-	mu       sync.Mutex
-	draining bool
-	active   map[int]WorkerHandle // worker id -> handle, for drain/kill + status
-	nextID   int
+	mu        sync.Mutex
+	draining  bool
+	active    map[int]WorkerHandle // worker id -> handle, for drain/kill + status
+	launching int                  // launchers in progress; Drain must not mistake these for idle
+	nextID    int
 
 	drainOnce sync.Once
 	drained   chan struct{}
@@ -265,11 +266,29 @@ func (p *Pool) Run(ctx context.Context, spec WorkerSpec, sink Sink) (int, error)
 // runOnce launches a single worker, pumps its output to sink, and returns its
 // exit code. The worker handle is tracked so Drain can kill it.
 func (p *Pool) runOnce(ctx context.Context, id int, spec WorkerSpec, sink Sink) (int, error) {
+	p.mu.Lock()
+	if p.draining {
+		p.mu.Unlock()
+		return 0, ErrPoolDraining
+	}
+	p.launching++
+	p.mu.Unlock()
 	handle, err := p.opts.Launcher(ctx, spec)
+	p.mu.Lock()
+	p.launching--
+	draining := p.draining
+	if err == nil && !draining {
+		p.active[id] = handle
+	}
+	p.mu.Unlock()
 	if err != nil {
 		return 0, err
 	}
-	p.track(id, handle)
+	if draining {
+		_ = handle.Kill()
+		_, _ = handle.Wait()
+		return 0, ErrPoolDraining
+	}
 	defer p.untrack(id)
 
 	// Pump stdout lines until the stream ends.
@@ -359,7 +378,7 @@ func (p *Pool) Drain() {
 		deadline := time.Now().Add(p.opts.KillTimeout)
 		for time.Now().Before(deadline) {
 			p.mu.Lock()
-			n := len(p.active)
+			n := len(p.active) + p.launching
 			p.mu.Unlock()
 			if n == 0 {
 				return // all workers drained gracefully

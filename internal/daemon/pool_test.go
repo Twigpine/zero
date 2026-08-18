@@ -275,6 +275,40 @@ func TestPoolDrainKillsStraggler(t *testing.T) {
 	}
 }
 
+func TestPoolDrainKillsWorkerLaunchedAfterDrainStarts(t *testing.T) {
+	launchStarted := make(chan struct{})
+	releaseLaunch := make(chan struct{})
+	straggler := &fakeWorker{pid: 1, waitCh: make(chan struct{})}
+	pool, _ := NewPool(PoolOptions{Size: 1, KillTimeout: 10 * time.Millisecond, Launcher: func(context.Context, WorkerSpec) (WorkerHandle, error) {
+		close(launchStarted)
+		<-releaseLaunch
+		return straggler, nil
+	}})
+	runDone := make(chan struct{})
+	go func() {
+		_, _ = pool.Run(context.Background(), WorkerSpec{Session: "a"}, &collectSink{})
+		close(runDone)
+	}()
+	<-launchStarted
+	drained := make(chan struct{})
+	go func() { pool.Drain(); close(drained) }()
+	time.Sleep(20 * time.Millisecond)
+	close(releaseLaunch)
+	select {
+	case <-drained:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Drain did not finish")
+	}
+	select {
+	case <-runDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not finish after Drain")
+	}
+	if atomic.LoadInt32(&straggler.killed) != 1 {
+		t.Fatal("Drain must kill a worker whose launch completed after draining began")
+	}
+}
+
 func TestPoolRunSurfacesStdoutReadError(t *testing.T) {
 	// A worker stdout read error must surface as a failure (not be swallowed and
 	// reported as clean success), and the worker is killed so it can't block on an
