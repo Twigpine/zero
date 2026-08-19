@@ -552,3 +552,42 @@ func TestAContractedToolCaveatIsRecognised(t *testing.T) {
 		}
 	}
 }
+
+// "ANY" IS WHAT MAKES A NEGATIVE RESULT A RESULT.
+//
+// The observation verbs were added to successNegationTails BARE, to make the
+// observation-family strong tails reachable. That made every "could not <verb>"
+// a successful negative finding, and these are ordinary admissions that went
+// silent:
+//
+//	"I could not produce the requested report."
+//	"I could not measure the throughput, so the number is unknown."
+//
+// Looking for something and finding none of it is a result. Failing to produce a
+// thing you were asked for is not. Both directions are asserted here because the
+// fix for one of them is what broke the other.
+func TestABareObservationVerbIsNotASuccessfulAbsence(t *testing.T) {
+	for _, admission := range []string{
+		"I could not produce the requested report.",
+		"I could not measure the throughput, so the number is unknown.",
+		"I could not trigger the migration, so it never ran.",
+		"I could not surface the config value.",
+		"I could not encounter the documented behaviour.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("an admission was read as a successful negative result: %q", admission)
+		}
+	}
+
+	for _, finding := range []string{
+		"I could not trigger any crash, so it looks resolved.",
+		"I could not surface any regressions, so nothing was modified.",
+		"I could not reproduce any failure after the fix, so it looks resolved.",
+		"I could not encounter any failures, and nothing was modified.",
+		"I could not measure any slowdown, so the change is neutral.",
+	} {
+		if reason := selfReportedIncompletion(finding); reason != "" {
+			t.Errorf("a negative observation result was reported as an admission: %q -> %s", finding, reason)
+		}
+	}
+}

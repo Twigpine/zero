@@ -213,11 +213,22 @@ var inabilityStems = []string{
 var successNegationTails = []string{
 	"find any", "found any", "find a ", "see any", "detect any", "identify any",
 	"reproduce", "spot any", "locate any",
-	// The OBSERVATION verbs. strongAbsence is only consulted after this list has
-	// already matched, so the observation-family strong tails added a round
-	// earlier were unreachable without these — seven of eight did nothing, and
-	// only "reproduce" worked because it was already here.
-	"trigger", "produce", "hit any", "encounter", "provoke", "surface", "measure",
+	// The OBSERVATION verbs, in their "... any" forms ONLY. strongAbsence is
+	// consulted after this list has matched, so the observation-family strong
+	// tails were unreachable without these — but adding the verbs BARE made every
+	// "could not <verb>" a successful negative result, and these are ordinary
+	// admissions:
+	//
+	//	"I could not produce the requested report."
+	//	"I could not measure the throughput, so the number is unknown."
+	//	"I could not trigger the migration, so it never ran."
+	//
+	// All five went silent. Looking for something and finding none of it is a
+	// result; failing to produce a thing you were asked for is not, and the "any"
+	// is what separates them. Matching the strong tails exactly is also what keeps
+	// the two lists from drifting apart again.
+	"trigger any", "produce any", "hit any", "encounter any",
+	"provoke any", "surface any", "measure any",
 	// A NEGATIVE SEARCH RESULT IS THE ANSWER, not a failure to produce one.
 	//
 	// The list above already encodes this — "I could not find any remaining
