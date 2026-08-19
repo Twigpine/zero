@@ -388,8 +388,9 @@ func (p *Pool) sleep(ctx context.Context, d time.Duration) bool {
 // Drain stops accepting new work, gives in-flight workers a grace window
 // (KillTimeout) to finish on their own, then force-kills any straggler. It
 // returns as soon as the pool is idle, the grace window elapses and existing
-// workers are force-killed, or the separately bounded late-launch cleanup
-// completes. Safe to call once; subsequent calls are no-ops.
+// workers are force-killed, or one separately bounded late-launch cleanup wait
+// elapses. A launcher that ignores cancellation may finish its cleanup after
+// Drain returns. Safe to call once; subsequent calls are no-ops.
 func (p *Pool) Drain() {
 	p.drainOnce.Do(func() {
 		p.mu.Lock()
