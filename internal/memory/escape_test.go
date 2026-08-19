@@ -395,6 +395,11 @@ func TestAPresentButUnopenableStoreIsReportedNotHidden(t *testing.T) {
 	if _, err := Write(paths, ScopeProject, "note", "d", "body"); err != nil {
 		t.Fatal(err)
 	}
+	// NOT CONSTRUCTIBLE EVERYWHERE, and the platforms invert. On Windows
+	// os.Chmod only toggles the read-only attribute, so this arm cannot build the
+	// refusal there — which is the opposite of what an earlier version of this
+	// comment claimed. The companion below covers Windows with a junction, which
+	// IS constructible there and is not here.
 	blocked := filepath.Join(root, ".zero")
 	if err := os.Chmod(blocked, 0o000); err != nil {
 		t.Skipf("cannot remove access here: %v", err)
@@ -436,5 +441,143 @@ func TestAnUncreatedStoreIsStillOrdinaryAbsence(t *testing.T) {
 	}
 	if _, err := Write(paths, ScopeLocal, "first", "d", "b"); err != nil {
 		t.Errorf("the first write into a clean workspace failed: %v", err)
+	}
+}
+
+// SAVE A NOTE, READ IT STRAIGHT BACK, GET YOUR OWN.
+//
+// memory_write and memory_forget default to local while an unscoped read
+// resolved project first, and scope is optional in every schema. A model that
+// omitted it was handed content it never wrote, and told a note was deleted
+// after which the name still read. A checked-in project note is the ordinary way
+// that happens — it arrives with a clone, and the model has no reason to expect
+// it.
+func TestAnUnscopedRoundTripReturnsWhatWasWritten(t *testing.T) {
+	root := t.TempDir()
+	paths := DefaultPaths(root)
+	if err := os.MkdirAll(paths.ProjectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The checked-in note that used to win.
+	if err := os.WriteFile(filepath.Join(paths.ProjectDir, "findings"+fileExt),
+		[]byte("---\nname: findings\ndescription: theirs\n---\n\nPROJECT-CONTENT\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Write(paths, ScopeLocal, "findings", "mine", "MY-OWN-CONTENT"); err != nil {
+		t.Fatal(err)
+	}
+
+	scopes, err := ResolveScopes("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scopes) == 0 || scopes[0] != ScopeLocal {
+		t.Fatalf("the unscoped order is %v; a write lands in local, so a read must look there first", scopes)
+	}
+	var got Note
+	for _, scope := range scopes {
+		if note, err := Read(paths, scope, "findings"); err == nil {
+			got = note
+			break
+		}
+	}
+	if !strings.Contains(got.Body, "MY-OWN-CONTENT") {
+		t.Errorf("an unscoped read returned %q, not what the unscoped write saved", got.Body)
+	}
+
+	// A project note is still reachable when nothing local shadows it — the order
+	// decides which wins, not what exists.
+	if err := Forget(paths, ScopeLocal, "findings"); err != nil {
+		t.Fatal(err)
+	}
+	for _, scope := range scopes {
+		if note, err := Read(paths, scope, "findings"); err == nil {
+			got = note
+			break
+		}
+	}
+	if !strings.Contains(got.Body, "PROJECT-CONTENT") {
+		t.Errorf("after forgetting the local note the project one should be found; got %q", got.Body)
+	}
+}
+
+// A NOTE THE LISTING DENIES EXISTS MUST NOT BE DESTROYED BY THE NEXT WRITE.
+//
+// List matches the extension exactly; Read reopened name+".md", and on a
+// case-insensitive filesystem that is the same file as a hand-authored
+// "findings.MD". So the listing reported an empty store, writing was the
+// reasonable next move, and a checked-in file was silently overwritten.
+//
+// Read now agrees with List, and the write refuses rather than taking the
+// occupant's place.
+func TestADifferentlySpelledNoteIsNotSilentlyOverwritten(t *testing.T) {
+	root := t.TempDir()
+	paths := DefaultPaths(root)
+	if err := os.MkdirAll(paths.ProjectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	shouty := filepath.Join(paths.ProjectDir, "findings.MD")
+	original := "---\nname: findings\ndescription: d\n---\n\nHAND-WRITTEN\n"
+	if err := os.WriteFile(shouty, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	probe := filepath.Join(root, ".CaseProbe")
+	if err := os.WriteFile(probe, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, insensitiveErr := os.Stat(filepath.Join(root, ".caseprobe"))
+	os.Remove(probe)
+	if insensitiveErr != nil {
+		t.Skip("this filesystem is case-sensitive, so the two names are genuinely different files")
+	}
+
+	// Read agrees with the listing: neither offers it.
+	notes, err := List(paths, ScopeProject)
+	if err != nil || len(notes) != 0 {
+		t.Fatalf("List = %+v, %v; the exact-extension rule should not show findings.MD", notes, err)
+	}
+	if _, err := Read(paths, ScopeProject, "findings"); err == nil {
+		t.Error("Read handed back a note the listing denies exists")
+	}
+
+	// And the write refuses rather than destroying it.
+	if _, err := Write(paths, ScopeProject, "findings", "d", "OVERWRITTEN"); !errors.Is(err, ErrNameClash) {
+		t.Errorf("Write = %v, want ErrNameClash rather than taking the occupant's place", err)
+	}
+	after, err := os.ReadFile(shouty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != original {
+		t.Errorf("the hand-authored note was modified: %q", string(after))
+	}
+}
+
+// THE COMPANION FOR THE PLATFORM THE OTHER ARM CANNOT REACH.
+//
+// TestAPresentButUnopenableStoreIsReportedNotHidden builds its refusal with
+// chmod, which Windows does not honour — os.Chmod there only toggles the
+// read-only attribute. So that arm skips on Windows and the branch would have no
+// coverage on the one platform where reparse points are ordinary.
+//
+// A junction is the reverse: constructible on Windows, not here. Between the two
+// arms the refusal is exercised everywhere, and neither passes vacuously —
+// each skips loudly where its own mechanism is unavailable.
+func TestAStoreBehindAReparsePointIsRefusedOnEveryPlatform(t *testing.T) {
+	root := t.TempDir()
+	paths := DefaultPaths(root)
+	target := filepath.Join(root, "elsewhere")
+	if err := os.MkdirAll(filepath.Join(target, "memory"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linkDir(t, target, filepath.Join(root, ".zero"))
+
+	if _, err := Read(paths, ScopeProject, "anything"); errors.Is(err, ErrNotFound) {
+		t.Error("a store behind a reparse point read as a missing note, which is what makes a model overwrite it")
+	} else if err == nil {
+		t.Error("a store behind a reparse point was read through")
+	}
+	if _, err := List(paths, ScopeProject); err == nil {
+		t.Error("List presented a store behind a reparse point as an empty one")
 	}
 }

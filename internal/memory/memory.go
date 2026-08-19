@@ -118,6 +118,12 @@ var (
 	// ErrIsSymlink, which names a reparse point this process could actually
 	// identify as one — a junction is not identifiable that way, and neither is
 	// a directory the process may not enter.
+	// ErrNameClash is a note whose stored spelling differs from the one asked
+	// for. On a case-insensitive filesystem the two are the same file, so writing
+	// the second destroys the first — and List, which matches the extension
+	// exactly, does not show it, so the model is told the store is empty right
+	// before it overwrites something.
+	ErrNameClash  = errors.New("a differently spelled note already occupies this name")
 	ErrUnreadable = errors.New("the memory store exists but could not be read")
 	ErrNotPrivate = errors.New("the local memory store is not ignored by git, so a note saved there would not stay on this machine")
 	// ErrIsSymlink is pathjail's refusal, kept under this package's own name so
@@ -231,6 +237,41 @@ func (paths Paths) openScope(scope Scope) (*os.Root, string, error) {
 // Outermost first because that is the component whose redirection decides where
 // everything below it lands, and it makes the error name the link the caller can
 // actually act on.
+// storedEntryName returns the spelling the store actually holds for a note, and
+// whether anything holds it at all.
+//
+// LIST AND READ HAVE TO ANSWER THE SAME QUESTION. List matches the extension
+// exactly; Read reopens name+".md", and on a case-insensitive filesystem that
+// opens "findings.MD" — a file the listing never showed. The model is told the
+// store is empty, writes, and a hand-authored checked-in note is destroyed.
+// Reading the directory is what lets both sides agree on one spelling.
+func storedEntryName(handle *os.Root, relative, name string) (string, bool, error) {
+	dir, err := handle.Open(relative)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	defer dir.Close()
+	entries, err := dir.ReadDir(-1)
+	if err != nil {
+		return "", false, err
+	}
+	want := name + fileExt
+	for _, entry := range entries {
+		if entry.Name() == want {
+			return entry.Name(), true, nil
+		}
+	}
+	for _, entry := range entries {
+		if strings.EqualFold(entry.Name(), want) {
+			return entry.Name(), true, nil
+		}
+	}
+	return "", false, nil
+}
+
 // presentOnDisk reports whether relative exists under root by ordinary pathname.
 //
 // Deliberately NOT through the confined handle — the whole point is to ask a
@@ -257,24 +298,29 @@ func refuseReparseChain(handle *os.Root, root string, relative string) error {
 		if err := pathjail.RefuseReparse(handle, component); err != nil {
 			return err
 		}
-		// OPENABLE, NOT MERELY PRESENT. The previous version asked whether the
-		// component was ABSENT to the handle and only then compared against disk —
-		// and a junction is not absent to it. handle.Lstat does not traverse a
-		// reparse point, so it reports the junction as being right there, the
-		// !exists branch never ran, presentOnDisk was never consulted, and the walk
-		// continued straight past the component it was meant to refuse. The later
-		// open failed as ErrNotFound and List dropped it, exactly as before the
-		// fix.
+		// OPENABLE, NOT MERELY PRESENT. A path the confined handle will not open
+		// while it is plainly present on disk has been REFUSED; a path absent from
+		// both is simply not there yet, which is what a first write is for.
 		//
-		// The question that separates absence from refusal is what the handle can
-		// OPEN, because opening is what traverses. A path the confined handle will
-		// not open while it is plainly present on disk has been REFUSED; a path
-		// that is absent from both is simply not there yet, which is what a first
-		// write is for.
+		// WHAT THIS ACTUALLY COVERS, corrected. This was written as a junction
+		// fix, and it is not one: @Vasanthdev2004 re-measured and every junction
+		// placement is already refused one layer earlier, because os.Root.Lstat
+		// reports a junction as ModeIrregular and pathjail.RefuseReparse rejects
+		// it on the first component — with that neutered, os.Root still refuses
+		// with "path escapes from parent". Two layers stand in front of this
+		// branch, and the tampered-store-reads-as-empty outcome it was built for
+		// does not occur.
 		//
-		// A Windows junction is not a symlink and does not answer like one:
-		// os.ModeSymlink misses it, EvalSymlinks returns it unchanged, and Lstat
-		// says it is there. Only the open disagrees.
+		// What it does cover is a store that is present and cannot be opened for
+		// an ordinary reason — a directory this process may not enter. That used
+		// to surface as "no such memory", and a caller cannot tell an empty store
+		// from an unreadable one on that answer. It is a smaller claim than the
+		// one this comment used to make, and it is the true one.
+		//
+		// RACE: between the open failing and presentOnDisk succeeding, a store
+		// being created concurrently reads as refused rather than absent. The
+		// caller is told to look rather than told nothing is there, so the
+		// direction is the safe one, but it is a real window.
 		opened, openErr := handle.Open(component)
 		if openErr == nil {
 			opened.Close()
@@ -311,6 +357,30 @@ func ValidName(name string) bool {
 		namePattern.MatchString(name) && !reservedDeviceNames[name]
 }
 
+// DefaultScopeOrder is the ONE order an unscoped operation uses, and every tool
+// that takes an optional scope must use it.
+//
+// LOCAL FIRST, because local is where an unscoped WRITE lands. It used to be
+// project first while memory_write and memory_forget defaulted to local, so a
+// model that omitted the scope — which every schema allows — could not read back
+// what it had just written:
+//
+//	memory_write{name, content}   -> Saved "findings" (local).
+//	memory_read{name}             -> memory "findings" (project) ... someone else's
+//	memory_forget{name}           -> Forgot "findings" (local).
+//	memory_read{name}             -> memory "findings" (project) ... still there
+//
+// Every one of those messages is accurate about the scope it acted on, and the
+// round trip is still broken: the model is handed content it never wrote, and
+// told a note was deleted after which the name still reads. A checked-in project
+// note is the ordinary way that happens, since it arrives with a clone and the
+// model has no reason to expect it. The tool's own approval text says future
+// sessions will read and believe these notes, which is exactly what fails.
+//
+// A project note is still found when no local one shadows it, so nothing becomes
+// unreachable — the ordering only decides which wins when both exist.
+var DefaultScopeOrder = []Scope{ScopeLocal, ScopeProject}
+
 // ResolveScopes turns a requested scope into the scopes to search.
 //
 // ONE place decides, because there were two and they disagreed: the write path
@@ -323,7 +393,7 @@ func ValidName(name string) bool {
 func ResolveScopes(requested string) ([]Scope, error) {
 	trimmed := strings.TrimSpace(requested)
 	if trimmed == "" {
-		return []Scope{ScopeProject, ScopeLocal}, nil
+		return append([]Scope(nil), DefaultScopeOrder...), nil
 	}
 	switch scope := Scope(strings.ToLower(trimmed)); scope {
 	case ScopeProject, ScopeLocal:
@@ -439,6 +509,16 @@ func Read(paths Paths, scope Scope, name string) (Note, error) {
 	// this comment matches what the code actually does.
 	if err := pathjail.RefuseReparse(handle, relativePath); err != nil {
 		return Note{}, err
+	}
+	// AGREE WITH LIST. List matches the extension exactly, so a differently
+	// spelled entry is one it never showed — and opening it here would hand back
+	// a note the caller was told does not exist.
+	stored, found, entryErr := storedEntryName(handle, relative, name)
+	if entryErr != nil {
+		return Note{}, entryErr
+	}
+	if found && stored != name+fileExt {
+		return Note{}, fmt.Errorf("%w: %s is stored as %s", ErrNameClash, name+fileExt, stored)
 	}
 	body, err := readBounded(handle, relativePath)
 	if err != nil {
@@ -616,6 +696,15 @@ func Write(paths Paths, scope Scope, name, description, body string) (string, er
 	relativePath := filepath.Join(relative, name+fileExt)
 	if err := pathjail.RefuseReparse(handle, relativePath); err != nil {
 		return "", err
+	}
+	// A REAL CLASH GUARD. On a case-insensitive filesystem "findings.md" and
+	// "findings.MD" are one file, so writing the first destroys the second — and
+	// List never showed it, so the model had every reason to think the name was
+	// free. Refusing names the occupant instead of silently taking its place.
+	if stored, found, entryErr := storedEntryName(handle, relative, name); entryErr != nil {
+		return "", entryErr
+	} else if found && stored != name+fileExt {
+		return "", fmt.Errorf("%w: %s is stored as %s; rename or remove it first", ErrNameClash, name+fileExt, stored)
 	}
 	file, temp, err := pathjail.CreateTemp(handle, relative, name, tempExt)
 	if err != nil {
