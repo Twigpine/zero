@@ -355,15 +355,6 @@ func (p *Pool) newStat() *workerStat {
 	return &workerStat{id: p.nextID}
 }
 
-// track/untrack key the active set by the pool's monotonic worker id, not the OS
-// pid: the OS can reuse a pid the instant a worker exits, so a pid key could collide
-// a finished worker with a freshly-launched one and drop the wrong handle (D10).
-func (p *Pool) track(id int, h WorkerHandle) {
-	p.mu.Lock()
-	p.active[id] = h
-	p.mu.Unlock()
-}
-
 func (p *Pool) untrack(id int) {
 	p.mu.Lock()
 	delete(p.active, id)
