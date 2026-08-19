@@ -42,6 +42,10 @@ type fakeWorker struct {
 	exitCode int
 	killed   int32
 	waitCh   chan struct{} // when non-nil, Wait blocks until closed (drain tests)
+	killCh   chan struct{} // when non-nil, Kill signals before any blocked Wait returns
+	// waitAfterKill keeps Wait blocked after Kill so drain tests can prove the
+	// pool waits for reaping rather than merely dispatching a kill signal.
+	waitAfterKill bool
 }
 
 func (w *fakeWorker) Stdout() Lines { return &fakeLines{lines: w.out, err: w.outErr} }
@@ -53,7 +57,14 @@ func (w *fakeWorker) Wait() (int, error) {
 }
 func (w *fakeWorker) Kill() error {
 	atomic.StoreInt32(&w.killed, 1)
-	if w.waitCh != nil {
+	if w.killCh != nil {
+		select {
+		case <-w.killCh:
+		default:
+			close(w.killCh)
+		}
+	}
+	if w.waitCh != nil && !w.waitAfterKill {
 		select {
 		case <-w.waitCh:
 		default:
@@ -279,7 +290,8 @@ func TestPoolDrainKillsStraggler(t *testing.T) {
 func TestPoolDrainKillsWorkerLaunchedAfterDrainStarts(t *testing.T) {
 	launchStarted := make(chan struct{})
 	releaseLaunch := make(chan struct{})
-	straggler := &fakeWorker{pid: 1, waitCh: make(chan struct{})}
+	releaseWait := make(chan struct{})
+	straggler := &fakeWorker{pid: 1, waitCh: releaseWait, killCh: make(chan struct{}), waitAfterKill: true}
 	pool, _ := NewPool(PoolOptions{Size: 1, MaxAttempts: 1, KillTimeout: 2 * time.Second, Backoff: func(int) time.Duration { return 0 }, Launcher: func(context.Context, WorkerSpec) (WorkerHandle, error) {
 		close(launchStarted)
 		<-releaseLaunch
@@ -300,6 +312,17 @@ func TestPoolDrainKillsWorkerLaunchedAfterDrainStarts(t *testing.T) {
 	default:
 	}
 	close(releaseLaunch)
+	select {
+	case <-straggler.killCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Drain did not kill the worker launched after draining began")
+	}
+	select {
+	case <-drained:
+		t.Fatal("Drain returned before the late worker was reaped")
+	default:
+	}
+	close(releaseWait)
 	select {
 	case <-drained:
 	case <-time.After(2 * time.Second):
