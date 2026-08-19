@@ -221,6 +221,12 @@ func (p *Pool) Run(ctx context.Context, spec WorkerSpec, sink Sink) (int, error)
 			return 0, ErrPoolDraining
 		}
 		code, err := p.runOnce(ctx, stat.id, spec, sink)
+		// A run can observe a normal worker result just as Drain starts. Check
+		// again before classifying it so shutdown remains terminal rather than
+		// entering a retry path or reporting ErrPermanent.
+		if p.isDraining() {
+			return 0, ErrPoolDraining
+		}
 		switch {
 		case err != nil:
 			lastErr = err
@@ -245,6 +251,9 @@ func (p *Pool) Run(ctx context.Context, spec WorkerSpec, sink Sink) (int, error)
 			lastErr = fmt.Errorf("worker %d tempfail (code=%d)", stat.id, code)
 			p.logf("worker %d tempfail — retry after %s", stat.id, p.opts.TempfailDelay)
 			if !p.sleep(ctx, p.opts.TempfailDelay) {
+				if p.isDraining() {
+					return 0, ErrPoolDraining
+				}
 				return 0, ctx.Err()
 			}
 			continue // tempfail retries do not count against the crash backoff
@@ -259,6 +268,9 @@ func (p *Pool) Run(ctx context.Context, spec WorkerSpec, sink Sink) (int, error)
 		delay := p.opts.Backoff(stat.restarts)
 		p.logf("worker %d restart %d after backoff %s", stat.id, stat.restarts, delay)
 		if !p.sleep(ctx, delay) {
+			if p.isDraining() {
+				return 0, ErrPoolDraining
+			}
 			return 0, ctx.Err()
 		}
 	}
@@ -376,6 +388,8 @@ func (p *Pool) sleep(ctx context.Context, d time.Duration) bool {
 	case <-timer.C:
 		return true
 	case <-ctx.Done():
+		return false
+	case <-p.drained:
 		return false
 	}
 }

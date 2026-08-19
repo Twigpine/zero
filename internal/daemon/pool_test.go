@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -292,7 +293,7 @@ func TestPoolDrainKillsWorkerLaunchedAfterDrainStarts(t *testing.T) {
 	<-launchStarted
 	drained := make(chan struct{})
 	go func() { pool.Drain(); close(drained) }()
-	waitFor(t, pool.isDraining)
+	testutil.WaitFor(t, "pool draining", pool.isDraining)
 	select {
 	case <-drained:
 		t.Fatal("Drain returned while a launcher was still in progress")
@@ -311,6 +312,61 @@ func TestPoolDrainKillsWorkerLaunchedAfterDrainStarts(t *testing.T) {
 	}
 	if atomic.LoadInt32(&straggler.killed) != 1 {
 		t.Fatal("Drain must kill a worker whose launch completed after draining began")
+	}
+}
+
+func TestPoolDrainInterruptsRetryDelays(t *testing.T) {
+	cases := []struct {
+		name        string
+		exitCode    int
+		maxAttempts int
+	}{
+		{name: "backoff", exitCode: 1, maxAttempts: 2},
+		{name: "tempfail", exitCode: ExitTempfail, maxAttempts: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			delaying := make(chan struct{})
+			pool, err := NewPool(PoolOptions{
+				Size:          1,
+				MaxAttempts:   tc.maxAttempts,
+				KillTimeout:   time.Second,
+				TempfailDelay: time.Hour,
+				Backoff: func(int) time.Duration {
+					return time.Hour
+				},
+				Log: func(message string) {
+					if strings.Contains(message, "retry after") || strings.Contains(message, "restart") {
+						select {
+						case <-delaying:
+						default:
+							close(delaying)
+						}
+					}
+				},
+				Launcher: func(context.Context, WorkerSpec) (WorkerHandle, error) {
+					return &fakeWorker{pid: 1, exitCode: tc.exitCode}, nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("NewPool: %v", err)
+			}
+			result := make(chan error, 1)
+			go func() {
+				_, err := pool.Run(context.Background(), WorkerSpec{Session: "a"}, &collectSink{})
+				result <- err
+			}()
+			<-delaying
+			pool.Drain()
+			select {
+			case err := <-result:
+				if !errors.Is(err, ErrPoolDraining) {
+					t.Fatalf("Run error = %v, want ErrPoolDraining", err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("Run remained in retry delay after Drain")
+			}
+		})
 	}
 }
 
