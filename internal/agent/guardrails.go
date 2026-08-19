@@ -345,6 +345,44 @@ var toolGrantMarkers = []string{
 	"is not in my toolset", "not in my toolset", "not in this toolset",
 }
 
+// causalExcuseMarkers introduce the tool as the REASON some action did not
+// happen, rather than as a footnote about this run's capabilities.
+//
+// THE TOOL AS EXCUSE IS NOT THE TOOL AS FOOTNOTE. Naming an absent tool does not
+// establish it was unnecessary, and the copula broadening let these through:
+//
+//	"I could not run the migration because no migration tool is available."
+//	"…because the migration tool is available only on Windows."
+//
+// The migration did not run and nothing took its place; the sentence explains
+// WHY. Whereas the case the exemption was built for names no failed action at
+// all — "I don't have an update_plan tool available in this specialist context
+// (only read-only exploration tools were provided)" is a capability footnote,
+// verbatim from a session this detector wrongly flagged.
+//
+// A causal connective is what separates them, and it yields when the sentence
+// goes on to say what was done instead: the tool really was unnecessary then,
+// which is the whole premise of the exemption.
+var causalExcuseMarkers = []string{
+	"because", "since ", " as no ", " as the ", " as there ", "due to", "owing to",
+}
+
+// deliveredAlternativeMarkers say the work was done another way, which is what
+// makes an absent tool harmless.
+//
+// AN ALLOW-LIST, because it grants the exemption. An unrecognised phrasing
+// simply does not exempt — the sentence goes on to the ordinary handling rather
+// than being waved through — which is the direction this detector should fail
+// in when it cannot tell.
+var deliveredAlternativeMarkers = []string{
+	"instead", "by hand", "manually", "directly",
+	"proceeded", "went ahead", "carried on",
+	"in this answer", "into this answer", "in the answer",
+	"was not needed", "were not needed", "not needed here", "did not need",
+	"which was unnecessary", "so i read", "so i wrote", "so i checked",
+	"so i listed", "so i summarised", "so i summarized", "so i used",
+}
+
 // objectiveFailureMarkers name the OBJECTIVE rather than a capability. A
 // sentence carrying one is about whether the job got done, so the tool-grant
 // exemption above does not apply to it however many tools it mentions.
@@ -710,7 +748,22 @@ func selfReportedIncompletion(text string) string {
 		// reason to stop reading — so a sentence that also says something is
 		// unverified, unapplied or untested goes on to the blocked-work handling
 		// below instead of being exempted here.
+		// AND SOMETHING WAS DELIVERED INSTEAD. Naming an absent tool does not by
+		// itself establish that the tool was unnecessary — that is the claim the
+		// exemption makes on the sentence's behalf, and these do not support it:
+		//
+		//	"I could not run the migration because no migration tool is available."
+		//	"…because the migration tool is available only on Windows."
+		//
+		// The migration did not run and nothing took its place; the sentence
+		// merely explains WHY it did not. Broadening the matcher to the copula
+		// forms is what let these through, so the same commit that recognised a
+		// harmless caveat also started excusing an ordinary failure.
+		//
+		// The exemption exists for a tool that was NOT NEEDED, and what shows it
+		// was not needed is the alternative the sentence goes on to describe.
 		if containsAny(sentence, toolGrantMarkers) &&
+			(!containsAny(sentence, causalExcuseMarkers) || containsAny(sentence, deliveredAlternativeMarkers)) &&
 			!containsAny(sentence, objectiveFailureMarkers) &&
 			!containsAny(sentence, blockedStateMarkers) {
 			continue

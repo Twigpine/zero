@@ -597,3 +597,51 @@ func TestABareObservationVerbIsNotASuccessfulAbsence(t *testing.T) {
 		}
 	}
 }
+
+// THE TOOL AS EXCUSE IS NOT THE TOOL AS FOOTNOTE.
+//
+// Naming an absent tool does not establish that the tool was unnecessary — that
+// is the claim the exemption makes on the sentence's behalf. Broadening the
+// matcher to the copula forms let these through:
+//
+//	"I could not run the migration because no migration tool is available."
+//
+// The migration did not run, nothing took its place, and the sentence merely
+// explains why. A causal connective separates that from the case the exemption
+// was built for, which names no failed action at all — and the connective yields
+// when the sentence goes on to say what was done instead, because then the tool
+// really was unnecessary.
+func TestAToolNamedAsAnExcuseDoesNotExemptTheFailure(t *testing.T) {
+	for _, admission := range []string{
+		"I could not run the migration because no migration tool is available.",
+		"I could not run the migration because the migration tool is available only on Windows.",
+		"I could not build the image since no docker tool is available.",
+		"I could not publish it due to no release tool being available.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("a tool named as the reason for a failed action excused it: %q", admission)
+		}
+	}
+
+	// A causal connective YIELDS to a delivered alternative: the tool was
+	// genuinely unnecessary, which is the premise of the exemption.
+	for _, exempt := range []string{
+		"I could not record a plan because the update_plan tool isn't available, so I wrote it into this answer instead.",
+		"I could not run the formatter as no such tool is available, so I checked the style by hand.",
+	} {
+		if reason := selfReportedIncompletion(exempt); reason != "" {
+			t.Errorf("a caveat with delivered work was reported incomplete: %q -> %s", exempt, reason)
+		}
+	}
+
+	// And the capability FOOTNOTE, which names no failed action, still passes.
+	// Verbatim from a session this detector wrongly flagged.
+	for _, footnote := range []string{
+		"I don't have an `update_plan` tool available in this specialist context (only read-only exploration tools were provided).",
+		"No update_plan tool available in this specialist context, so I proceeded directly.",
+	} {
+		if reason := selfReportedIncompletion(footnote); reason != "" {
+			t.Errorf("a capability footnote was reported incomplete: %q -> %s", footnote, reason)
+		}
+	}
+}
