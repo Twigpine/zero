@@ -513,7 +513,13 @@ func TestEveryStrongAbsenceTailIsReachable(t *testing.T) {
 	for _, tail := range strongAbsenceTails {
 		reachable := false
 		for _, negation := range successNegationTails {
-			if strings.HasPrefix(tail, negation) || strings.HasPrefix(negation, tail) {
+			// ONE DIRECTION, the one the runtime uses. hasAnyPrefix asks
+			// HasPrefix(tail, negation); the reverse clause this used to carry
+			// accepted a negation entry LONGER than the strong tail, which can
+			// never match a real message beginning with that tail — so the
+			// invariant would pass while the tail stayed dead. No entry is longer
+			// today, which is exactly why the loose form looked fine.
+			if strings.HasPrefix(tail, negation) {
 				reachable = true
 				break
 			}
