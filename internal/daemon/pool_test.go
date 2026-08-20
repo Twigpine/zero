@@ -302,7 +302,11 @@ func TestPoolDrainKillsWorkerLaunchedAfterDrainStarts(t *testing.T) {
 		_, _ = pool.Run(context.Background(), WorkerSpec{Session: "a"}, &collectSink{})
 		close(runDone)
 	}()
-	<-launchStarted
+	select {
+	case <-launchStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not start the launcher")
+	}
 	drained := make(chan struct{})
 	go func() { pool.Drain(); close(drained) }()
 	testutil.WaitFor(t, "pool draining", pool.isDraining)
@@ -379,7 +383,11 @@ func TestPoolDrainInterruptsRetryDelays(t *testing.T) {
 				_, err := pool.Run(context.Background(), WorkerSpec{Session: "a"}, &collectSink{})
 				result <- err
 			}()
-			<-delaying
+			select {
+			case <-delaying:
+			case <-time.After(2 * time.Second):
+				t.Fatal("Run did not enter the retry delay")
+			}
 			pool.Drain()
 			select {
 			case err := <-result:
