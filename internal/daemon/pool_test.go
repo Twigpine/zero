@@ -297,10 +297,10 @@ func TestPoolDrainKillsWorkerLaunchedAfterDrainStarts(t *testing.T) {
 		<-releaseLaunch
 		return straggler, nil
 	}})
-	runDone := make(chan struct{})
+	runResult := make(chan error, 1)
 	go func() {
-		_, _ = pool.Run(context.Background(), WorkerSpec{Session: "a"}, &collectSink{})
-		close(runDone)
+		_, err := pool.Run(context.Background(), WorkerSpec{Session: "a"}, &collectSink{})
+		runResult <- err
 	}()
 	select {
 	case <-launchStarted:
@@ -333,7 +333,10 @@ func TestPoolDrainKillsWorkerLaunchedAfterDrainStarts(t *testing.T) {
 		t.Fatal("Drain did not finish")
 	}
 	select {
-	case <-runDone:
+	case err := <-runResult:
+		if !errors.Is(err, ErrPoolDraining) {
+			t.Fatalf("Run error = %v, want ErrPoolDraining", err)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not finish after Drain")
 	}
