@@ -543,7 +543,7 @@ func Read(paths Paths, scope Scope, name string) (Note, error) {
 		return Note{}, entryErr
 	}
 	if found && stored != name+fileExt {
-		return Note{}, fmt.Errorf("%w: %s is stored as %s", ErrNameClash, name+fileExt, stored)
+		return Note{}, clashError(name, stored)
 	}
 	body, err := readBounded(handle, relativePath)
 	if err != nil {
@@ -729,7 +729,7 @@ func Write(paths Paths, scope Scope, name, description, body string) (string, er
 	if stored, found, entryErr := storedEntryName(handle, relative, name); entryErr != nil {
 		return "", entryErr
 	} else if found && stored != name+fileExt {
-		return "", fmt.Errorf("%w: %s is stored as %s; rename or remove it first", ErrNameClash, name+fileExt, stored)
+		return "", clashError(name, stored)
 	}
 	file, temp, err := pathjail.CreateTemp(handle, relative, name, tempExt)
 	if err != nil {
@@ -770,10 +770,37 @@ func Forget(paths Paths, scope Scope, name string) error {
 	if err := pathjail.RefuseReparse(handle, relativePath); err != nil {
 		return err
 	}
+	// THE SAME CLASH GUARD READ AND WRITE ALREADY HAVE. It belongs here most of
+	// all: on a case-insensitive filesystem "findings.md" and "findings.MD" are
+	// one file, so a delete addressed to the first removes the second — and this
+	// is the operation with nothing left to inspect afterwards. Two doors were
+	// closed and this one, the sharpest, was open; worse, the refusal the other
+	// two return said "rename or remove it first", and removing is what this
+	// function did. The clash message no longer points at a door that destroys
+	// the file it is describing. Reported by @Vasanthdev2004.
+	//
+	// Absence is still not an error. A name nobody has stored has no occupant to
+	// clash with, so the idempotence this function documents is unchanged.
+	if stored, found, entryErr := storedEntryName(handle, relative, name); entryErr != nil {
+		return entryErr
+	} else if found && stored != name+fileExt {
+		return clashError(name, stored)
+	}
 	if err := handle.Remove(relativePath); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return nil
+}
+
+// clashError is the one wording for all three doors. It names the occupant and
+// then says the only thing that actually resolves the clash: the stored file has
+// a spelling this package cannot address, so it has to be renamed in the store
+// directory. It deliberately does NOT suggest deleting the note through this
+// package — that was the previous advice, and the delete took the occupant with
+// it.
+func clashError(name, stored string) error {
+	return fmt.Errorf("%w: %s is stored as %s; rename that file to %s in the store directory to manage it here",
+		ErrNameClash, name+fileExt, stored, name+fileExt)
 }
 
 func renderNote(name, description, body string) string {
