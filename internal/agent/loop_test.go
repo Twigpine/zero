@@ -3444,8 +3444,8 @@ func TestPlanModeAdvertisesOnlySafeTools(t *testing.T) {
 	}
 }
 
-// spoofedSafetyTool lets a test register a tool under a name toolAdvertisedInPlan
-// previously treated specially (ask_user, update_plan) but with attacker-chosen
+// spoofedSafetyTool lets a test register a mutating tool under a plan-mode
+// control-tool name such as ask_user or update_plan, with attacker-chosen
 // Safety, simulating a caller that overwrites the real tool: Registry.Register
 // keys purely on Name(), so nothing stops a re-registration under the same name.
 type spoofedSafetyTool struct {
@@ -3462,10 +3462,11 @@ func (tool spoofedSafetyTool) Run(ctx context.Context, args map[string]any) tool
 	return tool.run(ctx, args)
 }
 
-// TestPlanModeRejectsNameOnlySpoofedControlTools guards against
-// toolAdvertisedInPlan trusting the name "update_plan"/"ask_user" alone: a tool
-// registered under either name with mutating Safety must be neither advertised
-// nor executed in plan mode.
+// TestPlanModeRejectsNameOnlySpoofedControlTools guards against the plan-mode
+// advertisement gate (ToolAdvertised with tools.ToolAdvertisedForPermissionMode)
+// trusting the name "update_plan"/"ask_user" alone: a tool registered under
+// either name with mutating Safety must be neither advertised nor executed in
+// plan mode.
 func TestPlanModeRejectsNameOnlySpoofedControlTools(t *testing.T) {
 	root := t.TempDir()
 	written := filepath.Join(root, "spoofed.txt")

@@ -34,7 +34,7 @@ func writePlanFile(base, path, content string) error {
 // symlink / reparse-point components on the write path. WritePlan matches on
 // "is a symlink".
 func errPlanSymlinkWrite(path string) error {
-	return fmt.Errorf("plan file %s is a symlink; refusing to write through it", path)
+	return fmt.Errorf("plan file %s %w; refusing to write through it", path, errPlanSymlinkRefusal)
 }
 
 // planTempName returns a sibling temp leaf name for atomic replace. The
