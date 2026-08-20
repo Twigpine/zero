@@ -89,7 +89,20 @@ func (tool memoryTool) Run(_ context.Context, args map[string]any) Result {
 	}
 
 	if strings.TrimSpace(name) == "" {
-		notes, listErr := memory.List(tool.paths, scopes...)
+		// A LISTING IS NOT A RESOLUTION, and passing the resolved scopes through
+		// made it one. ResolveScopes answers "which scope wins when both hold this
+		// name", which must be local-first or an unscoped write cannot be read
+		// back; a listing shadows nothing, shows both scopes, and labels every row.
+		// Forwarding the resolved order meant memory.List's own listing order was
+		// unreachable from the product — the named variable, its comment, and the
+		// test that asserts it all described something no user could see. Handing
+		// List no scopes at all is what asks it to choose. A caller who NAMES a
+		// scope still gets exactly that one. Reported by @Vasanthdev2004.
+		listScopes := scopes
+		if strings.TrimSpace(scope) == "" {
+			listScopes = nil
+		}
+		notes, listErr := memory.List(tool.paths, listScopes...)
 		// BESIDE the notes, not instead of them. memory.List deliberately returns
 		// what it could read alongside the failures, and returning an error here
 		// threw that away — turning the library's careful partial success back

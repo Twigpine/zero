@@ -205,3 +205,75 @@ func TestAProjectFailureDoesNotHideTheLocalNote(t *testing.T) {
 		t.Errorf("the local note was not returned: %q", result.Output)
 	}
 }
+
+// A DELETE MUST REFUSE THE NAME THE OTHER TWO DOORS REFUSE. memory_read and
+// memory_write both decline a note whose stored spelling differs from the one
+// asked for, because on a case-insensitive filesystem they are one file. Forget
+// did not, so the operation with nothing recoverable afterwards was the only one
+// that ignored the guard — and the refusal the other two return used to say
+// "rename or remove it first", which named this tool as the way out.
+func TestMemoryForgetRefusesADifferentlySpelledNote(t *testing.T) {
+	paths := memoryTestPaths(t)
+	if err := os.MkdirAll(paths.ProjectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hand := filepath.Join(paths.ProjectDir, "findings.MD")
+	if err := os.WriteFile(hand, []byte("---\nname: findings\n---\n\nweeks of work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := NewMemoryForgetTool(paths).Run(context.Background(), map[string]any{"name": "findings", "scope": "project"})
+	if result.Status != StatusError {
+		t.Errorf("forget accepted a clashing name and reported %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "findings.MD") {
+		t.Errorf("the refusal did not name the occupant it declined to delete: %q", result.Output)
+	}
+	if strings.Contains(result.Output, MemoryForgetToolName) {
+		t.Errorf("the refusal pointed back at the deleting tool: %q", result.Output)
+	}
+	// AND IT MUST NOT ADVISE REMOVAL. The wording is the other half of this bug:
+	// all three doors used to answer a clash with "rename or remove it first",
+	// and removal is the operation that destroys the occupant being described.
+	// A refusal that routes the reader to the sharpest door is not a refusal.
+	if strings.Contains(strings.ToLower(result.Output), "remove it") {
+		t.Errorf("the refusal advised removing the occupant it just protected: %q", result.Output)
+	}
+	if !strings.Contains(strings.ToLower(result.Output), "rename") {
+		t.Errorf("the refusal named no way forward: %q", result.Output)
+	}
+	body, err := os.ReadFile(hand)
+	if err != nil {
+		t.Fatalf("the hand-authored note was deleted by a refused forget: %v", err)
+	}
+	if !strings.Contains(string(body), "weeks of work") {
+		t.Errorf("the note survived but its contents did not: %q", body)
+	}
+}
+
+// THE LISTING ORDER HAS TO REACH A USER TO BE AN ORDER. memory.List documents a
+// project-first listing and a test asserts it, but the tool resolved scopes
+// first and handed the resolution order (local-first) straight through, so the
+// documented order applied to nothing anybody could see.
+func TestAnUnscopedListingIsProjectFirst(t *testing.T) {
+	paths := memoryTestPaths(t)
+	write := NewMemoryWriteTool(paths)
+	if r := write.Run(context.Background(), map[string]any{"name": "zulu", "scope": "local", "content": "a local note"}); r.Status == StatusError {
+		t.Fatal(r.Output)
+	}
+	if r := write.Run(context.Background(), map[string]any{"name": "alpha", "scope": "project", "content": "a project note"}); r.Status == StatusError {
+		t.Fatal(r.Output)
+	}
+
+	result := NewMemoryTool(paths).Run(context.Background(), map[string]any{})
+	if result.Status == StatusError {
+		t.Fatal(result.Output)
+	}
+	project, local := strings.Index(result.Output, "alpha (project)"), strings.Index(result.Output, "zulu (local)")
+	if project < 0 || local < 0 {
+		t.Fatalf("the unscoped listing lost a scope: %q", result.Output)
+	}
+	if project > local {
+		t.Errorf("the listing put local before project, which is the resolution order, not the listing order:\n%s", result.Output)
+	}
+}
