@@ -612,6 +612,21 @@ func TestABareObservationVerbIsNotASuccessfulAbsence(t *testing.T) {
 // when the sentence goes on to say what was done instead, because then the tool
 // really was unnecessary.
 func TestAToolNamedAsAnExcuseDoesNotExemptTheFailure(t *testing.T) {
+	// PUNCTUATION IS NOT THE POINT, the relationship is. The first version of
+	// this fix enumerated causal connectives, so only the mark had to change to
+	// walk past it — five of six ordinary forms were still exempted:
+	for _, admission := range []string{
+		"I could not run the migration; no migration tool is available.",
+		"I could not run the migration: no migration tool is available.",
+		"I could not run the migration — no migration tool is available.",
+		"I could not run the migration, no migration tool is available.",
+		"I could not run the migration (no migration tool is available).",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("a tool offered as the reason for a failed action excused it: %q", admission)
+		}
+	}
+
 	for _, admission := range []string{
 		"I could not run the migration because no migration tool is available.",
 		"I could not run the migration because the migration tool is available only on Windows.",

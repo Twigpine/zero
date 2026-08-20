@@ -345,26 +345,81 @@ var toolGrantMarkers = []string{
 	"is not in my toolset", "not in my toolset", "not in this toolset",
 }
 
-// causalExcuseMarkers introduce the tool as the REASON some action did not
-// happen, rather than as a footnote about this run's capabilities.
+// toolCaveatIsTheStatement reports whether the tool mention IS what the inability
+// is about, rather than an excuse offered for a separate action that did not
+// happen.
 //
-// THE TOOL AS EXCUSE IS NOT THE TOOL AS FOOTNOTE. Naming an absent tool does not
-// establish it was unnecessary, and the copula broadening let these through:
+// POSITION, NOT VOCABULARY. This was an enumeration of causal connectives —
+// because, since, due to — and enumerating is how this class stays open. Only
+// the punctuation had to change to walk straight past it:
 //
-//	"I could not run the migration because no migration tool is available."
-//	"…because the migration tool is available only on Windows."
+//	"I could not run the migration; no migration tool is available."
+//	"I could not run the migration: no migration tool is available."
+//	"I could not run the migration — no migration tool is available."
 //
-// The migration did not run and nothing took its place; the sentence explains
-// WHY. Whereas the case the exemption was built for names no failed action at
-// all — "I don't have an update_plan tool available in this specialist context
-// (only read-only exploration tools were provided)" is a capability footnote,
-// verbatim from a session this detector wrongly flagged.
+// Five of six ordinary forms were still exempted. Listing every connective and
+// every mark a person might type is the deny-list shape this repo has been bitten
+// by repeatedly; the relationship is the thing to test.
 //
-// A causal connective is what separates them, and it yields when the sentence
-// goes on to say what was done instead: the tool really was unnecessary then,
-// which is the whole premise of the exemption.
-var causalExcuseMarkers = []string{
-	"because", "since ", " as no ", " as the ", " as there ", "due to", "owing to",
+// The relationship is simple. If the inability's own clause is the tool statement
+// — "I don't have an update_plan tool available in this specialist context" —
+// then the caveat IS the statement and there is no failed action to excuse. If a
+// clause boundary of ANY kind sits between the inability and the tool mention,
+// something else was attempted first and the tool is being offered as the reason
+// it did not happen.
+//
+// A sentence with no inability before the tool mention is a bare capability note
+// and stays exempt.
+func toolCaveatIsTheStatement(sentence string) bool {
+	toolAt := firstIndexOfAny(sentence, toolGrantMarkers)
+	if toolAt < 0 {
+		return false
+	}
+	stemAt, stemLen := firstStemBefore(sentence, toolAt)
+	if stemAt < 0 {
+		return true
+	}
+	return !containsClauseBoundary(sentence[stemAt+stemLen : toolAt])
+}
+
+// firstIndexOfAny returns the earliest offset at which any marker occurs, or -1.
+func firstIndexOfAny(s string, markers []string) int {
+	best := -1
+	for _, marker := range markers {
+		if at := strings.Index(s, marker); at >= 0 && (best < 0 || at < best) {
+			best = at
+		}
+	}
+	return best
+}
+
+// firstStemBefore returns the offset and length of the earliest inability stem
+// that starts before limit, or -1.
+func firstStemBefore(s string, limit int) (int, int) {
+	bestAt, bestLen := -1, 0
+	for _, stem := range inabilityStems {
+		at := strings.Index(s, stem)
+		if at < 0 || at >= limit {
+			continue
+		}
+		if bestAt < 0 || at < bestAt {
+			bestAt, bestLen = at, len(stem)
+		}
+	}
+	return bestAt, bestLen
+}
+
+// clauseBoundaries end the clause an inability was stated in. Punctuation and
+// connectives together, because a person separating two statements reaches for
+// either and the detector should not care which.
+var clauseBoundaries = []string{
+	";", ":", ",", ".", "(", ")", "|", "\u2014", "\u2013", " - ", " -- ",
+	"because", "since ", " as ", "due to", "owing to", "given that",
+	" so ", " but ", " and ", " while ", " though ", " although ",
+}
+
+func containsClauseBoundary(between string) bool {
+	return containsAny(between, clauseBoundaries)
 }
 
 // deliveredAlternativeMarkers say the work was done another way, which is what
@@ -763,7 +818,7 @@ func selfReportedIncompletion(text string) string {
 		// The exemption exists for a tool that was NOT NEEDED, and what shows it
 		// was not needed is the alternative the sentence goes on to describe.
 		if containsAny(sentence, toolGrantMarkers) &&
-			(!containsAny(sentence, causalExcuseMarkers) || containsAny(sentence, deliveredAlternativeMarkers)) &&
+			(toolCaveatIsTheStatement(sentence) || containsAny(sentence, deliveredAlternativeMarkers)) &&
 			!containsAny(sentence, objectiveFailureMarkers) &&
 			!containsAny(sentence, blockedStateMarkers) {
 			continue
