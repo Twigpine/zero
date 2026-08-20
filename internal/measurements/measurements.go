@@ -101,14 +101,23 @@ var (
 	// only its minute remainder and read as 600s, so a truthful restatement of a
 	// recorded 4200s was reported as a conflict — the fabricated accusation this
 	// package exists to avoid, one unit further up.
-	claimedMinuteDuration = regexp.MustCompile(`([0-9]+)m(?:([0-9]+(?:\.[0-9]+)?)s)?\b`)
+	//
+	// THE WHOLE NUMBER, INCLUDING ITS FRACTION. An integer-only minute component
+	// could not match "1.5m" at its start, so the leftmost match began at the
+	// remainder instead and "1.5m" read as 5 minutes — and "0.5m", half a minute,
+	// read as five. compoundPart already parses with ParseFloat, so the fraction
+	// only had to be allowed into the capture for the match to start where the
+	// number does.
+	claimedMinuteDuration = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)m(?:([0-9]+(?:\.[0-9]+)?)s)?\b`)
 	// The hour form, kept as its OWN pattern rather than an optional prefix on the
 	// minute one: every part optional makes the whole expression matchable by the
 	// EMPTY string, which regexp then finds at offset 0 ahead of any real
 	// duration — "1h10m0s" read as 0s that way, which is worse than the bug being
 	// fixed. Minutes and seconds are optional here, so "2h", "1h30s" and
 	// "1h10m0s" all parse.
-	claimedHourDuration = regexp.MustCompile(`([0-9]+)h(?:([0-9]+)m)?(?:([0-9]+(?:\.[0-9]+)?)s)?\b`)
+	// Decimal components here for the same reason: "1.5h" read as 5 hours and
+	// "10.25h" as 25.
+	claimedHourDuration = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)h(?:([0-9]+(?:\.[0-9]+)?)m)?(?:([0-9]+(?:\.[0-9]+)?)s)?\b`)
 )
 
 // ParseGoTest pulls every timing out of `go test` output.
@@ -217,6 +226,18 @@ func (l *Ledger) Record(run Run, text string) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	key := run.key()
+	// A LEDGER THAT WAS NEVER CONSTRUCTED STILL HAS TO BEHAVE. The nil receiver
+	// above is already handled, but a zero-value Ledger got past it and panicked
+	// with "assignment to entry in nil map" on the first Record — a value that is
+	// trivially easy to reach by declaring one rather than calling NewLedger.
+	// Allocating here costs nothing on the NewLedger path, where both maps are
+	// already non-nil.
+	if l.observed == nil {
+		l.observed = map[string]map[string][]float64{}
+	}
+	if l.runs == nil {
+		l.runs = map[string]Run{}
+	}
 	byName := l.observed[key]
 	if byName == nil {
 		byName = map[string][]float64{}

@@ -760,3 +760,66 @@ func TestTheClauseScanSeesTheHourForm(t *testing.T) {
 		t.Errorf("a truthful 1h10m0s restatement was reported as a conflict: %+v", conflicts)
 	}
 }
+
+// A DECIMAL DURATION IS ONE NUMBER, NOT ITS REMAINDER. The minute and hour
+// components accepted integers only, so neither pattern could match "1.5m" at
+// the digit it starts on — the leftmost match began after the point instead and
+// read the claim as 5 minutes. "0.5m", half a minute, read as five, and "10.25h"
+// as twenty-five hours.
+//
+// That is the exact failure this package exists to prevent, in its own parser: a
+// model that truthfully restated a recorded 90s as "1.5m" was accused of
+// fabricating a number, and the nudge quoted 300s back at it — a figure nothing
+// in the run ever produced.
+func TestADecimalDurationIsReadWhole(t *testing.T) {
+	for _, c := range []struct {
+		recorded string
+		seconds  float64
+		claim    string
+	}{
+		{"--- PASS: TestNinety (90.00s)\n", 90, "TestNinety took 1.5m"},
+		{"--- PASS: TestHalf (30.00s)\n", 30, "TestHalf took 0.5m"},
+		{"--- PASS: TestLong (5400.00s)\n", 5400, "TestLong took 1.5h"},
+		{"--- PASS: TestVeryLong (36900.00s)\n", 36900, "TestVeryLong took 10.25h"},
+	} {
+		ledger := NewLedger()
+		ledger.Record(Run{}, c.recorded)
+		if conflicts := ledger.Conflicts(Run{}, c.claim); len(conflicts) != 0 {
+			t.Errorf("an honest claim %q against %vs was reported as a conflict: %+v", c.claim, c.seconds, conflicts)
+		}
+	}
+
+	// AND THE UNITS THAT WERE ALREADY RIGHT STAY RIGHT. "1.5ms" must not become
+	// a minute claim: the word boundary after "m" is what kept milliseconds out
+	// of the minute pattern, and widening the number must not cost that.
+	milli := NewLedger()
+	milli.Record(Run{}, "--- PASS: TestQuick (0.0015s)\n")
+	if conflicts := milli.Conflicts(Run{}, "TestQuick took 1.5ms"); len(conflicts) != 0 {
+		t.Errorf("an honest 1.5ms claim was read as minutes: %+v", conflicts)
+	}
+
+	// STILL CAUGHT WHEN A DECIMAL CLAIM REALLY DISAGREES, and reported as the
+	// number that was written. 4.5m is 270s; under the old patterns it matched
+	// its remainder and came back as 300, so asserting the reported value — not
+	// merely that something was reported — is what distinguishes a whole read
+	// from a lucky one. (2.5m would also disagree, but 150s against a recorded
+	// 90s sits inside the deliberate 50% tolerance band and is not a conflict.)
+	wrong := NewLedger()
+	wrong.Record(Run{}, "--- PASS: TestNinety (90.00s)\n")
+	if conflicts := wrong.Conflicts(Run{}, "TestNinety took 4.5m"); len(conflicts) != 1 || conflicts[0].Claimed != 270 {
+		t.Errorf("a fabricated 4.5m was not caught as 270s: %+v", conflicts)
+	}
+}
+
+// A Ledger that was declared rather than constructed still has to behave. The
+// nil receiver is already handled; a zero value got past that guard and panicked
+// with "assignment to entry in nil map" on its first Record.
+func TestAZeroValueLedgerRecordsWithoutPanicking(t *testing.T) {
+	var ledger Ledger
+	if n := ledger.Record(Run{}, "--- PASS: TestSomething (1.25s)\n"); n != 1 {
+		t.Errorf("a zero-value ledger recorded %d measurements, want 1", n)
+	}
+	if conflicts := ledger.Conflicts(Run{}, "TestSomething took 1.25s"); len(conflicts) != 0 {
+		t.Errorf("a zero-value ledger reported a conflict against its own record: %+v", conflicts)
+	}
+}
