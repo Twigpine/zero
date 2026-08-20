@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"net"
 	"os"
@@ -494,5 +495,74 @@ func TestServerRejectsUnknownCommand(t *testing.T) {
 	err = client.Run("", "", "hi", nil, nil)
 	if err == nil {
 		t.Fatal("run with empty session id must return an error")
+	}
+}
+
+func TestServerShutdownMakesRetryDelaysDrainTerminal(t *testing.T) {
+	cases := []struct {
+		name        string
+		exitCode    int
+		maxAttempts int
+	}{
+		{name: "backoff", exitCode: 1, maxAttempts: 2},
+		{name: "tempfail", exitCode: ExitTempfail, maxAttempts: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			delaying := make(chan struct{})
+			pool, err := NewPool(PoolOptions{
+				Size:          1,
+				MaxAttempts:   tc.maxAttempts,
+				KillTimeout:   20 * time.Millisecond,
+				TempfailDelay: time.Hour,
+				Backoff:       func(int) time.Duration { return time.Hour },
+				Log: func(message string) {
+					if strings.Contains(message, "retry after") || strings.Contains(message, "restart") {
+						select {
+						case <-delaying:
+						default:
+							close(delaying)
+						}
+					}
+				},
+				Launcher: func(context.Context, WorkerSpec) (WorkerHandle, error) {
+					return &fakeWorker{pid: 1, exitCode: tc.exitCode}, nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("NewPool: %v", err)
+			}
+			mgr, err := NewSessionManager(SessionManagerOptions{Pool: pool})
+			if err != nil {
+				t.Fatalf("NewSessionManager: %v", err)
+			}
+			dir := t.TempDir()
+			srv, err := NewServer(ServerOptions{
+				Paths:   Paths{Socket: filepath.Join(dir, "d.sock"), Lock: filepath.Join(dir, "d.lock"), Status: filepath.Join(dir, "d.status")},
+				Manager: mgr,
+				Pool:    pool,
+			})
+			if err != nil {
+				t.Fatalf("NewServer: %v", err)
+			}
+			sess, err := mgr.Start(srv.ctx, WorkerSpec{Session: "a"})
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			select {
+			case <-delaying:
+			case <-time.After(2 * time.Second):
+				t.Fatal("session did not enter retry delay")
+			}
+			srv.Shutdown()
+			select {
+			case <-sess.Done():
+				if !errors.Is(sess.Err(), ErrPoolDraining) {
+					t.Fatalf("session error = %v, want ErrPoolDraining", sess.Err())
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("session did not finish after shutdown")
+			}
+		})
 	}
 }

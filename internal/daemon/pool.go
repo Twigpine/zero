@@ -120,8 +120,9 @@ type Pool struct {
 	launching int                  // launchers in progress; Drain must not mistake these for idle
 	nextID    int
 
-	drainOnce sync.Once
-	drained   chan struct{}
+	drainStartOnce sync.Once
+	drainOnce      sync.Once
+	drained        chan struct{}
 }
 
 // workerStat tracks one in-flight request's restart count (local to Run).
@@ -385,6 +386,18 @@ func (p *Pool) sleep(ctx context.Context, d time.Duration) bool {
 	}
 }
 
+// beginDrain publishes the terminal pool state before callers cancel work that
+// may be waiting in Run. Publishing this separately from Drain's bounded
+// cleanup makes the shutdown result deterministic for every Run wakeup.
+func (p *Pool) beginDrain() {
+	p.drainStartOnce.Do(func() {
+		p.mu.Lock()
+		p.draining = true
+		p.mu.Unlock()
+		close(p.drained)
+	})
+}
+
 // Drain stops accepting new work, gives in-flight workers a grace window
 // (KillTimeout) to finish on their own, then force-kills any straggler. It
 // returns as soon as the pool is idle, the grace window elapses and existing
@@ -392,12 +405,8 @@ func (p *Pool) sleep(ctx context.Context, d time.Duration) bool {
 // elapses. A launcher that ignores cancellation may finish its cleanup after
 // Drain returns. Safe to call once; subsequent calls are no-ops.
 func (p *Pool) Drain() {
+	p.beginDrain()
 	p.drainOnce.Do(func() {
-		p.mu.Lock()
-		p.draining = true
-		p.mu.Unlock()
-		close(p.drained)
-
 		// Grace window: poll until idle or the deadline.
 		deadline := time.Now().Add(p.opts.KillTimeout)
 		for time.Now().Before(deadline) {
