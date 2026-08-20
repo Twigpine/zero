@@ -108,23 +108,23 @@ var (
 	ErrTooLarge = fmt.Errorf("a memory note may be at most %d bytes", maxNoteBytes)
 	ErrNotFound = errors.New("no such memory")
 	ErrBadScope = errors.New(`scope must be "project" or "local"`)
-	// ErrNotPrivate is returned rather than writing a local note the repository
-	// would then track. The local scope's whole promise is that the note stays on
-	// this machine, and a promise that degrades quietly is worse than one that
-	// refuses.
+	// ErrNameClash is a note whose stored spelling differs from the one asked
+	// for. On a case-insensitive filesystem the two are the same file, so writing
+	// the second destroys the first — and List, which matches the extension
+	// exactly, does not show it, so the model is told the store is empty right
+	// before it overwrites something.
+	ErrNameClash = errors.New("a differently spelled note already occupies this name")
 	// ErrUnreadable is a path the confined handle will not open while it is
 	// plainly present on disk. Distinct from ErrNotFound, which is the answer
 	// that let a tampered store present as an empty one, and distinct from
 	// ErrIsSymlink, which names a reparse point this process could actually
 	// identify as one — a junction is not identifiable that way, and neither is
 	// a directory the process may not enter.
-	// ErrNameClash is a note whose stored spelling differs from the one asked
-	// for. On a case-insensitive filesystem the two are the same file, so writing
-	// the second destroys the first — and List, which matches the extension
-	// exactly, does not show it, so the model is told the store is empty right
-	// before it overwrites something.
-	ErrNameClash  = errors.New("a differently spelled note already occupies this name")
 	ErrUnreadable = errors.New("the memory store exists but could not be read")
+	// ErrNotPrivate is returned rather than writing a local note the repository
+	// would then track. The local scope's whole promise is that the note stays on
+	// this machine, and a promise that degrades quietly is worse than one that
+	// refuses.
 	ErrNotPrivate = errors.New("the local memory store is not ignored by git, so a note saved there would not stay on this machine")
 	// ErrIsSymlink is pathjail's refusal, kept under this package's own name so
 	// callers testing for it keep working. It now covers a Windows junction as
@@ -379,7 +379,19 @@ func ValidName(name string) bool {
 //
 // A project note is still found when no local one shadows it, so nothing becomes
 // unreachable — the ordering only decides which wins when both exist.
-var DefaultScopeOrder = []Scope{ScopeLocal, ScopeProject}
+var defaultScopeOrder = []Scope{ScopeLocal, ScopeProject}
+
+// DefaultScopeOrder returns a COPY. Handing out the backing slice would let a
+// caller reorder the resolution every other caller depends on.
+func DefaultScopeOrder() []Scope { return append([]Scope(nil), defaultScopeOrder...) }
+
+// listingScopeOrder is the order a LISTING presents scopes in, which is not the
+// order an unscoped lookup resolves them in. Named rather than left as a literal
+// so the difference from DefaultScopeOrder is a stated decision instead of
+// something a later reader tidies away.
+var listingOrder = []Scope{ScopeProject, ScopeLocal}
+
+func listingScopeOrder() []Scope { return append([]Scope(nil), listingOrder...) }
 
 // ResolveScopes turns a requested scope into the scopes to search.
 //
@@ -393,7 +405,7 @@ var DefaultScopeOrder = []Scope{ScopeLocal, ScopeProject}
 func ResolveScopes(requested string) ([]Scope, error) {
 	trimmed := strings.TrimSpace(requested)
 	if trimmed == "" {
-		return append([]Scope(nil), DefaultScopeOrder...), nil
+		return DefaultScopeOrder(), nil
 	}
 	switch scope := Scope(strings.ToLower(trimmed)); scope {
 	case ScopeProject, ScopeLocal:
@@ -417,7 +429,20 @@ func ResolveScopes(requested string) ([]Scope, error) {
 // an empty memory.
 func List(paths Paths, scopes ...Scope) ([]Note, error) {
 	if len(scopes) == 0 {
-		scopes = []Scope{ScopeProject, ScopeLocal}
+		// DELIBERATELY NOT DefaultScopeOrder. These are two different decisions
+		// and the review that flagged the duplication read them as one:
+		//
+		//	resolution order decides which note WINS when both scopes hold the
+		//	  name, and must be local-first or an unscoped write cannot be read
+		//	  back
+		//	listing order decides only what a reader sees FIRST — both scopes are
+		//	  shown and neither shadows the other, so nothing is being resolved
+		//
+		// Project first here puts the checked-in, team-facing notes at the top of
+		// a long listing, which is what a reader scanning it wants. Making this
+		// follow the resolution order would change that for no gain, and
+		// TestListingShowsBothScopesWithoutShadowing asserts it on purpose.
+		scopes = listingScopeOrder()
 	}
 	var out []Note
 	var problems []error

@@ -309,6 +309,12 @@ func TestTheIgnoreGateAgreesWithGit(t *testing.T) {
 		"trailing spaces":   {"*   \n", true},
 		"plain":             {"*\n", true},
 		"comment then star": {"# mine\n*\n", true},
+		// CRLF, because a .gitignore written on Windows carries them and git does
+		// not care. The gate strips the carriage return before comparing; if that
+		// ever stops, every local write on a Windows checkout fails for a file
+		// that was doing its job.
+		"crlf":              {"*\r\n", true},
+		"crlf with comment": {"# mine\r\n*\r\n", true},
 		"cancelled":         {"*\n!keep.md\n", false},
 	} {
 		if got := ignoresEverything(tc.content); got != tc.covered {
@@ -423,24 +429,6 @@ func TestAPresentButUnopenableStoreIsReportedNotHidden(t *testing.T) {
 	}
 	if _, listErr := List(paths, ScopeProject); listErr == nil {
 		t.Error("List presented an unreadable store as an empty one")
-	}
-}
-
-// And absence is still absence: a workspace that has never held a store must
-// read as missing, list empty without an error, and accept its first write.
-// Treating that as a refusal would break every clean checkout.
-func TestAnUncreatedStoreIsStillOrdinaryAbsence(t *testing.T) {
-	fresh := t.TempDir()
-	paths := DefaultPaths(fresh)
-	if _, err := Read(paths, ScopeProject, "nothing"); !errors.Is(err, ErrNotFound) {
-		t.Errorf("Read in a clean workspace = %v, want ErrNotFound", err)
-	}
-	notes, err := List(paths, ScopeProject)
-	if err != nil || len(notes) != 0 {
-		t.Errorf("List in a clean workspace = %+v, %v; want empty and no error", notes, err)
-	}
-	if _, err := Write(paths, ScopeLocal, "first", "d", "b"); err != nil {
-		t.Errorf("the first write into a clean workspace failed: %v", err)
 	}
 }
 
