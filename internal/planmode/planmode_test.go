@@ -735,6 +735,11 @@ func TestStageForEditorRejectsStagingInsideWorkspace(t *testing.T) {
 	if err := os.MkdirAll(insideWorkspace, 0o700); err != nil {
 		t.Fatalf("mkdir inside workspace: %v", err)
 	}
+	// Distinctive mode: the refusal must happen before any chmod, so the
+	// symlink target's permissions must survive unchanged.
+	if err := os.Chmod(insideWorkspace, 0o755); err != nil {
+		t.Fatalf("chmod inside workspace: %v", err)
+	}
 	stagingLink := filepath.Join(cfg, "zero", "plan-edit")
 	if err := os.MkdirAll(filepath.Dir(stagingLink), 0o700); err != nil {
 		t.Fatalf("mkdir staging parent: %v", err)
@@ -752,6 +757,13 @@ func TestStageForEditorRejectsStagingInsideWorkspace(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "sandbox-writable") {
 		t.Fatalf("expected the staging-privacy error, got: %v", err)
+	}
+	info, statErr := os.Stat(insideWorkspace)
+	if statErr != nil {
+		t.Fatalf("stat symlink target: %v", statErr)
+	}
+	if perm := info.Mode().Perm(); perm != 0o755 {
+		t.Fatalf("rejected staging must not chmod the symlink target, mode = %o", perm)
 	}
 }
 

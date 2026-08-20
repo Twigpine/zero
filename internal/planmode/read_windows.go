@@ -136,7 +136,7 @@ func openWindowsBaseDir(absBase string) (windows.Handle, error) {
 	var iosb windows.IO_STATUS_BLOCK
 	err = windows.NtCreateFile(
 		&h,
-		windows.FILE_GENERIC_READ|windows.SYNCHRONIZE,
+		windows.FILE_GENERIC_READ|windows.FILE_TRAVERSE|windows.SYNCHRONIZE,
 		oa,
 		&iosb,
 		nil,
@@ -179,7 +179,10 @@ func openatNoFollow(dirfd windows.Handle, name string, directory bool) (windows.
 	options := uint32(windows.FILE_SYNCHRONOUS_IO_NONALERT | windows.FILE_OPEN_FOR_BACKUP_INTENT)
 	if directory {
 		options |= windows.FILE_DIRECTORY_FILE
-		access |= windows.FILE_LIST_DIRECTORY
+		// FILE_TRAVERSE: this handle becomes the RootDirectory for the next
+		// component's NtCreateFile call, which requires it without
+		// SeChangeNotifyPrivilege.
+		access |= windows.FILE_LIST_DIRECTORY | windows.FILE_TRAVERSE
 	} else {
 		options |= windows.FILE_NON_DIRECTORY_FILE
 	}

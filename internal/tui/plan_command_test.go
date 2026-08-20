@@ -545,7 +545,9 @@ func TestPlanOpenEditorExitReloadsFileIntoPlan(t *testing.T) {
 	if err := os.WriteFile(path, []byte("edited first step\nedited second step\n"), 0o600); err != nil {
 		t.Fatalf("rewrite plan file: %v", err)
 	}
-	m.reloadPlanFromFile()
+	if _, _, err := m.reloadPlanFromFile(); err != nil {
+		t.Fatalf("reloadPlanFromFile: %v", err)
+	}
 
 	got := planTool.CurrentPlan()
 	if len(got) != 2 {
@@ -766,7 +768,9 @@ func TestPlanOpenEditorReloadPreservesStatusAndNotes(t *testing.T) {
 		t.Fatalf("WritePlan: %v", err)
 	}
 
-	m.reloadPlanFromFile()
+	if _, _, err := m.reloadPlanFromFile(); err != nil {
+		t.Fatalf("reloadPlanFromFile: %v", err)
+	}
 
 	got := planTool.CurrentPlan()
 	if len(got) != 3 {
