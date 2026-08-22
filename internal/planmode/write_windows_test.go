@@ -45,13 +45,13 @@ func TestWritePlanRefusesStorageRootReparsePoint(t *testing.T) {
 		t.Fatal("openWindowsBaseDir accepted a reparse-point storage root")
 	}
 	if !errors.Is(err, errPlanSymlinkRefusal) {
-		t.Fatalf("openWindowsBaseDir err = %v, want errPlanBaseSymlink", err)
+		t.Fatalf("openWindowsBaseDir err = %v, want errPlanSymlinkRefusal", err)
 	}
 
 	if _, err := WritePlan(workspace, "session-1", "1. [pending] redirected\n"); err == nil {
 		t.Fatal("expected WritePlan to refuse a reparse-point plan storage root")
 	} else if !errors.Is(err, errPlanSymlinkRefusal) || !strings.Contains(err.Error(), "plan storage root") {
-		t.Fatalf("expected WritePlan to propagate errPlanBaseSymlink, got: %v", err)
+		t.Fatalf("expected WritePlan to propagate errPlanSymlinkRefusal, got: %v", err)
 	}
 
 	if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {

@@ -110,6 +110,7 @@ func writePlanUnderBase(base, rel, displayPath, content string) error {
 	if err := renameatRetry(dirfd, tmpName, dirfd, final); err != nil {
 		return fmt.Errorf("replace plan file: %w", err)
 	}
+	_ = unix.Fsync(dirfd)
 	written = true
 	return nil
 }
