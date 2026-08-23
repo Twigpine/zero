@@ -76,6 +76,11 @@ type HandlerFunc func(ctx context.Context, params json.RawMessage) (any, error)
 // NotifyFunc handles an inbound notification (no response is sent).
 type NotifyFunc func(ctx context.Context, params json.RawMessage)
 
+const (
+	maxFrameBytes         = 64 * 1024 * 1024
+	maxConcurrentRequests = 128
+)
+
 // Conn is a JSON-RPC 2.0 peer over a single ndjson stream pair. It both serves
 // inbound requests/notifications (via registered handlers) and issues outbound
 // requests/notifications — needed because ACP is bidirectional (the agent calls
@@ -89,20 +94,14 @@ type Conn struct {
 
 	handlers  map[string]HandlerFunc
 	notifiers map[string]NotifyFunc
-	// Notifications for one method are an ordered stream: session/update in
-	// particular is stateful, so dispatching every frame in an unrelated
-	// goroutine can make a later chunk overtake an earlier one. Different
-	// methods retain independent tails, keeping session/cancel responsive while
-	// an update handler is busy.
-	notifyMu    sync.Mutex
-	notifyTails map[string]chan struct{}
 
 	mu      sync.Mutex
 	nextID  int64
 	pending map[int64]chan rpcMessage
 	closed  bool
 
-	wg sync.WaitGroup // tracks in-flight inbound handlers
+	sem chan struct{}
+	wg  sync.WaitGroup // tracks in-flight inbound handlers
 }
 
 // NewConn builds a peer reading ndjson from r and writing ndjson to w. This
@@ -113,12 +112,12 @@ type Conn struct {
 // lifetime.
 func NewConn(r io.Reader, w io.Writer) *Conn {
 	return &Conn{
-		rawReader:   r,
-		w:           w,
-		handlers:    make(map[string]HandlerFunc),
-		notifiers:   make(map[string]NotifyFunc),
-		notifyTails: make(map[string]chan struct{}),
-		pending:     make(map[int64]chan rpcMessage),
+		rawReader: r,
+		w:         w,
+		handlers:  make(map[string]HandlerFunc),
+		notifiers: make(map[string]NotifyFunc),
+		pending:   make(map[int64]chan rpcMessage),
+		sem:       make(chan struct{}, maxConcurrentRequests),
 	}
 }
 
@@ -305,13 +304,21 @@ func (c *Conn) handleLine(ctx context.Context, line []byte) {
 		c.deliver(msg)
 	case msg.isRequest():
 		c.wg.Add(1)
+		c.acquireSem(ctx)
 		go func(m rpcMessage) {
+			defer c.releaseSem()
 			defer c.wg.Done()
 			c.dispatchRequest(ctx, m)
 		}(msg)
 	case msg.isNotify():
 		if fn := c.notifiers[msg.Method]; fn != nil {
-			c.dispatchNotification(ctx, msg, fn)
+			c.wg.Add(1)
+			c.acquireSem(ctx)
+			go func(m rpcMessage) {
+				defer c.releaseSem()
+				defer c.wg.Done()
+				fn(ctx, m.Params)
+			}(msg)
 		}
 	default:
 		// Malformed frame; reply only if we can identify a request id.
@@ -321,33 +328,24 @@ func (c *Conn) handleLine(ctx context.Context, line []byte) {
 	}
 }
 
-// dispatchNotification preserves wire order within one method without making
-// unrelated notification methods wait for each other. The read loop installs
-// each tail before starting its goroutine, so goroutine scheduling cannot
-// reorder the chain it observes.
-func (c *Conn) dispatchNotification(ctx context.Context, msg rpcMessage, fn NotifyFunc) {
-	c.notifyMu.Lock()
-	previous := c.notifyTails[msg.Method]
-	done := make(chan struct{})
-	c.notifyTails[msg.Method] = done
-	c.notifyMu.Unlock()
+func (c *Conn) acquireSem(ctx context.Context) {
+	if c.sem == nil {
+		return
+	}
+	select {
+	case c.sem <- struct{}{}:
+	case <-ctx.Done():
+	}
+}
 
-	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
-		defer func() {
-			close(done)
-			c.notifyMu.Lock()
-			if c.notifyTails[msg.Method] == done {
-				delete(c.notifyTails, msg.Method)
-			}
-			c.notifyMu.Unlock()
-		}()
-		if previous != nil {
-			<-previous
-		}
-		fn(ctx, msg.Params)
-	}()
+func (c *Conn) releaseSem() {
+	if c.sem == nil {
+		return
+	}
+	select {
+	case <-c.sem:
+	default:
+	}
 }
 
 func (c *Conn) dispatchRequest(ctx context.Context, msg rpcMessage) {
