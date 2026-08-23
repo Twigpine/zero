@@ -33,7 +33,7 @@ func TestRedactStringRedactsAdjacentAWSKeys(t *testing.T) {
 func TestRedactStringCoversCommonSecretShapes(t *testing.T) {
 	input := strings.Join([]string{
 		`{"apiKey":"sk-proj-abcdefghijklmnopqrstuvwxyz"}`,
-		"authorization: Bearer ghp_abcdefghijklmnopqrstuvwxyz123456",
+		"authorization: Bearer ghp_abcdefghijklmnopqrstuvwxyz1234567890",
 		"https://zero:super-secret@example.test/path?token=glpat-abcdefghijklmnopqrstuvwxyz",
 		"-----BEGIN PRIVATE KEY-----\nabc123\n-----END PRIVATE KEY-----",
 	}, "\n")
@@ -42,7 +42,7 @@ func TestRedactStringCoversCommonSecretShapes(t *testing.T) {
 
 	for _, leaked := range []string{
 		"sk-proj-abcdefghijklmnopqrstuvwxyz",
-		"ghp_abcdefghijklmnopqrstuvwxyz123456",
+		"ghp_abcdefghijklmnopqrstuvwxyz1234567890",
 		"super-secret",
 		"glpat-abcdefghijklmnopqrstuvwxyz",
 		"abc123",
@@ -81,7 +81,7 @@ func TestRedactValueHandlesSensitiveKeysAndCycles(t *testing.T) {
 func TestRedactErrorRedactsMessageStackAndFields(t *testing.T) {
 	err := withFieldsError{
 		err:    errors.New("request failed with api_key=sk-test-secret1234567890"),
-		Token:  "ghp_abcdefghijklmnopqrstuvwxyz123456",
+		Token:  "ghp_abcdefghijklmnopqrstuvwxyz1234567890",
 		Detail: "safe",
 	}
 
@@ -189,7 +189,7 @@ func TestRedactStringLongAdjacentKeyRunCompletesPromptly(t *testing.T) {
 func BenchmarkRedactString(b *testing.B) {
 	sample := strings.Join([]string{
 		`{"apiKey":"sk-proj-abcdefghijklmnopqrstuvwxyz1234567890"}`,
-		"authorization: Bearer ghp_abcdefghijklmnopqrstuvwxyz123456",
+		"authorization: Bearer ghp_abcdefghijklmnopqrstuvwxyz1234567890",
 		"https://zero:super-secret@example.test/path?token=glpat-abcdefghijklmnopqrstuvwxyz",
 		"export AWS_SECRET_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE",
 		"normal line with no secrets just log messages and numbers 123456789",
@@ -212,5 +212,180 @@ func BenchmarkRedactStringClean(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		_ = RedactString(cleanText, opts)
+	}
+}
+
+func TestRedactStringConditionalGates(t *testing.T) {
+	const ghp = "ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+	const gho = "gho_abcdefghijklmnopqrstuvwxyz1234567890"
+	const pat = "github_pat_abcdefghijklmnopqrstuv"
+	const ant = "sk-ant-api03-abcdefghijklmnopqrst"
+	const glpat = "glpat-abcdefghijkl"
+	const aiza = "AIza" + "01234567890123456789012345678901234"
+	const slack = "xoxb-1234567890-abcdefghij"
+	const akia = "AKIAIOSFODNN7EXAMPLE"
+	const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturexx"
+
+	tests := []struct {
+		name    string
+		in      string
+		leaked  []string
+		keep    []string
+		wantHit bool
+	}{
+		{
+			name:    "private key match",
+			in:      "-----BEGIN RSA PRIVATE KEY-----\nabc123\n-----END RSA PRIVATE KEY-----",
+			leaked:  []string{"abc123"},
+			wantHit: true,
+		},
+		{
+			name:    "private key near-miss",
+			in:      "-----BEGIN PUBLIC KEY-----\nabc123\n-----END PUBLIC KEY-----",
+			keep:    []string{"abc123"},
+			wantHit: false,
+		},
+		{
+			name:    "json sensitive key",
+			in:      `{"apiKey":"hunter2secret"}`,
+			leaked:  []string{"hunter2secret"},
+			wantHit: true,
+		},
+		{
+			name:    "json non-sensitive key",
+			in:      `{"name":"hunter2secret"}`,
+			keep:    []string{"hunter2secret"},
+			wantHit: false,
+		},
+		{
+			name:    "assign sensitive",
+			in:      "AWS_SECRET_ACCESS_KEY=supersecretvalue",
+			leaked:  []string{"supersecretvalue"},
+			wantHit: true,
+		},
+		{
+			name:    "assign non-sensitive",
+			in:      "PATH=/usr/bin",
+			keep:    []string{"/usr/bin"},
+			wantHit: false,
+		},
+		{
+			name:    "authorization header case-insensitive",
+			in:      "AUTHORIZATION: Bearer " + ghp,
+			leaked:  []string{ghp},
+			wantHit: true,
+		},
+		{
+			name:    "authorization near-miss not a header name",
+			in:      "X-Request-Id: Bearer not-a-token-value",
+			keep:    []string{"not-a-token-value"},
+			wantHit: false,
+		},
+		{
+			name:    "query token",
+			in:      "https://example.test/x?token=" + glpat,
+			leaked:  []string{glpat},
+			wantHit: true,
+		},
+		{
+			name:    "query near-miss",
+			in:      "https://example.test/x?page=42",
+			keep:    []string{"page=42"},
+			wantHit: false,
+		},
+		{
+			name:    "openai sk-proj",
+			in:      "key=" + "sk-proj-abcdefghijklmnopqrstuvwxyz1234",
+			leaked:  []string{"sk-proj-abcdefghijklmnopqrstuvwxyz1234"},
+			wantHit: true,
+		},
+		{
+			name:    "sk-ant",
+			in:      ant,
+			leaked:  []string{ant},
+			wantHit: true,
+		},
+		{
+			name:    "github_pat",
+			in:      pat,
+			leaked:  []string{pat},
+			wantHit: true,
+		},
+		{
+			name:    "ghp classic",
+			in:      ghp,
+			leaked:  []string{ghp},
+			wantHit: true,
+		},
+		{
+			name:    "gho oauth",
+			in:      gho,
+			leaked:  []string{gho},
+			wantHit: true,
+		},
+		{
+			name:    "ghp too short unchanged",
+			in:      "ghp_shorttoken",
+			keep:    []string{"ghp_shorttoken"},
+			wantHit: false,
+		},
+		{
+			name:    "unsupported prefix ghx",
+			in:      "ghx_abcdefghijklmnopqrstuvwxyz1234567890",
+			keep:    []string{"ghx_abcdefghijklmnopqrstuvwxyz1234567890"},
+			wantHit: false,
+		},
+		{
+			name:    "glpat",
+			in:      glpat,
+			leaked:  []string{glpat},
+			wantHit: true,
+		},
+		{
+			name:    "google aiza",
+			in:      aiza,
+			leaked:  []string{aiza},
+			wantHit: true,
+		},
+		{
+			name:    "slack xoxb",
+			in:      slack,
+			leaked:  []string{slack},
+			wantHit: true,
+		},
+		{
+			name:    "aws akia",
+			in:      akia,
+			leaked:  []string{akia},
+			wantHit: true,
+		},
+		{
+			name:    "jwt",
+			in:      jwt,
+			leaked:  []string{jwt},
+			wantHit: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RedactString(tc.in, Options{})
+			for _, leak := range tc.leaked {
+				if strings.Contains(got, leak) {
+					t.Fatalf("leaked %q in %q", leak, got)
+				}
+			}
+			for _, keep := range tc.keep {
+				if !strings.Contains(got, keep) {
+					t.Fatalf("near-miss changed: want %q still in %q", keep, got)
+				}
+			}
+			if tc.wantHit && !strings.Contains(got, RedactedSecret) {
+				t.Fatalf("expected %q, got %q", RedactedSecret, got)
+			}
+			if !tc.wantHit && strings.Contains(got, RedactedSecret) {
+				t.Fatalf("unexpected redaction: %q", got)
+			}
+		})
 	}
 }
