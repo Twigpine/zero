@@ -823,3 +823,31 @@ func TestAZeroValueLedgerRecordsWithoutPanicking(t *testing.T) {
 		t.Errorf("a zero-value ledger reported a conflict against its own record: %+v", conflicts)
 	}
 }
+
+// THE AGREEING CLAIM ABOVE NEVER REACHES THE MAP THAT PANICS. `raised` is
+// written only when a contradiction is actually found — it is the dedupe that
+// stops the same wrong number being reported twice — so a test that asks a
+// truthful claim returns early and proves nothing about it. The first fix for
+// the zero-value Ledger initialised the two maps Record touches and left
+// `raised` nil, and this test passed anyway. Reported by @jatmn.
+//
+// Both conflict entry points are covered: they write different key shapes into
+// the same map, so one of them holding says nothing about the other.
+func TestAZeroValueLedgerSurvivesAContradiction(t *testing.T) {
+	var single Ledger
+	single.Record(Run{}, "--- PASS: TestSomething (1.25s)\n")
+	conflicts := single.Conflicts(Run{}, "TestSomething took 99s")
+	if len(conflicts) != 1 || conflicts[0].Claimed != 99 {
+		t.Errorf("a zero-value ledger did not report the contradiction: %+v", conflicts)
+	}
+	// And the dedupe it just wrote actually works, which is what that map is for.
+	if again := single.Conflicts(Run{}, "TestSomething took 99s"); len(again) != 0 {
+		t.Errorf("the same wrong number was reported twice: %+v", again)
+	}
+
+	var across Ledger
+	across.Record(Run{}, "--- PASS: TestSomething (1.25s)\n")
+	if conflicts := across.ConflictsAcrossRuns("TestSomething took 99s"); len(conflicts) != 1 {
+		t.Errorf("a zero-value ledger did not report the contradiction across runs: %+v", conflicts)
+	}
+}

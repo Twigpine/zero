@@ -208,6 +208,33 @@ func NewLedger() *Ledger {
 	}
 }
 
+// ensureMaps makes a zero-value Ledger behave like a constructed one.
+//
+// ONE PLACE, NOT THREE. The nil receiver is handled separately, but a Ledger
+// that was DECLARED rather than built by NewLedger reached the map writes with
+// nil maps and panicked. The first attempt at this fixed the two maps Record
+// touches and missed `raised`, which only Conflicts and ConflictsAcrossRuns
+// write — and they write it exclusively on the contradiction path, so a test
+// asking an agreeing claim never reached it. Reported by @jatmn.
+//
+// Every caller that can write a map calls this, and the field list lives beside
+// NewLedger's, so a fourth map added later is a compile-time-visible omission in
+// one spot rather than a panic in whichever entry point forgot it.
+//
+// Callers hold l.mu; this only fills nil fields, so a constructed Ledger pays
+// three nil checks and nothing else.
+func (l *Ledger) ensureMaps() {
+	if l.observed == nil {
+		l.observed = map[string]map[string][]float64{}
+	}
+	if l.runs == nil {
+		l.runs = map[string]Run{}
+	}
+	if l.raised == nil {
+		l.raised = map[raisedKey]bool{}
+	}
+}
+
 // Record reads any timings out of a command's output and remembers them against
 // the run that produced it. Returns how many it took, which is what a test
 // asserts on.
@@ -226,18 +253,7 @@ func (l *Ledger) Record(run Run, text string) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	key := run.key()
-	// A LEDGER THAT WAS NEVER CONSTRUCTED STILL HAS TO BEHAVE. The nil receiver
-	// above is already handled, but a zero-value Ledger got past it and panicked
-	// with "assignment to entry in nil map" on the first Record — a value that is
-	// trivially easy to reach by declaring one rather than calling NewLedger.
-	// Allocating here costs nothing on the NewLedger path, where both maps are
-	// already non-nil.
-	if l.observed == nil {
-		l.observed = map[string]map[string][]float64{}
-	}
-	if l.runs == nil {
-		l.runs = map[string]Run{}
-	}
+	l.ensureMaps()
 	byName := l.observed[key]
 	if byName == nil {
 		byName = map[string][]float64{}
@@ -278,6 +294,7 @@ func (l *Ledger) Conflicts(run Run, claim string) []Conflict {
 		return nil
 	}
 	l.mu.Lock()
+	l.ensureMaps()
 	defer l.mu.Unlock()
 
 	// ONLY THIS RUN'S VALUES. A claim about `go test ./...` is not answered by a
@@ -695,6 +712,7 @@ func (l *Ledger) ConflictsAcrossRuns(claim string) []Conflict {
 		return nil
 	}
 	l.mu.Lock()
+	l.ensureMaps()
 	defer l.mu.Unlock()
 
 	// Names are gathered across runs first, so a name recorded by two commands
