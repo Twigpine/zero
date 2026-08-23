@@ -248,55 +248,91 @@ func RedactString(value string, options Options) string {
 		}
 	}
 
-	redacted = privateKeyPattern.ReplaceAllString(redacted, replacement)
-	redacted = jsonStringPattern.ReplaceAllStringFunc(redacted, func(match string) string {
-		parts := jsonStringPattern.FindStringSubmatch(match)
-		if len(parts) < 3 || !IsSensitiveKey(parts[2], options) {
-			return match
+	if strings.Contains(redacted, "-----BEGIN ") && strings.Contains(redacted, "PRIVATE KEY") {
+		redacted = privateKeyPattern.ReplaceAllString(redacted, replacement)
+	}
+	if strings.Contains(redacted, ":") && strings.Contains(redacted, "\"") {
+		redacted = jsonStringPattern.ReplaceAllStringFunc(redacted, func(match string) string {
+			parts := jsonStringPattern.FindStringSubmatch(match)
+			if len(parts) < 3 || !IsSensitiveKey(parts[2], options) {
+				return match
+			}
+			return parts[1] + `"` + replacement + `"`
+		})
+	}
+	if strings.Contains(redacted, "=") {
+		redacted = assignPattern.ReplaceAllStringFunc(redacted, func(match string) string {
+			parts := assignPattern.FindStringSubmatch(match)
+			if len(parts) < 6 || !IsSensitiveKey(parts[1], options) {
+				return match
+			}
+			if parts[3] != "" {
+				return parts[1] + parts[2] + `"` + replacement + `"`
+			}
+			if parts[4] != "" {
+				return parts[1] + parts[2] + `'` + replacement + `'`
+			}
+			return parts[1] + parts[2] + replacement
+		})
+	}
+	if strings.Contains(redacted, ":") {
+		if strings.Contains(strings.ToLower(redacted), "authorization") {
+			redacted = headerPattern.ReplaceAllStringFunc(redacted, func(match string) string {
+				groups := headerPattern.FindStringSubmatch(match)
+				if groups[2] != "" {
+					return groups[1] + ": " + groups[2] + " " + replacement
+				}
+				return groups[1] + ": " + replacement
+			})
 		}
-		return parts[1] + `"` + replacement + `"`
-	})
-	redacted = assignPattern.ReplaceAllStringFunc(redacted, func(match string) string {
-		parts := assignPattern.FindStringSubmatch(match)
-		if len(parts) < 6 || !IsSensitiveKey(parts[1], options) {
-			return match
-		}
-		if parts[3] != "" {
-			return parts[1] + parts[2] + `"` + replacement + `"`
-		}
-		if parts[4] != "" {
-			return parts[1] + parts[2] + `'` + replacement + `'`
-		}
-		return parts[1] + parts[2] + replacement
-	})
-	redacted = headerPattern.ReplaceAllStringFunc(redacted, func(match string) string {
-		groups := headerPattern.FindStringSubmatch(match)
-		// groups[2] is the known scheme (kept for readability) or "" for an opaque /
-		// custom-scheme credential — in which case the whole value is redacted (M12).
-		if groups[2] != "" {
-			return groups[1] + ": " + groups[2] + " " + replacement
-		}
-		return groups[1] + ": " + replacement
-	})
-	redacted = secretHeader.ReplaceAllString(redacted, "$1: "+replacement)
-	redacted = redactURLPasswords(redacted, replacement)
-	redacted = queryPattern.ReplaceAllStringFunc(redacted, func(match string) string {
-		parts := queryPattern.FindStringSubmatch(match)
-		if len(parts) < 4 || !IsSensitiveKey(parts[2], options) {
-			return match
-		}
-		return parts[1] + parts[2] + "=" + replacement
-	})
+		redacted = secretHeader.ReplaceAllString(redacted, "$1: "+replacement)
+	}
+	if strings.Contains(redacted, "://") && strings.Contains(redacted, "@") {
+		redacted = redactURLPasswords(redacted, replacement)
+	}
+	if strings.Contains(redacted, "?") || strings.Contains(redacted, "&") {
+		redacted = queryPattern.ReplaceAllStringFunc(redacted, func(match string) string {
+			parts := queryPattern.FindStringSubmatch(match)
+			if len(parts) < 4 || !IsSensitiveKey(parts[2], options) {
+				return match
+			}
+			return parts[1] + parts[2] + "=" + replacement
+		})
+	}
 	// openai keys first so the filter can drop kebab-case false positives
 	// before any other pattern rewrites nearby text.
-	redacted = openaiKeyPattern.ReplaceAllStringFunc(redacted, func(match string) string {
-		if !openAIShapeIsSecret(match) {
-			return match
-		}
-		return replacement
-	})
-	for i, pattern := range textSecretPatterns {
-		redacted = redactAdjacent(redacted, pattern, anchoredSecretPatterns[i], replacement)
+	if strings.Contains(redacted, "sk-") {
+		redacted = openaiKeyPattern.ReplaceAllStringFunc(redacted, func(match string) string {
+			if !openAIShapeIsSecret(match) {
+				return match
+			}
+			return replacement
+		})
+	}
+	if strings.Contains(redacted, "sk-ant-") {
+		redacted = redactAdjacent(redacted, textSecretPatterns[0], anchoredSecretPatterns[0], replacement)
+	}
+	if strings.Contains(redacted, "github_pat_") {
+		redacted = redactAdjacent(redacted, textSecretPatterns[1], anchoredSecretPatterns[1], replacement)
+	}
+	if strings.Contains(redacted, "ghp_") || strings.Contains(redacted, "gho_") || strings.Contains(redacted, "ghu_") || strings.Contains(redacted, "ghs_") || strings.Contains(redacted, "ghr_") {
+		redacted = redactAdjacent(redacted, textSecretPatterns[2], anchoredSecretPatterns[2], replacement)
+	}
+	if strings.Contains(redacted, "glpat-") {
+		redacted = redactAdjacent(redacted, textSecretPatterns[3], anchoredSecretPatterns[3], replacement)
+	}
+	if strings.Contains(redacted, "AIza") {
+		redacted = redactAdjacent(redacted, textSecretPatterns[4], anchoredSecretPatterns[4], replacement)
+	}
+	if strings.Contains(redacted, "xox") {
+		redacted = redactAdjacent(redacted, textSecretPatterns[5], anchoredSecretPatterns[5], replacement)
+	}
+	if strings.Contains(redacted, "AKIA") || strings.Contains(redacted, "ASIA") {
+		redacted = redactAdjacent(redacted, textSecretPatterns[6], anchoredSecretPatterns[6], replacement)
+	}
+	if strings.Contains(redacted, "eyJ") {
+		redacted = redactAdjacent(redacted, textSecretPatterns[7], anchoredSecretPatterns[7], replacement)
+		redacted = redactAdjacent(redacted, textSecretPatterns[8], anchoredSecretPatterns[8], replacement)
 	}
 	// Credentials broken up by invisible characters last, over what the
 	// contiguous matchers left: a whole credential is already claimed by its own

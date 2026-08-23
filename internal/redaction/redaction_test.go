@@ -185,3 +185,32 @@ func TestRedactStringLongAdjacentKeyRunCompletesPromptly(t *testing.T) {
 		t.Fatalf("expected %d redaction markers, got %d", count, strings.Count(got, RedactedSecret))
 	}
 }
+
+func BenchmarkRedactString(b *testing.B) {
+	sample := strings.Join([]string{
+		`{"apiKey":"sk-proj-abcdefghijklmnopqrstuvwxyz1234567890"}`,
+		"authorization: Bearer ghp_abcdefghijklmnopqrstuvwxyz123456",
+		"https://zero:super-secret@example.test/path?token=glpat-abcdefghijklmnopqrstuvwxyz",
+		"export AWS_SECRET_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE",
+		"normal line with no secrets just log messages and numbers 123456789",
+		"another normal line about git commit status and file diff output",
+	}, "\n")
+	opts := Options{ExtraSecretValues: []string{"super-secret"}}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = RedactString(sample, opts)
+	}
+}
+
+func BenchmarkRedactStringClean(b *testing.B) {
+	cleanText := "normal line with no secrets just log messages and numbers 123456789\nanother line without secrets"
+	opts := Options{}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = RedactString(cleanText, opts)
+	}
+}
