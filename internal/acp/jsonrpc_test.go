@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -564,4 +566,101 @@ func asRPCError(err error, target **rpcError) bool {
 		*target = re
 	}
 	return ok
+}
+
+// TestCancelNotificationDeliveredDuringHandlerSaturation proves that when all 128
+// request handler slots are occupied by blocking work, an inbound notification
+// (such as session/cancel) is still delivered and executed immediately rather than
+// being dropped, blocked, or starved behind saturated request workers.
+func TestCancelNotificationDeliveredDuringHandlerSaturation(t *testing.T) {
+	clientR, serverW := io.Pipe()
+	serverR, clientW := io.Pipe()
+
+	server := NewConn(serverR, serverW)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer func() {
+		cancel()
+		_ = clientR.Close()
+		_ = serverW.Close()
+		_ = clientW.Close()
+	}()
+
+	releaseHandlers := make(chan struct{})
+	handlerStarted := make(chan struct{}, maxConcurrentRequests)
+
+	server.Handle("block", func(ctx context.Context, _ json.RawMessage) (any, error) {
+		handlerStarted <- struct{}{}
+		select {
+		case <-releaseHandlers:
+			return "ok", nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	})
+
+	cancelDelivered := make(chan struct{}, 1)
+	server.HandleNotify("session/cancel", func(_ context.Context, _ json.RawMessage) {
+		cancelDelivered <- struct{}{}
+		close(releaseHandlers)
+	})
+
+	go func() { _ = server.Serve(ctx) }()
+
+	// 1. Fill all 128 request slots
+	for i := 1; i <= maxConcurrentRequests; i++ {
+		req := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"block"}`+"\n", i)
+		_, _ = clientW.Write([]byte(req))
+	}
+
+	for i := 0; i < maxConcurrentRequests; i++ {
+		select {
+		case <-handlerStarted:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for handler %d to start", i)
+		}
+	}
+
+	// 2. Send notification while all request slots are occupied
+	notify := `{"jsonrpc":"2.0","method":"session/cancel","params":{}}` + "\n"
+	_, _ = clientW.Write([]byte(notify))
+
+	// 3. Verify notification is delivered without delay
+	select {
+	case <-cancelDelivered:
+		// Success: notification bypassed request throttling and freed the handlers
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancel notification was dropped or blocked by saturated request handlers")
+	}
+}
+
+// TestReadNDJSONFrameRejectsOversizedTerminatedFrame proves that frames exceeding
+// the configured frame limit are rejected with an error rather than buffered unboundedly.
+func TestReadNDJSONFrameRejectsOversizedTerminatedFrame(t *testing.T) {
+	serverR, clientW := io.Pipe()
+
+	server := NewConn(serverR, io.Discard)
+	server.frameLimit = 64 // 64 bytes frame limit for test injection
+	server.Handle("ping", func(_ context.Context, _ json.RawMessage) (any, error) { return "pong", nil })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer func() {
+		cancel()
+		_ = clientW.Close()
+	}()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- server.Serve(ctx) }()
+
+	// Send an oversized frame > 64 bytes terminated by \n
+	oversized := `{"jsonrpc":"2.0","id":1,"method":"ping","params":{"long_padding":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}` + "\n"
+	_, _ = clientW.Write([]byte(oversized))
+
+	select {
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), "exceeds limit") {
+			t.Fatalf("expected frame limit error, got: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for Serve to reject oversized frame")
+	}
 }

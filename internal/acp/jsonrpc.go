@@ -77,6 +77,8 @@ type HandlerFunc func(ctx context.Context, params json.RawMessage) (any, error)
 type NotifyFunc func(ctx context.Context, params json.RawMessage)
 
 const (
+	// maxFrameBytes limits the maximum size of a single ndjson line including
+	// the trailing newline delimiter (effective maximum payload is limit - 1).
 	maxFrameBytes         = 64 * 1024 * 1024
 	maxConcurrentRequests = 128
 )
@@ -99,6 +101,10 @@ type Conn struct {
 	nextID  int64
 	pending map[int64]chan rpcMessage
 	closed  bool
+
+	// frameLimit bounds inbound ndjson line size. If zero, maxFrameBytes is used.
+	// This field has no public setter and is set solely by tests.
+	frameLimit int64
 
 	sem chan struct{}
 	wg  sync.WaitGroup // tracks in-flight inbound handlers
@@ -162,7 +168,7 @@ func (c *Conn) Serve(ctx context.Context) error {
 		// decoder) keeps a single malformed line from making the whole connection
 		// unrecoverable — we report -32700 and continue.
 		//
-		// generation brackets this SPECIFIC ReadBytes call: bufio may invoke
+		// generation brackets this SPECIFIC readNDJSONFrame call: bufio may invoke
 		// interruptible.Read zero or more times underneath it (zero when the
 		// answer is already sitting in bufio's own buffer — including a
 		// previously-buffered, not-yet-surfaced error: bufio can return a
@@ -174,8 +180,12 @@ func (c *Conn) Serve(ctx context.Context) error {
 		// didn't pass through that branch — whether because it was answered from
 		// the buffer or because it raced ctx.Done() and won. Only that proof
 		// makes it safe to call the outcome genuine.
+		limit := int64(maxFrameBytes)
+		if c.frameLimit > 0 {
+			limit = c.frameLimit
+		}
 		before := interruptible.generation()
-		line, err := reader.ReadBytes('\n')
+		line, err := readNDJSONFrame(reader, limit)
 		interrupted := interruptible.generation() != before
 
 		if len(bytes.TrimSpace(line)) > 0 {
@@ -188,6 +198,28 @@ func (c *Conn) Serve(ctx context.Context) error {
 			}
 			return err
 		}
+	}
+}
+
+// readNDJSONFrame reads a single newline-terminated NDJSON frame from r,
+// bounded by limit bytes. The buffer includes the trailing newline delimiter,
+// so the maximum payload is limit - 1. If the frame exceeds limit before
+// encountering '\n', it returns the accumulated partial line alongside an error.
+func readNDJSONFrame(r *bufio.Reader, limit int64) ([]byte, error) {
+	var buf []byte
+	for {
+		chunk, err := r.ReadSlice('\n')
+		buf = append(buf, chunk...)
+		if limit > 0 && int64(len(buf)) > limit {
+			return buf, fmt.Errorf("acp: frame exceeds limit of %d bytes", limit)
+		}
+		if err == nil {
+			return buf, nil
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		return buf, err
 	}
 }
 
@@ -304,18 +336,18 @@ func (c *Conn) handleLine(ctx context.Context, line []byte) {
 		c.deliver(msg)
 	case msg.isRequest():
 		c.wg.Add(1)
-		c.acquireSem(ctx)
 		go func(m rpcMessage) {
-			defer c.releaseSem()
 			defer c.wg.Done()
+			if !c.acquireSem(ctx) {
+				return
+			}
+			defer c.releaseSem()
 			c.dispatchRequest(ctx, m)
 		}(msg)
 	case msg.isNotify():
 		if fn := c.notifiers[msg.Method]; fn != nil {
 			c.wg.Add(1)
-			c.acquireSem(ctx)
 			go func(m rpcMessage) {
-				defer c.releaseSem()
 				defer c.wg.Done()
 				fn(ctx, m.Params)
 			}(msg)
@@ -328,13 +360,15 @@ func (c *Conn) handleLine(ctx context.Context, line []byte) {
 	}
 }
 
-func (c *Conn) acquireSem(ctx context.Context) {
+func (c *Conn) acquireSem(ctx context.Context) bool {
 	if c.sem == nil {
-		return
+		return true
 	}
 	select {
 	case c.sem <- struct{}{}:
+		return true
 	case <-ctx.Done():
+		return false
 	}
 }
 
