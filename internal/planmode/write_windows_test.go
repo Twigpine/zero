@@ -54,6 +54,12 @@ func TestWritePlanRefusesStorageRootReparsePoint(t *testing.T) {
 		t.Fatalf("expected WritePlan to propagate errPlanSymlinkRefusal, got: %v", err)
 	}
 
+	if content, ok, err := ReadPlan(workspace, "session-1"); err == nil {
+		t.Fatalf("expected ReadPlan to refuse a reparse-point plan storage root, got ok=%t content=%q", ok, content)
+	} else if !errors.Is(err, errPlanSymlinkRefusal) {
+		t.Fatalf("expected ReadPlan to propagate errPlanSymlinkRefusal, got: %v", err)
+	}
+
 	if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {
 		t.Fatalf("write escaped through the storage-root reparse point into %s: %v", elsewhere, entries)
 	}
