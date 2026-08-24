@@ -20,15 +20,19 @@
 package memory
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Gitlawb/zero/internal/pathjail"
 )
@@ -53,6 +57,21 @@ const fileExt = ".md"
 const gitignoreName = ".gitignore"
 
 const localIgnoreContent = "# Notes saved to the local scope stay on this machine.\n*\n"
+
+// gitDirName is the entry whose presence at a directory makes that directory a
+// repository. A FILE by this name counts as much as a directory: that is what a
+// linked worktree and a submodule carry, and both track their files exactly like
+// an ordinary checkout.
+const gitDirName = ".git"
+
+// gitIndexTimeout bounds the one subprocess this package runs. Reading an index
+// is local and takes milliseconds; the bound is here so a wedged or
+// filesystem-blocked git cannot hold a note write open forever.
+const gitIndexTimeout = 15 * time.Second
+
+// maxTrackedNamed is how many tracked entries a refusal spells out. A store with
+// hundreds of them is still one refusal, and the first few name the problem.
+const maxTrackedNamed = 5
 
 // tempExt is what an in-progress write carries. Deliberately not fileExt, so a
 // temp file a crash left behind is never listed as a note.
@@ -124,8 +143,10 @@ var (
 	// ErrNotPrivate is returned rather than writing a local note the repository
 	// would then track. The local scope's whole promise is that the note stays on
 	// this machine, and a promise that degrades quietly is worse than one that
-	// refuses.
-	ErrNotPrivate = errors.New("the local memory store is not ignored by git, so a note saved there would not stay on this machine")
+	// refuses. It covers both ways the promise can fail: an ignore rule that does
+	// not cover the store, and a store git already tracks — where no ignore rule
+	// applies at all.
+	ErrNotPrivate = errors.New("a note saved to the local memory store would not stay on this machine")
 	// ErrIsSymlink is pathjail's refusal, kept under this package's own name so
 	// callers testing for it keep working. It now covers a Windows junction as
 	// well as a symlink, which the old ModeSymlink-only check did not.
@@ -560,8 +581,9 @@ func Read(paths Paths, scope Scope, name string) (Note, error) {
 	return Note{Name: name, Description: description, Scope: scope, Body: text}, nil
 }
 
-// keepLocalScopePrivate installs, or verifies, the ignore that keeps local notes
-// out of the repository.
+// keepLocalScopePrivate establishes that a local note will not enter the
+// repository: git must be tracking nothing in the store, and the ignore that
+// keeps future notes out of it must be installed or already in force.
 //
 // "local" promises the note stays on this machine, and it did not: the store
 // lives at <workspace>/.zero/memory/local, inside the working tree, so a default
@@ -583,9 +605,25 @@ func Read(paths Paths, scope Scope, name string) (Note, error) {
 // the store fully tracked. The promise is the feature here — a note the user was
 // told stays on this machine, sitting in git status, is worse than a refused
 // write, because the refusal is visible and the leak is not.
-func keepLocalScopePrivate(handle *os.Root, scope Scope, relative string) error {
+func keepLocalScopePrivate(handle *os.Root, scope Scope, relative, dir string) error {
 	if scope != ScopeLocal {
 		return nil
+	}
+	// THE INDEX DECIDES, NOT THE IGNORE FILE, and the ignore file used to be the
+	// only thing consulted. Git applies no ignore rule to a path already in the
+	// index, so "*" proves privacy for an UNTRACKED path and for nothing else: a
+	// clone, an earlier `git add -f`, or a hand-authored repository restores both
+	// the ignore AND local/<note>.md as TRACKED files, and the rename below then
+	// replaced a tracked file with a body the user was told stays on this
+	// machine — sitting in git status, one `git commit -a` from being shared.
+	// Reported by @jatmn.
+	//
+	// It gates BOTH branches below, deliberately. Refusing only where an existing
+	// ignore is accepted leaves the same leak reachable by deleting the ignore
+	// from the worktree: O_EXCL would then create a fresh one, report a clean
+	// first write, and overwrite the tracked note anyway.
+	if err := refuseTrackedLocalStore(dir); err != nil {
+		return err
 	}
 	ignorePath := filepath.Join(relative, gitignoreName)
 	// O_EXCL still decides whether this is the first write, in one syscall — but
@@ -615,7 +653,7 @@ func keepLocalScopePrivate(handle *os.Root, scope Scope, relative string) error 
 		return fmt.Errorf("read %s: %w", ignorePath, err)
 	}
 	if !ignoresEverything(string(existing)) {
-		return fmt.Errorf("%w: %s", ErrNotPrivate, ignorePath)
+		return fmt.Errorf("%w: %s does not ignore the whole store", ErrNotPrivate, ignorePath)
 	}
 	return nil
 }
@@ -660,6 +698,167 @@ func ignoresEverything(content string) bool {
 		}
 	}
 	return covered
+}
+
+// refuseTrackedLocalStore refuses a local write whose store git already TRACKS.
+//
+// The two questions are asked by different means on purpose. Whether a
+// repository encloses the store is answered from the FILESYSTEM, because "this
+// is not a repository" and "git is not installed" both come back from a
+// subprocess as an error, and a check that cannot tell them apart has to choose
+// between failing open on the first and breaking every non-repository workspace
+// on the second. Looking for .git separates them without running anything. Only
+// once a repository is found does the INDEX get consulted, and only there does
+// an unanswerable question become a refusal.
+func refuseTrackedLocalStore(dir string) error {
+	// The physical path, because that is the one git will see: os/exec chdirs
+	// into it, and git discovers the repository from the resulting getcwd. A
+	// lexical walk up a symlinked workspace looks at ancestors the child process
+	// never has, and can find no repository where git finds one.
+	//
+	// THIS BRANCH AND THE ONE BELOW ARE DEFENCE IN DEPTH, not live paths, and
+	// that is worth writing down because a reviewer will otherwise read them as
+	// untested. Neither is reachable through Write: refuseReparseChain has
+	// already refused every link in the chain, and opening the rooted handle has
+	// already failed on an unreadable ancestor, so by the time control arrives
+	// here the path resolves and the walk can read. Verified by trying both — a
+	// self-referential store link is refused as a link, and a 000 ancestor fails
+	// at mkdir, neither reaching this function.
+	//
+	// They stay because the reachability is a property of the CALLERS, not of
+	// this function, and this function's contract is that an unanswerable
+	// privacy question is a refusal. A future caller that skips the earlier
+	// guards would otherwise inherit a silent fail-open.
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return fmt.Errorf("%w: cannot resolve %s to ask git about it: %v", ErrNotPrivate, dir, err)
+	}
+	repo, err := enclosingGitRepo(resolved)
+	if err != nil {
+		return fmt.Errorf("%w: cannot tell whether %s is inside a git repository: %v", ErrNotPrivate, dir, err)
+	}
+	if repo == "" {
+		// Nothing encloses the store, so nothing can be tracked and there is
+		// nothing to ask. This is also where a machine with no git at all lands,
+		// which is why the question above is not a subprocess.
+		return nil
+	}
+	tracked, err := trackedStoreEntries(resolved)
+	if err != nil {
+		return fmt.Errorf("%w: %s is inside the git repository at %s, and git could not say which files there are tracked: %v",
+			ErrNotPrivate, dir, repo, err)
+	}
+	offenders := make([]string, 0, len(tracked))
+	for _, entry := range tracked {
+		// The store's own ignore file is the one tracked entry that is not a leak:
+		// it carries no note, and a repository that checks it in hands every clone
+		// the rule before the first write. Anything else under this directory is a
+		// note the local scope promised would not be in the repository.
+		if entry == gitignoreName {
+			continue
+		}
+		offenders = append(offenders, entry)
+	}
+	if len(offenders) == 0 {
+		return nil
+	}
+	sort.Strings(offenders)
+	return fmt.Errorf("%w: the repository at %s tracks %s in %s, and git applies no ignore rule to a path already in the index; remove it with `git rm --cached` before saving a local note",
+		ErrNotPrivate, repo, namedEntries(offenders), dir)
+}
+
+// enclosingGitRepo returns the nearest ancestor of dir, dir itself included,
+// carrying a .git entry, or "" when none does.
+func enclosingGitRepo(dir string) (string, error) {
+	for current := filepath.Clean(dir); ; {
+		_, err := os.Lstat(filepath.Join(current, gitDirName))
+		switch {
+		case err == nil:
+			return current, nil
+		case !errors.Is(err, fs.ErrNotExist):
+			// Unreadable is not absent. Reporting "no repository above this" from a
+			// permission error is the same fail-open shape in a smaller place.
+			return "", err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", nil
+		}
+		current = parent
+	}
+}
+
+// trackedStoreEntries lists what git's index holds under dir, named relative to
+// it.
+//
+// The store directory goes in as the WORKING DIRECTORY and nothing goes in as an
+// argument: `git ls-files` run inside a subdirectory already lists that
+// subdirectory and names its paths relative to it, so there is no pathspec for a
+// note name to reach, and no path for this side to spell differently from the
+// way the kernel just resolved it. -z because a tracked path may hold anything a
+// filename can and git quotes such a name in its default output. Both the
+// subcommand and the flag predate any version this project could plausibly meet.
+func trackedStoreEntries(dir string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), gitIndexTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "ls-files", "-z")
+	cmd.Dir = dir
+	// Cancelling the context does not by itself return control here: WaitDelay is
+	// what stops a git holding its pipes open from outliving the deadline.
+	cmd.WaitDelay = gitIndexTimeout
+	cmd.Env = gitDiscoveryEnv(os.Environ())
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if detail := singleLine(stderr.String()); detail != "" {
+			return nil, fmt.Errorf("%w: %s", err, detail)
+		}
+		return nil, err
+	}
+	entries := make([]string, 0, 4)
+	for _, entry := range strings.Split(stdout.String(), "\x00") {
+		if entry != "" {
+			entries = append(entries, entry)
+		}
+	}
+	return entries, nil
+}
+
+// gitDiscoveryEnv drops the variables that would point git at an index other
+// than the one belonging to the checkout the store sits in.
+//
+// A hook, a rebase, or any `git` wrapper exports GIT_DIR and GIT_INDEX_FILE into
+// the environment its children inherit, and zero inherits them like anything
+// else. Left in place they answer this question about a different index — during
+// a rebase, one holding none of the worktree's paths — and the answer is
+// "nothing is tracked", which is precisely the fail-open being closed here. The
+// repository was located from the filesystem at the store, so the index is
+// looked up the same way.
+func gitDiscoveryEnv(environ []string) []string {
+	redirects := []string{"GIT_DIR=", "GIT_COMMON_DIR=", "GIT_WORK_TREE=", "GIT_INDEX_FILE="}
+	filtered := make([]string, 0, len(environ))
+	for _, entry := range environ {
+		redirected := false
+		for _, prefix := range redirects {
+			if strings.HasPrefix(entry, prefix) {
+				redirected = true
+				break
+			}
+		}
+		if !redirected {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
+}
+
+// namedEntries spells out at most maxTrackedNamed of them and counts the rest.
+func namedEntries(entries []string) string {
+	if len(entries) <= maxTrackedNamed {
+		return strings.Join(entries, ", ")
+	}
+	return fmt.Sprintf("%s and %d more", strings.Join(entries[:maxTrackedNamed], ", "), len(entries)-maxTrackedNamed)
 }
 
 // readBounded reads at most maxNoteBytes, refusing anything larger rather than
@@ -714,7 +913,7 @@ func Write(paths Paths, scope Scope, name, description, body string) (string, er
 	if err := handle.MkdirAll(relative, 0o700); err != nil {
 		return "", fmt.Errorf("create %s: %w", dir, err)
 	}
-	if err := keepLocalScopePrivate(handle, scope, relative); err != nil {
+	if err := keepLocalScopePrivate(handle, scope, relative, dir); err != nil {
 		return "", err
 	}
 	path := filepath.Join(dir, name+fileExt)

@@ -569,3 +569,331 @@ func TestAStoreBehindAReparsePointIsRefusedOnEveryPlatform(t *testing.T) {
 		t.Error("List presented a store behind a reparse point as an empty one")
 	}
 }
+
+// runStoreGit runs one git command in dir and fails the test if it does not
+// succeed. Identity comes from the environment rather than repository config so
+// nothing here depends on a git new enough for GIT_CONFIG_GLOBAL.
+func runStoreGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.invalid",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.invalid",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return string(out)
+}
+
+// seedStoreRepo makes root a repository with one commit, so HEAD exists and the
+// index is a real one rather than the empty index of a bare `git init`.
+func seedStoreRepo(t *testing.T, root string) {
+	t.Helper()
+	runStoreGit(t, root, "init")
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("readme\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runStoreGit(t, root, "add", "README.md")
+	runStoreGit(t, root, "commit", "-m", "seed")
+}
+
+// writeStoreFile creates one file under the local store, making the store
+// directory first.
+func writeStoreFile(t *testing.T, paths Paths, name, content string) string {
+	t.Helper()
+	if err := os.MkdirAll(paths.LocalDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(paths.LocalDir, name)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// AN IGNORED PATH IS NOT NECESSARILY A PRIVATE ONE.
+//
+// git applies no ignore rule to a path already in the INDEX, so "*" in
+// local/.gitignore proves privacy only for an untracked path. A clone, an
+// earlier `git add -f`, or a hand-authored repository restores both the ignore
+// and the note as tracked files; the gate read the ignore, agreed the store was
+// private, and the atomic rename replaced a TRACKED file with the body the user
+// was told stays on this machine. `git status` showed it as a modification ready
+// to commit. Reported by @jatmn.
+func TestALocalWriteIsRefusedWhenGitTracksTheNote(t *testing.T) {
+	root := t.TempDir()
+	paths := DefaultPaths(root)
+	const committedBody = "---\nname: private\n---\n\ncommitted body\n"
+	notePath := writeStoreFile(t, paths, "private.md", committedBody)
+	writeStoreFile(t, paths, gitignoreName, localIgnoreContent)
+
+	seedStoreRepo(t, root)
+	// -f, because the ignore this repository is committing covers both files —
+	// which is the whole point: the rule is in force AND the paths are tracked.
+	runStoreGit(t, root, "add", "-f", ".zero/memory/local/.gitignore", ".zero/memory/local/private.md")
+	runStoreGit(t, root, "commit", "-m", "track the local store")
+
+	if _, err := Write(paths, ScopeLocal, "private", "d", "machine-local secret"); !errors.Is(err, ErrNotPrivate) {
+		t.Fatalf("Write into a tracked local store = %v, want ErrNotPrivate", err)
+	} else if !strings.Contains(err.Error(), "private.md") {
+		t.Errorf("refusal %q does not name the tracked note", err)
+	}
+
+	// The exact committed bytes, not merely "unchanged length": the failure being
+	// pinned is a body swap of the same shape.
+	body, readErr := os.ReadFile(notePath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(body) != committedBody {
+		t.Errorf("tracked note body = %q, want the committed %q", body, committedBody)
+	}
+	if status := runStoreGit(t, root, "status", "--porcelain"); status != "" {
+		t.Errorf("git status = %q, want empty — the refused write left an index-visible change", status)
+	}
+}
+
+// THE SAME REFUSAL ON THE FIRST-WRITE BRANCH.
+//
+// O_EXCL is what decides whether the gate is installing the ignore or checking
+// one, and only the checking branch used to look at anything. A repository that
+// tracks the note without the ignore therefore walked straight through: the gate
+// created a fresh ignore, reported a clean first write, and overwrote the tracked
+// note anyway. Deleting one file from the worktree is all that separates this
+// from the case above, so gating one branch and not the other fixes nothing.
+func TestALocalWriteIsRefusedWhenTrackedWithNoIgnorePresent(t *testing.T) {
+	root := t.TempDir()
+	paths := DefaultPaths(root)
+	const committedBody = "---\nname: private\n---\n\ncommitted body\n"
+	notePath := writeStoreFile(t, paths, "private.md", committedBody)
+
+	seedStoreRepo(t, root)
+	runStoreGit(t, root, "add", ".zero/memory/local/private.md")
+	runStoreGit(t, root, "commit", "-m", "track the local note")
+
+	if _, err := Write(paths, ScopeLocal, "private", "d", "machine-local secret"); !errors.Is(err, ErrNotPrivate) {
+		t.Fatalf("Write into a tracked store with no ignore = %v, want ErrNotPrivate", err)
+	}
+	body, readErr := os.ReadFile(notePath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(body) != committedBody {
+		t.Errorf("tracked note body = %q, want the committed %q", body, committedBody)
+	}
+	if status := runStoreGit(t, root, "status", "--porcelain"); status != "" {
+		t.Errorf("git status = %q, want empty", status)
+	}
+}
+
+// THE ORDINARY CASE KEEPS WORKING, which is the constraint the refusal above has
+// to live inside: a repository whose local store is untracked is the normal
+// state, and a note written there must still land and still be invisible to git.
+func TestALocalWriteInsideAnUntrackedStoreStillLands(t *testing.T) {
+	root := t.TempDir()
+	paths := DefaultPaths(root)
+	seedStoreRepo(t, root)
+
+	if _, err := Write(paths, ScopeLocal, "private", "d", "machine-local secret"); err != nil {
+		t.Fatalf("Write into an untracked store inside a repository = %v, want success", err)
+	}
+	note, err := Read(paths, ScopeLocal, "private")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if note.Body != "machine-local secret\n" {
+		t.Errorf("note body = %q, want %q", note.Body, "machine-local secret\n")
+	}
+	if status := runStoreGit(t, root, "status", "--porcelain"); status != "" {
+		t.Errorf("git status = %q, want empty — the note must not be visible to git", status)
+	}
+}
+
+// A CHECKED-IN IGNORE IS NOT A LEAK. Committing local/.gitignore hands every
+// clone the rule before its first write, and the file carries no note, so it is
+// the one tracked entry the store may hold. Refusing it would break a deliberate
+// and correct setup in the name of the fix above.
+func TestACheckedInIgnoreDoesNotBlockLocalWrites(t *testing.T) {
+	root := t.TempDir()
+	paths := DefaultPaths(root)
+	writeStoreFile(t, paths, gitignoreName, localIgnoreContent)
+
+	seedStoreRepo(t, root)
+	runStoreGit(t, root, "add", "-f", ".zero/memory/local/.gitignore")
+	runStoreGit(t, root, "commit", "-m", "check in the ignore")
+
+	if _, err := Write(paths, ScopeLocal, "private", "d", "machine-local secret"); err != nil {
+		t.Fatalf("Write with only the ignore tracked = %v, want success", err)
+	}
+	if status := runStoreGit(t, root, "status", "--porcelain"); status != "" {
+		t.Errorf("git status = %q, want empty", status)
+	}
+}
+
+// PROJECT SCOPE IS SUPPOSED TO BE TRACKED. It is checked in beside the repo and
+// reviewed like any other file, so the index check must not reach it: a second
+// write to a committed project note is an ordinary edit, not a broken promise.
+func TestAProjectNoteStaysWritableWhileTracked(t *testing.T) {
+	root := t.TempDir()
+	paths := DefaultPaths(root)
+	if _, err := Write(paths, ScopeProject, "shared", "d", "first"); err != nil {
+		t.Fatal(err)
+	}
+	seedStoreRepo(t, root)
+	runStoreGit(t, root, "add", ".zero/memory/shared.md")
+	runStoreGit(t, root, "commit", "-m", "track the project note")
+
+	if _, err := Write(paths, ScopeProject, "shared", "d", "second"); err != nil {
+		t.Fatalf("Write to a tracked project note = %v, want success", err)
+	}
+	note, err := Read(paths, ScopeProject, "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if note.Body != "second\n" {
+		t.Errorf("project note body = %q, want %q", note.Body, "second\n")
+	}
+}
+
+// UNANSWERABLE INSIDE A REPOSITORY IS A REFUSAL.
+//
+// The repository was found on disk, so the store IS somewhere git can track it;
+// without git there is no way to learn whether it already does. Treating that as
+// "nothing is tracked" is the fail-open being closed here, so it refuses instead
+// — and only here, because a store with no repository above it never reaches
+// this call.
+func TestALocalWriteIsRefusedWhenGitCannotBeAsked(t *testing.T) {
+	root := t.TempDir()
+	paths := DefaultPaths(root)
+	seedStoreRepo(t, root)
+
+	t.Setenv("PATH", "")
+	if _, err := Write(paths, ScopeLocal, "private", "d", "machine-local secret"); !errors.Is(err, ErrNotPrivate) {
+		t.Fatalf("Write with git unreachable inside a repository = %v, want ErrNotPrivate", err)
+	}
+}
+
+// NO REPOSITORY MEANS NOTHING TO ASK. The common workspace is not a checkout at
+// all, and there git may not even be installed — so repository membership is
+// decided from the filesystem and no subprocess runs. Removing git from PATH
+// must not change the answer.
+func TestALocalWriteOutsideAnyRepositoryNeedsNoGit(t *testing.T) {
+	root := t.TempDir()
+	paths := DefaultPaths(root)
+
+	t.Setenv("PATH", "")
+	if _, err := Write(paths, ScopeLocal, "private", "d", "machine-local secret"); err != nil {
+		t.Fatalf("Write outside a repository with no git on PATH = %v, want success", err)
+	}
+	note, err := Read(paths, ScopeLocal, "private")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if note.Body != "machine-local secret\n" {
+		t.Errorf("note body = %q, want %q", note.Body, "machine-local secret\n")
+	}
+}
+
+// AN INHERITED INDEX REDIRECT MUST NOT ANSWER FOR THE CHECKOUT.
+//
+// A hook, a rebase, or any git wrapper exports GIT_INDEX_FILE and GIT_DIR into
+// the environment its children inherit, and zero inherits them like anything
+// else. Left in place they point `git ls-files` at a different index — during a
+// rebase, one holding none of the worktree's paths — and it answers "nothing is
+// tracked" about a store that plainly is.
+func TestAnInheritedIndexRedirectCannotHideTracking(t *testing.T) {
+	root := t.TempDir()
+	paths := DefaultPaths(root)
+	writeStoreFile(t, paths, "private.md", "---\nname: private\n---\n\ncommitted body\n")
+
+	seedStoreRepo(t, root)
+	runStoreGit(t, root, "add", ".zero/memory/local/private.md")
+	runStoreGit(t, root, "commit", "-m", "track the local note")
+
+	// A path with no index at it reads as an empty index, which is exactly the
+	// shape that makes a tracked store look clean.
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(t.TempDir(), "elsewhere.index"))
+	if _, err := Write(paths, ScopeLocal, "private", "d", "machine-local secret"); !errors.Is(err, ErrNotPrivate) {
+		t.Fatalf("Write with GIT_INDEX_FILE redirected = %v, want ErrNotPrivate", err)
+	}
+}
+
+// THE REPOSITORY IS LOOKED FOR WHERE GIT WILL LOOK.
+//
+// os/exec chdirs into the store, so git discovers the repository from the
+// resulting getcwd — the physical path. Walking the lexical path up instead
+// visits ancestors the child process never has: with the workspace reached
+// through a link into a repository subdirectory, the lexical walk leaves the
+// repository immediately, finds no .git, and concludes nothing can be tracked
+// about a store git tracks.
+func TestTheRepositoryIsFoundThroughALinkedWorkspace(t *testing.T) {
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	inner := filepath.Join(repo, "inner")
+	if err := os.MkdirAll(inner, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Join(base, "workspace")
+	linkDir(t, inner, workspace)
+
+	paths := DefaultPaths(workspace)
+	writeStoreFile(t, paths, "private.md", "---\nname: private\n---\n\ncommitted body\n")
+	seedStoreRepo(t, repo)
+	runStoreGit(t, repo, "add", "inner/.zero/memory/local/private.md")
+	runStoreGit(t, repo, "commit", "-m", "track the local note")
+
+	if _, err := Write(paths, ScopeLocal, "private", "d", "machine-local secret"); !errors.Is(err, ErrNotPrivate) {
+		t.Fatalf("Write through a linked workspace = %v, want ErrNotPrivate", err)
+	}
+	if status := runStoreGit(t, repo, "status", "--porcelain"); status != "" {
+		t.Errorf("git status = %q, want empty", status)
+	}
+}
+
+// A LINKED WORKTREE CARRIES .git AS A FILE, NOT A DIRECTORY, and it tracks its
+// files exactly like an ordinary checkout. gitDirName's comment says so; nothing
+// tested it. A verifier changed the presence check to `err == nil && info.IsDir()`
+// and every other test in this file still passed, which means the whole
+// linked-worktree and submodule class was resting on a comment.
+//
+// A REAL FIXTURE RATHER THAN A MOCK: `git worktree add` produces the genuine
+// article — a .git FILE whose body is "gitdir: <path>" — so this exercises the
+// same code a user's linked worktree does, instead of a stand-in that agrees
+// with whatever the check happens to be.
+func TestALocalWriteIsRefusedInsideALinkedWorktree(t *testing.T) {
+	root := t.TempDir()
+	main := filepath.Join(root, "main")
+	if err := os.MkdirAll(main, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	seedStoreRepo(t, main)
+	linked := filepath.Join(root, "linked")
+	runStoreGit(t, main, "worktree", "add", linked)
+
+	marker, err := os.Lstat(filepath.Join(linked, gitDirName))
+	if err != nil {
+		t.Fatalf("the linked worktree has no %s: %v", gitDirName, err)
+	}
+	if marker.IsDir() {
+		t.Skipf("this git writes %s as a directory in a linked worktree; the case under test does not arise", gitDirName)
+	}
+
+	paths := DefaultPaths(linked)
+	writeStoreFile(t, paths, "private.md", "---\nname: private\n---\n\nmachine-local\n")
+	writeStoreFile(t, paths, ".gitignore", localIgnoreContent)
+	runStoreGit(t, linked, "add", "-f", filepath.Join(".zero", "memory", "local", "private.md"))
+	runStoreGit(t, linked, "commit", "-m", "track the local note")
+
+	_, err = Write(paths, ScopeLocal, "private", "d", "replaced")
+	if !errors.Is(err, ErrNotPrivate) {
+		t.Fatalf("a tracked local note inside a linked worktree was writable: %v", err)
+	}
+	if status := runStoreGit(t, linked, "status", "--porcelain"); strings.TrimSpace(status) != "" {
+		t.Errorf("the refused write still left an index-visible change:\n%s", status)
+	}
+}
