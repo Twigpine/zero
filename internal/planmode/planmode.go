@@ -167,7 +167,7 @@ func StageForEditor(workspaceRoot, sessionID string) (stagedPath string, cleanup
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", nil, fmt.Errorf("create plan editor staging directory: %w", err)
 	}
-	resolvedDir, err := filepath.EvalSymlinks(dir)
+	resolvedDir, err := resolvePhysical(dir)
 	if err != nil {
 		return "", nil, fmt.Errorf("resolve plan editor staging directory: %w", err)
 	}
@@ -285,12 +285,14 @@ func editorStagingDirIsPrivate(dir, workspaceRoot, tempDir string) bool {
 // verifyPrivateDirectory reports an error when path is not a plain directory
 // or is still group/world-writable after the caller tightened it. Symlinks
 // are rejected via Lstat so a TOCTOU swap of the directory for a link cannot
-// host a staged file that $EDITOR will follow. The permission-bit check is
-// skipped on Windows: NTFS reports a directory's POSIX mode via ACLs rather
-// than the bits os.Chmod sets, so it does not reflect what os.Chmod(0o700)
-// actually restricted (see the same rationale on the file-mode check in
-// TestWritePlanUsesRestrictivePermissions) — containment there relies on the
-// path checks in editorStagingDirIsPrivate instead.
+// host a staged file that $EDITOR will follow. Windows junctions are rejected
+// separately: os.Lstat maps one to os.ModeIrregular, not os.ModeSymlink, so
+// the check above cannot see it. The permission-bit check is skipped on
+// Windows: NTFS reports a directory's POSIX mode via ACLs rather than the bits
+// os.Chmod sets, so it does not reflect what os.Chmod(0o700) actually
+// restricted (see the same rationale on the file-mode check in
+// TestWritePlanUsesRestrictivePermissions) — containment there rests on
+// editorStagingDirIsPrivate and on the reparse-point rejection here.
 func verifyPrivateDirectory(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -298,6 +300,9 @@ func verifyPrivateDirectory(path string) error {
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("%s is a symlink; refusing to stage through it", path)
+	}
+	if pathIsReparsePoint(path) {
+		return fmt.Errorf("%s is a reparse point; refusing to stage through it", path)
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("%s is not a directory", path)
@@ -317,8 +322,13 @@ func verifyPrivateDirectory(path string) error {
 // same physical spelling as the (existing, resolved) roots: without this,
 // macOS's /var vs /private/var and Windows's 8.3 short names (RUNNER~1)
 // would make the containment comparison silently miss.
+//
+// Resolution goes through resolvePhysical rather than filepath.EvalSymlinks
+// directly because EvalSymlinks does not traverse a Windows junction, and a
+// junction is the one reparse point an unprivileged process can plant. See
+// resolvePhysical in physical_windows.go.
 func physicalPath(path string) string {
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+	if resolved, err := resolvePhysical(path); err == nil {
 		return resolved
 	}
 	cleaned := filepath.Clean(path)
