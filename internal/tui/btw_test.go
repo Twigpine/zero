@@ -13,6 +13,7 @@ import (
 	"github.com/Twigpine/zero/internal/agent"
 	"github.com/Twigpine/zero/internal/config"
 	"github.com/Twigpine/zero/internal/notify"
+	"github.com/Twigpine/zero/internal/peermsg"
 	"github.com/Twigpine/zero/internal/planmode"
 	"github.com/Twigpine/zero/internal/sessions"
 	"github.com/Twigpine/zero/internal/tools"
@@ -601,6 +602,49 @@ func TestBTWExitsPlanModeOnSideAndPreservesParent(t *testing.T) {
 	}
 	if len(planTool.CurrentPlan()) != 0 {
 		t.Fatalf("expected shared update_plan empty without a durable plan file, got %+v", planTool.CurrentPlan())
+	}
+}
+
+func TestBTWLeaveRestoresParentPeerIdentity(t *testing.T) {
+	isolatePlanConfig(t)
+	svc, err := peermsg.New(peermsg.Options{
+		RootDir: t.TempDir(),
+		Identity: peermsg.Identity{
+			Name:            "zero",
+			Cwd:             t.TempDir(),
+			PermissionClass: peermsg.PermissionBypass,
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := svc.Start(func(peermsg.InboundMessage) bool { return true }); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = svc.Close() })
+
+	m := newBTWTestModel(t)
+	m.cwd = t.TempDir()
+	m.permissionMode = agent.PermissionModeUnsafe
+	m.peerService = svc
+
+	updated, _ := m.handlePlanCommand("on")
+	parent := updated.(model)
+	if got := svc.Self().PermissionClass; got != peermsg.PermissionPrompting {
+		t.Fatalf("after /plan on PermissionClass = %q, want %q", got, peermsg.PermissionPrompting)
+	}
+
+	side, _ := parent.handleBTWCommand("")
+	if got := svc.Self().PermissionClass; got != peermsg.PermissionBypass {
+		t.Fatalf("inside /btw PermissionClass = %q, want %q", got, peermsg.PermissionBypass)
+	}
+
+	returned, _ := side.leaveBTW()
+	if returned.permissionMode != agent.PermissionModePlan {
+		t.Fatalf("returning from BTW lost parent plan mode: %s", returned.permissionMode)
+	}
+	if got := svc.Self().PermissionClass; got != peermsg.PermissionPrompting {
+		t.Fatalf("after returning from /btw PermissionClass = %q, want %q", got, peermsg.PermissionPrompting)
 	}
 }
 

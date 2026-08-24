@@ -229,6 +229,7 @@ func (m model) leaveBTW() (model, tea.Cmd) {
 		parent = parent.resetPlanForSessionSwitch()
 	}
 	parent.resetFlushFrontier("· returned from btw ·")
+	parent = parent.syncPeerIdentity()
 	var goalCmd tea.Cmd
 	parent, goalCmd = parent.launchGoalContinuationIfReady()
 	return parent, batchCommands(sweepCmd, spinnerCmd, goalCmd)

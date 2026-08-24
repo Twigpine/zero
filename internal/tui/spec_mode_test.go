@@ -69,6 +69,10 @@ func TestSpecApproveStartsImplementationSession(t *testing.T) {
 	if review == nil {
 		t.Fatal("expected pending review before approval")
 	}
+	next = startFixedLoop(next, "draft-session loop", time.Minute)
+	next.permissionMode = agent.PermissionModePlan
+	next.permissionModeBeforePlan = agent.PermissionModeAsk
+	next, _ = next.pauseLoopsForPlan()
 
 	updated, cmd = next.Update(testKeyText("a"))
 	next = updated.(model)
@@ -80,6 +84,9 @@ func TestSpecApproveStartsImplementationSession(t *testing.T) {
 	}
 	if next.activeSession.SessionKind != sessions.SessionKindSpecImpl {
 		t.Fatalf("expected active implementation session, got %#v", next.activeSession)
+	}
+	if len(next.loops) != 0 {
+		t.Fatalf("expected approval to clear loops from the draft session, got %+v", next.loops)
 	}
 
 	updated, _ = next.Update(execCmd(cmd))
@@ -293,12 +300,21 @@ func TestSpecCommandExitsPlanMode(t *testing.T) {
 	planTool := tools.NewUpdatePlanTool()
 	planTool.SetPlan([]tools.PlanItem{{Content: "prior draft", Status: "pending"}})
 	m.registry.Register(planTool)
-	m.permissionMode = agent.PermissionModePlan
-	m.permissionModeBeforePlan = agent.PermissionModeAuto
 	m.plan.updateFromItems(planTool.CurrentPlan(), m.now())
+	var err error
+	m, err = m.ensureActiveSession("")
+	if err != nil {
+		t.Fatalf("ensureActiveSession: %v", err)
+	}
+	m = startFixedLoop(m, "previous-session loop", time.Minute)
+	updated, _ := m.handlePlanCommand("on")
+	m = updated.(model)
+	if len(m.loops) != 1 || !m.loops[0].paused {
+		t.Fatalf("expected /plan on to pause the existing loop, got %+v", m.loops)
+	}
 	m.input.SetValue("/spec add review flow")
 
-	updated, _ := m.Update(testKey(tea.KeyEnter))
+	updated, _ = m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 	if next.permissionMode == agent.PermissionModePlan {
 		t.Fatalf("expected /spec to exit plan mode, got %s", next.permissionMode)
@@ -311,6 +327,9 @@ func TestSpecCommandExitsPlanMode(t *testing.T) {
 	}
 	if !next.plan.isEmpty() {
 		t.Fatalf("expected sticky plan panel cleared after successful /spec, got %+v", next.plan)
+	}
+	if len(next.loops) != 0 {
+		t.Fatalf("expected /spec to clear loops from the previous session, got %+v", next.loops)
 	}
 }
 
