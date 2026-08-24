@@ -90,35 +90,157 @@ var (
 	goTestPackageLine = regexp.MustCompile(`(?m)^(?:ok|FAIL)\s+(\S+)\s+([0-9]+(?:\.[0-9]+)?)s(?:\s|$)`)
 	// `--- PASS: TestFoo (0.30s)`, at any indentation, including subtests.
 	goTestCaseLine = regexp.MustCompile(`(?m)^\s*--- (?:PASS|FAIL|SKIP):\s+(\S+)\s+\(([0-9]+(?:\.[0-9]+)?)s\)`)
-	// A duration as an answer would write it, in seconds or milliseconds.
-	claimedDuration = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)\s*(ms|s)\b`)
-	// The compound Go duration form, tried FIRST: "1m10s" must not be read as its
-	// seconds remainder. Every part is optional, so "2m", "1h10m0s", "1h30s" and
-	// a bare "2h" all parse — a match is only accepted when an hour or minute
-	// part is present, which is what separates this from the plain-seconds form.
-	//
-	// HOURS COUNT for the same reason minutes did. Without them "1h10m0s" matched
-	// only its minute remainder and read as 600s, so a truthful restatement of a
-	// recorded 4200s was reported as a conflict — the fabricated accusation this
-	// package exists to avoid, one unit further up.
-	//
-	// THE WHOLE NUMBER, INCLUDING ITS FRACTION. An integer-only minute component
-	// could not match "1.5m" at its start, so the leftmost match began at the
-	// remainder instead and "1.5m" read as 5 minutes — and "0.5m", half a minute,
-	// read as five. compoundPart already parses with ParseFloat, so the fraction
-	// only had to be allowed into the capture for the match to start where the
-	// number does.
-	claimedMinuteDuration = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)m(?:([0-9]+(?:\.[0-9]+)?)s)?\b`)
-	// The hour form, kept as its OWN pattern rather than an optional prefix on the
-	// minute one: every part optional makes the whole expression matchable by the
-	// EMPTY string, which regexp then finds at offset 0 ahead of any real
-	// duration — "1h10m0s" read as 0s that way, which is worse than the bug being
-	// fixed. Minutes and seconds are optional here, so "2h", "1h30s" and
-	// "1h10m0s" all parse.
-	// Decimal components here for the same reason: "1.5h" read as 5 hours and
-	// "10.25h" as 25.
-	claimedHourDuration = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)h(?:([0-9]+(?:\.[0-9]+)?)m)?(?:([0-9]+(?:\.[0-9]+)?)s)?\b`)
 )
+
+// ── one authoritative duration token ────────────────────────────────────────
+//
+// THREE UNANCHORED SEARCHES WERE THE ROOT CAUSE. Each regex hunted for its own
+// suffix with no shared left boundary, so a failed outer match simply restarted
+// inside the same token: ".86s" was read as 86s, ".5m" as 300s, "1,200ms" as
+// 0.2s, and the valid Go compounds "1m10ms" and "1h1m500ms" fell through to their
+// millisecond tails as 0.01s and 0.5s. Every one of those turns an honest claim
+// into a fabricated correction, which is the single failure this package exists
+// to prevent. Reported by @jatmn.
+//
+// A token is now recognised WHOLE or not at all, and one scanner answers for both
+// callers — parseClaimedDuration and the clause scan — so the two can no longer
+// disagree about what counts as a duration.
+
+// durationUnits are ordered longest-first: "ms" has to be tried before "m", or
+// every millisecond figure reads as minutes.
+var durationUnits = []struct {
+	suffix  string
+	seconds float64
+}{
+	{"ms", 0.001},
+	{"h", 3600},
+	{"m", 60},
+	{"s", 1},
+}
+
+// tokenLeftBoundary reports whether a duration may BEGIN at index.
+//
+// A digit, letter, dot or comma before the figure means this is the middle of
+// something else — the fractional tail of ".86s", the grouped remainder of
+// "1,200ms", or an identifier. None of those is a duration this package can read,
+// and reading part of one is how a truthful sentence acquired a number it never
+// contained.
+func tokenLeftBoundary(text string, index int) bool {
+	if index == 0 {
+		return true
+	}
+	switch previous := text[index-1]; {
+	case previous >= '0' && previous <= '9':
+		return false
+	case previous >= 'a' && previous <= 'z', previous >= 'A' && previous <= 'Z':
+		return false
+	case previous == '.', previous == ',':
+		return false
+	default:
+		return true
+	}
+}
+
+// tokenRightBoundary reports whether a duration may END at index.
+func tokenRightBoundary(text string, index int) bool {
+	if index >= len(text) {
+		return true
+	}
+	switch next := text[index]; {
+	case next >= '0' && next <= '9':
+		return false
+	case next >= 'a' && next <= 'z', next >= 'A' && next <= 'Z':
+		return false
+	case next == '.':
+		// A sentence-ending dot is a boundary; a decimal point is not. Only a
+		// digit after it makes it part of a number.
+		return index+1 >= len(text) || text[index+1] < '0' || text[index+1] > '9'
+	default:
+		return true
+	}
+}
+
+// scanNumber reads a plain or decimal figure at index, returning its end offset.
+func scanNumber(text string, index int) int {
+	at := index
+	for at < len(text) && text[at] >= '0' && text[at] <= '9' {
+		at++
+	}
+	if at == index {
+		return index
+	}
+	if at < len(text) && text[at] == '.' {
+		fraction := at + 1
+		for fraction < len(text) && text[fraction] >= '0' && text[fraction] <= '9' {
+			fraction++
+		}
+		if fraction > at+1 {
+			at = fraction
+		}
+	}
+	return at
+}
+
+// durationTokenAt reads a complete duration token beginning at index.
+//
+// Every component must be a figure followed by a unit, and the whole run must sit
+// between token boundaries. A partial parse yields nothing rather than a
+// second-best reading: an unsupported form is not evidence, and guessing at one
+// is exactly how a fabricated number reaches the model.
+func durationTokenAt(text string, index int) (end int, seconds float64, unitCount int, ok bool) {
+	if !tokenLeftBoundary(text, index) {
+		return 0, 0, 0, false
+	}
+	at := index
+	for {
+		numberEnd := scanNumber(text, at)
+		if numberEnd == at {
+			break
+		}
+		matched := false
+		for _, unit := range durationUnits {
+			if !strings.HasPrefix(text[numberEnd:], unit.suffix) {
+				continue
+			}
+			value, err := strconv.ParseFloat(text[at:numberEnd], 64)
+			if err != nil {
+				return 0, 0, 0, false
+			}
+			seconds += value * unit.seconds
+			at = numberEnd + len(unit.suffix)
+			unitCount++
+			matched = true
+			break
+		}
+		if !matched {
+			// A figure with no unit, or an unsupported one. The token is not a
+			// duration, and no prefix of it is either.
+			return 0, 0, 0, false
+		}
+	}
+	if unitCount == 0 || !tokenRightBoundary(text, at) {
+		return 0, 0, 0, false
+	}
+	return at, seconds, unitCount, true
+}
+
+// nextDurationToken finds the next complete duration token at or after start.
+func nextDurationToken(text string, start int) (begin, end int, seconds float64, unitCount int, ok bool) {
+	for at := start; at < len(text); at++ {
+		if text[at] < '0' || text[at] > '9' {
+			continue
+		}
+		if finish, value, units, valid := durationTokenAt(text, at); valid {
+			return at, finish, value, units, true
+		}
+		// Skip the rest of this numeric run rather than re-entering it one digit
+		// later, which is precisely how ".86s" became "86s".
+		for at < len(text) && ((text[at] >= '0' && text[at] <= '9') || text[at] == '.' || text[at] == ',') {
+			at++
+		}
+	}
+	return 0, 0, 0, 0, false
+}
 
 // ParseGoTest pulls every timing out of `go test` output.
 //
@@ -308,26 +430,34 @@ func (l *Ledger) Conflicts(run Run, claim string) []Conflict {
 		if len(recorded) == 0 {
 			continue
 		}
-		claimed, ok := claimedSecondsFor(claim, name, observed)
-		if !ok {
-			continue
-		}
-		if l.raised[newRaisedKey(run, name, claimed)] {
-			continue
-		}
-		agrees := false
-		for _, seen := range recorded {
-			if tolerance(claimed, seen) {
-				agrees = true
-				break
+		// EVERY MENTION, not the first that parsed. An agreeing occurrence used to
+		// return before any later one was examined, so a fabricated second value
+		// went unseen — and the per-value dedupe below exists precisely because
+		// two different wrong numbers for one name are two findings.
+		// ONE FINDING PER DISTINCT VALUE, within this call as well as across
+		// calls. The ledger's dedupe is keyed on the value for a reason: the
+		// same wrong number said twice is one thing to correct, while two
+		// different wrong numbers are two.
+		seenThisCall := map[int64]bool{}
+		for _, claimed := range claimedSecondsAllFor(claim, name, observed) {
+			if l.raised[newRaisedKey(run, name, claimed)] || seenThisCall[claimedMilli(claimed)] {
+				continue
 			}
+			seenThisCall[claimedMilli(claimed)] = true
+			agrees := false
+			for _, seen := range recorded {
+				if tolerance(claimed, seen) {
+					agrees = true
+					break
+				}
+			}
+			if agrees {
+				continue
+			}
+			values := append([]float64(nil), recorded...)
+			sort.Float64s(values)
+			out = append(out, Conflict{Name: name, Claimed: claimed, Recorded: values, Run: run})
 		}
-		if agrees {
-			continue
-		}
-		values := append([]float64(nil), recorded...)
-		sort.Float64s(values)
-		out = append(out, Conflict{Name: name, Claimed: claimed, Recorded: values, Run: run})
 	}
 	// Deterministic order: this text reaches a model, and a set that reshuffles
 	// between identical runs is a diff nobody can read.
@@ -338,24 +468,31 @@ func (l *Ledger) Conflicts(run Run, claim string) []Conflict {
 	return out
 }
 
-// claimedSecondsFor finds the duration an answer puts beside a name, searching
-// this name's own clause on each line it appears on. Same line only: a number
-// three paragraphs away is not this name's timing, and pairing them would invent
-// a disagreement rather than find one.
+// firstDurationEnd returns the offset just past the first duration token in the
+// clause, or len(clause) when there is none.
+func firstDurationEnd(clause string) int {
+	if _, end, _, _, ok := nextDurationToken(clause, 0); ok {
+		return end
+	}
+	return len(clause)
+}
+
+// claimedSecondsAllFor returns EVERY value the claim attributes to name, in the
+// order they appear.
 //
-// THE CLAUSE ENDS WHERE THE NEXT NAME BEGINS. Searching the whole remainder of
-// the line let one name borrow another's number:
+// THE SCALAR CONTRACT WAS THE DEFECT. Returning at the first occurrence that
+// parsed meant an agreeing mention shielded every later one, so
+// "TestFoo took 1.00s; TestFoo later took 9.00s" produced no conflict against a
+// recorded 1s — the fabricated 9s was never examined. That also contradicted the
+// ledger's per-VALUE dedupe, which exists precisely so two different wrong
+// numbers for one name are two findings.
 //
-//	recorded: TestFoo 0.10s, TestBar 4.20s
-//	claim:    "TestFoo passed; TestBar took 4.20s"
-//	  -> [{Name:TestFoo Claimed:4.2 Recorded:[0.1]}]
-//
-// Every word of that claim is true. TestFoo reached past its own clause, took the
-// number belonging to TestBar, and was told it had invented it — the same failure
-// as reading a package total as a test's own timing, arrived at through the name
-// binding rather than the pattern order. Cutting at the next known name is the
-// bound, and the ledger is what knows those names, so they are passed in.
-func claimedSecondsFor(claim, name string, known map[string][]float64) (float64, bool) {
+// Comparison and dedupe belong to the caller, which is why this returns values
+// rather than a verdict: "later" is not a special case, and neither are two wrong
+// values, repeated equivalent spellings, or more than two mentions. Reported by
+// @jatmn.
+func claimedSecondsAllFor(claim, name string, known map[string][]float64) []float64 {
+	var values []float64
 	for _, line := range strings.Split(claim, "\n") {
 		for start := 0; start < len(line); {
 			index := strings.Index(line[start:], name)
@@ -368,12 +505,31 @@ func claimedSecondsFor(claim, name string, known map[string][]float64) (float64,
 			if !nameBoundary(line, absolute, end) {
 				continue
 			}
-			if value, ok := parseClaimedDuration(line[end:clauseEnd(line, end, known)]); ok {
-				return value, true
+			clause := line[end:clauseEnd(line, end, known)]
+			// TWO DURATIONS IN ONE CLAUSE MEANS OWNERSHIP IS UNCLEAR, so the
+			// clause yields nothing.
+			//
+			// Position is not ownership. "nearest duration" was standing in for
+			// "the duration asserted as this test's result", and the two part
+			// company the moment a budget is stated first: with 0.86s recorded,
+			// "TestQuick stayed under the 10s timeout and completed in 0.86s" was
+			// reported as claiming 10s — a completely truthful sentence receiving
+			// the exact fabricated correction this package exists to prevent.
+			//
+			// Deliberately NOT a "timeout" keyword exception: the same structure
+			// arrives as deadlines, limits, budgets, targets and baselines, and a
+			// word list would reopen the class at the next synonym. An ambiguous
+			// clause is silent, which fails toward a miss rather than an
+			// accusation. Reported by @jatmn.
+			if _, _, _, _, second := nextDurationToken(clause, firstDurationEnd(clause)); second {
+				continue
+			}
+			if value, ok := parseClaimedDuration(clause); ok {
+				values = append(values, value)
 			}
 		}
 	}
-	return 0, false
+	return values
 }
 
 // clauseEnd returns the offset in line at which this name's clause stops.
@@ -476,6 +632,28 @@ func separatorBreaksClause(after string) bool {
 	if containsLetter(after[:start]) {
 		return true
 	}
+	// A TRAILING WORD KEEPS THE CLAUSE AMBIGUOUS, and that stays deliberate.
+	//
+	// @jatmn is right that this misses a real fabrication: "TestFoo passed, 9.90s
+	// elapsed" reports nothing where the same sentence without "elapsed" is
+	// caught, because containsLetter cannot tell a noun phrase that OWNS the
+	// figure from a word that merely DESCRIBES it.
+	//
+	// I tried the fix he suggested first — recognise a subject rather than any
+	// letter, using the same measurement-name layer the clause bound uses — and it
+	// reopened the case this check exists for. "TestFoo passed; 4.20s was the
+	// whole suite." and five siblings went straight back to charging the suite's
+	// figure to the test, which is a FALSE ACCUSATION where the current behaviour
+	// is only a miss. Measured, not reasoned: all six of the following-subject
+	// tests failed.
+	//
+	// "the whole suite" and "elapsed" are both ordinary words. Separating them by
+	// vocabulary is the qualifier allowlist he explicitly ruled out, and it would
+	// reopen the same class at the next synonym. So the clause stays ambiguous,
+	// which fails toward silence — this file's own comments say a miss is cheaper
+	// than a fabricated correction, and that ordering has not changed. Closing the
+	// miss needs an ownership model that reads structure rather than words, and I
+	// do not have one that survives the six cases above.
 	tail := after[stop:]
 	return containsLetter(tail[:segmentEnd(tail)])
 }
@@ -522,61 +700,17 @@ func containsLetter(text string) bool {
 // lengthens the scan and shortens the clause — the direction every bound here
 // takes.
 func nextDurationSpan(text string) (int, int) {
-	start, stop := -1, -1
-	take := func(match []int) {
-		if match == nil {
-			return
-		}
-		if start < 0 || match[0] < start {
-			start, stop = match[0], match[1]
-		}
+	// THE SAME SCANNER THE PARSER USES. These were separate heuristics, so a token
+	// the parser refused could still bound a clause and vice versa — the two
+	// disagreeing about what a duration is was its own defect class.
+	begin, end, _, units, ok := nextDurationToken(text, 0)
+	if !ok {
+		return -1, -1
 	}
-	take(claimedDuration.FindStringSubmatchIndex(text))
-	if match := claimedMinuteDuration.FindStringSubmatchIndex(text); match != nil && !bareUnitIsAmbiguous(text, match, 2) {
-		take(match)
+	if units == 1 && bareUnitFollowedByWord(text, begin, end) {
+		return -1, -1
 	}
-	if match := claimedHourDuration.FindStringSubmatchIndex(text); match != nil && !bareUnitIsAmbiguous(text, match, 2, 3) {
-		take(match)
-	}
-	return start, stop
-}
-
-// bareUnitIsAmbiguous reports whether a compound-duration match is a bare "5m"
-// or "5h" — a figure and a unit letter with no smaller component — carrying a
-// word directly after it. subUnits names the smaller components' capture groups.
-//
-// AN "m" IS NOT ALWAYS MINUTES. "TestParseCorpus handled 5m rows in 0.86s" is an
-// ordinary sentence, and the minute pattern reads its count of rows as five
-// minutes. Position decides between the forms, so the count wins over the
-// truthful 0.86s that follows it and the report is accused of stating 300s — a
-// number its answer never contained, which is the one failure this package must
-// never produce. A compound form ("1m10s", "2h30m") cannot be a count, and a bare
-// figure with nothing after it ("took 2m", "| 2m |", "(9h)") has no noun to be
-// counting, so the bare-plus-word shape is the whole of the ambiguity.
-//
-// AMBIGUOUS MEANS SILENT, NOT GUESSED. An ambiguous token is not evidence, so its
-// clause yields no duration rather than a second-choice one — reaching past it to
-// a later figure would decide the same question by guessing. The cost is real and
-// stated plainly: "TestSlow took 2m to finish" is now unreadable, and a figure
-// fabricated in that spelling goes uncaught. This package errs toward silence by
-// design, and a missed number costs one detection while a false accusation costs
-// the tripwire.
-func bareUnitIsAmbiguous(text string, match []int, subUnits ...int) bool {
-	for _, group := range subUnits {
-		if match[group*2] >= 0 {
-			return false
-		}
-	}
-	for index := match[1]; index < len(text); index++ {
-		switch c := text[index]; {
-		case c == ' ' || c == '\t':
-		case (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'):
-			return true
-		default:
-			return false
-		}
-	}
-	return false
+	return begin, end
 }
 
 // clauseSeparators end a measurement clause without starting a new name.
@@ -664,8 +798,49 @@ func nextNameShaped(line string, from int) int {
 			}
 			return index
 		}
+		if packagePathAt(line, index) {
+			return index
+		}
 	}
 	return -1
+}
+
+// packagePathAt reports whether a package path begins at index.
+//
+// A PACKAGE IS A MEASUREMENT SUBJECT TOO, and it used to be recognised only when
+// that exact package had already been recorded. So a truthful
+// "github.com/x/first passed github.com/x/unrecorded took 4.20s" charged the
+// second package's figure backwards to the first, because the unrecorded
+// neighbour did not bound the clause — while an unrecorded TEST-shaped name
+// always did. Whether a neighbouring subject ends a clause cannot depend on
+// whether that neighbour happened to produce a parseable timing. Reported by
+// @jatmn.
+//
+// Deliberately narrow: at least one slash, and every segment made of the
+// characters an import path may contain. Prose rarely looks like this, and the
+// consequence of a miss is the pre-existing behaviour rather than a new one.
+func packagePathAt(line string, index int) bool {
+	end := index
+	slashes := 0
+	for end < len(line) {
+		c := line[end]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
+			c == '.', c == '-', c == '_':
+		case c == '/':
+			slashes++
+		default:
+			goto done
+		}
+		end++
+	}
+done:
+	if slashes == 0 || end == index {
+		return false
+	}
+	// A trailing dot is sentence punctuation, not part of the path.
+	segment := line[index:end]
+	return !strings.HasPrefix(segment, "/") && !strings.HasSuffix(segment, "/")
 }
 
 // isNameContinuation reports whether b continues a go test name rather than
@@ -716,34 +891,6 @@ func nameBoundary(line string, from, to int) bool {
 	return true
 }
 
-// startsFirst reports whether match begins no later than every other candidate.
-// Ties go to the caller's match, which is how the hour form wins over the minute
-// form inside "1h10m0s" — that string starts a minute match at "10m" only
-// because the hour part came first.
-func startsFirst(match []int, others ...[]int) bool {
-	for _, other := range others {
-		if other != nil && other[0] < match[0] {
-			return false
-		}
-	}
-	return true
-}
-
-// compoundPart reads one optional group of a compound duration match. An unset
-// group is reported by regexp as index -1 rather than an empty span, which is
-// how "1m" is told from "0m".
-func compoundPart(tail string, match []int, group int) (float64, bool) {
-	start, end := match[group*2], match[group*2+1]
-	if start < 0 {
-		return 0, false
-	}
-	value, err := strconv.ParseFloat(tail[start:end], 64)
-	if err != nil {
-		return 0, false
-	}
-	return value, true
-}
-
 // parseClaimedDuration reads the FIRST duration in tail, in seconds.
 //
 // MINUTES COUNT. The pattern was ms-or-s only, so "1m10s" failed on "1m", the
@@ -769,43 +916,42 @@ func compoundPart(tail string, match []int, group int) (float64, bool) {
 // beside it. bareUnitIsAmbiguous holds that shape back, and its clause then
 // reports nothing at all rather than a guess.
 func parseClaimedDuration(tail string) (float64, bool) {
-	minute := claimedMinuteDuration.FindStringSubmatchIndex(tail)
-	hour := claimedHourDuration.FindStringSubmatchIndex(tail)
-	plain := claimedDuration.FindStringSubmatchIndex(tail)
-	switch {
-	case minute == nil && hour == nil && plain == nil:
-		return 0, false
-	case hour != nil && startsFirst(hour, minute, plain):
-		if bareUnitIsAmbiguous(tail, hour, 2, 3) {
-			return 0, false
-		}
-		hours, _ := compoundPart(tail, hour, 1)
-		minutesPart, _ := compoundPart(tail, hour, 2)
-		secondsPart, _ := compoundPart(tail, hour, 3)
-		return hours*3600 + minutesPart*60 + secondsPart, true
-	case minute != nil && (plain == nil || minute[0] <= plain[0]):
-		if bareUnitIsAmbiguous(tail, minute, 2) {
-			return 0, false
-		}
-		minutes, _ := compoundPart(tail, minute, 1)
-		seconds, _ := compoundPart(tail, minute, 2)
-		return minutes*60 + seconds, true
-	}
-	// Reachable only when the plain form matched — the guard above returns when
-	// all three are nil, and each compound branch handles the cases where it
-	// starts first. That is an argument, not a check, and this file has already
-	// paid once for a fall-through whose precondition was only implied.
-	if plain == nil {
+	begin, end, seconds, units, ok := nextDurationToken(tail, 0)
+	if !ok {
 		return 0, false
 	}
-	value, err := strconv.ParseFloat(tail[plain[2]:plain[3]], 64)
-	if err != nil {
+	// AMBIGUITY IS STILL SILENCE, NOT A SECOND-BEST READING. A bare "5m" or "9h"
+	// with a word directly after it may be a count rather than a duration
+	// ("handled 5m rows"), and reaching past it to a later figure would answer the
+	// same question by guessing.
+	if units == 1 && bareUnitFollowedByWord(tail, begin, end) {
 		return 0, false
 	}
-	if tail[plain[4]:plain[5]] == "ms" {
-		value /= 1000
+	return seconds, true
+}
+
+// bareUnitFollowedByWord reports whether a single-component token is the
+// ambiguous count shape: one figure, one unit letter, and a word beside it. A
+// compound form cannot be a count, and a bare figure with nothing after it has no
+// noun to be counting.
+func bareUnitFollowedByWord(text string, begin, end int) bool {
+	if end-begin == 0 {
+		return false
 	}
-	return value, true
+	switch text[end-1] {
+	case 'm', 'h':
+	default:
+		return false
+	}
+	at := end
+	for at < len(text) && text[at] == ' ' {
+		at++
+	}
+	if at == end || at >= len(text) {
+		return false
+	}
+	letter := text[at]
+	return (letter >= 'a' && letter <= 'z') || (letter >= 'A' && letter <= 'Z')
 }
 
 // sortedRunKeys walks the recorded runs in an order that does not depend on how
@@ -885,40 +1031,41 @@ func (l *Ledger) ConflictsAcrossRuns(claim string) []Conflict {
 
 	var out []Conflict
 	for name, seen := range merged {
-		claimed, ok := claimedSecondsFor(claim, name, names)
-		if !ok {
-			continue
-		}
-		if l.raised[newAcrossRunsKey(name, claimed)] {
-			continue
-		}
-		agrees := false
-		for _, value := range seen.values {
-			if tolerance(claimed, value) {
-				agrees = true
-				break
+		// EVERY MENTION, for the same reason as the per-run path above.
+		seenThisCall := map[int64]bool{}
+		for _, claimed := range claimedSecondsAllFor(claim, name, names) {
+			if l.raised[newAcrossRunsKey(name, claimed)] || seenThisCall[claimedMilli(claimed)] {
+				continue
 			}
+			seenThisCall[claimedMilli(claimed)] = true
+			agrees := false
+			for _, value := range seen.values {
+				if tolerance(claimed, value) {
+					agrees = true
+					break
+				}
+			}
+			if agrees {
+				continue
+			}
+			values := append([]float64(nil), seen.values...)
+			sort.Float64s(values)
+			// NAME A COMMAND ONLY WHEN ONE COMMAND PRINTED ALL OF THESE. Merging two
+			// runs' values and then labelling the union with one of them said that
+			// command reported a number it never printed:
+			//
+			//	`go test ./a` in this session reported 0.1s, 0.2s
+			//
+			// where 0.2s came only from ./b. Choosing the run deterministically fixed
+			// the reshuffling and left the attribution just as untrue. With more than
+			// one run behind the values the label is dropped, and Nudge falls back to
+			// naming the session rather than a command.
+			attributed := seen.run
+			if seen.runs > 1 {
+				attributed = Run{}
+			}
+			out = append(out, Conflict{Name: name, Claimed: claimed, Recorded: values, Run: attributed})
 		}
-		if agrees {
-			continue
-		}
-		values := append([]float64(nil), seen.values...)
-		sort.Float64s(values)
-		// NAME A COMMAND ONLY WHEN ONE COMMAND PRINTED ALL OF THESE. Merging two
-		// runs' values and then labelling the union with one of them said that
-		// command reported a number it never printed:
-		//
-		//	`go test ./a` in this session reported 0.1s, 0.2s
-		//
-		// where 0.2s came only from ./b. Choosing the run deterministically fixed
-		// the reshuffling and left the attribution just as untrue. With more than
-		// one run behind the values the label is dropped, and Nudge falls back to
-		// naming the session rather than a command.
-		attributed := seen.run
-		if seen.runs > 1 {
-			attributed = Run{}
-		}
-		out = append(out, Conflict{Name: name, Claimed: claimed, Recorded: values, Run: attributed})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	for _, conflict := range out {

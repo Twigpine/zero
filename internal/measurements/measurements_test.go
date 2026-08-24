@@ -1090,3 +1090,123 @@ func TestTheClauseScanRefusesWhatTheParserRefuses(t *testing.T) {
 		}
 	}
 }
+
+// A DURATION IS READ WHOLE OR NOT AT ALL.
+//
+// Three unanchored regexes each hunted for their own suffix with no shared left
+// boundary, so a failed outer match restarted inside the same token. Every one of
+// these was a truthful claim turned into a fabricated correction — the single
+// failure this package exists to prevent. Reported by @jatmn.
+func TestADurationTokenIsReadWholeOrRefused(t *testing.T) {
+	for _, honest := range []struct {
+		recorded string
+		claim    string
+	}{
+		{"--- PASS: TestQ (0.86s)\n", "TestQ took .86s"},         // was read as 86s
+		{"--- PASS: TestQ (90.00s)\n", "TestQ took .5m"},         // was read as 300s
+		{"--- PASS: TestQ (1.20s)\n", "TestQ took 1,200ms"},      // was read as 0.2s
+		{"--- PASS: TestQ (70.01s)\n", "TestQ took 1m10ms"},      // was read as 0.01s
+		{"--- PASS: TestQ (3660.50s)\n", "TestQ took 1h1m500ms"}, // was read as 0.5s
+	} {
+		ledger := NewLedger()
+		ledger.Record(Run{}, honest.recorded)
+		if conflicts := ledger.Conflicts(Run{}, honest.claim); len(conflicts) != 0 {
+			t.Errorf("an honest claim %q was accused: %+v", honest.claim, conflicts)
+		}
+	}
+
+	// AND THE FORMS THAT DO PARSE STILL PARSE, so refusing partial tokens has not
+	// simply made the detector blind.
+	for _, readable := range []struct {
+		recorded string
+		claim    string
+	}{
+		{"--- PASS: TestQ (0.86s)\n", "TestQ took 0.86s"},
+		{"--- PASS: TestQ (70.00s)\n", "TestQ took 1m10s"},
+		{"--- PASS: TestQ (0.05s)\n", "TestQ took 50ms"},
+		{"--- PASS: TestQ (4200.00s)\n", "TestQ took 1h10m0s"},
+	} {
+		ledger := NewLedger()
+		ledger.Record(Run{}, readable.recorded)
+		if conflicts := ledger.Conflicts(Run{}, readable.claim); len(conflicts) != 0 {
+			t.Errorf("a valid duration %q stopped being read: %+v", readable.claim, conflicts)
+		}
+	}
+
+	// A real fabrication is still caught.
+	wrong := NewLedger()
+	wrong.Record(Run{}, "--- PASS: TestQ (0.86s)\n")
+	if conflicts := wrong.Conflicts(Run{}, "TestQ took 9.00s"); len(conflicts) != 1 || conflicts[0].Claimed != 9 {
+		t.Errorf("a fabricated 9.00s was not caught as 9: %+v", conflicts)
+	}
+}
+
+// EVERY TIMED MENTION IS CHECKED, not the first that parsed.
+//
+// claimedSecondsFor returned at its first successful occurrence, so an agreeing
+// mention shielded every later one and "TestFoo took 1.00s; TestFoo later took
+// 9.00s" reported nothing against a recorded 1s. That also contradicted the
+// ledger's per-VALUE dedupe, which exists so two different wrong numbers are two
+// findings. Reported by @jatmn.
+func TestEveryTimedMentionOfANameIsChecked(t *testing.T) {
+	for _, c := range []struct {
+		label string
+		claim string
+		want  []float64
+	}{
+		{"agreeing then wrong", "TestFoo took 1.00s; TestFoo later took 9.00s", []float64{9}},
+		{"wrong then agreeing", "TestFoo took 9.00s; TestFoo actually took 1.00s", []float64{9}},
+		{"two distinct wrong", "TestFoo took 9.00s; TestFoo took 20.00s", []float64{9, 20}},
+		{"repeated equivalent", "TestFoo took 9.00s; TestFoo took 9.00s", []float64{9}},
+		{"all agreeing", "TestFoo took 1.00s; TestFoo took 1.00s", nil},
+	} {
+		for _, entry := range []struct {
+			name string
+			run  func(*Ledger) []Conflict
+		}{
+			{"per-run", func(l *Ledger) []Conflict { return l.Conflicts(Run{}, c.claim) }},
+			{"across-runs", func(l *Ledger) []Conflict { return l.ConflictsAcrossRuns(c.claim) }},
+		} {
+			ledger := NewLedger()
+			ledger.Record(Run{}, "--- PASS: TestFoo (1.00s)\n")
+			got := entry.run(ledger)
+			if len(got) != len(c.want) {
+				t.Errorf("%s/%s: %d conflicts, want %d: %+v", entry.name, c.label, len(got), len(c.want), got)
+				continue
+			}
+			for i, want := range c.want {
+				if got[i].Claimed != want {
+					t.Errorf("%s/%s: conflict %d claimed %v, want %v", entry.name, c.label, i, got[i].Claimed, want)
+				}
+			}
+		}
+	}
+}
+
+// AN UNRECORDED PACKAGE BOUNDS A CLAUSE, exactly as an unrecorded test-shaped
+// name already did.
+//
+// Package neighbours were only recognised when that package had itself been
+// recorded, so a truthful sentence charged an unrecorded neighbour's figure
+// backwards to the first package. Whether a neighbouring subject ends a clause
+// cannot depend on whether that neighbour happened to produce a parseable
+// timing. Reported by @jatmn.
+func TestAnUnrecordedPackageNeighbourBoundsTheClause(t *testing.T) {
+	for _, claim := range []string{
+		"github.com/x/first passed github.com/x/unrecorded took 4.20s",
+		"github.com/x/first passed, github.com/x/unrecorded took 4.20s",
+		"github.com/x/first ok; github.com/x/unrecorded took 4.20s",
+	} {
+		ledger := NewLedger()
+		ledger.Record(Run{}, "ok  \tgithub.com/x/first\t0.10s\n")
+		if conflicts := ledger.Conflicts(Run{}, claim); len(conflicts) != 0 {
+			t.Errorf("a neighbour's figure was charged to the first package: %q -> %+v", claim, conflicts)
+		}
+	}
+	// THE CONTROL: when the duration really is the first package's, it still reads.
+	ledger := NewLedger()
+	ledger.Record(Run{}, "ok  \tgithub.com/x/first\t0.10s\n")
+	if conflicts := ledger.Conflicts(Run{}, "github.com/x/first took 4.20s"); len(conflicts) != 1 {
+		t.Errorf("a genuine package fabrication stopped being caught: %+v", conflicts)
+	}
+}
