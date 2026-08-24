@@ -96,6 +96,21 @@ var textSecretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
 }
 
+// textSecretPrefixes lists the mandatory literal prefixes for each entry in
+// textSecretPatterns so RedactString can skip the regex scan when none of the
+// trigger prefixes appear in the input.
+var textSecretPrefixes = [][]string{
+	{"sk-ant-"},
+	{"github_pat_"},
+	{"ghp_", "gho_", "ghu_", "ghs_", "ghr_"},
+	{"glpat-"},
+	{"AIza"},
+	{"xox"},
+	{"AKIA", "ASIA"},
+	{"eyJ"},
+	{"eyJ"},
+}
+
 // anchoredSecretPatterns mirrors textSecretPatterns with the leading \b
 // replaced by \A, so each shape can be tested at an exact byte offset. A
 // credential that starts exactly where a redacted span ends (two AWS keys
@@ -276,7 +291,7 @@ func RedactString(value string, options Options) string {
 		})
 	}
 	if strings.Contains(redacted, ":") {
-		if strings.Contains(strings.ToLower(redacted), "authorization") {
+		if containsCaseInsensitive(redacted, "authorization") {
 			redacted = headerPattern.ReplaceAllStringFunc(redacted, func(match string) string {
 				groups := headerPattern.FindStringSubmatch(match)
 				if groups[2] != "" {
@@ -309,30 +324,10 @@ func RedactString(value string, options Options) string {
 			return replacement
 		})
 	}
-	if strings.Contains(redacted, "sk-ant-") {
-		redacted = redactAdjacent(redacted, textSecretPatterns[0], anchoredSecretPatterns[0], replacement)
-	}
-	if strings.Contains(redacted, "github_pat_") {
-		redacted = redactAdjacent(redacted, textSecretPatterns[1], anchoredSecretPatterns[1], replacement)
-	}
-	if strings.Contains(redacted, "ghp_") || strings.Contains(redacted, "gho_") || strings.Contains(redacted, "ghu_") || strings.Contains(redacted, "ghs_") || strings.Contains(redacted, "ghr_") {
-		redacted = redactAdjacent(redacted, textSecretPatterns[2], anchoredSecretPatterns[2], replacement)
-	}
-	if strings.Contains(redacted, "glpat-") {
-		redacted = redactAdjacent(redacted, textSecretPatterns[3], anchoredSecretPatterns[3], replacement)
-	}
-	if strings.Contains(redacted, "AIza") {
-		redacted = redactAdjacent(redacted, textSecretPatterns[4], anchoredSecretPatterns[4], replacement)
-	}
-	if strings.Contains(redacted, "xox") {
-		redacted = redactAdjacent(redacted, textSecretPatterns[5], anchoredSecretPatterns[5], replacement)
-	}
-	if strings.Contains(redacted, "AKIA") || strings.Contains(redacted, "ASIA") {
-		redacted = redactAdjacent(redacted, textSecretPatterns[6], anchoredSecretPatterns[6], replacement)
-	}
-	if strings.Contains(redacted, "eyJ") {
-		redacted = redactAdjacent(redacted, textSecretPatterns[7], anchoredSecretPatterns[7], replacement)
-		redacted = redactAdjacent(redacted, textSecretPatterns[8], anchoredSecretPatterns[8], replacement)
+	for i, pattern := range textSecretPatterns {
+		if hasAnyPrefix(redacted, textSecretPrefixes[i]) {
+			redacted = redactAdjacent(redacted, pattern, anchoredSecretPatterns[i], replacement)
+		}
 	}
 	// Credentials broken up by invisible characters last, over what the
 	// contiguous matchers left: a whole credential is already claimed by its own
@@ -340,6 +335,46 @@ func RedactString(value string, options Options) string {
 	// a no-op for text with no such character, which is nearly all text.
 	redacted = redactControlSplitSecrets(redacted, replacement)
 	return redacted
+}
+
+func hasAnyPrefix(s string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.Contains(s, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsCaseInsensitive(s, substr string) bool {
+	if len(substr) == 0 {
+		return true
+	}
+	if len(s) < len(substr) {
+		return false
+	}
+	for i := 0; i <= len(s)-len(substr); i++ {
+		match := true
+		for j := 0; j < len(substr); j++ {
+			c1 := s[i+j]
+			c2 := substr[j]
+			if c1 != c2 && toLowerASCII(c1) != toLowerASCII(c2) {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
+func toLowerASCII(c byte) byte {
+	if c >= 'A' && c <= 'Z' {
+		return c + ('a' - 'A')
+	}
+	return c
 }
 
 // knownOpenAIKeyPrefix is the redaction-side twin of secrets.knownOpenAIKeyPrefix:
