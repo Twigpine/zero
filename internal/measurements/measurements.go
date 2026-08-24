@@ -447,27 +447,133 @@ func clauseEnd(line string, from int, known map[string][]float64) int {
 // separatorBreaksClause reports whether the text after a separator names a new
 // subject, rather than simply carrying the preceding name's own number.
 //
-// A word before the next duration means something else is being talked about. No
+// A word beside the next duration means something else is being talked about. No
 // word — just the number — means the punctuation was only presentation, which is
 // how a table, a bullet list or an aside states one test's timing.
+//
+// BESIDE, NOT BEFORE. The scan used to look only at what came ahead of the
+// number, so a subject that trailed its own figure was invisible and the
+// separator read as presentation:
+//
+//	recorded: TestFoo 0.10s
+//	claim:    "TestFoo passed; 4.20s was the whole suite."
+//	  -> [{Name:TestFoo Claimed:4.2 Recorded:[0.1]}]
+//
+// Every word of that claim is true and 4.20s belongs to the suite named directly
+// after it. Which side of the figure its subject sits on says nothing about who
+// owns it, so both sides are scanned.
+//
+// The trailing scan stops at the end of the figure's OWN segment, or ordinary
+// layouts would break themselves: the words after "| 4.20s |" belong to the next
+// cell, and the ones after ", 9.99s." to the next sentence.
 func separatorBreaksClause(after string) bool {
-	end := len(after)
-	// THE HOUR FORM COUNTS HERE TOO. Without it this scan cannot locate "9h" as a
-	// duration, so it reads the "h" as the first letter of a new subject and
-	// turns the punctuation into a clause boundary — cutting the test's own
-	// number off from its name. Four ordinary spellings were missed that way:
-	// "TestVerySlow - 9h", "…passed - 9h", "…(9h)" and "…: 9h", while the bare
-	// "took 9h" worked because no separator was involved. A duration this package
-	// can parse must be one this scan can see, or the two disagree about where a
-	// clause ends.
-	for _, pattern := range []*regexp.Regexp{claimedDuration, claimedMinuteDuration, claimedHourDuration} {
-		if match := pattern.FindStringIndex(after); match != nil && match[0] < end {
-			end = match[0]
+	start, stop := nextDurationSpan(after)
+	if start < 0 {
+		// No duration after the separator at all, so there is no figure for a
+		// word to sit beside: any word is a new subject.
+		start, stop = len(after), len(after)
+	}
+	if containsLetter(after[:start]) {
+		return true
+	}
+	tail := after[stop:]
+	return containsLetter(tail[:segmentEnd(tail)])
+}
+
+// segmentEnd returns the offset at which text stops belonging to the segment it
+// starts — the first clause separator or sentence terminator, or the whole
+// string when it holds neither.
+func segmentEnd(text string) int {
+	end := len(text)
+	for _, separator := range clauseSeparators {
+		if index := strings.Index(text, separator); index >= 0 && index < end {
+			end = index
 		}
 	}
-	for index := 0; index < end; index++ {
-		if c := after[index]; (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+	if index := sentenceEnd(text, 0); index >= 0 && index < end {
+		end = index
+	}
+	return end
+}
+
+func containsLetter(text string) bool {
+	for index := 0; index < len(text); index++ {
+		if c := text[index]; (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
 			return true
+		}
+	}
+	return false
+}
+
+// nextDurationSpan returns the bounds of the first duration in text that this
+// package would actually read, or -1 when there is none.
+//
+// EVERY FORM THE PARSER READS, AND NO FORM IT REFUSES. Without the hour form this
+// scan could not locate "9h" as a duration, so it read the "h" as the first
+// letter of a new subject and turned the punctuation into a clause boundary,
+// cutting a test's own number off from its name — "TestVerySlow - 9h",
+// "…passed - 9h", "…(9h)" and "…: 9h" were all missed that way. The ambiguous
+// bare unit below is the same requirement from the other side: a token
+// parseClaimedDuration will not read is not a duration here either, or the two
+// again disagree about where a clause ends.
+//
+// Only the leftmost match of each form is considered, so an ambiguous "5m"
+// hides any later minute figure. That can only push the span later, which
+// lengthens the scan and shortens the clause — the direction every bound here
+// takes.
+func nextDurationSpan(text string) (int, int) {
+	start, stop := -1, -1
+	take := func(match []int) {
+		if match == nil {
+			return
+		}
+		if start < 0 || match[0] < start {
+			start, stop = match[0], match[1]
+		}
+	}
+	take(claimedDuration.FindStringSubmatchIndex(text))
+	if match := claimedMinuteDuration.FindStringSubmatchIndex(text); match != nil && !bareUnitIsAmbiguous(text, match, 2) {
+		take(match)
+	}
+	if match := claimedHourDuration.FindStringSubmatchIndex(text); match != nil && !bareUnitIsAmbiguous(text, match, 2, 3) {
+		take(match)
+	}
+	return start, stop
+}
+
+// bareUnitIsAmbiguous reports whether a compound-duration match is a bare "5m"
+// or "5h" — a figure and a unit letter with no smaller component — carrying a
+// word directly after it. subUnits names the smaller components' capture groups.
+//
+// AN "m" IS NOT ALWAYS MINUTES. "TestParseCorpus handled 5m rows in 0.86s" is an
+// ordinary sentence, and the minute pattern reads its count of rows as five
+// minutes. Position decides between the forms, so the count wins over the
+// truthful 0.86s that follows it and the report is accused of stating 300s — a
+// number its answer never contained, which is the one failure this package must
+// never produce. A compound form ("1m10s", "2h30m") cannot be a count, and a bare
+// figure with nothing after it ("took 2m", "| 2m |", "(9h)") has no noun to be
+// counting, so the bare-plus-word shape is the whole of the ambiguity.
+//
+// AMBIGUOUS MEANS SILENT, NOT GUESSED. An ambiguous token is not evidence, so its
+// clause yields no duration rather than a second-choice one — reaching past it to
+// a later figure would decide the same question by guessing. The cost is real and
+// stated plainly: "TestSlow took 2m to finish" is now unreadable, and a figure
+// fabricated in that spelling goes uncaught. This package errs toward silence by
+// design, and a missed number costs one detection while a false accusation costs
+// the tripwire.
+func bareUnitIsAmbiguous(text string, match []int, subUnits ...int) bool {
+	for _, group := range subUnits {
+		if match[group*2] >= 0 {
+			return false
+		}
+	}
+	for index := match[1]; index < len(text); index++ {
+		switch c := text[index]; {
+		case c == ' ' || c == '\t':
+		case (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'):
+			return true
+		default:
+			return false
 		}
 	}
 	return false
@@ -656,6 +762,12 @@ func compoundPart(tail string, match []int, group int) (float64, bool) {
 // conflict against a number the model got right, which is the one failure this
 // package must never produce. Both patterns are located, and the minute form
 // wins only when it starts no later than the seconds form.
+//
+// AND POSITION IS ONLY WORTH DECIDING BETWEEN REAL DURATIONS. A bare "5m" or "9h"
+// carrying a word — "handled 5m rows" — may be a count rather than a duration,
+// and winning on position is exactly how it took precedence over the timing
+// beside it. bareUnitIsAmbiguous holds that shape back, and its clause then
+// reports nothing at all rather than a guess.
 func parseClaimedDuration(tail string) (float64, bool) {
 	minute := claimedMinuteDuration.FindStringSubmatchIndex(tail)
 	hour := claimedHourDuration.FindStringSubmatchIndex(tail)
@@ -664,11 +776,17 @@ func parseClaimedDuration(tail string) (float64, bool) {
 	case minute == nil && hour == nil && plain == nil:
 		return 0, false
 	case hour != nil && startsFirst(hour, minute, plain):
+		if bareUnitIsAmbiguous(tail, hour, 2, 3) {
+			return 0, false
+		}
 		hours, _ := compoundPart(tail, hour, 1)
 		minutesPart, _ := compoundPart(tail, hour, 2)
 		secondsPart, _ := compoundPart(tail, hour, 3)
 		return hours*3600 + minutesPart*60 + secondsPart, true
 	case minute != nil && (plain == nil || minute[0] <= plain[0]):
+		if bareUnitIsAmbiguous(tail, minute, 2) {
+			return 0, false
+		}
 		minutes, _ := compoundPart(tail, minute, 1)
 		seconds, _ := compoundPart(tail, minute, 2)
 		return minutes*60 + seconds, true
@@ -688,6 +806,32 @@ func parseClaimedDuration(tail string) (float64, bool) {
 		value /= 1000
 	}
 	return value, true
+}
+
+// sortedRunKeys walks the recorded runs in an order that does not depend on how
+// the map was built.
+//
+// THE RUN QUOTED IS CHOSEN DETERMINISTICALLY. Map iteration order is randomised
+// per range, and a merged sighting keeps the first run that recorded the name, so
+// taking whichever came first made the nudge name a different command between
+// identical passes — and this text reaches a model, where a message that
+// reshuffles is the same problem the sorted output exists to avoid. The lowest
+// run key wins, which is stable.
+//
+// NOTHING DOWNSTREAM CAN SEE THIS ORDER TODAY, and that is why it is a named
+// function. A name recorded by several runs has its label dropped as untrue of
+// any one of them, and a name recorded by one run has a single candidate, so the
+// choice is forced either way and every assertion about it passes whatever this
+// returns — removing the sort entirely leaves the suite green. A bound with no
+// live witness is the shape that rots, so it is tested here directly instead of
+// being certified by accident.
+func sortedRunKeys(observed map[string]map[string][]float64) []string {
+	keys := make([]string, 0, len(observed))
+	for key := range observed {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // ConflictsAcrossRuns reports numbers in claim that contradict EVERY run this
@@ -722,17 +866,7 @@ func (l *Ledger) ConflictsAcrossRuns(claim string) []Conflict {
 		run    Run
 		runs   int
 	}
-	// THE RUN QUOTED IS CHOSEN DETERMINISTICALLY. Map iteration order is
-	// randomised per range, so taking whichever run came first made the nudge
-	// name a different command between identical passes — and this text reaches
-	// a model, where a message that reshuffles is the same problem the sorted
-	// output below exists to avoid. The lowest run key that recorded the name
-	// wins, which is stable and does not depend on how the map was built.
-	keys := make([]string, 0, len(l.observed))
-	for key := range l.observed {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
+	keys := sortedRunKeys(l.observed)
 
 	merged := map[string]*sighting{}
 	names := map[string][]float64{}

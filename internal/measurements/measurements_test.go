@@ -1,6 +1,7 @@
 package measurements
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -417,32 +418,24 @@ func TestAcrossRunsAcceptsAValueAnyRunPrinted(t *testing.T) {
 		}
 	}
 
-	// AND THE RUN IT QUOTES IS STABLE. This text reaches a model; naming a
-	// different command between identical passes is the same problem the sorted
-	// output exists to avoid.
-	// DIFFERENT NAMES PER RUN, deliberately. Recording the SAME name under both
-	// runs makes the report a merged one, which drops the label — so this
-	// assertion watched an always-empty string and could not have failed. That
-	// was introduced by the merged-attribution fix in this same PR: a change to
-	// production code silently disarmed a test guarding a different property.
-	// One name per run keeps a single run behind each conflict, which is the only
-	// case where a label is quoted at all.
-	labels := map[string]bool{}
-	for attempt := 0; attempt < 200; attempt++ {
-		stable := NewLedger()
-		stable.Record(plain, "--- PASS: TestOnlyPlain (1.00s)\n")
-		stable.Record(race, "--- PASS: TestOnlyRace (9.00s)\n")
-		reported := stable.ConflictsAcrossRuns("TestOnlyPlain took 45.00s")
-		if len(reported) != 1 {
-			t.Fatalf("attempt %d: expected one conflict, got %+v", attempt, reported)
-		}
-		if reported[0].Run.Label() == "" {
-			t.Fatalf("attempt %d: a single-run conflict quoted no command, so this test observes nothing", attempt)
-		}
-		labels[reported[0].Run.Label()] = true
-	}
-	if len(labels) != 1 {
-		t.Errorf("the quoted run varies between identical passes: %v", labels)
+	// AND THE RUN IT QUOTES IS THE ONE THAT RECORDED THE NAME, named here rather
+	// than checked for being non-empty.
+	//
+	// THIS IS NOT THE DETERMINISM CHECK, though it used to be dressed as one:
+	// 200 identical passes collected the label into a set and required the set to
+	// hold one entry. TestOnlyPlain is recorded by a single run, so a single
+	// candidate exists however the map iterates and the set could not hold two.
+	// It was vacuous by accident before that — the same name under both runs
+	// makes the report a merged one, and merged reports drop the label, so it
+	// watched an empty string — and vacuous by construction after the repair.
+	// Determinism is asserted where something can actually reshuffle, in
+	// TestTheReportIsIdenticalBetweenIdenticalPasses.
+	stable := NewLedger()
+	stable.Record(plain, "--- PASS: TestOnlyPlain (1.00s)\n")
+	stable.Record(race, "--- PASS: TestOnlyRace (9.00s)\n")
+	reported := stable.ConflictsAcrossRuns("TestOnlyPlain took 45.00s")
+	if len(reported) != 1 || reported[0].Run.Label() != "go test ./..." {
+		t.Fatalf("a single-run conflict must quote the command that recorded it: %+v", reported)
 	}
 
 	// THE TWO ENTRY POINTS KEEP SEPARATE BOOKS, deliberately. They answer
@@ -849,5 +842,251 @@ func TestAZeroValueLedgerSurvivesAContradiction(t *testing.T) {
 	across.Record(Run{}, "--- PASS: TestSomething (1.25s)\n")
 	if conflicts := across.ConflictsAcrossRuns("TestSomething took 99s"); len(conflicts) != 1 {
 		t.Errorf("a zero-value ledger did not report the contradiction across runs: %+v", conflicts)
+	}
+}
+
+// DETERMINISM IS ASSERTED WHERE SOMETHING CAN ACTUALLY RESHUFFLE.
+//
+// Both entry points build their report by ranging over maps, and Go randomises
+// that order per range, so the sort at the end of each is the only thing keeping
+// two identical passes from producing two different texts. This text reaches a
+// model, where a message that reshuffles between passes is a diff nobody can
+// read — the reason the sorts are there at all.
+//
+// Nothing observed them. The assertion that claimed to was written against a
+// name only one run had recorded, which leaves one candidate however the map
+// iterates; deleting BOTH sorts left the whole suite green over twenty runs. One
+// name cannot catch an ordering, so this uses four and pins the exact report:
+// name, value, quoted command and recorded values, in order.
+func TestTheReportIsIdenticalBetweenIdenticalPasses(t *testing.T) {
+	plain := Run{Command: "go", Args: []string{"test", "./..."}}
+	race := Run{Command: "go", Args: []string{"test", "-race", "./..."}}
+	const fromPlain = "--- PASS: TestAlpha (1.00s)\n--- PASS: TestBravo (2.00s)\n--- PASS: TestShared (1.00s)\n"
+	const fromRace = "--- PASS: TestCharlie (3.00s)\n--- PASS: TestShared (9.00s)\n"
+	const claim = "TestAlpha took 45.00s; TestBravo took 46.00s; TestCharlie took 47.00s; TestShared took 48.00s"
+
+	report := func(conflicts []Conflict) string {
+		var b strings.Builder
+		for _, conflict := range conflicts {
+			fmt.Fprintf(&b, "%s=%v@%q%v|", conflict.Name, conflict.Claimed, conflict.Run.Label(), conflict.Recorded)
+		}
+		return b.String()
+	}
+
+	// TestShared is recorded by BOTH runs deliberately: its label is dropped as
+	// untrue of either one, so the ordering has a fourth distinct rendering to
+	// get wrong rather than three that differ only in their command.
+	const wantAcross = `TestAlpha=45@"go test ./..."[1]|TestBravo=46@"go test ./..."[2]|TestCharlie=47@"go test -race ./..."[3]|TestShared=48@""[1 9]|`
+	const wantPerRun = `TestAlpha=45@"go test ./..."[1]|TestBravo=46@"go test ./..."[2]|TestShared=48@"go test ./..."[1]|`
+
+	// A fresh ledger each pass: the dedupe is per-Ledger, so a reused one would
+	// report nothing after the first attempt and the loop would assert on empty.
+	for attempt := 0; attempt < 200; attempt++ {
+		across := NewLedger()
+		across.Record(plain, fromPlain)
+		across.Record(race, fromRace)
+		if got := report(across.ConflictsAcrossRuns(claim)); got != wantAcross {
+			t.Fatalf("attempt %d: the cross-run report is not what identical passes must produce:\n got %s\nwant %s", attempt, got, wantAcross)
+		}
+
+		perRun := NewLedger()
+		perRun.Record(plain, fromPlain)
+		perRun.Record(race, fromRace)
+		if got := report(perRun.Conflicts(plain, claim)); got != wantPerRun {
+			t.Fatalf("attempt %d: the per-run report is not what identical passes must produce:\n got %s\nwant %s", attempt, got, wantPerRun)
+		}
+	}
+}
+
+// THE ORDER THE MERGE WALKS IS PINNED HERE BECAUSE NOTHING DOWNSTREAM CAN SEE IT.
+//
+// sortedRunKeys decides which run a merged sighting keeps. A name recorded by
+// several runs has its label dropped as untrue of any one of them, and a name
+// recorded by one run has a single candidate, so every assertion about the
+// report passes whatever order this returns — reversing it, or deleting the sort
+// inside it, leaves the suite green. That is the shape of bound this package has
+// already shipped twice: alive-looking and certifying nothing. It is asserted
+// directly instead, so it stays true for the next caller that does depend on it.
+func TestTheRunOrderTheMergeWalksIsStable(t *testing.T) {
+	runs := []Run{
+		{},
+		{Command: "go", Args: []string{"test", "-race", "./..."}},
+		{Command: "go", Args: []string{"test", "./..."}},
+		{Command: "go", Args: []string{"test", "./internal/agent"}},
+		{Command: "go", Args: []string{"test", "./..."}, Dir: "/w"},
+	}
+	observed := map[string]map[string][]float64{}
+	for _, run := range runs {
+		observed[run.key()] = map[string][]float64{"TestFoo": {1}}
+	}
+	// Byte order of the keys, written out rather than computed with the function
+	// under test: the zero run first, then "-race" ahead of "./..." because the
+	// hyphen sorts below the dot, and the directory-qualified key last.
+	want := []string{
+		runs[0].key(), runs[1].key(), runs[2].key(), runs[3].key(), runs[4].key(),
+	}
+
+	for attempt := 0; attempt < 200; attempt++ {
+		got := sortedRunKeys(observed)
+		if len(got) != len(want) {
+			t.Fatalf("attempt %d: got %d keys, want %d", attempt, len(got), len(want))
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("attempt %d: key %d is %q, want %q — the merge walks the runs in map order", attempt, i, got[i], want[i])
+			}
+		}
+	}
+}
+
+// A SUBJECT THAT FOLLOWS ITS OWN NUMBER STILL OWNS IT.
+//
+// The subject rule scanned only what came BEFORE the next duration, so a
+// separator with the figure first and its subject second looked like plain
+// presentation — the shape a table or an aside uses for a test's own timing — and
+// the neighbouring number was charged to the name in front of it:
+//
+//	recorded: TestFoo 0.10s
+//	claim:    "TestFoo passed; 4.20s was the whole suite."
+//	  -> [{Name:TestFoo Claimed:4.2 Recorded:[0.1]}]
+//
+// Every word of that claim is true, and 4.20s belongs to the suite named
+// immediately after it. Which side of a figure its subject sits on says nothing
+// about who owns it.
+func TestASubjectFollowingItsNumberEndsTheClause(t *testing.T) {
+	for _, claim := range []string{
+		"TestFoo passed; 4.20s was the whole suite.",
+		"TestFoo passed - 4.20s was the package total",
+		"TestFoo passed | 4.20s for the whole package",
+		"TestFoo ok: 4.20s across every package",
+		"TestFoo passed (4.20s for the suite)",
+		"TestFoo was fine, 4.20s covered every package",
+	} {
+		ledger := NewLedger()
+		ledger.Record(Run{}, "--- PASS: TestFoo (0.10s)\n")
+		if conflicts := ledger.Conflicts(Run{}, claim); len(conflicts) != 0 {
+			t.Errorf("a following subject's number was charged to this test: %q -> %+v", claim, conflicts)
+		}
+	}
+
+	// AND THE PRESENTATION FORMS STILL READ, which is what the trailing scan
+	// stopping at the end of the figure's own segment buys: the words in the next
+	// table cell and the next sentence are not that figure's subject, and cutting
+	// there would silence a real fabrication.
+	for _, claim := range []string{
+		"TestFoo (9.90s)",
+		"TestFoo passed, 9.90s",
+		"| TestFoo | 9.90s | passes |",
+		"TestFoo passed, 9.90s. The suite took 34.249s.",
+		"TestFoo passed (9.90s) and the suite took 34.249s",
+	} {
+		ledger := NewLedger()
+		ledger.Record(Run{}, "--- PASS: TestFoo (0.10s)\n")
+		conflicts := ledger.Conflicts(Run{}, claim)
+		if len(conflicts) != 1 || conflicts[0].Claimed != 9.9 {
+			t.Errorf("a test's own number stopped being read: %q -> %+v", claim, conflicts)
+		}
+	}
+}
+
+// AN "m" THAT IS NOT A DURATION IS NOT MINUTES.
+//
+// The minute pattern matches any figure with an "m" and a word boundary after
+// it, and position decides between the forms, so a count of rows won over the
+// timing standing beside it:
+//
+//	recorded: TestParseCorpus 0.86s
+//	claim:    "TestParseCorpus handled 5m rows in 0.86s"
+//	  -> [{Name:TestParseCorpus Claimed:300 Recorded:[0.86]}]
+//
+// The report is truthful and the nudge quotes 300s back at it, a number its
+// answer never contained — this package's own failure mode, in its own parser.
+//
+// An ambiguous bare unit now reports NOTHING rather than a second-choice figure,
+// because reaching past it would decide the same question by guessing. The cost
+// is asserted below too: "took 2m to finish" is unreadable, and a figure
+// fabricated in that spelling goes uncaught.
+func TestANonDurationUnitIsNotReadAsMinutes(t *testing.T) {
+	for _, claim := range []string{
+		"TestParseCorpus handled 5m rows in 0.86s",
+		"TestParseCorpus processed 5m tokens",
+		"TestParseCorpus scanned 12m records and passed",
+		"TestParseCorpus walked 5m lines",
+	} {
+		ledger := NewLedger()
+		ledger.Record(Run{}, "--- PASS: TestParseCorpus (0.86s)\n")
+		if conflicts := ledger.Conflicts(Run{}, claim); len(conflicts) != 0 {
+			t.Errorf("a count was read as minutes and a truthful report accused of it: %q -> %+v", claim, conflicts)
+		}
+	}
+
+	// The exact readings, so a change that trades one wrong number for another
+	// cannot pass. A compound form cannot be a count and a bare figure with no
+	// word after it has no noun to be counting, so both still read.
+	for _, c := range []struct {
+		tail    string
+		seconds float64
+		ok      bool
+	}{
+		{" handled 5m rows in 0.86s", 0, false},
+		{" 5m rows", 0, false},
+		{" 9h of wall time", 0, false},
+		{" took 2m to finish", 0, false},
+		{" took 2m", 120, true},
+		{" took 5m.", 300, true},
+		{" (5m)", 300, true},
+		{" | 2m |", 120, true},
+		{" took 1m10s to finish", 70, true},
+		{" took 2h30m of wall time", 9000, true},
+		{" took 0.86s over 5m rows", 0.86, true},
+	} {
+		got, ok := parseClaimedDuration(c.tail)
+		if got != c.seconds || ok != c.ok {
+			t.Errorf("parseClaimedDuration(%q) = %v, %v; want %v, %v", c.tail, got, ok, c.seconds, c.ok)
+		}
+	}
+
+	// And a minute figure that really is one is still caught, whole.
+	caught := NewLedger()
+	caught.Record(Run{}, "--- PASS: TestSlow (70.00s)\n")
+	if conflicts := caught.Conflicts(Run{}, "TestSlow took 5m"); len(conflicts) != 1 || conflicts[0].Claimed != 300 {
+		t.Errorf("a bare minute figure with no word after it stopped being read: %+v", conflicts)
+	}
+}
+
+// AND THE CLAUSE SCAN REFUSES WHAT THE PARSER REFUSES.
+//
+// The scan locates the next duration to decide whether a separator introduces a
+// new subject, so the two have to agree about what a duration is — the hour form
+// was added to it for that reason, and an ambiguous bare unit is the same
+// requirement from the other side. While the scan still counted "5m" as a
+// duration, it found no word before it, read the punctuation as presentation,
+// and handed the count to the name in front as a timing the parser itself would
+// have refused:
+//
+//	recorded: TestFoo 0.10s
+//	claim:    "TestFoo passed; 5m and the suite took 4.20s"
+//	  -> [{Name:TestFoo Claimed:300 Recorded:[0.1]}]
+//
+// A conjunction directly after the figure is what exposes it: the trailing scan
+// stops at that separator, so the words beyond it cannot end the clause either,
+// and the ambiguous token is the only thing standing between the name and a
+// number that is not its own.
+func TestTheClauseScanRefusesWhatTheParserRefuses(t *testing.T) {
+	for _, claim := range []string{
+		"TestFoo passed; 5m and the suite took 4.20s",
+		"TestFoo passed, 5m and the whole run took 4.20s",
+		"TestFoo passed: 5m but the suite took 4.20s",
+		"TestFoo passed | 5m while the suite took 4.20s",
+		"TestFoo passed (5m and the suite took 4.20s)",
+		"TestFoo passed; 5m though the suite took 4.20s",
+		// The hour form the same way, at 32400s rather than 300s.
+		"TestFoo ok; 9h and the suite took 4.20s",
+	} {
+		ledger := NewLedger()
+		ledger.Record(Run{}, "--- PASS: TestFoo (0.10s)\n")
+		if conflicts := ledger.Conflicts(Run{}, claim); len(conflicts) != 0 {
+			t.Errorf("the clause scan read a token the parser refuses: %q -> %+v", claim, conflicts)
+		}
 	}
 }
