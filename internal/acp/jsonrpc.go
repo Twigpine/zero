@@ -27,6 +27,7 @@ const (
 	codeMethodNotFound = -32601
 	codeInvalidParams  = -32602
 	codeInternalError  = -32603
+	codeServerBusy     = -32000
 )
 
 // rpcError is a JSON-RPC 2.0 error object.
@@ -335,15 +336,28 @@ func (c *Conn) handleLine(ctx context.Context, line []byte) {
 	case msg.isResponse():
 		c.deliver(msg)
 	case msg.isRequest():
-		c.wg.Add(1)
-		go func(m rpcMessage) {
-			defer c.wg.Done()
-			if !c.acquireSem(ctx) {
-				return
+		if c.sem != nil {
+			select {
+			case c.sem <- struct{}{}:
+				c.wg.Add(1)
+				go func(m rpcMessage) {
+					defer c.wg.Done()
+					defer c.releaseSem()
+					c.dispatchRequest(ctx, m)
+				}(msg)
+			default:
+				c.writeError(msg.ID, &rpcError{
+					Code:    codeServerBusy,
+					Message: "server busy: max concurrent requests exceeded",
+				})
 			}
-			defer c.releaseSem()
-			c.dispatchRequest(ctx, m)
-		}(msg)
+		} else {
+			c.wg.Add(1)
+			go func(m rpcMessage) {
+				defer c.wg.Done()
+				c.dispatchRequest(ctx, m)
+			}(msg)
+		}
 	case msg.isNotify():
 		if fn := c.notifiers[msg.Method]; fn != nil {
 			c.wg.Add(1)

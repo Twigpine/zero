@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -503,6 +504,53 @@ func TestConnBidirectionalDuringHandler(t *testing.T) {
 	}
 	if !out.Ran {
 		t.Fatal("expected ran=true via mid-handler callback")
+	}
+}
+
+func TestConnSaturatedRequestsReturnsServerBusy(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	outReader, outWriter := io.Pipe()
+	defer inWriter.Close()
+	defer outReader.Close()
+
+	conn := NewConn(inReader, outWriter)
+	// Use a small 2-slot semaphore for test
+	conn.sem = make(chan struct{}, 2)
+
+	handlerBlock := make(chan struct{})
+	defer close(handlerBlock)
+
+	conn.Handle("slow", func(ctx context.Context, params json.RawMessage) (any, error) {
+		<-handlerBlock
+		return "ok", nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = conn.Serve(ctx) }()
+
+	// Send 2 requests that fill semaphore slots
+	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","id":1,"method":"slow","params":{}}` + "\n"))
+	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","id":2,"method":"slow","params":{}}` + "\n"))
+
+	// Wait until both slots are occupied
+	for len(conn.sem) < 2 {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Send 3rd request while pool is saturated
+	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","id":3,"method":"slow","params":{}}` + "\n"))
+
+	scanner := bufio.NewScanner(outReader)
+	if !scanner.Scan() {
+		t.Fatalf("expected response line, got none: %v", scanner.Err())
+	}
+	var resp rpcMessage
+	if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Error == nil || resp.Error.Code != codeServerBusy {
+		t.Fatalf("resp.Error = %#v, want code %d (Server Busy)", resp.Error, codeServerBusy)
 	}
 }
 
