@@ -335,7 +335,7 @@ func admissionSentences(lower string) []string {
 // unfinished work as done. The markers now have to be about what the run WAS
 // GIVEN, not about a tool being mentioned at all.
 var toolGrantMarkers = []string{
-	"tool available", "tools available", "no such tool", "not available in this",
+	"tool available", "tools available", "no such tool",
 	"tool is available", "tools are available", "tool was available", "tools were available",
 	"tool is not available", "tools are not available",
 	"tool isn't available", "tools aren't available",
@@ -343,6 +343,15 @@ var toolGrantMarkers = []string{
 	"tools were provided", "tools were given", "toolset provided",
 	"in this specialist context", "in this context only",
 	"is not in my toolset", "not in my toolset", "not in this toolset",
+}
+
+func hasToolGrantContext(sentence string) bool {
+	if !containsAny(sentence, toolGrantMarkers) {
+		return false
+	}
+	return containsAny(sentence, []string{
+		"tool", "tools", "toolset", "provided", "were given", "specialist context",
+	})
 }
 
 // toolCaveatIsTheStatement reports whether the tool mention IS what the inability
@@ -371,6 +380,9 @@ var toolGrantMarkers = []string{
 // A sentence with no inability before the tool mention is a bare capability note
 // and stays exempt.
 func toolCaveatIsTheStatement(sentence string) bool {
+	if !hasToolGrantContext(sentence) {
+		return false
+	}
 	toolAt := firstIndexOfAny(sentence, toolGrantMarkers)
 	if toolAt < 0 {
 		return false
@@ -412,10 +424,31 @@ func firstStemBefore(s string, limit int) (int, int) {
 // clauseBoundaries end the clause an inability was stated in. Punctuation and
 // connectives together, because a person separating two statements reaches for
 // either and the detector should not care which.
-var clauseBoundaries = []string{
-	";", ":", ",", ".", "(", ")", "|", "\u2014", "\u2013", " - ", " -- ",
-	"because", "since ", " as ", "due to", "owing to", "given that",
+var structuralClauseBoundaries = []string{
+	"; ", ": ", ", so ", ", but ", ", therefore", ", leaving ", ", which ",
 	" so ", " but ", " and ", " while ", " though ", " although ",
+	" - ", " -- ",
+}
+
+var clauseBoundaries = append([]string{
+	";", ":", ",", ".", "(", ")", "|",
+	"because", "since ", " as ", "due to", "owing to", "given that",
+}, structuralClauseBoundaries...)
+
+func clauseContaining(sentence string, at int) string {
+	start, end := 0, len(sentence)
+	for _, boundary := range structuralClauseBoundaries {
+		if before := strings.LastIndex(sentence[:at], boundary); before >= 0 {
+			candidate := before + len(boundary)
+			if candidate > start {
+				start = candidate
+			}
+		}
+		if after := strings.Index(sentence[at:], boundary); after >= 0 && at+after < end {
+			end = at + after
+		}
+	}
+	return strings.TrimSpace(sentence[start:end])
 }
 
 func containsClauseBoundary(between string) bool {
@@ -430,12 +463,48 @@ func containsClauseBoundary(between string) bool {
 // than being waved through — which is the direction this detector should fail
 // in when it cannot tell.
 var deliveredAlternativeMarkers = []string{
-	"instead", "by hand", "manually", "directly",
-	"proceeded", "went ahead", "carried on",
+	"instead", "by hand", "manually", "directly", "in this answer", "into this answer",
+}
+
+var deliveredAlternativeVerbs = []string{
+	"i wrote", "i have written", "i've written", "i checked", "i read", "i listed",
+	"i summarised", "i summarized", "i provided", "i completed", "i finished",
+	"i did", "i performed", "i used", "i report", "i reported",
+	"i proceeded", "i went ahead", "i carried on",
+}
+
+var attemptedAlternativeMarkers = []string{
+	"i tried", "i attempted", "i planned", "i intend", "i would", "i could try",
+}
+
+var deliveredAlternativeOutcomes = []string{
 	"in this answer", "into this answer", "in the answer",
 	"was not needed", "were not needed", "not needed here", "did not need",
 	"which was unnecessary", "so i read", "so i wrote", "so i checked",
 	"so i listed", "so i summarised", "so i summarized", "so i used",
+}
+
+func deliveredAlternative(sentence string) bool {
+	if containsAny(sentence, attemptedAlternativeMarkers) {
+		return false
+	}
+	if containsAny(sentence, deliveredAlternativeOutcomes) {
+		return true
+	}
+	for _, marker := range deliveredAlternativeMarkers {
+		for start := 0; ; {
+			rel := strings.Index(sentence[start:], marker)
+			if rel < 0 {
+				break
+			}
+			at := start + rel
+			if containsAny(clauseContaining(sentence, at), deliveredAlternativeVerbs) {
+				return true
+			}
+			start = at + len(marker)
+		}
+	}
+	return false
 }
 
 // objectiveFailureMarkers name the OBJECTIVE rather than a capability. A
@@ -464,6 +533,24 @@ var objectiveFailureMarkers = []string{
 	"complete what was asked", "completing what was asked",
 	"finish what was asked", "finishing what was asked",
 	"do this task", "perform this task", "carry out this task",
+}
+
+func hasObjectiveFailure(sentence string) bool {
+	for _, marker := range objectiveFailureMarkers {
+		for start := 0; ; {
+			rel := strings.Index(sentence[start:], marker)
+			if rel < 0 {
+				break
+			}
+			at := start + rel
+			stemAt, stemLen := firstStemBefore(sentence, at)
+			if stemAt >= 0 && !containsClauseBoundary(sentence[stemAt+stemLen:at]) {
+				return true
+			}
+			start = at + len(marker)
+		}
+	}
+	return false
 }
 
 // blockedWorkMarkers are what turns an absence-establishing sentence back into
@@ -598,6 +685,8 @@ func cutFirstWord(text string) (word string, rest string, ok bool) {
 
 var blockedWorkMarkers = []string{
 	"unverified", "not verified", "cannot verify", "could not verify",
+	"unapplied", "not applied", "untested", "was never run", "were never run",
+	"was not run", "were not run", "tests not run",
 	"someone else", "will need to", "needs someone", "handed off", "hand off",
 	// "someone else" and "will need to" are the two that also appear in
 	// SUCCESSFUL reports, describing somebody else's future work — "I could not
@@ -646,6 +735,8 @@ var bareInabilityStems = []string{"so i cannot", "so i could not"}
 // to another subject, which is what the lookahead's topic-shift guard is for.
 var unambiguousFailureStates = []string{
 	"unverified", "not verified",
+	"unapplied", "not applied", "untested", "was never run", "were never run",
+	"was not run", "were not run", "tests not run",
 	"is unresolved", "remains unresolved",
 	"still broken",
 	"is blocked", "are blocked", "remains blocked", "stays blocked", "still blocked",
@@ -670,7 +761,7 @@ var unambiguousFailureStates = []string{
 // the case the override was added for. What separates them is position: after a
 // consequence boundary the state is being asserted, inside a "that…" clause it is
 // the thing being denied.
-var consequenceBoundaries = []string{", so ", "; ", ", but ", ", therefore", ", leaving ", ", which "}
+var consequenceBoundaries = structuralClauseBoundaries
 
 // reportedConsequence returns the part of a sentence that states the OUTCOME,
 // or "" when the sentence never turns to one. Everything before the first
@@ -749,16 +840,20 @@ var topicShiftMarkers = []string{
 // stem.
 func countedLabelSentence(sentence string) bool {
 	trimmed := strings.TrimLeft(strings.TrimSpace(sentence), "-*#> \t")
-	if !strings.HasPrefix(trimmed, "unable to ") {
-		return false
-	}
-	return countedLabelSuffix.MatchString(sentence)
+	return countedLabelHeading.MatchString(trimmed)
 }
 
-var countedLabelSuffix = regexp.MustCompile(`\(\s*\d+\s*\)`)
+var countedLabelHeading = regexp.MustCompile(`^unable to [^:()]*\(\s*\d+\s*\)\s*:\s*(?:\*\*)?(?:\s|$)`)
+
+func normalizeAdmissionText(text string) string {
+	return strings.NewReplacer(
+		"\u2019", "'", "\u2018", "'", "\u02bc", "'",
+		"\u2014", " - ", "\u2013", " - ",
+	).Replace(text)
+}
 
 func selfReportedIncompletion(text string) string {
-	sentences := admissionSentences(strings.ToLower(stripQuoted(text)))
+	sentences := admissionSentences(strings.ToLower(normalizeAdmissionText(stripQuoted(text))))
 	for index, sentence := range sentences {
 		// THE CONSEQUENCE IS OFTEN THE NEXT SENTENCE. The blocked-work override
 		// only ever saw the sentence the allowance fired in, so the same
@@ -828,11 +923,20 @@ func selfReportedIncompletion(text string) string {
 		//
 		// The exemption exists for a tool that was NOT NEEDED, and what shows it
 		// was not needed is the alternative the sentence goes on to describe.
-		if containsAny(sentence, toolGrantMarkers) &&
-			(toolCaveatIsTheStatement(sentence) || containsAny(sentence, deliveredAlternativeMarkers)) &&
-			!containsAny(sentence, objectiveFailureMarkers) &&
+		if hasToolGrantContext(sentence) &&
+			(toolCaveatIsTheStatement(sentence) || deliveredAlternative(sentence)) &&
+			!hasObjectiveFailure(sentence) &&
 			!containsAny(sentence, blockedStateMarkers) {
 			continue
+		}
+		// A tool limitation can report blocked work without using a first-person
+		// inability stem: "No edit tool is available, so the change remains
+		// unapplied." The explicit bad state is the admission in that shape. Keep
+		// this narrow to a tool-grant statement plus an unambiguous consequence so
+		// ordinary discussion of an unavailable fixture or platform is not enough.
+		if hasToolGrantContext(sentence) &&
+			containsAny(reportedConsequence(sentence), unambiguousFailureStates) {
+			return selfReportReason("tool limitation left work blocked")
 		}
 		for _, stem := range inabilityStems {
 			// Scan EVERY occurrence of the stem, not just the first: an earlier

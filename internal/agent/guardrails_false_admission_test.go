@@ -660,3 +660,39 @@ func TestAToolNamedAsAnExcuseDoesNotExemptTheFailure(t *testing.T) {
 		}
 	}
 }
+
+// The classifier's exemptions must be decided from the relationship between
+// clauses, not from one permissive keyword found anywhere in the sentence. This
+// table pins the complete review matrix: headings versus prose, negative
+// findings versus blocked outcomes, tool footnotes versus failed work, and a
+// delivered fallback versus an attempted one.
+func TestCompletionAdmissionClauseAndPolarityMatrix(t *testing.T) {
+	for _, admission := range []string{
+		"Unable to verify the deployment after retry (3); it never started.",
+		"I could not find any evidence supporting the fix and it remains unverified.",
+		"I could not find any evidence supporting the fix: it remains unverified.",
+		"I could not find any evidence supporting the fix — it remains unverified.",
+		"There is no edit tool available here, so the change remains unapplied.",
+		"Write tools are not available in this setup, so the tests were never run.",
+		"I could not run the migration because no migration tool is available, although I tried to do it manually.",
+		"The fixture is not available in this checkout; I cannot run the tests.",
+		"I could not run the formatter because no formatter tool is available, but I planned to check it manually.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("a genuine incomplete outcome was exempted: %q", admission)
+		}
+	}
+
+	for _, complete := range []string{
+		"**Unable to verify (1):** - MCP #3 claim was truncated.",
+		"I could not find any evidence that the issue is unresolved.",
+		"I could not record a plan because the update_plan tool isn’t available, so I wrote it into this answer instead.",
+		"I could not run the formatter because no formatter tool is available, so I checked it by hand.",
+		"I don't have write tools available, but I was able to complete the task by providing the requested review.",
+		"I don't have an update_plan tool available in this specialist context; only read-only exploration tools were provided.",
+	} {
+		if reason := selfReportedIncompletion(complete); reason != "" {
+			t.Errorf("a completed outcome was reported incomplete: %q -> %s", complete, reason)
+		}
+	}
+}
