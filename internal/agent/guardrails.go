@@ -311,8 +311,10 @@ func admissionSentences(lower string) []string {
 // retells a past exchange (narrativeMarkers) is skipped entirely — an admission
 // must be the model's own report about the CURRENT objective, not general
 // language that merely resembles one.
-// toolGrantMarkers flag a sentence as reporting WHICH TOOLS this run was given,
-// not whether the work was done.
+// toolCapabilityMarkers identify statements about tool capability. They do NOT
+// establish polarity: positive availability is intentionally included so the
+// parser can locate the capability phrase, while hasUnavailableToolContext is
+// the only predicate allowed to grant an absence-based exemption.
 //
 // A read-only plan task is SUPPOSED to say this. One wrote "I don't have an
 // update_plan tool available in this specialist context (only read-only
@@ -335,24 +337,57 @@ func admissionSentences(lower string) []string {
 // direction: a false positive costs a re-run, a false negative reports
 // unfinished work as done. The markers now have to be about what the run WAS
 // GIVEN, not about a tool being mentioned at all.
-var toolGrantMarkers = []string{
+var toolCapabilityMarkers = []string{
 	"tool available", "tools available", "no such tool",
 	"tool is available", "tools are available", "tool was available", "tools were available",
 	"tool is not available", "tools are not available",
 	"tool isn't available", "tools aren't available",
+	"tool is unavailable", "tools are unavailable", "tool was unavailable", "tools were unavailable",
 	"read-only tools", "read only tools", "only read-only", "only read only",
 	"tools were provided", "tools were given", "toolset provided",
 	"in this specialist context", "in this context only",
 	"is not in my toolset", "not in my toolset", "not in this toolset",
 }
 
-func hasToolGrantContext(sentence string) bool {
-	if !containsAny(sentence, toolGrantMarkers) {
+func hasToolCapabilityContext(sentence string) bool {
+	if !containsAny(sentence, toolCapabilityMarkers) {
 		return false
 	}
 	return containsAny(sentence, []string{
-		"tool", "tools", "toolset", "provided", "were given", "specialist context",
+		"tool", "tools", "toolset", "provided", "were given", "specialist context", "update_plan",
 	})
+}
+
+var unavailableToolPattern = regexp.MustCompile(`\bno(?:\s+[[:alnum:]_'-]+){0,6}\s+tools?(?:\s+(?:is|are))?\s+available\b`)
+
+var explicitUnavailableToolMarkers = []string{
+	"no such tool", "tool is not available", "tools are not available",
+	"tool isn't available", "tools aren't available",
+	"tool is unavailable", "tools are unavailable", "tool was unavailable", "tools were unavailable",
+	"is not in my toolset", "not in my toolset", "not in this toolset",
+	"read-only tools", "read only tools", "only read-only", "only read only",
+}
+
+// hasUnavailableToolContext is the single polarity contract for exemptions.
+// A positive statement such as "the test tool is available" must never prove
+// that a failed operation was harmless.
+func hasUnavailableToolContext(sentence string) bool {
+	if strings.Contains(sentence, "update_plan") && containsAny(sentence, []string{
+		"is unavailable", "was unavailable", "isn't available", "is not available",
+	}) {
+		return true
+	}
+	if !hasToolCapabilityContext(sentence) {
+		return false
+	}
+	if containsAny(sentence, explicitUnavailableToolMarkers) || unavailableToolPattern.MatchString(sentence) {
+		return true
+	}
+	return false
+}
+
+func possessionDenialStem(stem string) bool {
+	return containsAny(stem, []string{"do not have", "don't have", "did not have", "didn't have"})
 }
 
 // firstIndexOfAny returns the earliest offset at which any marker occurs, or -1.
@@ -492,7 +527,8 @@ func deliveredAlternativeAfter(sentence string, after int) bool {
 // tests. The groups are deliberately small because a match grants a completion
 // exemption and therefore must fail closed for unfamiliar wording.
 func alternativeMatchesFailedWork(failed, fallback string) bool {
-	recognizedFailedWork := false
+	recognizedGroups := 0
+	allGroupsCovered := true
 	for _, group := range [][]string{
 		{"plan", "update_plan"},
 		{"format", "formatter", "style", "lint", "gofmt"},
@@ -505,17 +541,29 @@ func alternativeMatchesFailedWork(failed, fallback string) bool {
 		{"publish", "release"},
 	} {
 		failedInGroup := containsAlternativeTerm(failed, group)
-		recognizedFailedWork = recognizedFailedWork || failedInGroup
-		if failedInGroup && containsAlternativeTerm(fallback, group) {
-			return true
+		if !failedInGroup {
+			continue
 		}
+		recognizedGroups++
+		if !containsAlternativeTerm(fallback, group) {
+			allGroupsCovered = false
+		}
+	}
+	if recognizedGroups == 0 {
+		return false
+	}
+	if allGroupsCovered {
+		return true
 	}
 	// A fallback is also commonly pronominal: "could not run the formatter ...
 	// checked it by hand" or "could not record a plan ... wrote it into this
 	// answer". The explicit "it" ties the completed action to a recognized
 	// failed operation; "checked the style" does not and therefore cannot stand
 	// in for tests merely because both are checks.
-	return recognizedFailedWork && containsAny(fallback, []string{
+	// A singular pronoun can safely cover one recognized operation, not a list
+	// of distinct obligations. Every operation in a coordinated failure must
+	// have substitute evidence before the inability is exempted.
+	return recognizedGroups == 1 && containsAny(fallback, []string{
 		"wrote it", "written it", "checked it", "read it", "listed it", "provided it",
 		"completed it", "finished it", "did it", "performed it", "used it",
 	})
@@ -540,7 +588,7 @@ func containsAlternativeTerm(text string, terms []string) bool {
 // without skipping a separate failed action later in the same sentence.
 func toolCaveatAt(sentence string, stemAt, stemLen int) bool {
 	clause := clauseContaining(sentence, stemAt)
-	if !hasToolGrantContext(clause) {
+	if !hasToolCapabilityContext(clause) {
 		return false
 	}
 	stem := sentence[stemAt : stemAt+stemLen]
@@ -548,12 +596,13 @@ func toolCaveatAt(sentence string, stemAt, stemLen int) bool {
 	if localStem < 0 {
 		return false
 	}
-	toolAt := firstIndexOfAny(clause[localStem+stemLen:], toolGrantMarkers)
+	toolAt := firstIndexOfAny(clause[localStem+stemLen:], toolCapabilityMarkers)
 	if toolAt < 0 {
 		return false
 	}
 	between := clause[localStem+stemLen : localStem+stemLen+toolAt]
-	return !containsClauseBoundary(between)
+	return !containsClauseBoundary(between) &&
+		(hasUnavailableToolContext(clause) || possessionDenialStem(stem))
 }
 
 var completedObjectiveMarkers = []string{
@@ -569,7 +618,8 @@ var harmlessGrantLimitedActions = []string{
 // orchestration tool made impossible. It does not generalize to product work
 // such as inspecting a page or running a migration.
 func harmlessToolLimitation(sentence string, stemAt, stemLen int) bool {
-	if !hasToolGrantContext(sentence) {
+	stem := sentence[stemAt : stemAt+stemLen]
+	if !hasUnavailableToolContext(sentence) && !possessionDenialStem(stem) {
 		return false
 	}
 	tail := strings.TrimSpace(sentence[stemAt+stemLen:])
@@ -1038,7 +1088,7 @@ func selfReportedIncompletion(text string) string {
 		// unapplied." The explicit bad state is the admission in that shape. Keep
 		// this narrow to a tool-grant statement plus an unambiguous consequence so
 		// ordinary discussion of an unavailable fixture or platform is not enough.
-		if hasToolGrantContext(sentence) &&
+		if hasUnavailableToolContext(sentence) &&
 			containsAny(reportedConsequence(sentence, 0), unambiguousFailureStates) {
 			return selfReportReason("tool limitation left work blocked")
 		}
@@ -1061,10 +1111,10 @@ func selfReportedIncompletion(text string) string {
 				// Exempt only this occurrence. A capability clause cannot hide a
 				// later failed action, and a completed fallback cannot be borrowed
 				// by a later inability in the same sentence.
-				if (toolCaveatAt(sentence, abs, len(stem)) && !hasObjectiveFailure(scope) && !containsAny(scope, blockedStateMarkers)) ||
-					(harmlessToolLimitation(sentence, abs, len(stem)) && !hasObjectiveFailure(scope) && !containsAny(scope, blockedStateMarkers)) ||
-					(hasToolGrantContext(scope) && deliveredAlternativeAfter(sentence, abs+len(stem)) && !hasObjectiveFailure(scope) &&
-						!containsAny(scope, blockedStateMarkers)) {
+				if (toolCaveatAt(sentence, abs, len(stem)) && !hasObjectiveFailure(scope) && !containsAny(blockedContext, blockedStateMarkers)) ||
+					(harmlessToolLimitation(sentence, abs, len(stem)) && !hasObjectiveFailure(scope) && !containsAny(blockedContext, blockedStateMarkers)) ||
+					(hasUnavailableToolContext(scope) && deliveredAlternativeAfter(sentence, abs+len(stem)) && !hasObjectiveFailure(scope) &&
+						!containsAny(blockedContext, blockedStateMarkers)) {
 					start = abs + len(stem)
 					continue
 				}

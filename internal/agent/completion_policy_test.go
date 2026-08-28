@@ -56,6 +56,34 @@ func TestCompletionPolicyClauseLocalAdmissionMatrix(t *testing.T) {
 	}
 }
 
+func TestCompletionPolicyToolExemptionPolarityAndObligations(t *testing.T) {
+	for _, text := range []string{
+		"I could not run a test tool available in my toolset.",
+		"I could not record a plan while update_plan is available.",
+		"I could not run tests or deploy a release because no tools are available, so I checked the tests by hand.",
+		"I could not deploy a release or run tests because no tools are available, so I checked the tests by hand.",
+		"I could not record a plan because update_plan is unavailable. The task remains incomplete.",
+		"I could not run the formatter because no formatter tool is available, so I checked it by hand. The output remains unverified.",
+	} {
+		got := newCompletionPolicy(false).evaluate(text, completionContext{})
+		if got.Decision != CompletionIncomplete {
+			t.Errorf("incomplete capability/fallback report decided %q: %q (%s)", got.Decision, text, got.Reason)
+		}
+	}
+
+	for _, text := range []string{
+		"The test tool is available in my toolset, and I ran all tests successfully.",
+		"I could not record a plan because update_plan is unavailable.",
+		"I could not run the formatter because no formatter tool is available, so I checked it by hand.",
+		"I could not run the formatter because no formatter tool is available, so I checked it by hand. Separately, documentation remains unverified.",
+	} {
+		got := newCompletionPolicy(false).evaluate(text, completionContext{})
+		if got.Decision != CompletionComplete {
+			t.Errorf("completed or unrelated report decided %q: %q (%s)", got.Decision, text, got.Reason)
+		}
+	}
+}
+
 func TestCompletionPolicyPreservesBoundedPlanStallProtection(t *testing.T) {
 	policy := newCompletionPolicy(false)
 	for attempt := 0; attempt < maxContinueNudges; attempt++ {
