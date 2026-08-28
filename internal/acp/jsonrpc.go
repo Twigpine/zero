@@ -30,6 +30,8 @@ const (
 	codeServerBusy     = -32000
 )
 
+var errFrameTooLarge = errors.New("acp: frame exceeds limit")
+
 // rpcError is a JSON-RPC 2.0 error object.
 type rpcError struct {
 	Code    int             `json:"code"`
@@ -189,6 +191,10 @@ func (c *Conn) Serve(ctx context.Context) error {
 		line, err := readNDJSONFrame(reader, limit)
 		interrupted := interruptible.generation() != before
 
+		if errors.Is(err, errFrameTooLarge) {
+			c.failAllPending(err)
+			return err
+		}
 		if len(bytes.TrimSpace(line)) > 0 {
 			c.handleLine(ctx, line)
 		}
@@ -212,7 +218,7 @@ func readNDJSONFrame(r *bufio.Reader, limit int64) ([]byte, error) {
 		chunk, err := r.ReadSlice('\n')
 		buf = append(buf, chunk...)
 		if limit > 0 && int64(len(buf)) > limit {
-			return buf, fmt.Errorf("acp: frame exceeds limit of %d bytes", limit)
+			return buf, fmt.Errorf("%w of %d bytes", errFrameTooLarge, limit)
 		}
 		if err == nil {
 			return buf, nil
@@ -346,10 +352,15 @@ func (c *Conn) handleLine(ctx context.Context, line []byte) {
 					c.dispatchRequest(ctx, m)
 				}(msg)
 			default:
-				c.writeError(msg.ID, &rpcError{
-					Code:    codeServerBusy,
-					Message: "server busy: max concurrent requests exceeded",
-				})
+				id := append(json.RawMessage(nil), msg.ID...)
+				c.wg.Add(1)
+				go func() {
+					defer c.wg.Done()
+					c.writeError(id, &rpcError{
+						Code:    codeServerBusy,
+						Message: "server busy: max concurrent requests exceeded",
+					})
+				}()
 			}
 		} else {
 			c.wg.Add(1)

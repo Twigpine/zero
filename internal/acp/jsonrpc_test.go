@@ -688,7 +688,11 @@ func TestReadNDJSONFrameRejectsOversizedTerminatedFrame(t *testing.T) {
 
 	server := NewConn(serverR, io.Discard)
 	server.frameLimit = 64 // 64 bytes frame limit for test injection
-	server.Handle("ping", func(_ context.Context, _ json.RawMessage) (any, error) { return "pong", nil })
+	var invoked atomic.Bool
+	server.Handle("ping", func(_ context.Context, _ json.RawMessage) (any, error) {
+		invoked.Store(true)
+		return "pong", nil
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer func() {
@@ -699,16 +703,82 @@ func TestReadNDJSONFrameRejectsOversizedTerminatedFrame(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() { errCh <- server.Serve(ctx) }()
 
-	// Send an oversized frame > 64 bytes terminated by \n
-	oversized := `{"jsonrpc":"2.0","id":1,"method":"ping","params":{"long_padding":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}` + "\n"
+	// Valid request padded with JSON whitespace past the limit: dispatch would
+	// run ping unless the frame-limit error is checked before handleLine.
+	oversized := `{"jsonrpc":"2.0","id":1,"method":"ping"}` + strings.Repeat(" ", 64) + "\n"
 	_, _ = clientW.Write([]byte(oversized))
 
 	select {
 	case err := <-errCh:
-		if err == nil || !strings.Contains(err.Error(), "exceeds limit") {
+		if err == nil || !errors.Is(err, errFrameTooLarge) {
 			t.Fatalf("expected frame limit error, got: %v", err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for Serve to reject oversized frame")
+	}
+	if invoked.Load() {
+		t.Fatal("handler invoked for an oversized frame")
+	}
+}
+
+type stallWriter struct {
+	started chan struct{}
+	gate    chan struct{}
+	once    sync.Once
+}
+
+func (w *stallWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.started) })
+	<-w.gate
+	return len(p), nil
+}
+
+func TestSaturatedBusyWriteDoesNotBlockCancelNotification(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	defer inWriter.Close()
+
+	started := make(chan struct{})
+	gate := make(chan struct{})
+	defer close(gate)
+	conn := NewConn(inReader, &stallWriter{started: started, gate: gate})
+	conn.sem = make(chan struct{}, 2)
+
+	handlerStarted := make(chan struct{}, 2)
+	conn.Handle("slow", func(ctx context.Context, _ json.RawMessage) (any, error) {
+		handlerStarted <- struct{}{}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	cancelSeen := make(chan struct{})
+	conn.HandleNotify("session/cancel", func(_ context.Context, _ json.RawMessage) {
+		close(cancelSeen)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = conn.Serve(ctx) }()
+
+	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","id":1,"method":"slow"}` + "\n"))
+	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","id":2,"method":"slow"}` + "\n"))
+	for i := 0; i < 2; i++ {
+		select {
+		case <-handlerStarted:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for slow handler %d", i)
+		}
+	}
+
+	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","id":3,"method":"slow"}` + "\n"))
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for busy write to start")
+	}
+
+	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","method":"session/cancel","params":{}}` + "\n"))
+	select {
+	case <-cancelSeen:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancel notification stalled behind a blocked busy write")
 	}
 }
