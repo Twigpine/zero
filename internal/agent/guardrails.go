@@ -354,46 +354,6 @@ func hasToolGrantContext(sentence string) bool {
 	})
 }
 
-// toolCaveatIsTheStatement reports whether the tool mention IS what the inability
-// is about, rather than an excuse offered for a separate action that did not
-// happen.
-//
-// POSITION, NOT VOCABULARY. This was an enumeration of causal connectives —
-// because, since, due to — and enumerating is how this class stays open. Only
-// the punctuation had to change to walk straight past it:
-//
-//	"I could not run the migration; no migration tool is available."
-//	"I could not run the migration: no migration tool is available."
-//	"I could not run the migration — no migration tool is available."
-//
-// Five of six ordinary forms were still exempted. Listing every connective and
-// every mark a person might type is the deny-list shape this repo has been bitten
-// by repeatedly; the relationship is the thing to test.
-//
-// The relationship is simple. If the inability's own clause is the tool statement
-// — "I don't have an update_plan tool available in this specialist context" —
-// then the caveat IS the statement and there is no failed action to excuse. If a
-// clause boundary of ANY kind sits between the inability and the tool mention,
-// something else was attempted first and the tool is being offered as the reason
-// it did not happen.
-//
-// A sentence with no inability before the tool mention is a bare capability note
-// and stays exempt.
-func toolCaveatIsTheStatement(sentence string) bool {
-	if !hasToolGrantContext(sentence) {
-		return false
-	}
-	toolAt := firstIndexOfAny(sentence, toolGrantMarkers)
-	if toolAt < 0 {
-		return false
-	}
-	stemAt, stemLen := firstStemBefore(sentence, toolAt)
-	if stemAt < 0 {
-		return true
-	}
-	return !containsClauseBoundary(sentence[stemAt+stemLen : toolAt])
-}
-
 // firstIndexOfAny returns the earliest offset at which any marker occurs, or -1.
 func firstIndexOfAny(s string, markers []string) int {
 	best := -1
@@ -473,21 +433,17 @@ var deliveredAlternativeVerbs = []string{
 	"i proceeded", "i went ahead", "i carried on",
 }
 
-var attemptedAlternativeMarkers = []string{
-	"i tried", "i attempted", "i planned", "i intend", "i would", "i could try",
-}
-
 var deliveredAlternativeOutcomes = []string{
-	"in this answer", "into this answer", "in the answer",
 	"was not needed", "were not needed", "not needed here", "did not need",
 	"which was unnecessary", "so i read", "so i wrote", "so i checked",
 	"so i listed", "so i summarised", "so i summarized", "so i used",
 }
 
 func deliveredAlternative(sentence string) bool {
-	if containsAny(sentence, attemptedAlternativeMarkers) {
-		return false
-	}
+	// A prior attempt does not erase a later completed fallback. Order matters:
+	// the relevant clause must itself contain a completion verb and an
+	// alternative marker. Bare location phrases such as "the error is in this
+	// answer" never prove that substitute work was delivered.
 	if containsAny(sentence, deliveredAlternativeOutcomes) {
 		return true
 	}
@@ -505,6 +461,75 @@ func deliveredAlternative(sentence string) bool {
 		}
 	}
 	return false
+}
+
+func nextInability(sentence string, after int) int {
+	best := -1
+	for _, stem := range inabilityStems {
+		if rel := strings.Index(sentence[after:], stem); rel >= 0 {
+			at := after + rel
+			if best < 0 || at < best {
+				best = at
+			}
+		}
+	}
+	return best
+}
+
+// deliveredAlternativeAfter scopes proof of substitute work to one inability.
+// A later inability starts a new claim and cannot borrow an earlier fallback.
+func deliveredAlternativeAfter(sentence string, after int) bool {
+	end := len(sentence)
+	if next := nextInability(sentence, after); next >= 0 {
+		end = next
+	}
+	return deliveredAlternative(sentence[after:end])
+}
+
+// toolCaveatAt recognizes only the inability occurrence whose own clause says
+// which tool was unavailable. A harmless capability note may then be skipped
+// without skipping a separate failed action later in the same sentence.
+func toolCaveatAt(sentence string, stemAt, stemLen int) bool {
+	clause := clauseContaining(sentence, stemAt)
+	if !hasToolGrantContext(clause) {
+		return false
+	}
+	stem := sentence[stemAt : stemAt+stemLen]
+	localStem := strings.Index(clause, stem)
+	if localStem < 0 {
+		return false
+	}
+	toolAt := firstIndexOfAny(clause[localStem+stemLen:], toolGrantMarkers)
+	if toolAt < 0 {
+		return false
+	}
+	between := clause[localStem+stemLen : localStem+stemLen+toolAt]
+	return !containsClauseBoundary(between)
+}
+
+var completedObjectiveMarkers = []string{
+	"task is complete", "task is now complete", "objective is complete", "objective is met",
+	"assignment is complete", "completed the analysis as requested", "here is what was asked for",
+}
+
+var harmlessGrantLimitedActions = []string{
+	"record a plan", "record the plan", "update the plan", "call update_plan", "use update_plan",
+}
+
+// harmlessToolLimitation covers bounded bookkeeping that an explicitly absent
+// orchestration tool made impossible. It does not generalize to product work
+// such as inspecting a page or running a migration.
+func harmlessToolLimitation(sentence string, stemAt, stemLen int) bool {
+	if !hasToolGrantContext(sentence) {
+		return false
+	}
+	tail := strings.TrimSpace(sentence[stemAt+stemLen:])
+	for _, action := range harmlessGrantLimitedActions {
+		if strings.HasPrefix(tail, action) {
+			return true
+		}
+	}
+	return containsAny(sentence[stemAt+stemLen:], completedObjectiveMarkers)
 }
 
 // objectiveFailureMarkers name the OBJECTIVE rather than a capability. A
@@ -761,23 +786,43 @@ var unambiguousFailureStates = []string{
 // the case the override was added for. What separates them is position: after a
 // consequence boundary the state is being asserted, inside a "that…" clause it is
 // the thing being denied.
-var consequenceBoundaries = structuralClauseBoundaries
+var consequenceBoundaries = []string{
+	", so ", "; so ", " so ", ", but ", "; but ", " but ",
+	", therefore", "; therefore", " therefore", ", leaving ", " leaving ",
+	" because ", " since ", "; ", ": ", " - ", " -- ", " and ", ", ",
+}
 
-// reportedConsequence returns the part of a sentence that states the OUTCOME,
-// or "" when the sentence never turns to one. Everything before the first
-// boundary is what was searched for.
-func reportedConsequence(sentence string) string {
+// reportedConsequence returns an asserted outcome after one matched inability.
+// Separators before the stem are irrelevant, and weak separators inside a
+// `that ...` negated proposition remain part of what was not found. Explicit
+// result and causal connectors still end that proposition.
+func reportedConsequence(sentence string, stemEnd int) string {
+	if stemEnd < 0 || stemEnd >= len(sentence) {
+		return ""
+	}
+	tail := sentence[stemEnd:]
+	thatAt := strings.Index(tail, " that ")
 	earliest := -1
 	width := 0
 	for _, boundary := range consequenceBoundaries {
-		if index := strings.Index(sentence, boundary); index >= 0 && (earliest < 0 || index < earliest) {
+		index := strings.Index(tail, boundary)
+		if index < 0 {
+			continue
+		}
+		explicit := strings.Contains(boundary, " so ") || strings.Contains(boundary, " but ") ||
+			strings.Contains(boundary, "therefore") || strings.Contains(boundary, "leaving") ||
+			strings.Contains(boundary, "because") || strings.Contains(boundary, "since")
+		if thatAt >= 0 && index > thatAt && !explicit {
+			continue
+		}
+		if earliest < 0 || index < earliest {
 			earliest, width = index, len(boundary)
 		}
 	}
 	if earliest < 0 {
 		return ""
 	}
-	return sentence[earliest+width:]
+	return tail[earliest+width:]
 }
 
 // blockedStateMarkers describe WORK LEFT BLOCKED — unverified, unresolved,
@@ -840,7 +885,14 @@ var topicShiftMarkers = []string{
 // stem.
 func countedLabelSentence(sentence string) bool {
 	trimmed := strings.TrimLeft(strings.TrimSpace(sentence), "-*#> \t")
-	return countedLabelHeading.MatchString(trimmed)
+	match := countedLabelHeading.FindStringIndex(trimmed)
+	if match == nil {
+		return false
+	}
+	remainder := strings.TrimSpace(trimmed[match[1]:])
+	// A heading may stand alone or introduce a markdown bucket. Prose or another
+	// admission on the same line is not part of the label and must be inspected.
+	return remainder == "" || strings.HasPrefix(remainder, "- ")
 }
 
 var countedLabelHeading = regexp.MustCompile(`^unable to [^:()]*\(\s*\d+\s*\)\s*:\s*(?:\*\*)?(?:\s|$)`)
@@ -923,19 +975,13 @@ func selfReportedIncompletion(text string) string {
 		//
 		// The exemption exists for a tool that was NOT NEEDED, and what shows it
 		// was not needed is the alternative the sentence goes on to describe.
-		if hasToolGrantContext(sentence) &&
-			(toolCaveatIsTheStatement(sentence) || deliveredAlternative(sentence)) &&
-			!hasObjectiveFailure(sentence) &&
-			!containsAny(sentence, blockedStateMarkers) {
-			continue
-		}
 		// A tool limitation can report blocked work without using a first-person
 		// inability stem: "No edit tool is available, so the change remains
 		// unapplied." The explicit bad state is the admission in that shape. Keep
 		// this narrow to a tool-grant statement plus an unambiguous consequence so
 		// ordinary discussion of an unavailable fixture or platform is not enough.
 		if hasToolGrantContext(sentence) &&
-			containsAny(reportedConsequence(sentence), unambiguousFailureStates) {
+			containsAny(reportedConsequence(sentence, 0), unambiguousFailureStates) {
 			return selfReportReason("tool limitation left work blocked")
 		}
 		for _, stem := range inabilityStems {
@@ -949,6 +995,20 @@ func selfReportedIncompletion(text string) string {
 				}
 				abs := start + rel
 				tail := strings.TrimSpace(sentence[abs+len(stem):])
+				scopeEnd := len(sentence)
+				if next := nextInability(sentence, abs+len(stem)); next >= 0 {
+					scopeEnd = next
+				}
+				scope := sentence[abs:scopeEnd]
+				// Exempt only this occurrence. A capability clause cannot hide a
+				// later failed action, and a completed fallback cannot be borrowed
+				// by a later inability in the same sentence.
+				if (toolCaveatAt(sentence, abs, len(stem)) && !hasObjectiveFailure(scope)) ||
+					(harmlessToolLimitation(sentence, abs, len(stem)) && !hasObjectiveFailure(scope) && !containsAny(scope, blockedStateMarkers)) ||
+					(hasToolGrantContext(scope) && deliveredAlternativeAfter(sentence, abs+len(stem)) && !hasObjectiveFailure(scope)) {
+					start = abs + len(stem)
+					continue
+				}
 				// The allowance yields to a sentence that also says the work is
 				// blocked: "could not reproduce the crash" is a finding, "could not
 				// reproduce the crash, so the fix is unverified" is an admission,
@@ -957,7 +1017,7 @@ func selfReportedIncompletion(text string) string {
 				// The object decides whether finding nothing is a result; an
 				// explicit failure state in the SAME sentence decides that it is
 				// not, whatever the object.
-				if strong && containsAny(reportedConsequence(sentence), unambiguousFailureStates) {
+				if strong && containsAny(reportedConsequence(sentence, abs+len(stem)), unambiguousFailureStates) {
 					strong = false
 				}
 				if !hasAnyPrefix(tail, successNegationTails) || (!strong && containsAny(blockedContext, blockedWorkMarkers)) {

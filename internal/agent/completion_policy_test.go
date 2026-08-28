@@ -19,6 +19,38 @@ func TestCompletionPolicyLocalEvidenceDecidesWithoutSemanticCheck(t *testing.T) 
 	}
 }
 
+func TestCompletionPolicyClauseLocalAdmissionMatrix(t *testing.T) {
+	for _, text := range []string{
+		"I don't have a browser tool available, so I could not inspect the page.",
+		"No update_plan tool is available, so I wrote the plan manually, but I could not complete the requested analysis.",
+		"I could not run the migration because no migration tool is available; the error is quoted in this answer.",
+		"Unable to complete the migration (1): production deployment failed.",
+		"**Unable to verify (1):** I could not complete the audit; the review is unfinished.",
+		"I could not find any issues because I ran out of time before inspecting the code.",
+		"I could not find any issues since I ran out of time before inspecting the code.",
+	} {
+		got := newCompletionPolicy(false).evaluate(text, completionContext{})
+		if got.Decision != CompletionIncomplete {
+			t.Errorf("incomplete report decided %q: %q", got.Decision, text)
+		}
+	}
+
+	for _, text := range []string{
+		"I don't have an update_plan tool available in this specialist context; only read-only exploration tools were provided.",
+		"I could not record a plan because the update_plan tool isn't available, so I wrote it into this answer instead.",
+		"I tried the automated route first; I could not run the formatter because no formatter tool is available, so I checked it by hand.",
+		"**Unable to verify (1):** - MCP #3 claim was truncated.",
+		"From the source: I could not find any evidence that the issue is unresolved.",
+		"I could not find any evidence that the issue is unresolved and the fix is still unverified.",
+		"I could not find any remaining issues; separately, the documentation is outdated.",
+	} {
+		got := newCompletionPolicy(false).evaluate(text, completionContext{})
+		if got.Decision != CompletionComplete {
+			t.Errorf("complete report decided %q: %q (%s)", got.Decision, text, got.Reason)
+		}
+	}
+}
+
 func TestCompletionPolicyPreservesBoundedPlanStallProtection(t *testing.T) {
 	policy := newCompletionPolicy(false)
 	for attempt := 0; attempt < maxContinueNudges; attempt++ {
