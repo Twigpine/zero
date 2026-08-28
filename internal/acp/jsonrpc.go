@@ -344,12 +344,12 @@ func (r *interruptibleReader) Read(p []byte) (int, error) {
 func (c *Conn) handleLine(ctx context.Context, line []byte) {
 	var msg rpcMessage
 	if err := json.Unmarshal(bytes.TrimSpace(line), &msg); err != nil {
-		c.writeError(json.RawMessage("null"), &rpcError{Code: codeParseError, Message: "parse error"})
+		c.writeError(ctx, json.RawMessage("null"), &rpcError{Code: codeParseError, Message: "parse error"})
 		return
 	}
 	if msg.JSONRPC != "" && msg.JSONRPC != "2.0" {
 		if len(msg.ID) > 0 {
-			c.writeError(msg.ID, &rpcError{Code: codeInvalidRequest, Message: "unsupported jsonrpc version"})
+			c.writeError(ctx, msg.ID, &rpcError{Code: codeInvalidRequest, Message: "unsupported jsonrpc version"})
 		}
 		return
 	}
@@ -390,7 +390,7 @@ func (c *Conn) handleLine(ctx context.Context, line []byte) {
 	default:
 		// Malformed frame; reply only if we can identify a request id.
 		if len(msg.ID) > 0 {
-			c.writeError(msg.ID, &rpcError{Code: codeInvalidRequest, Message: "invalid request"})
+			c.writeError(ctx, msg.ID, &rpcError{Code: codeInvalidRequest, Message: "invalid request"})
 		}
 	}
 }
@@ -408,20 +408,20 @@ func (c *Conn) releaseSem() {
 func (c *Conn) dispatchRequest(ctx context.Context, msg rpcMessage) {
 	fn := c.handlers[msg.Method]
 	if fn == nil {
-		c.writeError(msg.ID, &rpcError{Code: codeMethodNotFound, Message: "method not found: " + msg.Method})
+		c.writeError(ctx, msg.ID, &rpcError{Code: codeMethodNotFound, Message: "method not found: " + msg.Method})
 		return
 	}
 	result, err := fn(ctx, msg.Params)
 	if err != nil {
 		var re *rpcError
 		if errors.As(err, &re) {
-			c.writeError(msg.ID, re)
+			c.writeError(ctx, msg.ID, re)
 		} else {
-			c.writeError(msg.ID, &rpcError{Code: codeInternalError, Message: err.Error()})
+			c.writeError(ctx, msg.ID, &rpcError{Code: codeInternalError, Message: err.Error()})
 		}
 		return
 	}
-	c.writeResult(msg.ID, result)
+	c.writeResult(ctx, msg.ID, result)
 }
 
 // Call issues an outbound request and blocks until the response arrives, ctx is
@@ -450,7 +450,7 @@ func (c *Conn) Call(ctx context.Context, method string, params any, result any) 
 	}()
 
 	idRaw, _ := json.Marshal(id)
-	if err := c.write(rpcMessage{JSONRPC: "2.0", ID: idRaw, Method: method, Params: raw}); err != nil {
+	if err := c.write(ctx, rpcMessage{JSONRPC: "2.0", ID: idRaw, Method: method, Params: raw}); err != nil {
 		return err
 	}
 
@@ -474,7 +474,7 @@ func (c *Conn) Notify(method string, params any) error {
 	if err != nil {
 		return err
 	}
-	return c.write(rpcMessage{JSONRPC: "2.0", Method: method, Params: raw})
+	return c.write(context.Background(), rpcMessage{JSONRPC: "2.0", Method: method, Params: raw})
 }
 
 func (c *Conn) deliver(msg rpcMessage) {
@@ -512,17 +512,17 @@ func (c *Conn) failAllPending(err error) {
 	}
 }
 
-func (c *Conn) writeResult(id json.RawMessage, result any) {
+func (c *Conn) writeResult(ctx context.Context, id json.RawMessage, result any) {
 	raw, err := json.Marshal(result)
 	if err != nil {
-		c.writeError(id, &rpcError{Code: codeInternalError, Message: err.Error()})
+		c.writeError(ctx, id, &rpcError{Code: codeInternalError, Message: err.Error()})
 		return
 	}
-	_ = c.write(rpcMessage{JSONRPC: "2.0", ID: id, Result: raw})
+	_ = c.write(ctx, rpcMessage{JSONRPC: "2.0", ID: id, Result: raw})
 }
 
-func (c *Conn) writeError(id json.RawMessage, e *rpcError) {
-	_ = c.write(rpcMessage{JSONRPC: "2.0", ID: id, Error: e})
+func (c *Conn) writeError(ctx context.Context, id json.RawMessage, e *rpcError) {
+	_ = c.write(ctx, rpcMessage{JSONRPC: "2.0", ID: id, Error: e})
 }
 
 func (c *Conn) tryEnqueueBusy(id json.RawMessage) bool {
@@ -554,12 +554,46 @@ func (c *Conn) writeBusyLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case id := <-c.busyCh:
-			c.writeError(id, busy)
+			c.writeError(ctx, id, busy)
 		}
 	}
 }
 
-func (c *Conn) write(msg rpcMessage) error {
+func (c *Conn) acquireWrite(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	done := make(chan struct{})
+	go func() {
+		c.writeMu.Lock()
+		close(done)
+	}()
+	select {
+	case <-done:
+		if err := ctx.Err(); err != nil {
+			c.writeMu.Unlock()
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		go func() {
+			<-done
+			c.writeMu.Unlock()
+		}()
+		return ctx.Err()
+	}
+}
+
+func (c *Conn) write(ctx context.Context, msg rpcMessage) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if c.overloaded.Load() {
 		return errBusyOverload
 	}
@@ -568,7 +602,9 @@ func (c *Conn) write(msg rpcMessage) error {
 	if err != nil {
 		return err
 	}
-	c.writeMu.Lock()
+	if err := c.acquireWrite(ctx); err != nil {
+		return err
+	}
 	defer c.writeMu.Unlock()
 	if c.overloaded.Load() {
 		return errBusyOverload

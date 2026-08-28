@@ -842,3 +842,38 @@ func TestStalledBusyRepliesStayBoundedAndServeExits(t *testing.T) {
 		t.Fatalf("goroutine growth = %d after %d rejected requests, want bounded", delta, extra)
 	}
 }
+
+func TestCallCancelsWhileWriterHoldsWriteMu(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	defer inWriter.Close()
+
+	started := make(chan struct{})
+	gate := make(chan struct{})
+	defer close(gate)
+	conn := NewConn(inReader, &stallWriter{started: started, gate: gate})
+
+	serveCtx, serveCancel := context.WithCancel(context.Background())
+	defer serveCancel()
+	go func() { _ = conn.Serve(serveCtx) }()
+
+	go func() { _ = conn.Call(context.Background(), "ping", nil, nil) }()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first write did not stall")
+	}
+
+	callCtx, callCancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- conn.Call(callCtx, "ping", nil, nil) }()
+	time.Sleep(50 * time.Millisecond)
+	callCancel()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Call returned %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Call did not return after context cancel while writeMu was held")
+	}
+}
