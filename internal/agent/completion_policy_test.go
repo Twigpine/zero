@@ -28,6 +28,10 @@ func TestCompletionPolicyClauseLocalAdmissionMatrix(t *testing.T) {
 		"**Unable to verify (1):** I could not complete the audit; the review is unfinished.",
 		"I could not find any issues because I ran out of time before inspecting the code.",
 		"I could not find any issues since I ran out of time before inspecting the code.",
+		"I could not run the tests because no test tool is available, so I checked the style by hand.",
+		"I could not run the tests because no test tool is available, so I checked the style by hand, but someone else will need to run the tests.",
+		"I could not run the tests because no test tool is available, so I checked the style by hand, but the tests remain unverified.",
+		"**Unable to verify (1):** - I could not complete the audit; the work remains unverified.",
 	} {
 		got := newCompletionPolicy(false).evaluate(text, completionContext{})
 		if got.Decision != CompletionIncomplete {
@@ -40,6 +44,7 @@ func TestCompletionPolicyClauseLocalAdmissionMatrix(t *testing.T) {
 		"I could not record a plan because the update_plan tool isn't available, so I wrote it into this answer instead.",
 		"I tried the automated route first; I could not run the formatter because no formatter tool is available, so I checked it by hand.",
 		"**Unable to verify (1):** - MCP #3 claim was truncated.",
+		"**Unable to verify (1):** - The source omitted MCP #3's full claim.",
 		"From the source: I could not find any evidence that the issue is unresolved.",
 		"I could not find any evidence that the issue is unresolved and the fix is still unverified.",
 		"I could not find any remaining issues; separately, the documentation is outdated.",

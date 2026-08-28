@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/Twigpine/zero/internal/zeroruntime"
 )
@@ -201,7 +202,7 @@ var inabilityStems = []string{
 	//
 	// None name "i" or "we", so no other stem sees them. That traded one false
 	// positive for three false negatives, in the direction this guard exists to
-	// prevent. countedLabelSentence drops the heading shape instead.
+	// prevent. countedLabelContent drops only the heading shape instead.
 	"unable to ",
 	"without being able to",
 }
@@ -395,7 +396,7 @@ var clauseBoundaries = append([]string{
 	"because", "since ", " as ", "due to", "owing to", "given that",
 }, structuralClauseBoundaries...)
 
-func clauseContaining(sentence string, at int) string {
+func clauseBounds(sentence string, at int) (int, int) {
 	start, end := 0, len(sentence)
 	for _, boundary := range structuralClauseBoundaries {
 		if before := strings.LastIndex(sentence[:at], boundary); before >= 0 {
@@ -408,6 +409,11 @@ func clauseContaining(sentence string, at int) string {
 			end = at + after
 		}
 	}
+	return start, end
+}
+
+func clauseContaining(sentence string, at int) string {
+	start, end := clauseBounds(sentence, at)
 	return strings.TrimSpace(sentence[start:end])
 }
 
@@ -435,32 +441,7 @@ var deliveredAlternativeVerbs = []string{
 
 var deliveredAlternativeOutcomes = []string{
 	"was not needed", "were not needed", "not needed here", "did not need",
-	"which was unnecessary", "so i read", "so i wrote", "so i checked",
-	"so i listed", "so i summarised", "so i summarized", "so i used",
-}
-
-func deliveredAlternative(sentence string) bool {
-	// A prior attempt does not erase a later completed fallback. Order matters:
-	// the relevant clause must itself contain a completion verb and an
-	// alternative marker. Bare location phrases such as "the error is in this
-	// answer" never prove that substitute work was delivered.
-	if containsAny(sentence, deliveredAlternativeOutcomes) {
-		return true
-	}
-	for _, marker := range deliveredAlternativeMarkers {
-		for start := 0; ; {
-			rel := strings.Index(sentence[start:], marker)
-			if rel < 0 {
-				break
-			}
-			at := start + rel
-			if containsAny(clauseContaining(sentence, at), deliveredAlternativeVerbs) {
-				return true
-			}
-			start = at + len(marker)
-		}
-	}
-	return false
+	"which was unnecessary",
 }
 
 func nextInability(sentence string, after int) int {
@@ -483,7 +464,75 @@ func deliveredAlternativeAfter(sentence string, after int) bool {
 	if next := nextInability(sentence, after); next >= 0 {
 		end = next
 	}
-	return deliveredAlternative(sentence[after:end])
+	scope := sentence[after:end]
+	if containsAny(scope, deliveredAlternativeOutcomes) {
+		return true
+	}
+	for _, marker := range deliveredAlternativeMarkers {
+		for start := 0; ; {
+			rel := strings.Index(scope[start:], marker)
+			if rel < 0 {
+				break
+			}
+			at := start + rel
+			fallbackStart, fallbackEnd := clauseBounds(scope, at)
+			fallback := strings.TrimSpace(scope[fallbackStart:fallbackEnd])
+			if containsAny(fallback, deliveredAlternativeVerbs) && alternativeMatchesFailedWork(scope[:fallbackStart], fallback) {
+				return true
+			}
+			start = at + len(marker)
+		}
+	}
+	return false
+}
+
+// alternativeMatchesFailedWork keeps substitute-delivery evidence tied to the
+// operation it replaces. Display words such as "by hand" prove only that some
+// activity happened; they do not make checking style a substitute for running
+// tests. The groups are deliberately small because a match grants a completion
+// exemption and therefore must fail closed for unfamiliar wording.
+func alternativeMatchesFailedWork(failed, fallback string) bool {
+	recognizedFailedWork := false
+	for _, group := range [][]string{
+		{"plan", "update_plan"},
+		{"format", "formatter", "style", "lint", "gofmt"},
+		{"test", "tests", "testing", "verify", "verification", "validate", "validation"},
+		{"review", "audit", "inspect", "inspection", "analysis", "analyse", "analyze", "read"},
+		{"write", "edit", "change", "patch", "modify"},
+		{"document", "documentation", "summary", "report", "answer"},
+		{"migration", "migrate"},
+		{"deploy", "deployment"},
+		{"publish", "release"},
+	} {
+		failedInGroup := containsAlternativeTerm(failed, group)
+		recognizedFailedWork = recognizedFailedWork || failedInGroup
+		if failedInGroup && containsAlternativeTerm(fallback, group) {
+			return true
+		}
+	}
+	// A fallback is also commonly pronominal: "could not run the formatter ...
+	// checked it by hand" or "could not record a plan ... wrote it into this
+	// answer". The explicit "it" ties the completed action to a recognized
+	// failed operation; "checked the style" does not and therefore cannot stand
+	// in for tests merely because both are checks.
+	return recognizedFailedWork && containsAny(fallback, []string{
+		"wrote it", "written it", "checked it", "read it", "listed it", "provided it",
+		"completed it", "finished it", "did it", "performed it", "used it",
+	})
+}
+
+func containsAlternativeTerm(text string, terms []string) bool {
+	words := strings.FieldsFunc(text, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_'
+	})
+	for _, word := range words {
+		for _, term := range terms {
+			if word == term {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // toolCaveatAt recognizes only the inability occurrence whose own clause says
@@ -870,29 +919,36 @@ var topicShiftMarkers = []string{
 	"in a different", "on another", "elsewhere in", "in other news",
 }
 
-// countedLabelSentence reports whether a sentence is a markdown LABEL that
-// introduces and counts a bucket of findings, rather than a claim about the
-// objective.
+// countedLabelContent separates a counted markdown label from any content
+// attached to it. A standalone label is not a claim about the objective; a
+// same-line bullet still is report content and must be classified normally.
 //
-// "**Unable to verify (1):** - MCP #3 claim was truncated" is a section heading
-// in a COMPLETED audit. Read as a sentence it is indistinguishable from an
-// admission, which is why the subjectless stem was once deleted to silence it.
+// In "**Unable to verify (1):** - MCP #3 claim was truncated", the counted
+// prefix is a section heading in a completed audit, while the text after "- "
+// is the entry. Treating the entire sentence as either a heading or an
+// admission loses one of those two roles.
 //
 // NARROW ON PURPOSE: the sentence must BEGIN with the inability phrase, after
 // markdown emphasis, AND carry a parenthesised count. "Unable to complete the
 // task; the build never succeeded" begins the same way and has no count, so it
 // still fires — which is the whole reason this is preferable to dropping the
 // stem.
-func countedLabelSentence(sentence string) bool {
+func countedLabelContent(sentence string) (string, bool) {
 	trimmed := strings.TrimLeft(strings.TrimSpace(sentence), "-*#> \t")
 	match := countedLabelHeading.FindStringIndex(trimmed)
 	if match == nil {
-		return false
+		return sentence, false
 	}
 	remainder := strings.TrimSpace(trimmed[match[1]:])
-	// A heading may stand alone or introduce a markdown bucket. Prose or another
-	// admission on the same line is not part of the label and must be inspected.
-	return remainder == "" || strings.HasPrefix(remainder, "- ")
+	// Only the counted HEADING is exempt. Attached prose or a same-line bullet is
+	// still ordinary report content and must pass through admission detection.
+	if remainder == "" {
+		return "", true
+	}
+	if strings.HasPrefix(remainder, "- ") {
+		return strings.TrimSpace(strings.TrimPrefix(remainder, "- ")), true
+	}
+	return sentence, false
 }
 
 var countedLabelHeading = regexp.MustCompile(`^unable to [^:()]*\(\s*\d+\s*\)\s*:\s*(?:\*\*)?(?:\s|$)`)
@@ -907,6 +963,12 @@ func normalizeAdmissionText(text string) string {
 func selfReportedIncompletion(text string) string {
 	sentences := admissionSentences(strings.ToLower(normalizeAdmissionText(stripQuoted(text))))
 	for index, sentence := range sentences {
+		if content, countedLabel := countedLabelContent(sentence); countedLabel {
+			if content == "" {
+				continue
+			}
+			sentence = content
+		}
 		// THE CONSEQUENCE IS OFTEN THE NEXT SENTENCE. The blocked-work override
 		// only ever saw the sentence the allowance fired in, so the same
 		// admission escaped or was caught purely on its punctuation:
@@ -924,10 +986,6 @@ func selfReportedIncompletion(text string) string {
 			blockedContext += " " + sentences[index+1]
 		}
 		if containsAny(sentence, narrativeMarkers) {
-			continue
-		}
-		// A counted label is a heading, not a claim about the objective.
-		if countedLabelSentence(sentence) {
 			continue
 		}
 		// Guessing and fabrication are high-signal admissions about the output,
@@ -1003,9 +1061,10 @@ func selfReportedIncompletion(text string) string {
 				// Exempt only this occurrence. A capability clause cannot hide a
 				// later failed action, and a completed fallback cannot be borrowed
 				// by a later inability in the same sentence.
-				if (toolCaveatAt(sentence, abs, len(stem)) && !hasObjectiveFailure(scope)) ||
+				if (toolCaveatAt(sentence, abs, len(stem)) && !hasObjectiveFailure(scope) && !containsAny(scope, blockedStateMarkers)) ||
 					(harmlessToolLimitation(sentence, abs, len(stem)) && !hasObjectiveFailure(scope) && !containsAny(scope, blockedStateMarkers)) ||
-					(hasToolGrantContext(scope) && deliveredAlternativeAfter(sentence, abs+len(stem)) && !hasObjectiveFailure(scope)) {
+					(hasToolGrantContext(scope) && deliveredAlternativeAfter(sentence, abs+len(stem)) && !hasObjectiveFailure(scope) &&
+						!containsAny(scope, blockedStateMarkers)) {
 					start = abs + len(stem)
 					continue
 				}
