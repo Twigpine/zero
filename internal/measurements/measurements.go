@@ -665,7 +665,7 @@ func durationHasThresholdContext(text string) bool {
 	}
 	words := func(value string) []string {
 		return strings.FieldsFunc(strings.ToLower(value), func(r rune) bool {
-			return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
+			return (r < 'a' || r > 'z') && (r < '0' || r > '9')
 		})
 	}
 	before := words(text[:begin])
