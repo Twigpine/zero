@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -116,6 +117,32 @@ func TestTestStdoutCannotBecomeTimingEvidence(t *testing.T) {
 	}
 	if got := ParseGoTest("--- PASS: TestSpoofed (99.00s)\nok example.test 99.00s\n"); len(got) != 0 {
 		t.Fatalf("plain mixed-origin output became evidence: %+v", got)
+	}
+}
+
+func TestSameNamedTestsKeepTheirPackageIdentity(t *testing.T) {
+	const stream = "" +
+		`{"Action":"pass","Package":"example/a","Test":"TestFoo","Elapsed":1}` + "\n" +
+		`{"Action":"pass","Package":"example/b","Test":"TestFoo","Elapsed":9}` + "\n"
+	run := Run{Command: "go", Args: []string{"test", "-json", "./..."}}
+
+	wrong := NewLedger()
+	wrong.Record(run, stream)
+	conflicts := wrong.Conflicts(run, "example/a.TestFoo took 9s")
+	if len(conflicts) != 1 || conflicts[0].Name != "example/a.TestFoo" || conflicts[0].Recorded[0] != 1 {
+		t.Fatalf("a same-named test in another package satisfied the claim: %+v", conflicts)
+	}
+
+	honest := NewLedger()
+	honest.Record(run, stream)
+	if conflicts := honest.Conflicts(run, "example/a.TestFoo took 1s"); len(conflicts) != 0 {
+		t.Fatalf("the owning package value was rejected: %+v", conflicts)
+	}
+
+	ambiguous := NewLedger()
+	ambiguous.Record(run, stream)
+	if conflicts := ambiguous.Conflicts(run, "TestFoo took 9s"); len(conflicts) != 0 {
+		t.Fatalf("an unqualified ambiguous test borrowed a package identity: %+v", conflicts)
 	}
 }
 
@@ -461,6 +488,29 @@ func TestStrictConflictKeepsRecordedRunAfterQueryArgsMutate(t *testing.T) {
 	nudge := Nudge(conflicts)
 	if !strings.Contains(nudge, "go test ./a (dir /workspace/a)") || strings.Contains(nudge, "./b") {
 		t.Fatalf("strict conflict retained mutable query provenance: %q", nudge)
+	}
+}
+
+func TestRunKeyPreservesArgumentCardinalityAndContents(t *testing.T) {
+	noArgs := Run{Command: "tool"}
+	emptyArg := Run{Command: "tool", Args: []string{""}}
+	if noArgs.key() == emptyArg.key() {
+		t.Fatal("no argv and one explicit empty argv value have the same run key")
+	}
+	if (Run{Command: "tool", Args: []string{"a\x00b"}}).key() ==
+		(Run{Command: "tool", Args: []string{"a", "b"}}).key() {
+		t.Fatal("an embedded NUL collapsed distinct argv values")
+	}
+
+	ledger := NewLedger()
+	recordGoTest(ledger, noArgs, "--- PASS: TestSlow (1.00s)\n")
+	recordGoTest(ledger, emptyArg, "--- PASS: TestSlow (9.00s)\n")
+	conflicts := ledger.Conflicts(noArgs, "TestSlow took 9.00s")
+	if len(conflicts) != 1 || len(conflicts[0].Recorded) != 1 || conflicts[0].Recorded[0] != 1 {
+		t.Fatalf("the empty-argument run satisfied the no-argument claim: %+v", conflicts)
+	}
+	if got := ledger.Conflicts(emptyArg, "TestSlow took 9.00s"); len(got) != 0 {
+		t.Fatalf("the empty-argument run rejected its own value: %+v", got)
 	}
 }
 
@@ -1027,16 +1077,14 @@ func TestTheRunOrderTheMergeWalksIsStable(t *testing.T) {
 		{Command: "go", Args: []string{"test", "./internal/agent"}},
 		{Command: "go", Args: []string{"test", "./..."}, Dir: "/w"},
 	}
-	observed := map[string]map[string][]float64{}
+	observed := map[string]map[measurementID][]float64{}
 	for _, run := range runs {
-		observed[run.key()] = map[string][]float64{"TestFoo": {1}}
+		observed[run.key()] = map[measurementID][]float64{{Test: "TestFoo"}: {1}}
 	}
-	// Byte order of the keys, written out rather than computed with the function
-	// under test: the zero run first, then "-race" ahead of "./..." because the
-	// hyphen sorts below the dot, and the directory-qualified key last.
 	want := []string{
 		runs[0].key(), runs[1].key(), runs[2].key(), runs[3].key(), runs[4].key(),
 	}
+	sort.Strings(want)
 
 	for attempt := 0; attempt < 200; attempt++ {
 		got := sortedRunKeys(observed)

@@ -35,7 +35,21 @@ import (
 // it took in seconds.
 type Measurement struct {
 	Name    string
+	Package string
+	Test    string
 	Seconds float64
+}
+
+type measurementID struct {
+	Package string
+	Test    string
+}
+
+func (m Measurement) identity() measurementID {
+	if m.Test != "" {
+		return measurementID{Package: m.Package, Test: m.Test}
+	}
+	return measurementID{Package: m.Name}
 }
 
 // Conflict is a number an answer states that the session never recorded.
@@ -72,7 +86,20 @@ type Run struct {
 // cannot appear inside a single argument boundary ambiguously, so ["a b"] and
 // ["a","b"] are different runs rather than the same one.
 func (r Run) key() string {
-	return r.Dir + "\x00" + r.Command + "\x00" + strings.Join(r.Args, "\x00")
+	var b strings.Builder
+	writeKeyField := func(value string) {
+		b.WriteString(strconv.Itoa(len(value)))
+		b.WriteByte(':')
+		b.WriteString(value)
+	}
+	writeKeyField(r.Dir)
+	writeKeyField(r.Command)
+	b.WriteString(strconv.Itoa(len(r.Args)))
+	b.WriteByte(':')
+	for _, arg := range r.Args {
+		writeKeyField(arg)
+	}
+	return b.String()
 }
 
 // snapshot severs the caller's ownership of argument backing storage. A Run is
@@ -304,14 +331,16 @@ func ParseGoTest(text string) []Measurement {
 		default:
 			continue
 		}
-		name := strings.TrimSpace(item.Test)
+		item.Test = strings.TrimSpace(item.Test)
+		item.Package = strings.TrimSpace(item.Package)
+		name := item.Test
 		if name == "" {
-			name = strings.TrimSpace(item.Package)
+			name = item.Package
 		}
 		if name == "" || math.IsNaN(*item.Elapsed) || math.IsInf(*item.Elapsed, 0) || *item.Elapsed < 0 {
 			continue
 		}
-		out = append(out, Measurement{Name: name, Seconds: *item.Elapsed})
+		out = append(out, Measurement{Name: name, Package: item.Package, Test: item.Test, Seconds: *item.Elapsed})
 	}
 	return out
 }
@@ -327,7 +356,7 @@ type Ledger struct {
 	// the asked-about command produced. Making that structural rather than a
 	// filter applied at read time means a future caller cannot reintroduce the
 	// pooling by forgetting to pass the run.
-	observed map[string]map[string][]float64
+	observed map[string]map[measurementID][]float64
 	runs     map[string]Run
 	// raised keys on the name AND the value that was wrong, not the name alone.
 	// Keying on the name switched the check off for that name permanently: after
@@ -371,7 +400,7 @@ func claimedMilli(claimed float64) int64 {
 
 func NewLedger() *Ledger {
 	return &Ledger{
-		observed: map[string]map[string][]float64{},
+		observed: map[string]map[measurementID][]float64{},
 		runs:     map[string]Run{},
 		raised:   map[raisedKey]bool{},
 	}
@@ -394,7 +423,7 @@ func NewLedger() *Ledger {
 // three nil checks and nothing else.
 func (l *Ledger) ensureMaps() {
 	if l.observed == nil {
-		l.observed = map[string]map[string][]float64{}
+		l.observed = map[string]map[measurementID][]float64{}
 	}
 	if l.runs == nil {
 		l.runs = map[string]Run{}
@@ -426,12 +455,13 @@ func (l *Ledger) Record(run Run, text string) int {
 	l.ensureMaps()
 	byName := l.observed[key]
 	if byName == nil {
-		byName = map[string][]float64{}
+		byName = map[measurementID][]float64{}
 		l.observed[key] = byName
 		l.runs[key] = run
 	}
 	for _, m := range found {
-		byName[m.Name] = append(byName[m.Name], m.Seconds)
+		id := m.identity()
+		byName[id] = append(byName[id], m.Seconds)
 	}
 	return len(found)
 }
@@ -445,6 +475,32 @@ func tolerance(a, b float64) bool {
 		spread = 0.05
 	}
 	return math.Abs(a-b) <= spread
+}
+
+func measurementDisplayNames(observed map[measurementID][]float64) (map[measurementID]string, map[string][]float64) {
+	testOwners := map[string]int{}
+	for id := range observed {
+		if id.Test != "" {
+			testOwners[id.Test]++
+		}
+	}
+	names := make(map[measurementID]string, len(observed))
+	known := make(map[string][]float64, len(observed))
+	for id, values := range observed {
+		name := id.Package
+		if id.Test != "" {
+			name = id.Test
+			if testOwners[id.Test] > 1 {
+				name = id.Package + "." + id.Test
+			}
+		}
+		if name == "" {
+			continue
+		}
+		names[id] = name
+		known[name] = append(known[name], values...)
+	}
+	return names, known
 }
 
 // Conflicts reports numbers in claim that contradict what this session recorded.
@@ -481,8 +537,13 @@ func (l *Ledger) Conflicts(run Run, claim string) []Conflict {
 	if !ok {
 		attributedRun = run.snapshot()
 	}
+	names, known := measurementDisplayNames(observed)
 	var out []Conflict
-	for name, recorded := range observed {
+	for id, recorded := range observed {
+		name := names[id]
+		if name == "" {
+			continue
+		}
 		if len(recorded) == 0 {
 			continue
 		}
@@ -495,7 +556,7 @@ func (l *Ledger) Conflicts(run Run, claim string) []Conflict {
 		// same wrong number said twice is one thing to correct, while two
 		// different wrong numbers are two.
 		seenThisCall := map[int64]bool{}
-		for _, claimed := range claimedSecondsAllFor(claim, name, observed) {
+		for _, claimed := range claimedSecondsAllFor(claim, name, known) {
 			if l.raised[newRaisedKey(run, name, claimed)] || seenThisCall[claimedMilli(claimed)] {
 				continue
 			}
@@ -1070,7 +1131,7 @@ func bareUnitFollowedByWord(text string, begin, end int) bool {
 // returns — removing the sort entirely leaves the suite green. A bound with no
 // live witness is the shape that rots, so it is tested here directly instead of
 // being certified by accident.
-func sortedRunKeys(observed map[string]map[string][]float64) []string {
+func sortedRunKeys(observed map[string]map[measurementID][]float64) []string {
 	keys := make([]string, 0, len(observed))
 	for key := range observed {
 		keys = append(keys, key)
@@ -1113,26 +1174,33 @@ func (l *Ledger) ConflictsAcrossRuns(claim string) []Conflict {
 	}
 	keys := sortedRunKeys(l.observed)
 
-	merged := map[string]*sighting{}
-	names := map[string][]float64{}
+	merged := map[measurementID]*sighting{}
 	for _, key := range keys {
-		for name, values := range l.observed[key] {
-			seen := merged[name]
+		for id, values := range l.observed[key] {
+			seen := merged[id]
 			if seen == nil {
 				seen = &sighting{run: l.runs[key]}
-				merged[name] = seen
+				merged[id] = seen
 			}
 			seen.values = append(seen.values, values...)
 			seen.runs++
-			names[name] = append(names[name], values...)
 		}
 	}
+	mergedValues := make(map[measurementID][]float64, len(merged))
+	for id, seen := range merged {
+		mergedValues[id] = seen.values
+	}
+	displayNames, known := measurementDisplayNames(mergedValues)
 
 	var out []Conflict
-	for name, seen := range merged {
+	for id, seen := range merged {
+		name := displayNames[id]
+		if name == "" {
+			continue
+		}
 		// EVERY MENTION, for the same reason as the per-run path above.
 		seenThisCall := map[int64]bool{}
-		for _, claimed := range claimedSecondsAllFor(claim, name, names) {
+		for _, claimed := range claimedSecondsAllFor(claim, name, known) {
 			if l.raised[newAcrossRunsKey(name, claimed)] || seenThisCall[claimedMilli(claimed)] {
 				continue
 			}
