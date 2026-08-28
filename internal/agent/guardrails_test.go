@@ -879,16 +879,43 @@ func TestIncompletionAllowanceYieldsToBlockedWork(t *testing.T) {
 		}
 	}
 
-	// NOT CAUGHT, and recorded rather than hidden. An explicit "any" is treated
-	// as exhaustive absence, so an admission phrased that way passes:
-	//
-	//	"I could not observe any effect, so the change may be inert."
-	//
-	// Measured across eleven admissions, four still pass, all of them either
-	// "any"-phrased or single-clause with no blocked-work signal ("I failed to
-	// reproduce it locally"). Catching those needs a different signal than
-	// substring matching; tightening this list to reach them re-broke the
-	// findings above every way I tried.
+	// A strong-absence phrase still yields when its consequence explicitly says
+	// the work is unresolved.
+	if selfReportedIncompletion("I could not observe any effect, so the change may be inert.") == "" {
+		t.Error("an unresolved strong-absence report passed the detector")
+	}
+}
+
+func TestToolCaveatDoesNotHideGuessingOrFabrication(t *testing.T) {
+	for _, admission := range []string{
+		"I don't have a write tool available in this specialist context, so I guessed the line numbers.",
+		"No update_plan tool is available, so I fabricated the plan section.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("tool caveat hid a high-signal admission: %q", admission)
+		}
+	}
+}
+
+func TestToolCaveatAllowsCompletedObjectiveLanguage(t *testing.T) {
+	for _, completed := range []string{
+		"I don't have a write tool available in this specialist context, and the objective is complete.",
+		"I don't have a write tool available in this specialist context, but I completed the analysis as requested.",
+		"I don't have an update_plan tool available in this specialist context; here is what was asked for.",
+	} {
+		if reason := selfReportedIncompletion(completed); reason != "" {
+			t.Errorf("completed tool caveat was flagged: %q -> %q", completed, reason)
+		}
+	}
+
+	for _, admission := range []string{
+		"I could not do what was asked because no write tool is available.",
+		"I am unable to complete what was asked with the tools available.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("verb-anchored objective failure passed the detector: %q", admission)
+		}
+	}
 }
 
 // An admission with NO first-person subject must still fire. The subjectless

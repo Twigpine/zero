@@ -223,7 +223,7 @@ var successNegationTails = []string{
 	//	"I could not measure the throughput, so the number is unknown."
 	//	"I could not trigger the migration, so it never ran."
 	//
-	// All five went silent. Looking for something and finding none of it is a
+	// These cases went silent. Looking for something and finding none of it is a
 	// result; failing to produce a thing you were asked for is not, and the "any"
 	// is what separates them. Matching the strong tails exactly is also what keeps
 	// the two lists from drifting apart again.
@@ -460,7 +460,9 @@ var objectiveFailureMarkers = []string{
 	"meet the objective", "meeting the objective", "achieve the objective",
 	"complete the assignment", "completing the assignment",
 	"finish the assignment", "finishing the assignment",
-	"as requested", "what was asked",
+	"do what was asked", "doing what was asked",
+	"complete what was asked", "completing what was asked",
+	"finish what was asked", "finishing what was asked",
 	"do this task", "perform this task", "carry out this task",
 }
 
@@ -781,6 +783,15 @@ func selfReportedIncompletion(text string) string {
 		if countedLabelSentence(sentence) {
 			continue
 		}
+		// Guessing and fabrication are high-signal admissions about the output,
+		// independent of which tools were granted. Check them before the tool
+		// caveat exemption so a capability note cannot hide a later admission in
+		// the same sentence.
+		for _, phrase := range selfReportPhrases {
+			if strings.Contains(sentence, phrase) {
+				return selfReportReason(phrase)
+			}
+		}
 		// A sentence about the tool grant is about CAPABILITY, not about the
 		// objective — UNLESS it also says the task itself could not be done.
 		//
@@ -822,11 +833,6 @@ func selfReportedIncompletion(text string) string {
 			!containsAny(sentence, objectiveFailureMarkers) &&
 			!containsAny(sentence, blockedStateMarkers) {
 			continue
-		}
-		for _, phrase := range selfReportPhrases {
-			if strings.Contains(sentence, phrase) {
-				return selfReportReason(phrase)
-			}
 		}
 		for _, stem := range inabilityStems {
 			// Scan EVERY occurrence of the stem, not just the first: an earlier
