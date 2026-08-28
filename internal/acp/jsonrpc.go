@@ -385,18 +385,6 @@ func (c *Conn) handleLine(ctx context.Context, line []byte) {
 	}
 }
 
-func (c *Conn) acquireSem(ctx context.Context) bool {
-	if c.sem == nil {
-		return true
-	}
-	select {
-	case c.sem <- struct{}{}:
-		return true
-	case <-ctx.Done():
-		return false
-	}
-}
-
 func (c *Conn) releaseSem() {
 	if c.sem == nil {
 		return
