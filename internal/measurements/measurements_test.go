@@ -146,6 +146,36 @@ func TestSameNamedTestsKeepTheirPackageIdentity(t *testing.T) {
 	}
 }
 
+func TestPackageAndQualifiedTestDisplayCollisionFailsSilent(t *testing.T) {
+	const stream = "" +
+		`{"Action":"pass","Package":"example/a.TestFoo","Elapsed":1}` + "\n" +
+		`{"Action":"pass","Package":"example/a","Test":"TestFoo","Elapsed":9}` + "\n" +
+		`{"Action":"pass","Package":"example/b","Test":"TestFoo","Elapsed":2}` + "\n"
+	run := Run{Command: "go", Args: []string{"test", "-json", "./..."}}
+
+	for _, entry := range []struct {
+		name  string
+		check func(*Ledger, string) []Conflict
+	}{
+		{"per-run", func(ledger *Ledger, claim string) []Conflict { return ledger.Conflicts(run, claim) }},
+		{"across-runs", func(ledger *Ledger, claim string) []Conflict { return ledger.ConflictsAcrossRuns(claim) }},
+	} {
+		t.Run(entry.name, func(t *testing.T) {
+			ledger := NewLedger()
+			ledger.Record(run, stream)
+			if conflicts := entry.check(ledger, "example/a.TestFoo took 30s"); len(conflicts) != 0 {
+				t.Fatalf("ambiguous package/test display identity produced conflicts: %+v", conflicts)
+			}
+
+			// The collision is local to example/a.TestFoo. A distinct qualified
+			// identity must remain enforceable rather than disabling the detector.
+			if conflicts := entry.check(ledger, "example/b.TestFoo took 30s"); len(conflicts) != 1 || conflicts[0].Name != "example/b.TestFoo" {
+				t.Fatalf("non-colliding qualified test stopped being checked: %+v", conflicts)
+			}
+		})
+	}
+}
+
 // THE FAILURE THIS WAS BUILT FOR: the same test reported at 0.86s in one paste
 // and 4.20s in the next, with nothing said about the difference.
 func TestAClaimThatContradictsTheTranscriptIsCaught(t *testing.T) {
@@ -1283,7 +1313,7 @@ func TestADurationTokenIsReadWholeOrRefused(t *testing.T) {
 		{"--- PASS: TestQ (0.86s)\n", "TestQ took .86s"},         // was read as 86s
 		{"--- PASS: TestQ (90.00s)\n", "TestQ took .5m"},         // was read as 300s
 		{"--- PASS: TestQ (1.20s)\n", "TestQ took 1,200ms"},      // was read as 0.2s
-		{"--- PASS: TestQ (70.01s)\n", "TestQ took 1m10ms"},      // was read as 0.01s
+		{"--- PASS: TestQ (60.01s)\n", "TestQ took 1m10ms"},      // was read as 0.01s
 		{"--- PASS: TestQ (3660.50s)\n", "TestQ took 1h1m500ms"}, // was read as 0.5s
 	} {
 		ledger := NewLedger()
@@ -1291,6 +1321,10 @@ func TestADurationTokenIsReadWholeOrRefused(t *testing.T) {
 		if conflicts := ledger.Conflicts(Run{}, honest.claim); len(conflicts) != 0 {
 			t.Errorf("an honest claim %q was accused: %+v", honest.claim, conflicts)
 		}
+	}
+
+	if got, ok := parseClaimedDuration("1m10ms"); !ok || got != 60.01 {
+		t.Fatalf("1m10ms parsed as (%v, %v), want exactly (60.01, true)", got, ok)
 	}
 
 	// AND THE FORMS THAT DO PARSE STILL PARSE, so refusing partial tokens has not
@@ -1316,6 +1350,34 @@ func TestADurationTokenIsReadWholeOrRefused(t *testing.T) {
 	recordGoTest(wrong, Run{}, "--- PASS: TestQ (0.86s)\n")
 	if conflicts := wrong.Conflicts(Run{}, "TestQ took 9.00s"); len(conflicts) != 1 || conflicts[0].Claimed != 9 {
 		t.Errorf("a fabricated 9.00s was not caught as 9: %+v", conflicts)
+	}
+}
+
+func TestSignedTimingDeltaIsNotElapsedTimeEvidence(t *testing.T) {
+	for _, claim := range []string{
+		"TestFoo improved by -4.20s",
+		"TestFoo regressed by +4.20s",
+		"TestFoo changed by −4.20s",
+	} {
+		for _, entry := range []struct {
+			name  string
+			check func(*Ledger) []Conflict
+		}{
+			{"per-run", func(ledger *Ledger) []Conflict { return ledger.Conflicts(Run{}, claim) }},
+			{"across-runs", func(ledger *Ledger) []Conflict { return ledger.ConflictsAcrossRuns(claim) }},
+		} {
+			ledger := NewLedger()
+			recordGoTest(ledger, Run{}, "--- PASS: TestFoo (1.00s)\n")
+			if conflicts := entry.check(ledger); len(conflicts) != 0 {
+				t.Errorf("%s treated signed delta as elapsed time: %q -> %+v", entry.name, claim, conflicts)
+			}
+		}
+	}
+
+	ledger := NewLedger()
+	recordGoTest(ledger, Run{}, "--- PASS: TestFoo (1.00s)\n")
+	if conflicts := ledger.Conflicts(Run{}, "TestFoo took 4.20s"); len(conflicts) != 1 || conflicts[0].Claimed != 4.2 {
+		t.Fatalf("unsigned elapsed-time fabrication stopped being detected: %+v", conflicts)
 	}
 }
 

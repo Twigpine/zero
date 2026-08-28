@@ -190,12 +190,19 @@ func tokenLeftBoundary(text string, index int) bool {
 	if index == 0 {
 		return true
 	}
-	switch previous := text[index-1]; {
+	previous, _ := utf8.DecodeLastRuneInString(text[:index])
+	switch {
 	case previous >= '0' && previous <= '9':
 		return false
 	case previous >= 'a' && previous <= 'z', previous >= 'A' && previous <= 'Z':
 		return false
 	case previous == '.', previous == ',':
+		return false
+	case previous == '+', previous == '-', previous == '−':
+		// A signed number is a delta or another numeric expression, not an
+		// unsigned elapsed-time claim. Starting at the digit would discard the
+		// sign and turn "improved by -4.20s" into a claim that the test took
+		// positive 4.20 seconds.
 		return false
 	default:
 		return true
@@ -485,9 +492,9 @@ func measurementDisplayNames(observed map[measurementID][]float64) (map[measurem
 			testOwners[id.Test]++
 		}
 	}
-	names := make(map[measurementID]string, len(observed))
-	known := make(map[string][]float64, len(observed))
-	for id, values := range observed {
+	candidates := make(map[measurementID]string, len(observed))
+	owners := make(map[string]int, len(observed))
+	for id := range observed {
 		name := id.Package
 		if id.Test != "" {
 			name = id.Test
@@ -498,8 +505,22 @@ func measurementDisplayNames(observed map[measurementID][]float64) (map[measurem
 		if name == "" {
 			continue
 		}
+		candidates[id] = name
+		owners[name]++
+	}
+	names := make(map[measurementID]string, len(candidates))
+	known := make(map[string][]float64, len(candidates))
+	for id, name := range candidates {
+		// Package results and package-qualified test results occupy distinct
+		// identities but can render to the same text (package "example/a.TestFoo"
+		// versus TestFoo in package "example/a"). Such a claim has no unique
+		// owner, so fail silent rather than pooling values or emitting two
+		// incompatible corrections.
+		if owners[name] != 1 {
+			continue
+		}
 		names[id] = name
-		known[name] = append(known[name], values...)
+		known[name] = append(known[name], observed[id]...)
 	}
 	return names, known
 }
