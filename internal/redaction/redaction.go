@@ -629,6 +629,7 @@ func redactURLPasswords(value string, replacement string) string {
 			return candidate
 		}
 		parsed.User = url.UserPassword(parsed.User.Username(), replacement)
-		return parsed.String()
+		encoded := parsed.String()
+		return strings.ReplaceAll(encoded, url.PathEscape(replacement), replacement)
 	})
 }

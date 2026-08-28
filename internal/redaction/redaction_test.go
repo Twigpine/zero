@@ -365,6 +365,30 @@ func TestRedactStringConditionalGates(t *testing.T) {
 			leaked:  []string{jwt},
 			wantHit: true,
 		},
+		{
+			name:    "secret header x-api-key",
+			in:      "X-API-Key: hunter2secret",
+			leaked:  []string{"hunter2secret"},
+			wantHit: true,
+		},
+		{
+			name:    "non-secret header unchanged",
+			in:      "X-Request-Id: hunter2secret",
+			keep:    []string{"hunter2secret"},
+			wantHit: false,
+		},
+		{
+			name:    "url password",
+			in:      "https://user:hunter2secret@example.test/x",
+			leaked:  []string{"hunter2secret"},
+			wantHit: true,
+		},
+		{
+			name:    "url user without password unchanged",
+			in:      "https://user@example.test/x",
+			keep:    []string{"https://user@example.test/x"},
+			wantHit: false,
+		},
 	}
 
 	for _, tc := range tests {
