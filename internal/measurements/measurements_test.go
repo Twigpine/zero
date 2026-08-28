@@ -1,11 +1,56 @@
 package measurements
 
 import (
+	"encoding/json"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 )
+
+var (
+	legacyPackageResult = regexp.MustCompile(`(?m)^(ok|FAIL)\s+(\S+)\s+([0-9]+(?:\.[0-9]+)?)s(?:\s|$)`)
+	legacyTestResult    = regexp.MustCompile(`(?m)^\s*--- (PASS|FAIL|SKIP):\s+(\S+)\s+\(([0-9]+(?:\.[0-9]+)?)s\)`)
+)
+
+// goTestJSON keeps the conflict-classifier fixtures concise while feeding the
+// production parser only the trusted event shape emitted by `go test -json`.
+// Parser trust-boundary behavior itself is tested directly below.
+func goTestJSON(legacy string) string {
+	type event struct {
+		Action  string  `json:"Action"`
+		Package string  `json:"Package,omitempty"`
+		Test    string  `json:"Test,omitempty"`
+		Elapsed float64 `json:"Elapsed"`
+	}
+	var lines []string
+	appendEvent := func(item event) {
+		encoded, err := json.Marshal(item)
+		if err != nil {
+			panic(err)
+		}
+		lines = append(lines, string(encoded))
+	}
+	for _, match := range legacyPackageResult.FindAllStringSubmatch(legacy, -1) {
+		seconds, _ := strconv.ParseFloat(match[3], 64)
+		action := "pass"
+		if match[1] == "FAIL" {
+			action = "fail"
+		}
+		appendEvent(event{Action: action, Package: match[2], Elapsed: seconds})
+	}
+	for _, match := range legacyTestResult.FindAllStringSubmatch(legacy, -1) {
+		seconds, _ := strconv.ParseFloat(match[3], 64)
+		appendEvent(event{Action: strings.ToLower(match[1]), Package: "example.test", Test: match[2], Elapsed: seconds})
+	}
+	return strings.Join(lines, "\n")
+}
+
+func recordGoTest(ledger *Ledger, run Run, legacy string) int {
+	return ledger.Record(run, goTestJSON(legacy))
+}
 
 const goTestOutput = `
 ok  	github.com/Gitlawb/zero/internal/specialist	8.337s
@@ -26,7 +71,7 @@ ok  	github.com/Gitlawb/zero/internal/minify	(cached)
 // output a real run produced, because the trimming is where the bug lives.
 
 func TestParseGoTestReadsBothLineShapes(t *testing.T) {
-	got := ParseGoTest(goTestOutput)
+	got := ParseGoTest(goTestJSON(goTestOutput))
 	byName := map[string]float64{}
 	for _, m := range got {
 		byName[m.Name] = m.Seconds
@@ -57,11 +102,28 @@ func TestParseGoTestReadsBothLineShapes(t *testing.T) {
 	}
 }
 
+func TestTestStdoutCannotBecomeTimingEvidence(t *testing.T) {
+	const stream = "" +
+		`{"Action":"output","Package":"example.test","Test":"TestSpoofed","Output":"--- PASS: TestSpoofed (99.00s)\\n"}` + "\n" +
+		`{"Action":"pass","Package":"example.test","Test":"TestSpoofed","Elapsed":1}` + "\n"
+	ledger := NewLedger()
+	if n := ledger.Record(Run{}, stream); n != 1 {
+		t.Fatalf("recorded %d events, want only the runner result", n)
+	}
+	conflicts := ledger.Conflicts(Run{}, "TestSpoofed took 99s")
+	if len(conflicts) != 1 || len(conflicts[0].Recorded) != 1 || conflicts[0].Recorded[0] != 1 {
+		t.Fatalf("test stdout satisfied a fabricated claim: %+v", conflicts)
+	}
+	if got := ParseGoTest("--- PASS: TestSpoofed (99.00s)\nok example.test 99.00s\n"); len(got) != 0 {
+		t.Fatalf("plain mixed-origin output became evidence: %+v", got)
+	}
+}
+
 // THE FAILURE THIS WAS BUILT FOR: the same test reported at 0.86s in one paste
 // and 4.20s in the next, with nothing said about the difference.
 func TestAClaimThatContradictsTheTranscriptIsCaught(t *testing.T) {
 	ledger := NewLedger()
-	if n := ledger.Record(Run{}, goTestOutput); n == 0 {
+	if n := recordGoTest(ledger, Run{}, goTestOutput); n == 0 {
 		t.Fatal("nothing was recorded, so no conflict could ever be found")
 	}
 
@@ -90,7 +152,7 @@ func TestHonestReportingProducesNoConflict(t *testing.T) {
 		"the same value in milliseconds": "TestChattyChild took 860ms.",
 	} {
 		fresh := NewLedger()
-		fresh.Record(Run{}, goTestOutput)
+		recordGoTest(fresh, Run{}, goTestOutput)
 		if got := fresh.Conflicts(Run{}, claim); len(got) != 0 {
 			t.Errorf("%s produced a false conflict: %+v", name, got)
 		}
@@ -101,7 +163,7 @@ func TestHonestReportingProducesNoConflict(t *testing.T) {
 // would invent disagreements rather than find them.
 func TestADurationOnAnotherLineIsNotPairedWithTheName(t *testing.T) {
 	ledger := NewLedger()
-	ledger.Record(Run{}, goTestOutput)
+	recordGoTest(ledger, Run{}, goTestOutput)
 
 	claim := "TestChattyChild is the one to look at.\n\nSeparately, the whole suite took 4.20s."
 	if got := ledger.Conflicts(Run{}, claim); len(got) != 0 {
@@ -113,7 +175,7 @@ func TestADurationOnAnotherLineIsNotPairedWithTheName(t *testing.T) {
 // pass over an uncorrected answer has to be silent or the loop never ends.
 func TestAConflictIsRaisedOnlyOnce(t *testing.T) {
 	ledger := NewLedger()
-	ledger.Record(Run{}, goTestOutput)
+	recordGoTest(ledger, Run{}, goTestOutput)
 	claim := "TestChattyChild took 4.20s."
 
 	if got := ledger.Conflicts(Run{}, claim); len(got) != 1 {
@@ -127,8 +189,8 @@ func TestAConflictIsRaisedOnlyOnce(t *testing.T) {
 // A test run twice legitimately has two timings, and matching EITHER is honest.
 func TestMatchingAnyRecordedValueIsEnough(t *testing.T) {
 	ledger := NewLedger()
-	ledger.Record(Run{}, "--- PASS: TestFlaky (0.10s)\n")
-	ledger.Record(Run{}, "--- PASS: TestFlaky (9.90s)\n")
+	recordGoTest(ledger, Run{}, "--- PASS: TestFlaky (0.10s)\n")
+	recordGoTest(ledger, Run{}, "--- PASS: TestFlaky (9.90s)\n")
 
 	if got := ledger.Conflicts(Run{}, "TestFlaky took 9.90s."); len(got) != 0 {
 		t.Errorf("matching the second of two recorded runs was called a conflict: %+v", got)
@@ -156,7 +218,7 @@ func TestTheNudgeNamesBothNumbersAndTheRemedy(t *testing.T) {
 // holds a real ledger under the posture.
 func TestANilLedgerIsSafe(t *testing.T) {
 	var ledger *Ledger
-	if got := ledger.Record(Run{}, goTestOutput); got != 0 {
+	if got := recordGoTest(ledger, Run{}, goTestOutput); got != 0 {
 		t.Errorf("Record on a nil ledger returned %d", got)
 	}
 	if got := ledger.Conflicts(Run{}, "TestChattyChild took 4.20s."); got != nil {
@@ -177,7 +239,7 @@ func TestTheLedgerIsSafeUnderConcurrentRecording(t *testing.T) {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			ledger.Record(Run{}, goTestOutput)
+			recordGoTest(ledger, Run{}, goTestOutput)
 			ledger.Conflicts(Run{}, "nothing to see")
 		}()
 	}
@@ -202,13 +264,13 @@ func TestAPrefixNameDoesNotAccuseAnHonestClaim(t *testing.T) {
 	// reads as agreement and this test passes whether or not the prefix boundary
 	// works — it certified nothing. Five seconds against a hundredth cannot be
 	// confused for the same measurement.
-	ledger.Record(Run{}, "--- PASS: TestNested (5.00s)\n    --- PASS: TestNested/subcase (0.01s)\n")
+	recordGoTest(ledger, Run{}, "--- PASS: TestNested (5.00s)\n    --- PASS: TestNested/subcase (0.01s)\n")
 	if conflicts := ledger.Conflicts(Run{}, "TestNested/subcase took 0.01s"); len(conflicts) != 0 {
 		t.Errorf("an honest subtest claim was reported as a conflict: %+v", conflicts)
 	}
 
 	packages := NewLedger()
-	packages.Record(Run{}, "ok  \tgithub.com/Gitlawb/zero/internal/agent\t35.58s\nok  \tgithub.com/Gitlawb/zero/internal/agentinit\t1.66s\n")
+	recordGoTest(packages, Run{}, "ok  \tgithub.com/Gitlawb/zero/internal/agent\t35.58s\nok  \tgithub.com/Gitlawb/zero/internal/agentinit\t1.66s\n")
 	if conflicts := packages.Conflicts(Run{}, "github.com/Gitlawb/zero/internal/agentinit took 1.66s"); len(conflicts) != 0 {
 		t.Errorf("an honest package claim was reported as a conflict: %+v", conflicts)
 	}
@@ -216,7 +278,7 @@ func TestAPrefixNameDoesNotAccuseAnHonestClaim(t *testing.T) {
 	// And the check still bites: a genuinely wrong subtest number is caught, and
 	// attributed to the subtest rather than to its parent.
 	caught := NewLedger()
-	caught.Record(Run{}, "--- PASS: TestNested (5.00s)\n    --- PASS: TestNested/subcase (0.01s)\n")
+	recordGoTest(caught, Run{}, "--- PASS: TestNested (5.00s)\n    --- PASS: TestNested/subcase (0.01s)\n")
 	conflicts := caught.Conflicts(Run{}, "TestNested/subcase took 4.20s")
 	if len(conflicts) != 1 || conflicts[0].Name != "TestNested/subcase" {
 		t.Errorf("a fabricated subtest number was not caught against its own name: %+v", conflicts)
@@ -229,20 +291,20 @@ func TestAPrefixNameDoesNotAccuseAnHonestClaim(t *testing.T) {
 // the model, a number its answer never contained.
 func TestAMinuteDurationIsReadWhole(t *testing.T) {
 	ledger := NewLedger()
-	ledger.Record(Run{}, "--- PASS: TestSlow (70.00s)\n")
+	recordGoTest(ledger, Run{}, "--- PASS: TestSlow (70.00s)\n")
 	if conflicts := ledger.Conflicts(Run{}, "TestSlow took 1m10s"); len(conflicts) != 0 {
 		t.Errorf("an honest 1m10s claim was reported as a conflict: %+v", conflicts)
 	}
 
 	bare := NewLedger()
-	bare.Record(Run{}, "--- PASS: TestTwoMinutes (120.00s)\n")
+	recordGoTest(bare, Run{}, "--- PASS: TestTwoMinutes (120.00s)\n")
 	if conflicts := bare.Conflicts(Run{}, "TestTwoMinutes took 2m"); len(conflicts) != 0 {
 		t.Errorf("an honest bare-minute claim was reported as a conflict: %+v", conflicts)
 	}
 
 	// Still caught when the minutes really disagree.
 	wrong := NewLedger()
-	wrong.Record(Run{}, "--- PASS: TestSlow (70.00s)\n")
+	recordGoTest(wrong, Run{}, "--- PASS: TestSlow (70.00s)\n")
 	conflicts := wrong.Conflicts(Run{}, "TestSlow took 5m00s")
 	if len(conflicts) != 1 || conflicts[0].Claimed != 300 {
 		t.Errorf("a fabricated 5m00s was not caught as 300s: %+v", conflicts)
@@ -256,14 +318,14 @@ func TestAMinuteDurationIsReadWhole(t *testing.T) {
 // model had right, the one failure this package must never produce.
 func TestTheNearestDurationIsTheClaim(t *testing.T) {
 	honest := NewLedger()
-	honest.Record(Run{}, "--- PASS: TestChattyChild (0.86s)\n")
+	recordGoTest(honest, Run{}, "--- PASS: TestChattyChild (0.86s)\n")
 	// The package total trails the test's own timing, exactly as `go test` prints it.
 	if conflicts := honest.Conflicts(Run{}, "TestChattyChild took 0.86s (package total 1m20s)"); len(conflicts) != 0 {
 		t.Errorf("a correct 0.86s claim was reported as a conflict because a later 1m20s was read instead: %+v", conflicts)
 	}
 
 	ms := NewLedger()
-	ms.Record(Run{}, "--- PASS: TestQuick (0.45s)\n")
+	recordGoTest(ms, Run{}, "--- PASS: TestQuick (0.45s)\n")
 	if conflicts := ms.Conflicts(Run{}, "TestQuick took 450ms, well under the 2m budget"); len(conflicts) != 0 {
 		t.Errorf("a correct 450ms claim was reported as a conflict: %+v", conflicts)
 	}
@@ -271,7 +333,7 @@ func TestTheNearestDurationIsTheClaim(t *testing.T) {
 	// And a seconds figure sitting nearby does not rescue a wrong minute claim
 	// when the minute figure is the one being stated.
 	wrong := NewLedger()
-	wrong.Record(Run{}, "--- PASS: TestSlow (70.00s)\n")
+	recordGoTest(wrong, Run{}, "--- PASS: TestSlow (70.00s)\n")
 	conflicts := wrong.Conflicts(Run{}, "TestSlow took 5m00s, not the 70s you might expect")
 	if len(conflicts) != 1 || conflicts[0].Claimed != 300 {
 		t.Errorf("a fabricated 5m00s was not caught as 300s: %+v", conflicts)
@@ -286,7 +348,7 @@ func TestTheNearestDurationIsTheClaim(t *testing.T) {
 // word of that sentence is correct, and the check called it a fabrication.
 func TestADurationBelongsToTheNameBesideIt(t *testing.T) {
 	honest := NewLedger()
-	honest.Record(Run{}, "--- PASS: TestFoo (0.10s)\n--- PASS: TestBar (4.20s)\n")
+	recordGoTest(honest, Run{}, "--- PASS: TestFoo (0.10s)\n--- PASS: TestBar (4.20s)\n")
 	for _, claim := range []string{
 		"TestFoo passed; TestBar took 4.20s",
 		"TestFoo was fine, TestBar took 4.20s",
@@ -299,7 +361,7 @@ func TestADurationBelongsToTheNameBesideIt(t *testing.T) {
 
 	// The name's OWN number is still read, and a wrong one still caught.
 	caught := NewLedger()
-	caught.Record(Run{}, "--- PASS: TestFoo (0.10s)\n--- PASS: TestBar (4.20s)\n")
+	recordGoTest(caught, Run{}, "--- PASS: TestFoo (0.10s)\n--- PASS: TestBar (4.20s)\n")
 	conflicts := caught.Conflicts(Run{}, "TestFoo took 9.90s; TestBar took 4.20s")
 	if len(conflicts) != 1 || conflicts[0].Name != "TestFoo" || conflicts[0].Claimed != 9.9 {
 		t.Errorf("a fabricated TestFoo timing beside an honest TestBar one was not caught: %+v", conflicts)
@@ -313,7 +375,7 @@ func TestADurationBelongsToTheNameBesideIt(t *testing.T) {
 // the same answer must still say nothing, which is what the dedupe is for.
 func TestEachWrongValueIsReportedOnce(t *testing.T) {
 	ledger := NewLedger()
-	ledger.Record(Run{}, "--- PASS: TestFoo (0.10s)\n")
+	recordGoTest(ledger, Run{}, "--- PASS: TestFoo (0.10s)\n")
 
 	if got := ledger.Conflicts(Run{}, "TestFoo took 4.20s"); len(got) != 1 {
 		t.Fatalf("the first wrong value was not reported: %+v", got)
@@ -339,8 +401,8 @@ func TestAClaimIsCheckedAgainstItsOwnRun(t *testing.T) {
 	race := Run{Command: "go", Args: []string{"test", "-race", "./..."}}
 
 	ledger := NewLedger()
-	ledger.Record(plain, "--- PASS: TestSlow (1.00s)\n")
-	ledger.Record(race, "--- PASS: TestSlow (9.00s)\n")
+	recordGoTest(ledger, plain, "--- PASS: TestSlow (1.00s)\n")
+	recordGoTest(ledger, race, "--- PASS: TestSlow (9.00s)\n")
 
 	// The race value must not excuse a plain-run claim of 9s.
 	conflicts := ledger.Conflicts(plain, "TestSlow took 9.00s")
@@ -369,7 +431,7 @@ func TestAClaimIsCheckedAgainstItsOwnRun(t *testing.T) {
 func TestRunProvenanceIsSnapshottedAtRecordTime(t *testing.T) {
 	args := []string{"test", "./a"}
 	ledger := NewLedger()
-	ledger.Record(Run{Command: "go", Args: args, Dir: "/workspace/a"}, "--- PASS: TestSlow (1.00s)\n")
+	recordGoTest(ledger, Run{Command: "go", Args: args, Dir: "/workspace/a"}, "--- PASS: TestSlow (1.00s)\n")
 
 	// Command builders commonly reuse an argv slice for the next invocation.
 	args[1] = "./b"
@@ -382,6 +444,23 @@ func TestRunProvenanceIsSnapshottedAtRecordTime(t *testing.T) {
 	}
 	if nudge := Nudge(conflicts); !strings.Contains(nudge, "go test ./a (dir /workspace/a)") || strings.Contains(nudge, "./b") {
 		t.Fatalf("nudge lost immutable provenance: %q", nudge)
+	}
+}
+
+func TestStrictConflictKeepsRecordedRunAfterQueryArgsMutate(t *testing.T) {
+	args := []string{"test", "./a"}
+	run := Run{Command: "go", Args: args, Dir: "/workspace/a"}
+	ledger := NewLedger()
+	recordGoTest(ledger, run, "--- PASS: TestSlow (1.00s)\n")
+
+	conflicts := ledger.Conflicts(run, "TestSlow took 9.00s")
+	if len(conflicts) != 1 {
+		t.Fatalf("conflicts = %+v, want one", conflicts)
+	}
+	args[1] = "./b"
+	nudge := Nudge(conflicts)
+	if !strings.Contains(nudge, "go test ./a (dir /workspace/a)") || strings.Contains(nudge, "./b") {
+		t.Fatalf("strict conflict retained mutable query provenance: %q", nudge)
 	}
 }
 
@@ -411,8 +490,8 @@ func TestAcrossRunsAcceptsAValueAnyRunPrinted(t *testing.T) {
 	race := Run{Command: "go", Args: []string{"test", "-race", "./..."}}
 
 	ledger := NewLedger()
-	ledger.Record(plain, "--- PASS: TestSlow (1.00s)\n")
-	ledger.Record(race, "--- PASS: TestSlow (9.00s)\n")
+	recordGoTest(ledger, plain, "--- PASS: TestSlow (1.00s)\n")
+	recordGoTest(ledger, race, "--- PASS: TestSlow (9.00s)\n")
 
 	// Either number is one this session really printed.
 	if got := ledger.ConflictsAcrossRuns("TestSlow took 9.00s"); len(got) != 0 {
@@ -441,8 +520,8 @@ func TestAcrossRunsAcceptsAValueAnyRunPrinted(t *testing.T) {
 	// intermittently, and a single pass would call it fixed.
 	for attempt := 0; attempt < 200; attempt++ {
 		repeat := NewLedger()
-		repeat.Record(plain, "--- PASS: TestSlow (1.00s)\n")
-		repeat.Record(race, "--- PASS: TestSlow (9.00s)\n")
+		recordGoTest(repeat, plain, "--- PASS: TestSlow (1.00s)\n")
+		recordGoTest(repeat, race, "--- PASS: TestSlow (9.00s)\n")
 		if first := repeat.ConflictsAcrossRuns("TestSlow took 45.00s"); len(first) != 1 {
 			t.Fatalf("attempt %d: the first pass did not report: %+v", attempt, first)
 		}
@@ -464,8 +543,8 @@ func TestAcrossRunsAcceptsAValueAnyRunPrinted(t *testing.T) {
 	// Determinism is asserted where something can actually reshuffle, in
 	// TestTheReportIsIdenticalBetweenIdenticalPasses.
 	stable := NewLedger()
-	stable.Record(plain, "--- PASS: TestOnlyPlain (1.00s)\n")
-	stable.Record(race, "--- PASS: TestOnlyRace (9.00s)\n")
+	recordGoTest(stable, plain, "--- PASS: TestOnlyPlain (1.00s)\n")
+	recordGoTest(stable, race, "--- PASS: TestOnlyRace (9.00s)\n")
 	reported := stable.ConflictsAcrossRuns("TestOnlyPlain took 45.00s")
 	if len(reported) != 1 || reported[0].Run.Label() != "go test ./..." {
 		t.Fatalf("a single-run conflict must quote the command that recorded it: %+v", reported)
@@ -478,7 +557,7 @@ func TestAcrossRunsAcceptsAValueAnyRunPrinted(t *testing.T) {
 	// per-run form is for a caller that knows its command. Pinned because it is a
 	// real consequence of the split rather than an accident.
 	shared := NewLedger()
-	shared.Record(plain, "--- PASS: TestSlow (1.00s)\n")
+	recordGoTest(shared, plain, "--- PASS: TestSlow (1.00s)\n")
 	if got := shared.Conflicts(plain, "TestSlow took 45.00s"); len(got) != 1 {
 		t.Errorf("the per-run question was not answered: %+v", got)
 	}
@@ -489,8 +568,8 @@ func TestAcrossRunsAcceptsAValueAnyRunPrinted(t *testing.T) {
 	// And the strict, per-run check still holds a claim to its own run — that is
 	// the whole difference between the two entry points.
 	strict := NewLedger()
-	strict.Record(plain, "--- PASS: TestSlow (1.00s)\n")
-	strict.Record(race, "--- PASS: TestSlow (9.00s)\n")
+	recordGoTest(strict, plain, "--- PASS: TestSlow (1.00s)\n")
+	recordGoTest(strict, race, "--- PASS: TestSlow (9.00s)\n")
 	if got := strict.Conflicts(plain, "TestSlow took 9.00s"); len(got) != 1 {
 		t.Errorf("the per-run check accepted another run's value: %+v", got)
 	}
@@ -527,7 +606,7 @@ func TestAnUnrecordedNeighbourStillEndsTheClause(t *testing.T) {
 		"TestFoo ok Example_usage took 4.20s",
 	} {
 		ledger := NewLedger()
-		ledger.Record(Run{}, "--- PASS: TestFoo (0.10s)\n")
+		recordGoTest(ledger, Run{}, "--- PASS: TestFoo (0.10s)\n")
 		if conflicts := ledger.Conflicts(Run{}, claim); len(conflicts) != 0 {
 			t.Errorf("a truthful claim was blamed for a neighbour's number: %q -> %+v", claim, conflicts)
 		}
@@ -541,7 +620,7 @@ func TestAnUnrecordedNeighbourStillEndsTheClause(t *testing.T) {
 		"TestFoo took 9.90s TestBar took 1.00s",
 	} {
 		ledger := NewLedger()
-		ledger.Record(Run{}, "--- PASS: TestFoo (0.10s)\n")
+		recordGoTest(ledger, Run{}, "--- PASS: TestFoo (0.10s)\n")
 		conflicts := ledger.Conflicts(Run{}, claim)
 		if len(conflicts) != 1 || conflicts[0].Claimed != 9.9 {
 			t.Errorf("a fabricated number beside a neighbour was not caught: %q -> %+v", claim, conflicts)
@@ -555,7 +634,7 @@ func TestAnUnrecordedNeighbourStillEndsTheClause(t *testing.T) {
 		"TestFoo took 9.90s, tested twice",
 	} {
 		ledger := NewLedger()
-		ledger.Record(Run{}, "--- PASS: TestFoo (0.10s)\n")
+		recordGoTest(ledger, Run{}, "--- PASS: TestFoo (0.10s)\n")
 		if conflicts := ledger.Conflicts(Run{}, claim); len(conflicts) != 1 {
 			t.Errorf("an ordinary word beginning with a name prefix ended the clause: %q -> %+v", claim, conflicts)
 		}
@@ -563,7 +642,7 @@ func TestAnUnrecordedNeighbourStillEndsTheClause(t *testing.T) {
 
 	// A package name is a name too, and its own claim still lands.
 	packages := NewLedger()
-	packages.Record(Run{}, "ok  \tgithub.com/x/y\t8.00s\n")
+	recordGoTest(packages, Run{}, "ok  \tgithub.com/x/y\t8.00s\n")
 	if conflicts := packages.Conflicts(Run{}, "github.com/x/y took 30.00s"); len(conflicts) != 1 {
 		t.Errorf("a package claim stopped being read: %+v", conflicts)
 	}
@@ -585,7 +664,7 @@ func TestASentenceTerminatorEndsTheClause(t *testing.T) {
 		"TestNested ok: package total 34.249s.",
 	} {
 		ledger := NewLedger()
-		ledger.Record(Run{}, "--- PASS: TestNested (0.03s)\n")
+		recordGoTest(ledger, Run{}, "--- PASS: TestNested (0.03s)\n")
 		if conflicts := ledger.Conflicts(Run{}, claim); len(conflicts) != 0 {
 			t.Errorf("the next sentence's number was charged to this test: %q -> %+v", claim, conflicts)
 		}
@@ -602,7 +681,7 @@ func TestASentenceTerminatorEndsTheClause(t *testing.T) {
 		{"ok  \tgithub.com/x/y\t8.00s\n", "github.com/x/y took 30.00s.", 30},
 	} {
 		ledger := NewLedger()
-		ledger.Record(Run{}, tc.recorded)
+		recordGoTest(ledger, Run{}, tc.recorded)
 		conflicts := ledger.Conflicts(Run{}, tc.claim)
 		if len(conflicts) != 1 || conflicts[0].Claimed != tc.want {
 			t.Errorf("a fabricated number stopped being read: %q -> %+v", tc.claim, conflicts)
@@ -612,7 +691,7 @@ func TestASentenceTerminatorEndsTheClause(t *testing.T) {
 	// The first duration in the clause still wins, so an honest report that gives
 	// its own timing before the total is untouched.
 	honest := NewLedger()
-	honest.Record(Run{}, "--- PASS: TestNested (0.03s)\n")
+	recordGoTest(honest, Run{}, "--- PASS: TestNested (0.03s)\n")
 	if conflicts := honest.Conflicts(Run{}, "TestNested passed in 0.03s. The full run took 34.249s."); len(conflicts) != 0 {
 		t.Errorf("an honest report carrying both numbers was flagged: %+v", conflicts)
 	}
@@ -627,8 +706,8 @@ func TestASentenceTerminatorEndsTheClause(t *testing.T) {
 // attribution just as untrue.
 func TestAMergedResultIsNotAttributedToOneCommand(t *testing.T) {
 	merged := NewLedger()
-	merged.Record(Run{Command: "go", Args: []string{"test", "./a"}}, "--- PASS: TestFoo (0.10s)\n")
-	merged.Record(Run{Command: "go", Args: []string{"test", "./b"}}, "--- PASS: TestFoo (0.20s)\n")
+	recordGoTest(merged, Run{Command: "go", Args: []string{"test", "./a"}}, "--- PASS: TestFoo (0.10s)\n")
+	recordGoTest(merged, Run{Command: "go", Args: []string{"test", "./b"}}, "--- PASS: TestFoo (0.20s)\n")
 	conflicts := merged.ConflictsAcrossRuns("TestFoo took 9.90s")
 	if len(conflicts) != 1 {
 		t.Fatalf("expected one conflict, got %+v", conflicts)
@@ -643,7 +722,7 @@ func TestAMergedResultIsNotAttributedToOneCommand(t *testing.T) {
 	// One run behind the values keeps the label, which is the useful case: the
 	// model is told exactly which command to re-run.
 	single := NewLedger()
-	single.Record(Run{Command: "go", Args: []string{"test", "./a"}}, "--- PASS: TestFoo (0.10s)\n")
+	recordGoTest(single, Run{Command: "go", Args: []string{"test", "./a"}}, "--- PASS: TestFoo (0.10s)\n")
 	one := single.ConflictsAcrossRuns("TestFoo took 9.90s")
 	if len(one) != 1 || one[0].Run.Label() != "go test ./a" {
 		t.Errorf("a single-run result lost its command label: %+v", one)
@@ -671,7 +750,7 @@ func TestEveryClausePunctuationEndsTheClause(t *testing.T) {
 		"TestChattyChild - the suite took 34.249s.",
 	} {
 		ledger := NewLedger()
-		ledger.Record(Run{}, "--- PASS: TestChattyChild (0.86s)\n")
+		recordGoTest(ledger, Run{}, "--- PASS: TestChattyChild (0.86s)\n")
 		if conflicts := ledger.Conflicts(Run{}, claim); len(conflicts) != 0 {
 			t.Errorf("a following clause's number was charged to this test: %q -> %+v", claim, conflicts)
 		}
@@ -702,7 +781,7 @@ func TestPunctuationCarryingThisTestsOwnNumberIsNotABoundary(t *testing.T) {
 		"TestChattyChild passed: 9.99s",
 	} {
 		ledger := NewLedger()
-		ledger.Record(Run{}, "--- PASS: TestChattyChild (0.86s)\n")
+		recordGoTest(ledger, Run{}, "--- PASS: TestChattyChild (0.86s)\n")
 		conflicts := ledger.Conflicts(Run{}, claim)
 		if len(conflicts) != 1 || conflicts[0].Claimed != 9.99 {
 			t.Errorf("a test's own number stopped being read: %q -> %+v", claim, conflicts)
@@ -739,12 +818,12 @@ func TestAnHourDurationIsReadWhole(t *testing.T) {
 	}
 
 	honest := NewLedger()
-	honest.Record(Run{}, "--- PASS: TestVerySlow (4200.00s)\n")
+	recordGoTest(honest, Run{}, "--- PASS: TestVerySlow (4200.00s)\n")
 	if conflicts := honest.Conflicts(Run{}, "TestVerySlow took 1h10m0s"); len(conflicts) != 0 {
 		t.Errorf("a truthful 1h10m0s claim was reported as a conflict: %+v", conflicts)
 	}
 	wrong := NewLedger()
-	wrong.Record(Run{}, "--- PASS: TestVerySlow (4200.00s)\n")
+	recordGoTest(wrong, Run{}, "--- PASS: TestVerySlow (4200.00s)\n")
 	if conflicts := wrong.Conflicts(Run{}, "TestVerySlow took 9h"); len(conflicts) != 1 || conflicts[0].Claimed != 32400 {
 		t.Errorf("a fabricated 9h was not caught as 32400s: %+v", conflicts)
 	}
@@ -766,7 +845,7 @@ func TestTheClauseScanSeesTheHourForm(t *testing.T) {
 		"TestVerySlow took 9h",
 	} {
 		ledger := NewLedger()
-		ledger.Record(Run{}, "--- PASS: TestVerySlow (4200.00s)\n")
+		recordGoTest(ledger, Run{}, "--- PASS: TestVerySlow (4200.00s)\n")
 		conflicts := ledger.Conflicts(Run{}, claim)
 		if len(conflicts) != 1 || conflicts[0].Claimed != 32400 {
 			t.Errorf("a fabricated hour figure was not read: %q -> %+v", claim, conflicts)
@@ -776,12 +855,12 @@ func TestTheClauseScanSeesTheHourForm(t *testing.T) {
 	// And the bounds still bind: an hour figure belonging to another subject
 	// stays that subject's, and a truthful hour restatement is not a conflict.
 	bleed := NewLedger()
-	bleed.Record(Run{}, "--- PASS: TestVerySlow (4200.00s)\n")
+	recordGoTest(bleed, Run{}, "--- PASS: TestVerySlow (4200.00s)\n")
 	if conflicts := bleed.Conflicts(Run{}, "TestVerySlow passed - the whole suite took 9h"); len(conflicts) != 0 {
 		t.Errorf("another subject's hour figure was charged to this test: %+v", conflicts)
 	}
 	honest := NewLedger()
-	honest.Record(Run{}, "--- PASS: TestVerySlow (4200.00s)\n")
+	recordGoTest(honest, Run{}, "--- PASS: TestVerySlow (4200.00s)\n")
 	if conflicts := honest.Conflicts(Run{}, "TestVerySlow - 1h10m0s"); len(conflicts) != 0 {
 		t.Errorf("a truthful 1h10m0s restatement was reported as a conflict: %+v", conflicts)
 	}
@@ -809,7 +888,7 @@ func TestADecimalDurationIsReadWhole(t *testing.T) {
 		{"--- PASS: TestVeryLong (36900.00s)\n", 36900, "TestVeryLong took 10.25h"},
 	} {
 		ledger := NewLedger()
-		ledger.Record(Run{}, c.recorded)
+		recordGoTest(ledger, Run{}, c.recorded)
 		if conflicts := ledger.Conflicts(Run{}, c.claim); len(conflicts) != 0 {
 			t.Errorf("an honest claim %q against %vs was reported as a conflict: %+v", c.claim, c.seconds, conflicts)
 		}
@@ -819,7 +898,7 @@ func TestADecimalDurationIsReadWhole(t *testing.T) {
 	// a minute claim: the word boundary after "m" is what kept milliseconds out
 	// of the minute pattern, and widening the number must not cost that.
 	milli := NewLedger()
-	milli.Record(Run{}, "--- PASS: TestQuick (0.0015s)\n")
+	recordGoTest(milli, Run{}, "--- PASS: TestQuick (0.0015s)\n")
 	if conflicts := milli.Conflicts(Run{}, "TestQuick took 1.5ms"); len(conflicts) != 0 {
 		t.Errorf("an honest 1.5ms claim was read as minutes: %+v", conflicts)
 	}
@@ -831,7 +910,7 @@ func TestADecimalDurationIsReadWhole(t *testing.T) {
 	// from a lucky one. (2.5m would also disagree, but 150s against a recorded
 	// 90s sits inside the deliberate 50% tolerance band and is not a conflict.)
 	wrong := NewLedger()
-	wrong.Record(Run{}, "--- PASS: TestNinety (90.00s)\n")
+	recordGoTest(wrong, Run{}, "--- PASS: TestNinety (90.00s)\n")
 	if conflicts := wrong.Conflicts(Run{}, "TestNinety took 4.5m"); len(conflicts) != 1 || conflicts[0].Claimed != 270 {
 		t.Errorf("a fabricated 4.5m was not caught as 270s: %+v", conflicts)
 	}
@@ -842,7 +921,7 @@ func TestADecimalDurationIsReadWhole(t *testing.T) {
 // with "assignment to entry in nil map" on its first Record.
 func TestAZeroValueLedgerRecordsWithoutPanicking(t *testing.T) {
 	var ledger Ledger
-	if n := ledger.Record(Run{}, "--- PASS: TestSomething (1.25s)\n"); n != 1 {
+	if n := recordGoTest(&ledger, Run{}, "--- PASS: TestSomething (1.25s)\n"); n != 1 {
 		t.Errorf("a zero-value ledger recorded %d measurements, want 1", n)
 	}
 	if conflicts := ledger.Conflicts(Run{}, "TestSomething took 1.25s"); len(conflicts) != 0 {
@@ -861,7 +940,7 @@ func TestAZeroValueLedgerRecordsWithoutPanicking(t *testing.T) {
 // the same map, so one of them holding says nothing about the other.
 func TestAZeroValueLedgerSurvivesAContradiction(t *testing.T) {
 	var single Ledger
-	single.Record(Run{}, "--- PASS: TestSomething (1.25s)\n")
+	recordGoTest(&single, Run{}, "--- PASS: TestSomething (1.25s)\n")
 	conflicts := single.Conflicts(Run{}, "TestSomething took 99s")
 	if len(conflicts) != 1 || conflicts[0].Claimed != 99 {
 		t.Errorf("a zero-value ledger did not report the contradiction: %+v", conflicts)
@@ -872,7 +951,7 @@ func TestAZeroValueLedgerSurvivesAContradiction(t *testing.T) {
 	}
 
 	var across Ledger
-	across.Record(Run{}, "--- PASS: TestSomething (1.25s)\n")
+	recordGoTest(&across, Run{}, "--- PASS: TestSomething (1.25s)\n")
 	if conflicts := across.ConflictsAcrossRuns("TestSomething took 99s"); len(conflicts) != 1 {
 		t.Errorf("a zero-value ledger did not report the contradiction across runs: %+v", conflicts)
 	}
@@ -916,15 +995,15 @@ func TestTheReportIsIdenticalBetweenIdenticalPasses(t *testing.T) {
 	// report nothing after the first attempt and the loop would assert on empty.
 	for attempt := 0; attempt < 200; attempt++ {
 		across := NewLedger()
-		across.Record(plain, fromPlain)
-		across.Record(race, fromRace)
+		recordGoTest(across, plain, fromPlain)
+		recordGoTest(across, race, fromRace)
 		if got := report(across.ConflictsAcrossRuns(claim)); got != wantAcross {
 			t.Fatalf("attempt %d: the cross-run report is not what identical passes must produce:\n got %s\nwant %s", attempt, got, wantAcross)
 		}
 
 		perRun := NewLedger()
-		perRun.Record(plain, fromPlain)
-		perRun.Record(race, fromRace)
+		recordGoTest(perRun, plain, fromPlain)
+		recordGoTest(perRun, race, fromRace)
 		if got := report(perRun.Conflicts(plain, claim)); got != wantPerRun {
 			t.Fatalf("attempt %d: the per-run report is not what identical passes must produce:\n got %s\nwant %s", attempt, got, wantPerRun)
 		}
@@ -996,7 +1075,7 @@ func TestASubjectFollowingItsNumberEndsTheClause(t *testing.T) {
 		"TestFoo was fine, 4.20s covered every package",
 	} {
 		ledger := NewLedger()
-		ledger.Record(Run{}, "--- PASS: TestFoo (0.10s)\n")
+		recordGoTest(ledger, Run{}, "--- PASS: TestFoo (0.10s)\n")
 		if conflicts := ledger.Conflicts(Run{}, claim); len(conflicts) != 0 {
 			t.Errorf("a following subject's number was charged to this test: %q -> %+v", claim, conflicts)
 		}
@@ -1014,7 +1093,7 @@ func TestASubjectFollowingItsNumberEndsTheClause(t *testing.T) {
 		"TestFoo passed (9.90s) and the suite took 34.249s",
 	} {
 		ledger := NewLedger()
-		ledger.Record(Run{}, "--- PASS: TestFoo (0.10s)\n")
+		recordGoTest(ledger, Run{}, "--- PASS: TestFoo (0.10s)\n")
 		conflicts := ledger.Conflicts(Run{}, claim)
 		if len(conflicts) != 1 || conflicts[0].Claimed != 9.9 {
 			t.Errorf("a test's own number stopped being read: %q -> %+v", claim, conflicts)
@@ -1047,7 +1126,7 @@ func TestANonDurationUnitIsNotReadAsMinutes(t *testing.T) {
 		"TestParseCorpus walked 5m lines",
 	} {
 		ledger := NewLedger()
-		ledger.Record(Run{}, "--- PASS: TestParseCorpus (0.86s)\n")
+		recordGoTest(ledger, Run{}, "--- PASS: TestParseCorpus (0.86s)\n")
 		if conflicts := ledger.Conflicts(Run{}, claim); len(conflicts) != 0 {
 			t.Errorf("a count was read as minutes and a truthful report accused of it: %q -> %+v", claim, conflicts)
 		}
@@ -1081,7 +1160,7 @@ func TestANonDurationUnitIsNotReadAsMinutes(t *testing.T) {
 
 	// And a minute figure that really is one is still caught, whole.
 	caught := NewLedger()
-	caught.Record(Run{}, "--- PASS: TestSlow (70.00s)\n")
+	recordGoTest(caught, Run{}, "--- PASS: TestSlow (70.00s)\n")
 	if conflicts := caught.Conflicts(Run{}, "TestSlow took 5m"); len(conflicts) != 1 || conflicts[0].Claimed != 300 {
 		t.Errorf("a bare minute figure with no word after it stopped being read: %+v", conflicts)
 	}
@@ -1117,7 +1196,7 @@ func TestTheClauseScanRefusesWhatTheParserRefuses(t *testing.T) {
 		"TestFoo ok; 9h and the suite took 4.20s",
 	} {
 		ledger := NewLedger()
-		ledger.Record(Run{}, "--- PASS: TestFoo (0.10s)\n")
+		recordGoTest(ledger, Run{}, "--- PASS: TestFoo (0.10s)\n")
 		if conflicts := ledger.Conflicts(Run{}, claim); len(conflicts) != 0 {
 			t.Errorf("the clause scan read a token the parser refuses: %q -> %+v", claim, conflicts)
 		}
@@ -1142,7 +1221,7 @@ func TestADurationTokenIsReadWholeOrRefused(t *testing.T) {
 		{"--- PASS: TestQ (3660.50s)\n", "TestQ took 1h1m500ms"}, // was read as 0.5s
 	} {
 		ledger := NewLedger()
-		ledger.Record(Run{}, honest.recorded)
+		recordGoTest(ledger, Run{}, honest.recorded)
 		if conflicts := ledger.Conflicts(Run{}, honest.claim); len(conflicts) != 0 {
 			t.Errorf("an honest claim %q was accused: %+v", honest.claim, conflicts)
 		}
@@ -1160,7 +1239,7 @@ func TestADurationTokenIsReadWholeOrRefused(t *testing.T) {
 		{"--- PASS: TestQ (4200.00s)\n", "TestQ took 1h10m0s"},
 	} {
 		ledger := NewLedger()
-		ledger.Record(Run{}, readable.recorded)
+		recordGoTest(ledger, Run{}, readable.recorded)
 		if conflicts := ledger.Conflicts(Run{}, readable.claim); len(conflicts) != 0 {
 			t.Errorf("a valid duration %q stopped being read: %+v", readable.claim, conflicts)
 		}
@@ -1168,7 +1247,7 @@ func TestADurationTokenIsReadWholeOrRefused(t *testing.T) {
 
 	// A real fabrication is still caught.
 	wrong := NewLedger()
-	wrong.Record(Run{}, "--- PASS: TestQ (0.86s)\n")
+	recordGoTest(wrong, Run{}, "--- PASS: TestQ (0.86s)\n")
 	if conflicts := wrong.Conflicts(Run{}, "TestQ took 9.00s"); len(conflicts) != 1 || conflicts[0].Claimed != 9 {
 		t.Errorf("a fabricated 9.00s was not caught as 9: %+v", conflicts)
 	}
@@ -1201,7 +1280,7 @@ func TestEveryTimedMentionOfANameIsChecked(t *testing.T) {
 			{"across-runs", func(l *Ledger) []Conflict { return l.ConflictsAcrossRuns(c.claim) }},
 		} {
 			ledger := NewLedger()
-			ledger.Record(Run{}, "--- PASS: TestFoo (1.00s)\n")
+			recordGoTest(ledger, Run{}, "--- PASS: TestFoo (1.00s)\n")
 			got := entry.run(ledger)
 			if len(got) != len(c.want) {
 				t.Errorf("%s/%s: %d conflicts, want %d: %+v", entry.name, c.label, len(got), len(c.want), got)
@@ -1222,14 +1301,14 @@ func TestAConjunctionSeparatedThresholdIsNotTheResult(t *testing.T) {
 		"TestQuick met the 10s budget and actually ran in 0.86s",
 	} {
 		ledger := NewLedger()
-		ledger.Record(Run{}, "--- PASS: TestQuick (0.86s)\n")
+		recordGoTest(ledger, Run{}, "--- PASS: TestQuick (0.86s)\n")
 		if conflicts := ledger.Conflicts(Run{}, claim); len(conflicts) != 0 {
 			t.Errorf("threshold/result wording produced a false conflict: %q -> %+v", claim, conflicts)
 		}
 	}
 
 	ledger := NewLedger()
-	ledger.Record(Run{}, "--- PASS: TestQuick (0.86s)\n")
+	recordGoTest(ledger, Run{}, "--- PASS: TestQuick (0.86s)\n")
 	if conflicts := ledger.Conflicts(Run{}, "TestQuick completed in 9.00s"); len(conflicts) != 1 || conflicts[0].Claimed != 9 {
 		t.Fatalf("an unambiguous wrong result stopped being detected: %+v", conflicts)
 	}
@@ -1237,7 +1316,7 @@ func TestAConjunctionSeparatedThresholdIsNotTheResult(t *testing.T) {
 
 func TestGeneratedDuplicateSubtestSuffixBelongsToTheName(t *testing.T) {
 	ledger := NewLedger()
-	ledger.Record(Run{}, strings.Join([]string{
+	recordGoTest(ledger, Run{}, strings.Join([]string{
 		"--- PASS: TestParent/sub (0.10s)",
 		"--- PASS: TestParent/sub#01 (4.20s)",
 		"",
@@ -1248,7 +1327,7 @@ func TestGeneratedDuplicateSubtestSuffixBelongsToTheName(t *testing.T) {
 	}
 
 	wrong := NewLedger()
-	wrong.Record(Run{}, strings.Join([]string{
+	recordGoTest(wrong, Run{}, strings.Join([]string{
 		"--- PASS: TestParent/sub (0.10s)",
 		"--- PASS: TestParent/sub#01 (4.20s)",
 		"",
@@ -1274,14 +1353,14 @@ func TestAnUnrecordedPackageNeighbourBoundsTheClause(t *testing.T) {
 		"github.com/x/first ok; github.com/x/unrecorded took 4.20s",
 	} {
 		ledger := NewLedger()
-		ledger.Record(Run{}, "ok  \tgithub.com/x/first\t0.10s\n")
+		recordGoTest(ledger, Run{}, "ok  \tgithub.com/x/first\t0.10s\n")
 		if conflicts := ledger.Conflicts(Run{}, claim); len(conflicts) != 0 {
 			t.Errorf("a neighbour's figure was charged to the first package: %q -> %+v", claim, conflicts)
 		}
 	}
 	// THE CONTROL: when the duration really is the first package's, it still reads.
 	ledger := NewLedger()
-	ledger.Record(Run{}, "ok  \tgithub.com/x/first\t0.10s\n")
+	recordGoTest(ledger, Run{}, "ok  \tgithub.com/x/first\t0.10s\n")
 	if conflicts := ledger.Conflicts(Run{}, "github.com/x/first took 4.20s"); len(conflicts) != 1 {
 		t.Errorf("a genuine package fabrication stopped being caught: %+v", conflicts)
 	}

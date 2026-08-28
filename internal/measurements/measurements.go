@@ -23,8 +23,8 @@
 package measurements
 
 import (
+	"encoding/json"
 	"math"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -124,14 +124,6 @@ func (r Run) Label() string {
 	}
 	return label
 }
-
-var (
-	// `ok  	github.com/x/y	8.337s` and its FAIL twin. Not anchored at the end:
-	// a coverage or cached suffix may follow.
-	goTestPackageLine = regexp.MustCompile(`(?m)^(?:ok|FAIL)\s+(\S+)\s+([0-9]+(?:\.[0-9]+)?)s(?:\s|$)`)
-	// `--- PASS: TestFoo (0.30s)`, at any indentation, including subtests.
-	goTestCaseLine = regexp.MustCompile(`(?m)^\s*--- (?:PASS|FAIL|SKIP):\s+(\S+)\s+\(([0-9]+(?:\.[0-9]+)?)s\)`)
-)
 
 // ── one authoritative duration token ────────────────────────────────────────
 //
@@ -283,29 +275,43 @@ func nextDurationToken(text string, start int) (begin, end int, seconds float64,
 	return 0, 0, 0, 0, false
 }
 
-// ParseGoTest pulls every timing out of `go test` output.
+// ParseGoTest pulls timings only from structured `go test -json` result events.
 //
-// Two shapes only — the per-package result line and the per-case `--- PASS`
-// line. Benchmarks report ns/op rather than a duration and are NOT read here:
-// guessing at a unit would put wrong numbers in the ledger, and a ledger that is
-// itself unreliable is worse than none.
+// Plain `go test -v` output is deliberately not accepted. The test process and
+// the Go runner share that text stream, so a test can print a line shaped like
+// `--- PASS: TestName (99.00s)` before the runner prints the real result. Under
+// -json, test stdout is wrapped in an "output" event; admitting only
+// pass/fail/skip events establishes which values the runner produced. Malformed
+// or ordinary-text lines are silence, not evidence.
 func ParseGoTest(text string) []Measurement {
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
+	type event struct {
+		Action  string   `json:"Action"`
+		Package string   `json:"Package"`
+		Test    string   `json:"Test"`
+		Elapsed *float64 `json:"Elapsed"`
+	}
 	var out []Measurement
-	for _, pattern := range []*regexp.Regexp{goTestPackageLine, goTestCaseLine} {
-		for _, match := range pattern.FindAllStringSubmatch(text, -1) {
-			seconds, err := strconv.ParseFloat(match[2], 64)
-			if err != nil {
-				continue
-			}
-			name := strings.TrimSpace(match[1])
-			if name == "" {
-				continue
-			}
-			out = append(out, Measurement{Name: name, Seconds: seconds})
+	for _, line := range strings.Split(text, "\n") {
+		var item event
+		if err := json.Unmarshal([]byte(line), &item); err != nil || item.Elapsed == nil {
+			continue
 		}
+		switch item.Action {
+		case "pass", "fail", "skip":
+		default:
+			continue
+		}
+		name := strings.TrimSpace(item.Test)
+		if name == "" {
+			name = strings.TrimSpace(item.Package)
+		}
+		if name == "" || math.IsNaN(*item.Elapsed) || math.IsInf(*item.Elapsed, 0) || *item.Elapsed < 0 {
+			continue
+		}
+		out = append(out, Measurement{Name: name, Seconds: *item.Elapsed})
 	}
 	return out
 }
@@ -463,9 +469,17 @@ func (l *Ledger) Conflicts(run Run, claim string) []Conflict {
 
 	// ONLY THIS RUN'S VALUES. A claim about `go test ./...` is not answered by a
 	// number that only `go test -race ./...` ever printed.
-	observed := l.observed[run.key()]
+	key := run.key()
+	observed := l.observed[key]
 	if len(observed) == 0 {
 		return nil
+	}
+	// Use the immutable provenance retained at Record time. A command builder
+	// may reuse the caller's argv backing array after this method returns; a
+	// later Nudge must still name the command that produced these observations.
+	attributedRun, ok := l.runs[key]
+	if !ok {
+		attributedRun = run.snapshot()
 	}
 	var out []Conflict
 	for name, recorded := range observed {
@@ -498,7 +512,7 @@ func (l *Ledger) Conflicts(run Run, claim string) []Conflict {
 			}
 			values := append([]float64(nil), recorded...)
 			sort.Float64s(values)
-			out = append(out, Conflict{Name: name, Claimed: claimed, Recorded: values, Run: run})
+			out = append(out, Conflict{Name: name, Claimed: claimed, Recorded: values, Run: attributedRun})
 		}
 	}
 	// Deterministic order: this text reaches a model, and a set that reshuffles
