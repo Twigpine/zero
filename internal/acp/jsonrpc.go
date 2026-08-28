@@ -30,7 +30,10 @@ const (
 	codeServerBusy     = -32000
 )
 
-var errFrameTooLarge = errors.New("acp: frame exceeds limit")
+var (
+	errFrameTooLarge = errors.New("acp: frame exceeds limit")
+	errBusyOverload  = errors.New("acp: busy-reply queue full")
+)
 
 // rpcError is a JSON-RPC 2.0 error object.
 type rpcError struct {
@@ -84,6 +87,7 @@ const (
 	// the trailing newline delimiter (effective maximum payload is limit - 1).
 	maxFrameBytes         = 64 * 1024 * 1024
 	maxConcurrentRequests = 128
+	maxBusyReplies        = 1
 )
 
 // Conn is a JSON-RPC 2.0 peer over a single ndjson stream pair. It both serves
@@ -111,6 +115,10 @@ type Conn struct {
 
 	sem chan struct{}
 	wg  sync.WaitGroup // tracks in-flight inbound handlers
+
+	busyCh      chan json.RawMessage
+	serveCancel context.CancelFunc
+	overloaded  atomic.Bool
 }
 
 // NewConn builds a peer reading ndjson from r and writing ndjson to w. This
@@ -127,6 +135,7 @@ func NewConn(r io.Reader, w io.Writer) *Conn {
 		notifiers: make(map[string]NotifyFunc),
 		pending:   make(map[int64]chan rpcMessage),
 		sem:       make(chan struct{}, maxConcurrentRequests),
+		busyCh:    make(chan json.RawMessage, maxBusyReplies),
 	}
 }
 
@@ -154,10 +163,13 @@ func (c *Conn) HandleNotify(method string, fn NotifyFunc) { c.notifiers[method] 
 // blocks the loop from delivering session/cancel or a permission response.
 func (c *Conn) Serve(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
+	c.serveCancel = cancel
+	go c.writeBusyLoop(ctx)
 	// On exit, cancel in-flight handlers (so a blocked outbound Call unblocks via
 	// ctx) and then wait for them to finish writing their responses. Without this,
 	// a finite input stream (e.g. piped ndjson that EOFs right after a request)
-	// would race the dispatch goroutine and drop the response.
+	// would race the dispatch goroutine and drop the response. The busy-reply
+	// writer is not on wg: it may be blocked in Write against a stalled peer.
 	defer func() {
 		cancel()
 		c.wg.Wait()
@@ -197,6 +209,9 @@ func (c *Conn) Serve(ctx context.Context) error {
 		}
 		if len(bytes.TrimSpace(line)) > 0 {
 			c.handleLine(ctx, line)
+		}
+		if c.overloaded.Load() {
+			return errBusyOverload
 		}
 		if err != nil {
 			c.failAllPending(err)
@@ -353,14 +368,9 @@ func (c *Conn) handleLine(ctx context.Context, line []byte) {
 				}(msg)
 			default:
 				id := append(json.RawMessage(nil), msg.ID...)
-				c.wg.Add(1)
-				go func() {
-					defer c.wg.Done()
-					c.writeError(id, &rpcError{
-						Code:    codeServerBusy,
-						Message: "server busy: max concurrent requests exceeded",
-					})
-				}()
+				if !c.tryEnqueueBusy(id) {
+					c.tripOverload()
+				}
 			}
 		} else {
 			c.wg.Add(1)
@@ -515,7 +525,44 @@ func (c *Conn) writeError(id json.RawMessage, e *rpcError) {
 	_ = c.write(rpcMessage{JSONRPC: "2.0", ID: id, Error: e})
 }
 
+func (c *Conn) tryEnqueueBusy(id json.RawMessage) bool {
+	if c.busyCh == nil {
+		return false
+	}
+	select {
+	case c.busyCh <- id:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Conn) tripOverload() {
+	if !c.overloaded.CompareAndSwap(false, true) {
+		return
+	}
+	c.failAllPending(errBusyOverload)
+	if c.serveCancel != nil {
+		c.serveCancel()
+	}
+}
+
+func (c *Conn) writeBusyLoop(ctx context.Context) {
+	busy := &rpcError{Code: codeServerBusy, Message: "server busy: max concurrent requests exceeded"}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case id := <-c.busyCh:
+			c.writeError(id, busy)
+		}
+	}
+}
+
 func (c *Conn) write(msg rpcMessage) error {
+	if c.overloaded.Load() {
+		return errBusyOverload
+	}
 	msg.JSONRPC = "2.0"
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -523,6 +570,9 @@ func (c *Conn) write(msg rpcMessage) error {
 	}
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	if c.overloaded.Load() {
+		return errBusyOverload
+	}
 	if _, err := c.w.Write(append(data, '\n')); err != nil {
 		return err
 	}

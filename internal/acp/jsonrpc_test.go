@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -780,5 +781,64 @@ func TestSaturatedBusyWriteDoesNotBlockCancelNotification(t *testing.T) {
 	case <-cancelSeen:
 	case <-time.After(2 * time.Second):
 		t.Fatal("cancel notification stalled behind a blocked busy write")
+	}
+}
+
+func TestStalledBusyRepliesStayBoundedAndServeExits(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	defer inWriter.Close()
+
+	started := make(chan struct{})
+	gate := make(chan struct{})
+	defer close(gate)
+	conn := NewConn(inReader, &stallWriter{started: started, gate: gate})
+	conn.sem = make(chan struct{}, 2)
+
+	handlerStarted := make(chan struct{}, 2)
+	conn.Handle("slow", func(ctx context.Context, _ json.RawMessage) (any, error) {
+		handlerStarted <- struct{}{}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- conn.Serve(ctx) }()
+
+	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","id":1,"method":"slow"}` + "\n"))
+	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","id":2,"method":"slow"}` + "\n"))
+	for i := 0; i < 2; i++ {
+		select {
+		case <-handlerStarted:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for slow handler %d", i)
+		}
+	}
+
+	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","id":3,"method":"slow"}` + "\n"))
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for busy write to stall")
+	}
+
+	before := runtime.NumGoroutine()
+	const extra = 50
+	go func() {
+		for i := 0; i < extra; i++ {
+			req := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"slow"}`+"\n", i+10)
+			_, _ = inWriter.Write([]byte(req))
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not exit after the busy-reply queue overflowed")
+	}
+	after := runtime.NumGoroutine()
+	if delta := after - before; delta > 8 {
+		t.Fatalf("goroutine growth = %d after %d rejected requests, want bounded", delta, extra)
 	}
 }
