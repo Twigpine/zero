@@ -389,6 +389,13 @@ func TestRedactStringConditionalGates(t *testing.T) {
 			keep:    []string{"https://user@example.test/x"},
 			wantHit: false,
 		},
+		{
+			name:    "url password does not unescape path marker",
+			in:      "https://user:hunter2secret@example.test/%5BREDACTED%5D",
+			leaked:  []string{"hunter2secret"},
+			keep:    []string{"/%5BREDACTED%5D"},
+			wantHit: true,
+		},
 	}
 
 	for _, tc := range tests {
