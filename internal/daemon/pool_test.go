@@ -346,13 +346,14 @@ func TestPoolDrainKillsWorkerLaunchedAfterDrainStarts(t *testing.T) {
 }
 
 func TestPoolDrainBoundsBlockedLauncher(t *testing.T) {
+	const killTimeout = 100 * time.Millisecond
 	launchStarted := make(chan struct{})
 	releaseLaunch := make(chan struct{})
 	lateWorker := &fakeWorker{pid: 1}
 	pool, err := NewPool(PoolOptions{
 		Size:        1,
 		MaxAttempts: 1,
-		KillTimeout: 100 * time.Millisecond,
+		KillTimeout: killTimeout,
 		Backoff:     func(int) time.Duration { return 0 },
 		Launcher: func(context.Context, WorkerSpec) (WorkerHandle, error) {
 			close(launchStarted)
@@ -373,18 +374,19 @@ func TestPoolDrainBoundsBlockedLauncher(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not start the launcher")
 	}
-	drained := make(chan struct{})
-	go func() { pool.Drain(); close(drained) }()
-	waitFor(t, pool.isDraining)
+	drainElapsed := make(chan time.Duration, 1)
+	go func() {
+		start := time.Now()
+		pool.Drain()
+		drainElapsed <- time.Since(start)
+	}()
 	// The first timeout accounts for the launch in progress. The second, separate
 	// timeout is what keeps Drain bounded once no handle exists to kill yet.
 	select {
-	case <-drained:
-		t.Fatal("Drain returned before the separately bounded late-launch wait")
-	case <-time.After(150 * time.Millisecond):
-	}
-	select {
-	case <-drained:
+	case elapsed := <-drainElapsed:
+		if elapsed < 2*killTimeout {
+			t.Fatalf("Drain returned after %s, want at least both bounded waits (%s)", elapsed, 2*killTimeout)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Drain did not return after the bounded blocked-launch wait")
 	}
