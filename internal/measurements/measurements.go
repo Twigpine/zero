@@ -75,13 +75,54 @@ func (r Run) key() string {
 	return r.Dir + "\x00" + r.Command + "\x00" + strings.Join(r.Args, "\x00")
 }
 
+// snapshot severs the caller's ownership of argument backing storage. A Run is
+// retained as provenance, so it must remain the same identity that produced the
+// key even when a command builder reuses its argument slice for a later run.
+func (r Run) snapshot() Run {
+	r.Args = append([]string(nil), r.Args...)
+	return r
+}
+
+// quoteRunPart keeps ordinary command lines readable while making argument
+// boundaries unambiguous whenever whitespace, quotes, shell expansion, or
+// control bytes would otherwise collapse two different argv values into the
+// same label.
+func quoteRunPart(part string) string {
+	if part == "" {
+		return strconv.Quote(part)
+	}
+	for _, r := range part {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case strings.ContainsRune("_./-:@%+=,", r):
+		default:
+			return strconv.Quote(part)
+		}
+	}
+	return part
+}
+
 // Label renders the run for a reader. Empty for the zero Run, so a caller that
 // does not distinguish runs gets the same wording it always had.
 func (r Run) Label() string {
-	if r.Command == "" && len(r.Args) == 0 {
+	if r.Command == "" && len(r.Args) == 0 && r.Dir == "" {
 		return ""
 	}
-	return strings.TrimSpace(r.Command + " " + strings.Join(r.Args, " "))
+	parts := make([]string, 0, len(r.Args)+1)
+	if r.Command != "" {
+		parts = append(parts, quoteRunPart(r.Command))
+	}
+	for _, arg := range r.Args {
+		parts = append(parts, quoteRunPart(arg))
+	}
+	label := strings.Join(parts, " ")
+	if r.Dir != "" {
+		if label != "" {
+			label += " "
+		}
+		label += "(dir " + quoteRunPart(r.Dir) + ")"
+	}
+	return label
 }
 
 var (
@@ -372,6 +413,7 @@ func (l *Ledger) Record(run Run, text string) int {
 	if len(found) == 0 {
 		return 0
 	}
+	run = run.snapshot()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	key := run.key()
@@ -591,13 +633,56 @@ func clauseEnd(line string, from int, known map[string][]float64) int {
 		// fabrication. What makes it a break is a subject named after it —
 		// "TestFoo passed (the suite took 34.249s)" — so the test is whether any
 		// word appears between the separator and the next duration.
-		if !separatorBreaksClause(line[from+index+len(separator):]) {
+		after := line[from+index+len(separator):]
+		// A CONJUNCTION AFTER A THRESHOLD DOES NOT PROVE NEW OWNERSHIP. Keeping the
+		// threshold and following result in one clause lets the ambiguity guard
+		// above refuse "under 10s and completed in 0.86s" instead of charging 10s
+		// to the test. A plain result followed by another subject still ends here.
+		if separator == " and " {
+			before := line[from : from+index]
+			_, _, _, _, afterDuration := nextDurationToken(after, 0)
+			if durationHasThresholdContext(before) && afterDuration {
+				continue
+			}
+		}
+		if !separatorBreaksClause(after) {
 			continue
 		}
 		consider(from + index)
 	}
 	consider(sentenceEnd(line, from))
 	return cut
+}
+
+// durationHasThresholdContext recognizes the bounded threshold grammar this
+// parser supports. The relationship is local to the duration: a comparative
+// immediately before it or a threshold noun immediately after it. Merely
+// finding one of these words elsewhere in the sentence is not enough.
+func durationHasThresholdContext(text string) bool {
+	begin, end, _, _, ok := nextDurationToken(text, 0)
+	if !ok {
+		return false
+	}
+	words := func(value string) []string {
+		return strings.FieldsFunc(strings.ToLower(value), func(r rune) bool {
+			return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
+		})
+	}
+	before := words(text[:begin])
+	after := words(text[end:])
+	if len(after) > 0 {
+		switch after[0] {
+		case "timeout", "deadline", "budget", "limit", "target", "threshold":
+			return true
+		}
+	}
+	if len(before) > 0 {
+		switch before[len(before)-1] {
+		case "under", "within", "below":
+			return true
+		}
+	}
+	return len(before) >= 2 && before[len(before)-2] == "at" && before[len(before)-1] == "most"
 }
 
 // separatorBreaksClause reports whether the text after a separator names a new
@@ -877,7 +962,7 @@ func nameBoundary(line string, from, to int) bool {
 		switch {
 		case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
 			return true
-		case b == '_', b == '/', b == '.', b == '-':
+		case b == '_', b == '/', b == '.', b == '-', b == '#':
 			return true
 		}
 		return false

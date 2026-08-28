@@ -366,6 +366,39 @@ func TestAClaimIsCheckedAgainstItsOwnRun(t *testing.T) {
 	}
 }
 
+func TestRunProvenanceIsSnapshottedAtRecordTime(t *testing.T) {
+	args := []string{"test", "./a"}
+	ledger := NewLedger()
+	ledger.Record(Run{Command: "go", Args: args, Dir: "/workspace/a"}, "--- PASS: TestSlow (1.00s)\n")
+
+	// Command builders commonly reuse an argv slice for the next invocation.
+	args[1] = "./b"
+	conflicts := ledger.ConflictsAcrossRuns("TestSlow took 9.00s")
+	if len(conflicts) != 1 {
+		t.Fatalf("conflicts = %+v, want one", conflicts)
+	}
+	if got := conflicts[0].Run.Label(); got != "go test ./a (dir /workspace/a)" {
+		t.Fatalf("retained run label = %q, want original command", got)
+	}
+	if nudge := Nudge(conflicts); !strings.Contains(nudge, "go test ./a (dir /workspace/a)") || strings.Contains(nudge, "./b") {
+		t.Fatalf("nudge lost immutable provenance: %q", nudge)
+	}
+}
+
+func TestRunLabelPreservesDirectoryAndArgumentBoundaries(t *testing.T) {
+	spaced := Run{Command: "go", Args: []string{"test", "a b"}, Dir: "/workspace/one"}.Label()
+	separate := Run{Command: "go", Args: []string{"test", "a", "b"}, Dir: "/workspace/two"}.Label()
+	if spaced != `go test "a b" (dir /workspace/one)` {
+		t.Fatalf("space-containing argument label = %q", spaced)
+	}
+	if separate != "go test a b (dir /workspace/two)" {
+		t.Fatalf("separate argument label = %q", separate)
+	}
+	if spaced == separate {
+		t.Fatal("distinct run identities rendered identically")
+	}
+}
+
 // A CALLER THAT CANNOT NAME THE RUN ASKS A DIFFERENT QUESTION.
 //
 // The agent loop checks a final answer that may summarise several commands, so
@@ -1180,6 +1213,49 @@ func TestEveryTimedMentionOfANameIsChecked(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestAConjunctionSeparatedThresholdIsNotTheResult(t *testing.T) {
+	for _, claim := range []string{
+		"TestQuick stayed under the 10s timeout and completed in 0.86s",
+		"TestQuick met the 10s budget and actually ran in 0.86s",
+	} {
+		ledger := NewLedger()
+		ledger.Record(Run{}, "--- PASS: TestQuick (0.86s)\n")
+		if conflicts := ledger.Conflicts(Run{}, claim); len(conflicts) != 0 {
+			t.Errorf("threshold/result wording produced a false conflict: %q -> %+v", claim, conflicts)
+		}
+	}
+
+	ledger := NewLedger()
+	ledger.Record(Run{}, "--- PASS: TestQuick (0.86s)\n")
+	if conflicts := ledger.Conflicts(Run{}, "TestQuick completed in 9.00s"); len(conflicts) != 1 || conflicts[0].Claimed != 9 {
+		t.Fatalf("an unambiguous wrong result stopped being detected: %+v", conflicts)
+	}
+}
+
+func TestGeneratedDuplicateSubtestSuffixBelongsToTheName(t *testing.T) {
+	ledger := NewLedger()
+	ledger.Record(Run{}, strings.Join([]string{
+		"--- PASS: TestParent/sub (0.10s)",
+		"--- PASS: TestParent/sub#01 (4.20s)",
+		"",
+	}, "\n"))
+
+	if conflicts := ledger.Conflicts(Run{}, "TestParent/sub#01 took 4.20s"); len(conflicts) != 0 {
+		t.Fatalf("suffixed subtest was attributed to its unsuffixed sibling: %+v", conflicts)
+	}
+
+	wrong := NewLedger()
+	wrong.Record(Run{}, strings.Join([]string{
+		"--- PASS: TestParent/sub (0.10s)",
+		"--- PASS: TestParent/sub#01 (4.20s)",
+		"",
+	}, "\n"))
+	conflicts := wrong.Conflicts(Run{}, "TestParent/sub#01 took 9.00s")
+	if len(conflicts) != 1 || conflicts[0].Name != "TestParent/sub#01" || conflicts[0].Claimed != 9 {
+		t.Fatalf("wrong suffixed result was not attributed to the suffixed name: %+v", conflicts)
 	}
 }
 
