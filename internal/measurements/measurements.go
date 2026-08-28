@@ -29,6 +29,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 // Measurement is one timing a command reported: what was measured, and how long
@@ -1033,20 +1034,34 @@ func isNameSeparator(b byte) bool {
 // inside TestParent/subcase and internal/agent does not match inside
 // internal/agentinit.
 func nameBoundary(line string, from, to int) bool {
-	continues := func(b byte) bool {
-		switch {
-		case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
+	continues := func(r rune) bool {
+		// Test names are Go identifiers and may contain Unicode letters and
+		// digits. Conservatively treating every non-ASCII rune (including invalid
+		// UTF-8 decoded as RuneError) as a continuation makes an uncertain match
+		// fail silent rather than attributing a longer foreign name to an ASCII
+		// prefix.
+		if r >= utf8.RuneSelf {
 			return true
-		case b == '_', b == '/', b == '.', b == '-', b == '#':
+		}
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return true
+		case r == '_', r == '/', r == '.', r == '-', r == '#':
 			return true
 		}
 		return false
 	}
-	if from > 0 && continues(line[from-1]) {
-		return false
+	if from > 0 {
+		before, _ := utf8.DecodeLastRuneInString(line[:from])
+		if continues(before) {
+			return false
+		}
 	}
-	if to < len(line) && continues(line[to]) {
-		return false
+	if to < len(line) {
+		after, _ := utf8.DecodeRuneInString(line[to:])
+		if continues(after) {
+			return false
+		}
 	}
 	return true
 }

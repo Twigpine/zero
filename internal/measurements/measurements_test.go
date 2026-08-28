@@ -312,6 +312,24 @@ func TestAPrefixNameDoesNotAccuseAnHonestClaim(t *testing.T) {
 	}
 }
 
+func TestAUnicodeSuffixDoesNotBelongToTheASCIIName(t *testing.T) {
+	ledger := NewLedger()
+	recordGoTest(ledger, Run{}, "--- PASS: TestFoo (1.00s)\n")
+
+	if conflicts := ledger.Conflicts(Run{}, "TestFooΩ took 9.00s"); len(conflicts) != 0 {
+		t.Fatalf("a Unicode-suffixed name was attributed to its ASCII prefix: %+v", conflicts)
+	}
+	if conflicts := ledger.Conflicts(Run{}, "ΩTestFoo took 9.00s"); len(conflicts) != 0 {
+		t.Fatalf("a name after a Unicode continuation was treated as a standalone token: %+v", conflicts)
+	}
+
+	wrong := NewLedger()
+	recordGoTest(wrong, Run{}, "--- PASS: TestFoo (1.00s)\n")
+	if conflicts := wrong.Conflicts(Run{}, "TestFoo took 9.00s"); len(conflicts) != 1 || conflicts[0].Name != "TestFoo" || conflicts[0].Claimed != 9 {
+		t.Fatalf("an exact-name fabricated duration stopped being caught: %+v", conflicts)
+	}
+}
+
 // A duration carrying a minute component must be read whole. The pattern was
 // ms-or-s only, so "1m10s" failed on "1m" and "10s" won — a truthful restatement
 // of a recorded 70 seconds became a conflict, and the nudge quoted 10s back at
