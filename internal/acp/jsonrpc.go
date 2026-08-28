@@ -407,21 +407,22 @@ func (c *Conn) releaseSem() {
 
 func (c *Conn) dispatchRequest(ctx context.Context, msg rpcMessage) {
 	fn := c.handlers[msg.Method]
+	writeCtx := context.Background()
 	if fn == nil {
-		c.writeError(ctx, msg.ID, &rpcError{Code: codeMethodNotFound, Message: "method not found: " + msg.Method})
+		c.writeError(writeCtx, msg.ID, &rpcError{Code: codeMethodNotFound, Message: "method not found: " + msg.Method})
 		return
 	}
 	result, err := fn(ctx, msg.Params)
 	if err != nil {
 		var re *rpcError
 		if errors.As(err, &re) {
-			c.writeError(ctx, msg.ID, re)
+			c.writeError(writeCtx, msg.ID, re)
 		} else {
-			c.writeError(ctx, msg.ID, &rpcError{Code: codeInternalError, Message: err.Error()})
+			c.writeError(writeCtx, msg.ID, &rpcError{Code: codeInternalError, Message: err.Error()})
 		}
 		return
 	}
-	c.writeResult(ctx, msg.ID, result)
+	c.writeResult(writeCtx, msg.ID, result)
 }
 
 // Call issues an outbound request and blocks until the response arrives, ctx is

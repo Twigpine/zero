@@ -534,8 +534,11 @@ func TestConnSaturatedRequestsReturnsServerBusy(t *testing.T) {
 	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","id":1,"method":"slow","params":{}}` + "\n"))
 	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","id":2,"method":"slow","params":{}}` + "\n"))
 
-	// Wait until both slots are occupied
+	deadline := time.Now().Add(2 * time.Second)
 	for len(conn.sem) < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for semaphore saturation, len = %d", len(conn.sem))
+		}
 		time.Sleep(5 * time.Millisecond)
 	}
 
@@ -837,9 +840,58 @@ func TestStalledBusyRepliesStayBoundedAndServeExits(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Serve did not exit after the busy-reply queue overflowed")
 	}
-	after := runtime.NumGoroutine()
-	if delta := after - before; delta > 8 {
+	settle := time.Now().Add(2 * time.Second)
+	delta := runtime.NumGoroutine() - before
+	for delta > 8 && time.Now().Before(settle) {
+		time.Sleep(10 * time.Millisecond)
+		delta = runtime.NumGoroutine() - before
+	}
+	if delta > 8 {
 		t.Fatalf("goroutine growth = %d after %d rejected requests, want bounded", delta, extra)
+	}
+}
+
+func TestServeEOFStillWritesInFlightResponse(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	outReader, outWriter := io.Pipe()
+	defer outWriter.Close()
+
+	conn := NewConn(inReader, outWriter)
+	started := make(chan struct{})
+	conn.Handle("echo", func(ctx context.Context, _ json.RawMessage) (any, error) {
+		close(started)
+		<-ctx.Done()
+		return map[string]string{"ok": "yes"}, nil
+	})
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- conn.Serve(context.Background()) }()
+	if _, err := inWriter.Write([]byte(`{"jsonrpc":"2.0","id":1,"method":"echo"}` + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not start")
+	}
+	if err := inWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	got := make(chan string, 1)
+	go func() {
+		scanner := bufio.NewScanner(outReader)
+		if scanner.Scan() {
+			got <- scanner.Text()
+		}
+	}()
+	select {
+	case line := <-got:
+		if !strings.Contains(line, `"ok":"yes"`) && !strings.Contains(line, `"ok": "yes"`) {
+			t.Fatalf("missing in-flight response: %s", line)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve dropped the in-flight response at EOF")
 	}
 }
 
