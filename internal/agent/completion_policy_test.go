@@ -84,6 +84,28 @@ func TestCompletionPolicyToolExemptionPolarityAndObligations(t *testing.T) {
 	}
 }
 
+func TestCompletionPolicyReviewerSemanticPairs(t *testing.T) {
+	cases := []struct {
+		text string
+		want CompletionDecision
+	}{
+		{"I could not produce any report.", CompletionIncomplete},
+		{"I could not produce any crash.", CompletionComplete},
+		{"I don't have access to the repository with no read tool available.", CompletionIncomplete},
+		{"I don't have an update_plan tool available in this specialist context; only read-only exploration tools were provided.", CompletionComplete},
+		{"I could not apply the edit because no write tool is available, so I reported the change manually.", CompletionIncomplete},
+		{"I could not apply the edit because no write tool is available, so I applied the edit manually instead.", CompletionComplete},
+		{"I could not run the full test suite because no test tool is available, so I manually tested only a smoke test.", CompletionIncomplete},
+		{"I could not run the full test suite because no test tool is available, so I manually ran the full test suite instead.", CompletionComplete},
+	}
+	for _, tc := range cases {
+		got := newCompletionPolicy(false).evaluate(tc.text, completionContext{})
+		if got.Decision != tc.want {
+			t.Errorf("evaluate(%q) = %q, want %q (%s)", tc.text, got.Decision, tc.want, got.Reason)
+		}
+	}
+}
+
 func TestCompletionPolicyPreservesBoundedPlanStallProtection(t *testing.T) {
 	policy := newCompletionPolicy(false)
 	for attempt := 0; attempt < maxContinueNudges; attempt++ {

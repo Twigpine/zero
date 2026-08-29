@@ -207,44 +207,6 @@ var inabilityStems = []string{
 	"without being able to",
 }
 
-// successNegationTails are negated phrasings that indicate SUCCESS, not an
-// admission ("I could not find any remaining issues", "I cannot reproduce the
-// bug"). When an inability stem is immediately followed by one of these, it is not
-// treated as an admission, so a clean result is not misreported as INCOMPLETE.
-var successNegationTails = []string{
-	"find any", "found any", "find a ", "see any", "detect any", "identify any",
-	"reproduce", "spot any", "locate any",
-	// The OBSERVATION verbs, in their "... any" forms ONLY. strongAbsence is
-	// consulted after this list has matched, so the observation-family strong
-	// tails were unreachable without these — but adding the verbs BARE made every
-	// "could not <verb>" a successful negative result, and these are ordinary
-	// admissions:
-	//
-	//	"I could not produce the requested report."
-	//	"I could not measure the throughput, so the number is unknown."
-	//	"I could not trigger the migration, so it never ran."
-	//
-	// These cases went silent. Looking for something and finding none of it is a
-	// result; failing to produce a thing you were asked for is not, and the "any"
-	// is what separates them. Matching the strong tails exactly is also what keeps
-	// the two lists from drifting apart again.
-	"trigger any", "produce any", "hit any", "encounter any",
-	"provoke any", "surface any", "measure any",
-	// A NEGATIVE SEARCH RESULT IS THE ANSWER, not a failure to produce one.
-	//
-	// The list above already encodes this — "I could not find any remaining
-	// issues" is success — but only for the "any" phrasings. A finder reporting
-	// "I could NOT find where AllowManifestToolAutoApproval is set to true in
-	// production code" was marked INCOMPLETE after 53 tool calls and a 19,145
-	// character audit, for doing precisely the job it was given: establishing
-	// that something is not there.
-	"find where", "find the", "find it", "find that", "find this",
-	"found where", "found the",
-	"locate where", "locate the", "locate it",
-	"determine where", "identify where", "see where",
-	"reproduce ", "confirm any", "observe any",
-}
-
 // narrativeMarkers flag a sentence as RETELLING a past exchange rather than
 // reporting the outcome of the current objective, so an inability admission in
 // that sentence is about THEN, not NOW. Grounded in a real false positive: a
@@ -467,20 +429,6 @@ var deliveredAlternativeMarkers = []string{
 	"instead", "by hand", "manually", "directly", "in this answer", "into this answer",
 }
 
-var deliveredAlternativeVerbs = []string{
-	"i wrote", "i have written", "i've written", "i checked", "i read", "i listed",
-	"i summarised", "i summarized", "i provided", "i completed", "i finished",
-	"i did", "i performed", "i used", "i report", "i reported",
-	"i ran", "i executed", "i applied", "i migrated", "i tested", "i verified",
-	"i validated", "i deployed", "i published", "i released",
-	"i proceeded", "i went ahead", "i carried on",
-}
-
-var deliveredAlternativeOutcomes = []string{
-	"was not needed", "were not needed", "not needed here", "did not need",
-	"which was unnecessary",
-}
-
 func nextInability(sentence string, after int) int {
 	best := -1
 	for _, stem := range inabilityStems {
@@ -502,9 +450,6 @@ func deliveredAlternativeAfter(sentence string, after int) bool {
 		end = next
 	}
 	scope := sentence[after:end]
-	if containsAny(scope, deliveredAlternativeOutcomes) {
-		return true
-	}
 	for _, marker := range deliveredAlternativeMarkers {
 		for start := 0; ; {
 			rel := strings.Index(scope[start:], marker)
@@ -514,7 +459,7 @@ func deliveredAlternativeAfter(sentence string, after int) bool {
 			at := start + rel
 			fallbackStart, fallbackEnd := clauseBounds(scope, at)
 			fallback := strings.TrimSpace(scope[fallbackStart:fallbackEnd])
-			if containsAny(fallback, deliveredAlternativeVerbs) && alternativeMatchesFailedWork(scope[:fallbackStart], fallback) {
+			if alternativeMatchesFailedWork(scope[:fallbackStart], fallback) {
 				return true
 			}
 			start = at + len(marker)
@@ -543,7 +488,7 @@ func alternativeMatchesFailedWork(failed, fallback string) bool {
 		terms []string
 	}{
 		{"plan", []string{"plan", "update_plan"}},
-		{"format", []string{"format", "formatter", "style", "lint", "gofmt"}},
+		{"format", []string{"format", "formatting", "formatter", "style", "lint", "gofmt"}},
 		{"test", []string{"test", "tests", "testing", "verify", "verification", "validate", "validation"}},
 		{"review", []string{"review", "audit", "inspect", "inspection", "analysis", "analyse", "analyze", "read"}},
 		{"write", []string{"write", "edit", "change", "patch", "modify"}},
@@ -563,6 +508,9 @@ func alternativeMatchesFailedWork(failed, fallback string) bool {
 		}
 	}
 	if recognizedGroups == 0 {
+		return false
+	}
+	if !fallbackCoversRequiredScope(failed, fallback) {
 		return false
 	}
 	if allGroupsCovered {
@@ -595,6 +543,30 @@ func fallbackCompletesObligation(name string, terms []string, fallback string) b
 		return false
 	}
 	switch name {
+	case "plan":
+		if containsAlternativeTerm(fallback, []string{"report", "documentation", "document"}) {
+			return false
+		}
+		return actionTargetsObligation(fallback, terms,
+			[]string{"planned", "recorded"}, []string{"wrote", "listed", "provided", "completed", "did"})
+	case "format":
+		if containsAlternativeTerm(fallback, []string{"plan", "report", "documentation", "document"}) {
+			return false
+		}
+		return actionTargetsObligation(fallback, terms,
+			[]string{"formatted"}, []string{"ran", "executed", "checked", "verified", "validated", "performed", "completed", "did"})
+	case "review":
+		return actionTargetsObligation(fallback, terms,
+			[]string{"reviewed", "audited", "inspected", "analysed", "analyzed", "read"}, []string{"checked", "performed", "completed", "did"})
+	case "write":
+		if containsAlternativeTerm(fallback, []string{"plan", "report", "documentation", "document", "summary"}) {
+			return false
+		}
+		return actionTargetsObligation(fallback, terms,
+			[]string{"wrote", "edited", "changed", "patched", "modified", "applied"}, []string{"performed", "completed", "did"})
+	case "document":
+		return actionTargetsObligation(fallback, terms,
+			[]string{"documented", "reported", "summarised", "summarized"}, []string{"wrote", "provided", "completed", "did"})
 	case "migration":
 		if containsAlternativeTerm(fallback, []string{"plan", "report", "documentation", "document"}) {
 			return false
@@ -613,9 +585,23 @@ func fallbackCompletesObligation(name string, terms []string, fallback string) b
 	case "publish":
 		return actionTargetsObligation(fallback, terms,
 			[]string{"published", "released"}, []string{"performed", "completed", "did"})
-	default:
-		return true
 	}
+	return false
+}
+
+// fallbackCoversRequiredScope keeps qualifiers that materially widen an
+// obligation attached to the operation. A smoke test is not a substitute for a
+// full suite, and checking one file is not a substitute for checking all files.
+func fallbackCoversRequiredScope(failed, fallback string) bool {
+	for _, equivalents := range [][]string{
+		{"full test suite", "full suite", "entire test suite", "entire suite", "all tests", "complete test suite"},
+		{"all files", "every file", "entire repository", "whole repository", "full repository"},
+	} {
+		if containsAny(failed, equivalents) && !containsAny(fallback, equivalents) {
+			return false
+		}
+	}
+	return true
 }
 
 func actionTargetsObligation(text string, objects, specificActions, genericActions []string) bool {
@@ -702,10 +688,10 @@ func containsAlternativeTerm(text string, terms []string) bool {
 	return false
 }
 
-// toolCaveatAt recognizes only the inability occurrence whose own clause says
-// which tool was unavailable. A harmless capability note may then be skipped
-// without skipping a separate failed action later in the same sentence.
-func toolCaveatAt(sentence string, stemAt, stemLen int) bool {
+// capabilityOnlyToolFootnote recognizes a direct statement about the granted
+// toolset, not a substantive inability whose explanation happens to mention a
+// tool later in the clause.
+func capabilityOnlyToolFootnote(sentence string, stemAt, stemLen int) bool {
 	clause := clauseContaining(sentence, stemAt)
 	stem := sentence[stemAt : stemAt+stemLen]
 	if !possessionDenialStem(stem) || !hasToolCapabilityContext(clause) {
@@ -720,7 +706,14 @@ func toolCaveatAt(sentence string, stemAt, stemLen int) bool {
 		return false
 	}
 	between := clause[localStem+stemLen : localStem+stemLen+toolAt]
-	return !containsClauseBoundary(between)
+	if containsClauseBoundary(between) {
+		return false
+	}
+	return !containsAny(between, []string{
+		"access", "repository", "file", "credential", "service", "network",
+		"inspect", "build", "edit", "change",
+		"publish", "deploy", "migrate", "verify", "validate",
+	})
 }
 
 var completedObjectiveMarkers = []string{
@@ -798,11 +791,10 @@ func hasObjectiveFailure(sentence string) bool {
 // blockedWorkMarkers are what turns an absence-establishing sentence back into
 // an admission of failure.
 //
-// MEASURED, NOT ARGUED. The successNegationTails list above exists so a finder
-// reporting "I could not find where X is set" is not marked incomplete for doing
-// its job. But the stems it added — "find the", "reproduce ", "confirm any",
-// "observe any" — also head the most ordinary way of admitting defeat, and the
-// allowance fired on the whole sentence regardless of how it ended. Measured
+// MEASURED, NOT ARGUED. A finder reporting "I could not find where X is set" is
+// not incomplete for doing its job. But search and reproduction wording also
+// heads ordinary admissions, and a relationship-free allowance fired on the
+// whole sentence regardless of how it ended. Measured
 // against eleven genuine admissions, TEN passed the detector undetected:
 //
 //	"I could not reproduce the crash, so the fix is unverified."
@@ -830,13 +822,6 @@ var strongAbsenceTails = []string{
 	"encounter any", "provoke any", "surface any", "measure any",
 }
 
-// EVERY STRONG TAIL MUST BE REACHABLE. strongAbsence is consulted only after
-// hasAnyPrefix(tail, successNegationTails) has already matched, so a strong tail
-// whose verb is missing from that list is never asked about. Seven of the eight
-// observation verbs added a round earlier were dead on arrival that way — only
-// "reproduce" was already a success-negation stem, which is why the corpus that
-// was supposed to cover them passed.
-
 // strongAbsenceObjects are the things whose ABSENCE IS THE RESULT: you go
 // looking for them precisely so you can report there are none, and finding none
 // is the work succeeding.
@@ -858,11 +843,12 @@ var strongAbsenceTails = []string{
 // flagging it outright.
 var strongAbsenceObjects = []string{
 	"issue", "issues", "problem", "problems", "bug", "bugs", "defect", "defects",
-	"error", "errors", "failure", "failures", "regression", "regressions",
+	"error", "errors", "failure", "failures", "regression", "regressions", "crash", "crashes",
 	"evidence", "example", "examples", "occurrence", "occurrences",
 	"instance", "instances", "reference", "references", "match", "matches",
 	"caller", "callers", "usage", "usages", "use", "uses", "case", "cases",
 	"vulnerability", "vulnerabilities", "leak", "leaks", "race", "races",
+	"slowdown", "slowdowns",
 	"sign", "signs", "trace", "traces", "mention", "mentions", "difference", "differences",
 	"blocker", "blockers", "gap", "gaps", "omission", "omissions", "discrepancy", "discrepancies",
 	"conflict", "conflicts", "violation", "violations", "warning", "warnings",
@@ -1128,6 +1114,73 @@ func normalizeAdmissionText(text string) string {
 	).Replace(text)
 }
 
+type inabilityClaim struct {
+	sentence       string
+	blockedContext string
+	stemAt         int
+	stemLen        int
+	scope          string
+	tail           string
+}
+
+func newInabilityClaim(sentence, blockedContext, stem string, stemAt int) inabilityClaim {
+	stemEnd := stemAt + len(stem)
+	scopeEnd := len(sentence)
+	if next := nextInability(sentence, stemEnd); next >= 0 {
+		scopeEnd = next
+	}
+	return inabilityClaim{
+		sentence:       sentence,
+		blockedContext: blockedContext,
+		stemAt:         stemAt,
+		stemLen:        len(stem),
+		scope:          sentence[stemAt:scopeEnd],
+		tail:           strings.TrimSpace(sentence[stemEnd:scopeEnd]),
+	}
+}
+
+var boundedNegativeObservationTails = []string{
+	"find where", "find the", "find it", "find that", "find this",
+	"found where", "found the",
+	"locate where", "locate the", "locate it",
+	"determine where", "identify where", "see where",
+	"reproduce",
+}
+
+// successfulNegativeObservation requires a positive proof that the inability
+// wording is actually the result: either a recognized absent object or a
+// bounded search/reproduction proposition. A mere verb shape such as
+// "produce any" cannot exempt an unrecognized deliverable.
+func successfulNegativeObservation(tail string) (matched, strong bool) {
+	if strongAbsence(tail) {
+		return true, true
+	}
+	return hasAnyPrefix(tail, boundedNegativeObservationTails), false
+}
+
+// exempt reports whether this particular inability is proven harmless. Direct
+// failure state has precedence; capability and fallback branches grant an
+// exemption only from their bounded clause and obligation evidence.
+func (claim inabilityClaim) exempt() bool {
+	if matched, strong := successfulNegativeObservation(claim.tail); matched {
+		if strong {
+			return !containsAny(reportedConsequence(claim.sentence, claim.stemAt+claim.stemLen), unambiguousFailureStates)
+		}
+		return !containsAny(claim.blockedContext, blockedWorkMarkers)
+	}
+	if hasObjectiveFailure(claim.scope) || containsAny(claim.blockedContext, blockedStateMarkers) {
+		return false
+	}
+	if capabilityOnlyToolFootnote(claim.sentence, claim.stemAt, claim.stemLen) {
+		return true
+	}
+	if harmlessToolLimitation(claim.sentence, claim.stemAt, claim.stemLen) {
+		return true
+	}
+	return hasUnavailableToolContext(claim.scope) &&
+		deliveredAlternativeAfter(claim.sentence, claim.stemAt+claim.stemLen)
+}
+
 func selfReportedIncompletion(text string) string {
 	sentences := admissionSentences(strings.ToLower(normalizeAdmissionText(stripQuoted(text))))
 	for index, sentence := range sentences {
@@ -1220,37 +1273,12 @@ func selfReportedIncompletion(text string) string {
 					break
 				}
 				abs := start + rel
-				tail := strings.TrimSpace(sentence[abs+len(stem):])
-				scopeEnd := len(sentence)
-				if next := nextInability(sentence, abs+len(stem)); next >= 0 {
-					scopeEnd = next
-				}
-				scope := sentence[abs:scopeEnd]
-				// Exempt only this occurrence. A capability clause cannot hide a
-				// later failed action, and a completed fallback cannot be borrowed
-				// by a later inability in the same sentence.
-				if (toolCaveatAt(sentence, abs, len(stem)) && !hasObjectiveFailure(scope) && !containsAny(blockedContext, blockedStateMarkers)) ||
-					(harmlessToolLimitation(sentence, abs, len(stem)) && !hasObjectiveFailure(scope) && !containsAny(blockedContext, blockedStateMarkers)) ||
-					(hasUnavailableToolContext(scope) && deliveredAlternativeAfter(sentence, abs+len(stem)) && !hasObjectiveFailure(scope) &&
-						!containsAny(blockedContext, blockedStateMarkers)) {
+				claim := newInabilityClaim(sentence, blockedContext, stem, abs)
+				if claim.exempt() {
 					start = abs + len(stem)
 					continue
 				}
-				// The allowance yields to a sentence that also says the work is
-				// blocked: "could not reproduce the crash" is a finding, "could not
-				// reproduce the crash, so the fix is unverified" is an admission,
-				// and the tail prefix alone cannot tell them apart.
-				strong := strongAbsence(tail)
-				// The object decides whether finding nothing is a result; an
-				// explicit failure state in the SAME sentence decides that it is
-				// not, whatever the object.
-				if strong && containsAny(reportedConsequence(sentence, abs+len(stem)), unambiguousFailureStates) {
-					strong = false
-				}
-				if !hasAnyPrefix(tail, successNegationTails) || (!strong && containsAny(blockedContext, blockedWorkMarkers)) {
-					return selfReportReason(strings.TrimSpace(stem) + " …")
-				}
-				start = abs + len(stem)
+				return selfReportReason(strings.TrimSpace(stem) + " …")
 			}
 		}
 	}

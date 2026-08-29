@@ -1,9 +1,6 @@
 package agent
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
 // FOUR COMPLETED TASKS WERE MARKED INCOMPLETE, and the sentences below are
 // verbatim from those sessions.
@@ -498,38 +495,6 @@ func TestAToolCaveatIsRecognisedInItsCopulaForms(t *testing.T) {
 	}
 }
 
-// EVERY STRONG ABSENCE TAIL MUST BE REACHABLE.
-//
-// strongAbsence is consulted only after hasAnyPrefix(tail, successNegationTails)
-// has already matched, so a strong tail whose verb is missing from that list is
-// never asked about. Seven of the eight observation verbs added a round earlier
-// were dead that way — only "reproduce" worked, because it was already a
-// success-negation stem, and the corpus meant to cover the other seven passed
-// on the strength of that one.
-//
-// Same shape as the unambiguous-state invariant below it: two lists that must
-// agree, asserted rather than remembered.
-func TestEveryStrongAbsenceTailIsReachable(t *testing.T) {
-	for _, tail := range strongAbsenceTails {
-		reachable := false
-		for _, negation := range successNegationTails {
-			// ONE DIRECTION, the one the runtime uses. hasAnyPrefix asks
-			// HasPrefix(tail, negation); the reverse clause this used to carry
-			// accepted a negation entry LONGER than the strong tail, which can
-			// never match a real message beginning with that tail — so the
-			// invariant would pass while the tail stayed dead. No entry is longer
-			// today, which is exactly why the loose form looked fine.
-			if strings.HasPrefix(tail, negation) {
-				reachable = true
-				break
-			}
-		}
-		if !reachable {
-			t.Errorf("strongAbsenceTails entry %q has no successNegationTails prefix, so strongAbsence never sees it", tail)
-		}
-	}
-}
-
 // A CONTRACTED TOOL CAVEAT IS THE SAME CAVEAT.
 //
 // The contracted markers shipped as "tool isn\'\'\'t available" — shell quoting
@@ -561,10 +526,8 @@ func TestAContractedToolCaveatIsRecognised(t *testing.T) {
 
 // "ANY" IS WHAT MAKES A NEGATIVE RESULT A RESULT.
 //
-// The observation verbs were added to successNegationTails BARE, to make the
-// observation-family strong tails reachable. That made every "could not <verb>"
-// a successful negative finding, and these are ordinary admissions that went
-// silent:
+// Treating every bare observation verb as a successful negative finding made
+// these ordinary admissions go silent:
 //
 //	"I could not produce the requested report."
 //	"I could not measure the throughput, so the number is unknown."
@@ -705,6 +668,39 @@ func TestCompletionAdmissionClauseAndPolarityMatrix(t *testing.T) {
 	} {
 		if reason := selfReportedIncompletion(complete); reason != "" {
 			t.Errorf("a completed outcome was reported incomplete: %q -> %s", complete, reason)
+		}
+	}
+}
+
+func TestCompletionAdmissionReviewerSemanticPairs(t *testing.T) {
+	admissions := []string{
+		"I could not produce any report.",
+		"I don't have access to the repository with no read tool available.",
+		"I don't have access to the file, although only read-only tools are available.",
+		"I don't have access to the credential with no credential tool available.",
+		"I don't have access to the service with no network tool available.",
+		"I could not run the migration because no migration tool is available; I did not need the formatted output.",
+		"I could not apply the edit because no write tool is available, so I reported the change manually.",
+		"I could not format the code because no formatter tool is available, so I documented the formatter manually.",
+		"I could not run the full test suite because no test tool is available, so I manually tested only a smoke test.",
+		"I could not run the tests and deploy the release because no tools are available, so I manually ran the tests.",
+	}
+	for _, text := range admissions {
+		if reason := selfReportedIncompletion(text); reason == "" {
+			t.Errorf("incomplete semantic pair was exempted: %q", text)
+		}
+	}
+
+	complete := []string{
+		"I could not produce any crash.",
+		"I don't have an update_plan tool available in this specialist context; only read-only exploration tools were provided.",
+		"I could not record a plan because update_plan is unavailable, so I wrote the plan into this answer instead.",
+		"I could not run the formatter because no formatter tool is available, so I checked the formatting manually.",
+		"I could not run the full test suite because no test tool is available, so I manually ran the full test suite instead.",
+	}
+	for _, text := range complete {
+		if reason := selfReportedIncompletion(text); reason != "" {
+			t.Errorf("completed semantic pair was rejected: %q -> %s", text, reason)
 		}
 	}
 }
