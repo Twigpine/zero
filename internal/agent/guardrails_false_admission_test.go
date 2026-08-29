@@ -632,6 +632,8 @@ func TestAToolNamedAsAnExcuseDoesNotExemptTheFailure(t *testing.T) {
 		"I could not run the migration because the migration tool is available only on Windows.",
 		"I could not build the image since no docker tool is available.",
 		"I could not publish it due to no release tool being available.",
+		"I could not run the migration with no migration tool available.",
+		"I could not run the migration when no migration tool is available.",
 	} {
 		if selfReportedIncompletion(admission) == "" {
 			t.Errorf("a tool named as the reason for a failed action excused it: %q", admission)
@@ -677,6 +679,14 @@ func TestCompletionAdmissionClauseAndPolarityMatrix(t *testing.T) {
 		"I could not run the migration because no migration tool is available, although I tried to do it manually.",
 		"The fixture is not available in this checkout; I cannot run the tests.",
 		"I could not run the formatter because no formatter tool is available, but I planned to check it manually.",
+		"I could not run the migration because no migration tool is available, so I wrote the migration plan manually.",
+		"I could not run the migration because no migration tool is available, so I reported the migration manually.",
+		"I could not run the migration because no migration tool is available, so I wrote the migration documentation manually.",
+		"I could not run the tests because no test tool is available, so I checked the test documentation manually.",
+		"I could not run the tests because no test tool is available, so I checked the test style manually.",
+		"I could not run the migration because no migration tool is available, so I did not execute the migration manually.",
+		"I could not run the tests because no test tool is available, so I did not test it manually.",
+		"I could not run the migration because no migration tool is available, so I executed diagnostics and wrote the migration plan manually.",
 	} {
 		if selfReportedIncompletion(admission) == "" {
 			t.Errorf("a genuine incomplete outcome was exempted: %q", admission)
@@ -690,6 +700,8 @@ func TestCompletionAdmissionClauseAndPolarityMatrix(t *testing.T) {
 		"I could not run the formatter because no formatter tool is available, so I checked it by hand.",
 		"I don't have write tools available, but I was able to complete the task by providing the requested review.",
 		"I don't have an update_plan tool available in this specialist context; only read-only exploration tools were provided.",
+		"I could not run the migration because no migration tool is available, so I executed the migration manually instead.",
+		"I could not run the tests because no test tool is available, so I tested it manually instead.",
 	} {
 		if reason := selfReportedIncompletion(complete); reason != "" {
 			t.Errorf("a completed outcome was reported incomplete: %q -> %s", complete, reason)

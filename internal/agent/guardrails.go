@@ -471,6 +471,8 @@ var deliveredAlternativeVerbs = []string{
 	"i wrote", "i have written", "i've written", "i checked", "i read", "i listed",
 	"i summarised", "i summarized", "i provided", "i completed", "i finished",
 	"i did", "i performed", "i used", "i report", "i reported",
+	"i ran", "i executed", "i applied", "i migrated", "i tested", "i verified",
+	"i validated", "i deployed", "i published", "i released",
 	"i proceeded", "i went ahead", "i carried on",
 }
 
@@ -527,25 +529,36 @@ func deliveredAlternativeAfter(sentence string, after int) bool {
 // tests. The groups are deliberately small because a match grants a completion
 // exemption and therefore must fail closed for unfamiliar wording.
 func alternativeMatchesFailedWork(failed, fallback string) bool {
+	if containsAny(fallback, []string{
+		"i did not", "i didn't", "i have not", "i haven't", "i could not", "i couldn't",
+		"i failed to", "i was unable to", "i wasn't able to", "i was not able to",
+	}) {
+		return false
+	}
 	recognizedGroups := 0
 	allGroupsCovered := true
-	for _, group := range [][]string{
-		{"plan", "update_plan"},
-		{"format", "formatter", "style", "lint", "gofmt"},
-		{"test", "tests", "testing", "verify", "verification", "validate", "validation"},
-		{"review", "audit", "inspect", "inspection", "analysis", "analyse", "analyze", "read"},
-		{"write", "edit", "change", "patch", "modify"},
-		{"document", "documentation", "summary", "report", "answer"},
-		{"migration", "migrate"},
-		{"deploy", "deployment"},
-		{"publish", "release"},
+	recognized := ""
+	for _, group := range []struct {
+		name  string
+		terms []string
+	}{
+		{"plan", []string{"plan", "update_plan"}},
+		{"format", []string{"format", "formatter", "style", "lint", "gofmt"}},
+		{"test", []string{"test", "tests", "testing", "verify", "verification", "validate", "validation"}},
+		{"review", []string{"review", "audit", "inspect", "inspection", "analysis", "analyse", "analyze", "read"}},
+		{"write", []string{"write", "edit", "change", "patch", "modify"}},
+		{"document", []string{"document", "documentation", "summary", "report", "answer"}},
+		{"migration", []string{"migration", "migrate"}},
+		{"deploy", []string{"deploy", "deployment"}},
+		{"publish", []string{"publish", "release"}},
 	} {
-		failedInGroup := containsAlternativeTerm(failed, group)
+		failedInGroup := containsAlternativeTerm(failed, group.terms)
 		if !failedInGroup {
 			continue
 		}
 		recognizedGroups++
-		if !containsAlternativeTerm(fallback, group) {
+		recognized = group.name
+		if !fallbackCompletesObligation(group.name, group.terms, fallback) {
 			allGroupsCovered = false
 		}
 	}
@@ -563,10 +576,116 @@ func alternativeMatchesFailedWork(failed, fallback string) bool {
 	// A singular pronoun can safely cover one recognized operation, not a list
 	// of distinct obligations. Every operation in a coordinated failure must
 	// have substitute evidence before the inability is exempted.
-	return recognizedGroups == 1 && containsAny(fallback, []string{
-		"wrote it", "written it", "checked it", "read it", "listed it", "provided it",
-		"completed it", "finished it", "did it", "performed it", "used it",
+	return recognizedGroups == 1 && fallbackPronounCompletesObligation(recognized, fallback)
+}
+
+// fallbackCompletesObligation requires evidence for the failed ACTION, not just
+// a repeated subject word. A migration plan and test documentation both share
+// vocabulary with the failed operation, but neither executes that operation.
+// The higher-risk operation groups therefore require an execution/verification
+// verb as well as their object.
+func fallbackCompletesObligation(name string, terms []string, fallback string) bool {
+	if containsAny(fallback, []string{
+		"i did not", "i didn't", "i have not", "i haven't", "i could not", "i couldn't",
+		"i failed to", "i was unable to", "i wasn't able to", "i was not able to",
+	}) {
+		return false
+	}
+	if !containsAlternativeTerm(fallback, terms) {
+		return false
+	}
+	switch name {
+	case "migration":
+		if containsAlternativeTerm(fallback, []string{"plan", "report", "documentation", "document"}) {
+			return false
+		}
+		return actionTargetsObligation(fallback, terms,
+			[]string{"migrated"}, []string{"ran", "executed", "applied", "performed", "completed", "did"})
+	case "test":
+		if containsAlternativeTerm(fallback, []string{"plan", "report", "documentation", "document", "style"}) {
+			return false
+		}
+		return actionTargetsObligation(fallback, terms,
+			[]string{"tested", "validated"}, []string{"ran", "executed", "verified", "performed", "completed", "did"})
+	case "deploy":
+		return actionTargetsObligation(fallback, terms,
+			[]string{"deployed"}, []string{"executed", "performed", "completed", "did"})
+	case "publish":
+		return actionTargetsObligation(fallback, terms,
+			[]string{"published", "released"}, []string{"performed", "completed", "did"})
+	default:
+		return true
+	}
+}
+
+func actionTargetsObligation(text string, objects, specificActions, genericActions []string) bool {
+	words := strings.FieldsFunc(text, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_'
 	})
+	for index, word := range words {
+		if !firstPersonAction(words, index) {
+			continue
+		}
+		if containsWord(specificActions, word) {
+			return true
+		}
+		if !containsWord(genericActions, word) {
+			continue
+		}
+		end := index + 6
+		if end > len(words) {
+			end = len(words)
+		}
+		for _, candidate := range words[index+1 : end] {
+			if containsWord([]string{"wrote", "reported", "documented", "planned", "reviewed", "read", "checked"}, candidate) {
+				break
+			}
+			if candidate == "it" || containsWord(objects, candidate) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func firstPersonAction(words []string, action int) bool {
+	start := action - 3
+	if start < 0 {
+		start = 0
+	}
+	for index := action - 1; index >= start; index-- {
+		switch words[index] {
+		case "not", "never", "failed", "reported", "wrote", "documented", "planned", "reviewed", "read", "checked":
+			return false
+		case "i":
+			return true
+		}
+	}
+	return false
+}
+
+func containsWord(words []string, want string) bool {
+	for _, word := range words {
+		if word == want {
+			return true
+		}
+	}
+	return false
+}
+
+func fallbackPronounCompletesObligation(name, fallback string) bool {
+	pronouns := map[string][]string{
+		"plan":      {"wrote it", "written it", "listed it", "provided it", "completed it", "finished it", "did it"},
+		"format":    {"checked it", "performed it", "completed it", "finished it", "did it"},
+		"test":      {"ran it", "executed it", "tested it", "verified it", "validated it", "performed it", "completed it", "did it"},
+		"review":    {"reviewed it", "checked it", "read it", "inspected it", "analysed it", "analyzed it", "performed it", "completed it", "did it"},
+		"write":     {"wrote it", "written it", "edited it", "changed it", "patched it", "modified it", "completed it", "did it"},
+		"document":  {"wrote it", "written it", "documented it", "reported it", "provided it", "completed it", "did it"},
+		"migration": {"ran it", "executed it", "applied it", "migrated it", "performed it", "completed it", "did it"},
+		"deploy":    {"deployed it", "executed it", "performed it", "completed it", "did it"},
+		"publish":   {"published it", "released it", "performed it", "completed it", "did it"},
+	}
+	return containsAny(fallback, pronouns[name])
 }
 
 func containsAlternativeTerm(text string, terms []string) bool {
@@ -588,10 +707,10 @@ func containsAlternativeTerm(text string, terms []string) bool {
 // without skipping a separate failed action later in the same sentence.
 func toolCaveatAt(sentence string, stemAt, stemLen int) bool {
 	clause := clauseContaining(sentence, stemAt)
-	if !hasToolCapabilityContext(clause) {
+	stem := sentence[stemAt : stemAt+stemLen]
+	if !possessionDenialStem(stem) || !hasToolCapabilityContext(clause) {
 		return false
 	}
-	stem := sentence[stemAt : stemAt+stemLen]
 	localStem := strings.Index(clause, stem)
 	if localStem < 0 {
 		return false
@@ -601,8 +720,7 @@ func toolCaveatAt(sentence string, stemAt, stemLen int) bool {
 		return false
 	}
 	between := clause[localStem+stemLen : localStem+stemLen+toolAt]
-	return !containsClauseBoundary(between) &&
-		(hasUnavailableToolContext(clause) || possessionDenialStem(stem))
+	return !containsClauseBoundary(between)
 }
 
 var completedObjectiveMarkers = []string{
