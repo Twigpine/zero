@@ -628,7 +628,7 @@ func redactURLPasswords(value string, replacement string) string {
 		if _, hasPassword := parsed.User.Password(); !hasPassword {
 			return candidate
 		}
-		username := parsed.User.Username()
+		username := url.User(parsed.User.Username()).String()
 		parsed.User = nil
 		rest := parsed.String()
 		prefix := parsed.Scheme + "://"

@@ -396,6 +396,17 @@ func TestRedactStringConditionalGates(t *testing.T) {
 			keep:    []string{"/%5BREDACTED%5D"},
 			wantHit: true,
 		},
+		{
+			name: "url encoded username does not inject header",
+			in:   "https://%0AAuthorization%3A%20Bearer%20opaque-token:hunter2secret@example.test/x",
+			leaked: []string{
+				"hunter2secret",
+				"Authorization: Bearer",
+				"\nAuthorization",
+			},
+			keep:    []string{"Authorization"},
+			wantHit: true,
+		},
 	}
 
 	for _, tc := range tests {
