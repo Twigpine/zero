@@ -18,6 +18,7 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // JSON-RPC 2.0 standard error codes.
@@ -88,6 +89,8 @@ const (
 	maxFrameBytes         = 64 * 1024 * 1024
 	maxConcurrentRequests = 128
 	maxBusyReplies        = 1
+	maxNotifyActive       = 32
+	overloadDrainTimeout  = 100 * time.Millisecond
 )
 
 // Conn is a JSON-RPC 2.0 peer over a single ndjson stream pair. It both serves
@@ -123,8 +126,26 @@ type Conn struct {
 	writeWaiters atomic.Int32
 
 	notifyMu sync.Mutex
-	notifyOn map[string]bool
-	notifyQ  map[string]json.RawMessage
+	notifyOn map[notifyKey]bool
+	notifyQ  map[notifyKey]json.RawMessage
+}
+
+type notifyKey struct {
+	method string
+	target string
+}
+
+func notifyTarget(params json.RawMessage) string {
+	if len(params) == 0 {
+		return ""
+	}
+	var header struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(params, &header); err == nil && header.SessionID != "" {
+		return header.SessionID
+	}
+	return ""
 }
 
 // NewConn builds a peer reading ndjson from r and writing ndjson to w. This
@@ -143,8 +164,8 @@ func NewConn(r io.Reader, w io.Writer) *Conn {
 		sem:        make(chan struct{}, maxConcurrentRequests),
 		busyCh:     make(chan json.RawMessage, maxBusyReplies),
 		writeAbort: make(chan struct{}),
-		notifyOn:   make(map[string]bool),
-		notifyQ:    make(map[string]json.RawMessage),
+		notifyOn:   make(map[notifyKey]bool),
+		notifyQ:    make(map[notifyKey]json.RawMessage),
 	}
 }
 
@@ -177,11 +198,24 @@ func (c *Conn) Serve(ctx context.Context) error {
 	// On exit, cancel in-flight handlers (so a blocked outbound Call unblocks via
 	// ctx) and then wait for them to finish writing their responses. Without this,
 	// a finite input stream (e.g. piped ndjson that EOFs right after a request)
-	// would race the dispatch goroutine and drop the response. The busy-reply
-	// writer is not on wg: it may be blocked in Write against a stalled peer.
+	// would race the dispatch goroutine and drop the response. When overloaded,
+	// skip waiting on wg so a handler already blocked inside a stalled transport
+	// Write does not retain Serve indefinitely.
 	defer func() {
 		cancel()
-		c.wg.Wait()
+		if !c.overloaded.Load() {
+			c.wg.Wait()
+			return
+		}
+		done := make(chan struct{})
+		go func() {
+			c.wg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(overloadDrainTimeout):
+		}
 	}()
 
 	interruptible := newInterruptibleReader(ctx, c.rawReader, c.readerCloser)
@@ -406,30 +440,35 @@ func (c *Conn) dispatchNotify(ctx context.Context, msg rpcMessage) {
 		return
 	}
 	params := append(json.RawMessage(nil), msg.Params...)
+	key := notifyKey{method: msg.Method, target: notifyTarget(params)}
 	c.notifyMu.Lock()
-	if c.notifyOn[msg.Method] {
-		c.notifyQ[msg.Method] = params
+	if c.notifyOn[key] {
+		c.notifyQ[key] = params
 		c.notifyMu.Unlock()
 		return
 	}
-	c.notifyOn[msg.Method] = true
+	if len(c.notifyOn) >= maxNotifyActive {
+		c.notifyMu.Unlock()
+		return
+	}
+	c.notifyOn[key] = true
 	c.notifyMu.Unlock()
 	c.wg.Add(1)
-	go c.runNotify(ctx, msg.Method, fn, params)
+	go c.runNotify(ctx, key, fn, params)
 }
 
-func (c *Conn) runNotify(ctx context.Context, method string, fn NotifyFunc, params json.RawMessage) {
+func (c *Conn) runNotify(ctx context.Context, key notifyKey, fn NotifyFunc, params json.RawMessage) {
 	defer c.wg.Done()
 	for {
 		fn(ctx, params)
 		c.notifyMu.Lock()
-		next, ok := c.notifyQ[method]
+		next, ok := c.notifyQ[key]
 		if !ok {
-			delete(c.notifyOn, method)
+			delete(c.notifyOn, key)
 			c.notifyMu.Unlock()
 			return
 		}
-		delete(c.notifyQ, method)
+		delete(c.notifyQ, key)
 		c.notifyMu.Unlock()
 		params = next
 	}

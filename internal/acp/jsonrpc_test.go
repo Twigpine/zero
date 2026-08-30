@@ -1157,3 +1157,157 @@ func TestQueuedBusyReplySurvivesOverloadBurst(t *testing.T) {
 	}
 	t.Fatalf("busy ids 2 (in-flight) and 3 (queued) must receive -32000; wrote %q", got)
 }
+
+func TestInterleavedSessionCancelsDoNotCoalesceAcrossSessions(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	defer inWriter.Close()
+
+	conn := NewConn(inReader, io.Discard)
+
+	firstRun := make(chan struct{})
+	gate := make(chan struct{})
+	var (
+		mu         sync.Mutex
+		cancelledA int
+		cancelledB int
+	)
+
+	conn.HandleNotify("session/cancel", func(_ context.Context, params json.RawMessage) {
+		var p struct {
+			SessionID string `json:"sessionId"`
+		}
+		_ = json.Unmarshal(params, &p)
+
+		mu.Lock()
+		if p.SessionID == "sess-A" {
+			cancelledA++
+		} else if p.SessionID == "sess-B" {
+			cancelledB++
+		}
+		first := (cancelledA + cancelledB) == 1
+		mu.Unlock()
+
+		if first {
+			close(firstRun)
+			<-gate
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = conn.Serve(ctx) }()
+
+	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"sess-A"}}` + "\n"))
+	select {
+	case <-firstRun:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first session cancel did not start")
+	}
+
+	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"sess-B"}}` + "\n"))
+	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"sess-A"}}` + "\n"))
+
+	// Wait until worker for sess-B runs or notifyQ receives the second sess-A before releasing gate.
+	deadlineWait := time.Now().Add(2 * time.Second)
+	for {
+		conn.notifyMu.Lock()
+		queued := string(conn.notifyQ[notifyKey{method: "session/cancel", target: "sess-A"}])
+		conn.notifyMu.Unlock()
+		if strings.Contains(queued, "sess-A") || time.Now().After(deadlineWait) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	close(gate)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		gotA := cancelledA
+		gotB := cancelledB
+		mu.Unlock()
+		if gotA >= 1 && gotB >= 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("session cancels not delivered to both sessions: sess-A=%d, sess-B=%d", gotA, gotB)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestOverloadTerminatesHandlerInsideStalledWrite(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	defer inWriter.Close()
+
+	started := make(chan struct{})
+	gate := make(chan struct{})
+	defer close(gate)
+	conn := NewConn(inReader, &stallWriter{started: started, gate: gate})
+	conn.sem = make(chan struct{}, 1)
+
+	conn.Handle("echo", func(ctx context.Context, _ json.RawMessage) (any, error) {
+		return "ok", nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- conn.Serve(ctx) }()
+
+	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","id":1,"method":"echo"}` + "\n"))
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not enter stalled write")
+	}
+
+	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","id":2,"method":"echo"}` + "\n"))
+	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","id":3,"method":"echo"}` + "\n"))
+	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","id":4,"method":"echo"}` + "\n"))
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, errBusyOverload) {
+			t.Fatalf("Serve returned %v, want %v", err, errBusyOverload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not return on overload while handler was stalled in Write")
+	}
+}
+
+func TestNotifyActiveIsBounded(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	defer inWriter.Close()
+	conn := NewConn(inReader, io.Discard)
+	gate := make(chan struct{})
+	conn.HandleNotify("session/cancel", func(context.Context, json.RawMessage) {
+		<-gate
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = conn.Serve(ctx) }()
+
+	for i := 0; i < maxNotifyActive+40; i++ {
+		frame := fmt.Sprintf(`{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s-%d"}}`+"\n", i)
+		if _, err := inWriter.Write([]byte(frame)); err != nil {
+			t.Fatalf("write cancel %d: %v", i, err)
+		}
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		conn.notifyMu.Lock()
+		n := len(conn.notifyOn)
+		conn.notifyMu.Unlock()
+		if n >= maxNotifyActive || time.Now().After(deadline) {
+			if n > maxNotifyActive {
+				close(gate)
+				t.Fatalf("notifyOn = %d, want <= %d", n, maxNotifyActive)
+			}
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(gate)
+}
