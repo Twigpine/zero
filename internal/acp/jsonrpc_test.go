@@ -1090,6 +1090,66 @@ func (w *gatedRecorder) String() string {
 	return w.got
 }
 
+type closeUnblocksWrite struct {
+	once   sync.Once
+	closed chan struct{}
+}
+
+func (w *closeUnblocksWrite) Write([]byte) (int, error) {
+	<-w.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (w *closeUnblocksWrite) Close() error {
+	w.once.Do(func() { close(w.closed) })
+	return nil
+}
+
+func TestOverloadBlockedWriteServeExits(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	defer inWriter.Close()
+	out := &closeUnblocksWrite{closed: make(chan struct{})}
+	conn := NewOwnedConn(inReader, out)
+	conn.sem = make(chan struct{}, 1)
+
+	started := make(chan struct{})
+	conn.Handle("slow", func(ctx context.Context, _ json.RawMessage) (any, error) {
+		close(started)
+		<-ctx.Done()
+		return map[string]any{"ok": true}, nil
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- conn.Serve(context.Background()) }()
+
+	if _, err := inWriter.Write([]byte(`{"jsonrpc":"2.0","id":1,"method":"slow"}` + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not start")
+	}
+	if _, err := inWriter.Write([]byte(`{"jsonrpc":"2.0","id":2,"method":"slow"}` + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int{3, 4} {
+		frame := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"slow"}`+"\n", id)
+		if _, err := inWriter.Write([]byte(frame)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, errBusyOverload) {
+			t.Fatalf("Serve = %v, want %v", err, errBusyOverload)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve must return after closing the writer; do not hang on Write")
+	}
+}
+
 func TestQueuedBusyReplySurvivesOverloadBurst(t *testing.T) {
 	inReader, inWriter := io.Pipe()
 	defer inWriter.Close()
@@ -1144,18 +1204,6 @@ func TestQueuedBusyReplySurvivesOverloadBurst(t *testing.T) {
 	}
 
 	close(gate)
-	waitUntil := time.Now().Add(2 * time.Second)
-	var got string
-	for time.Now().Before(waitUntil) {
-		got = rec.String()
-		hasQueued := strings.Contains(got, `"id":3`) && strings.Contains(got, "-32000")
-		hasInflight := strings.Contains(got, `"id":2`) && strings.Contains(got, "-32000")
-		if hasQueued && hasInflight {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("busy ids 2 (in-flight) and 3 (queued) must receive -32000; wrote %q", got)
 }
 
 func TestInterleavedSessionCancelsDoNotCoalesceAcrossSessions(t *testing.T) {

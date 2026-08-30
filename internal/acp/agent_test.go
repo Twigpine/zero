@@ -15,11 +15,8 @@ import (
 	"slices"
 	"sort"
 	"strings"
-<<<<<<< HEAD
 	"sync"
-=======
 	"sync/atomic"
->>>>>>> 8d021507 (fix(acp): key cancels by session, bound notify workers, drain Serve on overload)
 	"testing"
 	"time"
 
@@ -1154,7 +1151,6 @@ func drainTextUntil(t *testing.T, ch <-chan string, done func(string) bool) stri
 	}
 }
 
-<<<<<<< HEAD
 // normalisingResolver reproduces what ResolveWorkspaceRoot actually does — abs,
 // Clean, and a stat that the path exists — WITHOUT resolving symlinks or folding
 // case, which is the behaviour that makes two spellings of one directory produce
@@ -2626,48 +2622,12 @@ func TestACPPromptUnsupportedModelDropsImagesAndNotifies(t *testing.T) {
 		capturedPrompt = prompt
 		capturedOpts = opts
 		return agent.Result{FinalAnswer: "Answered without images"}, nil
-=======
-func TestACPCancelInterleavedSessionsCancelsBothPrompts(t *testing.T) {
-	prompt1Entered := make(chan struct{})
-	prompt2Entered := make(chan struct{})
-	blockPrompt1 := make(chan struct{})
-	blockPrompt2 := make(chan struct{})
-
-	firstCancelStarted := make(chan struct{})
-	holdFirstCancel := make(chan struct{})
-	var cancelCount atomic.Int32
-
-	deps := testDeps(t)
-	deps.RunAgent = func(ctx context.Context, prompt string, _ zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
-		if opts.SessionID == "sess-1" {
-			close(prompt1Entered)
-			select {
-			case <-blockPrompt1:
-				return agent.Result{FinalAnswer: "done1"}, nil
-			case <-ctx.Done():
-				return agent.Result{}, ctx.Err()
-			}
-		} else if opts.SessionID == "sess-2" {
-			close(prompt2Entered)
-			select {
-			case <-blockPrompt2:
-				return agent.Result{FinalAnswer: "done2"}, nil
-			case <-ctx.Done():
-				return agent.Result{}, ctx.Err()
-			}
-		}
-		return agent.Result{}, nil
->>>>>>> 8d021507 (fix(acp): key cancels by session, bound notify workers, drain Serve on overload)
 	}
 
 	h := newHarness(t, deps)
 	defer h.stop()
 
-<<<<<<< HEAD
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-=======
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
->>>>>>> 8d021507 (fix(acp): key cancels by session, bound notify workers, drain Serve on overload)
 	defer cancel()
 
 	var initRes InitializeResult
@@ -2675,7 +2635,6 @@ func TestACPCancelInterleavedSessionsCancelsBothPrompts(t *testing.T) {
 		t.Fatalf("initialize: %v", err)
 	}
 
-<<<<<<< HEAD
 	var newRes NewSessionResult
 	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir(), McpServers: []McpServer{}}, &newRes); err != nil {
 		t.Fatalf("session/new: %v", err)
@@ -2844,7 +2803,52 @@ func TestACPEndToEndImagePromptSupportedModel(t *testing.T) {
 	}
 	if strings.Contains(capturedPrompt, "does not support image input") {
 		t.Fatalf("prompt unexpectedly contains refusal note: %q", capturedPrompt)
-=======
+	}
+}
+
+func TestACPCancelInterleavedSessionsCancelsBothPrompts(t *testing.T) {
+	prompt1Entered := make(chan struct{})
+	prompt2Entered := make(chan struct{})
+	blockPrompt1 := make(chan struct{})
+	blockPrompt2 := make(chan struct{})
+
+	firstCancelStarted := make(chan struct{})
+	holdFirstCancel := make(chan struct{})
+	var cancelCount atomic.Int32
+
+	deps := testDeps(t)
+	deps.RunAgent = func(ctx context.Context, prompt string, _ zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
+		if opts.SessionID == "sess-1" {
+			close(prompt1Entered)
+			select {
+			case <-blockPrompt1:
+				return agent.Result{FinalAnswer: "done1"}, nil
+			case <-ctx.Done():
+				return agent.Result{}, ctx.Err()
+			}
+		} else if opts.SessionID == "sess-2" {
+			close(prompt2Entered)
+			select {
+			case <-blockPrompt2:
+				return agent.Result{FinalAnswer: "done2"}, nil
+			case <-ctx.Done():
+				return agent.Result{}, ctx.Err()
+			}
+		}
+		return agent.Result{}, nil
+	}
+
+	h := newHarness(t, deps)
+	defer h.stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var initRes InitializeResult
+	if err := h.client.Call(ctx, MethodInitialize, InitializeParams{ProtocolVersion: ProtocolVersion}, &initRes); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+
 	root := t.TempDir()
 	_, _ = deps.Store.Create(sessions.CreateInput{SessionID: "sess-1", Title: "s1", Cwd: root, ModelID: "fake-model"})
 	_, _ = deps.Store.Create(sessions.CreateInput{SessionID: "sess-2", Title: "s2", Cwd: root, ModelID: "fake-model"})
@@ -2944,6 +2948,5 @@ func TestACPEndToEndImagePromptSupportedModel(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("prompt2 did not cancel (session cancel was overwritten/coalesced across sessions)")
->>>>>>> 8d021507 (fix(acp): key cancels by session, bound notify workers, drain Serve on overload)
 	}
 }

@@ -101,9 +101,11 @@ const (
 // requests/notifications — needed because ACP is bidirectional (the agent calls
 // the client for session/request_permission, fs/*, terminal/*).
 type Conn struct {
-	rawReader    io.Reader // wrapped lazily in Serve, once ctx is known — see interruptibleReader
-	readerCloser io.Closer
-	w            io.Writer
+	rawReader      io.Reader // wrapped lazily in Serve, once ctx is known — see interruptibleReader
+	readerCloser   io.Closer
+	w              io.Writer
+	writerCloser   io.Closer
+	writeCloseOnce sync.Once
 
 	writeMu sync.Mutex // serializes all writes to w
 
@@ -190,7 +192,16 @@ func NewConn(r io.Reader, w io.Writer) *Conn {
 func NewOwnedConn(r io.Reader, w io.Writer) *Conn {
 	c := NewConn(r, w)
 	c.readerCloser, _ = r.(io.Closer)
+	c.writerCloser, _ = w.(io.Closer)
 	return c
+}
+
+func (c *Conn) closeWriter() {
+	c.writeCloseOnce.Do(func() {
+		if c.writerCloser != nil {
+			_ = c.writerCloser.Close()
+		}
+	})
 }
 
 // Handle registers a request handler for method.
@@ -217,6 +228,7 @@ func (c *Conn) Serve(ctx context.Context) error {
 	defer func() {
 		cancel()
 		if c.overloaded.Load() {
+			c.closeWriter()
 			done := make(chan struct{})
 			go func() {
 				c.wg.Wait()
@@ -744,7 +756,7 @@ func (c *Conn) writeError(ctx context.Context, id json.RawMessage, e *rpcError) 
 }
 
 func (c *Conn) tryEnqueueBusy(id json.RawMessage) bool {
-	if c.busyCh == nil {
+	if c.overloaded.Load() || c.busyCh == nil {
 		return false
 	}
 	select {
@@ -774,27 +786,11 @@ func (c *Conn) writeBusyLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			c.flushBusy(busy)
 			return
 		case id := <-c.busyCh:
-			c.writeBusy(id, busy)
+			_ = c.writeMsg(ctx, rpcMessage{JSONRPC: "2.0", ID: id, Error: busy}, false)
 		}
 	}
-}
-
-func (c *Conn) flushBusy(busy *rpcError) {
-	for {
-		select {
-		case id := <-c.busyCh:
-			c.writeBusy(id, busy)
-		default:
-			return
-		}
-	}
-}
-
-func (c *Conn) writeBusy(id json.RawMessage, busy *rpcError) {
-	_ = c.writeMsg(context.Background(), rpcMessage{JSONRPC: "2.0", ID: id, Error: busy}, true)
 }
 
 func (c *Conn) lockWrite(ctx context.Context, persist bool) error {
@@ -829,6 +825,10 @@ func (c *Conn) lockWrite(ctx context.Context, persist bool) error {
 			releaseWait()
 			abandon()
 			return ctx.Err()
+		case <-c.writeAbort:
+			releaseWait()
+			abandon()
+			return errBusyOverload
 		}
 	}
 	select {
