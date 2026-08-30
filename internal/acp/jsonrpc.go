@@ -92,6 +92,7 @@ const (
 	maxBusyReplies        = 1
 	maxNotifyActive       = 32
 	maxUpdateFIFO         = 32
+	maxSpecialNotify      = 256
 	overloadDrainTimeout  = 100 * time.Millisecond
 )
 
@@ -215,10 +216,6 @@ func (c *Conn) Serve(ctx context.Context) error {
 	// Write does not retain Serve indefinitely.
 	defer func() {
 		cancel()
-		if !c.overloaded.Load() {
-			c.wg.Wait()
-			return
-		}
 		done := make(chan struct{})
 		go func() {
 			c.wg.Wait()
@@ -468,10 +465,19 @@ func (c *Conn) dispatchSessionUpdate(ctx context.Context, fn NotifyFunc, params 
 		c.notifyMu.Unlock()
 		return
 	}
+	if c.specialNotifyBusyLocked() {
+		c.notifyMu.Unlock()
+		c.tripOverload()
+		return
+	}
 	c.updateOn[target] = true
 	c.notifyMu.Unlock()
 	c.wg.Add(1)
 	go c.runSessionUpdate(ctx, target, fn, params)
+}
+
+func (c *Conn) specialNotifyBusyLocked() bool {
+	return len(c.updateOn)+len(c.cancelOn) >= maxSpecialNotify
 }
 
 func (c *Conn) runSessionUpdate(ctx context.Context, target string, fn NotifyFunc, params json.RawMessage) {
@@ -482,6 +488,7 @@ func (c *Conn) runSessionUpdate(ctx context.Context, target string, fn NotifyFun
 		q := c.sessionUpdateQ[target]
 		if len(q) == 0 {
 			delete(c.updateOn, target)
+			delete(c.sessionUpdateQ, target)
 			c.notifyMu.Unlock()
 			return
 		}
@@ -497,6 +504,11 @@ func (c *Conn) dispatchCancel(ctx context.Context, fn NotifyFunc, params json.Ra
 	if c.cancelOn[key] {
 		c.notifyQ[key] = params
 		c.notifyMu.Unlock()
+		return
+	}
+	if c.specialNotifyBusyLocked() {
+		c.notifyMu.Unlock()
+		c.tripOverload()
 		return
 	}
 	c.cancelOn[key] = true

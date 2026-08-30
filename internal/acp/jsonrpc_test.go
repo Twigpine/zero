@@ -1349,8 +1349,14 @@ func TestSessionUpdatePreservesOrder(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(got) != 3 {
-		t.Fatalf("got %d updates, want 3 (no coalescing): %v", len(got), got)
+	want := []string{`{"sessionId":"s","n":1}`, `{"sessionId":"s","n":2}`, `{"sessionId":"s","n":3}`}
+	if len(got) != len(want) {
+		t.Fatalf("got %d updates, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("update %d = %s, want %s", i, got[i], want[i])
+		}
 	}
 }
 
@@ -1396,10 +1402,18 @@ func TestInflightByteBudgetRejects(t *testing.T) {
 		defer mu.Unlock()
 		return out.Write(p)
 	}))
-	conn.inflightLimit = 80
+	frame1 := `{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{}}` + "\n"
+	frame2 := `{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{}}` + "\n"
+	conn.inflightLimit = int64(len(frame1))
 	conn.sem = make(chan struct{}, 8)
 	gate := make(chan struct{})
+	started := make(chan struct{})
 	conn.Handle("session/prompt", func(context.Context, json.RawMessage) (any, error) {
+		select {
+		case <-started:
+		default:
+			close(started)
+		}
 		<-gate
 		return map[string]any{}, nil
 	})
@@ -1407,12 +1421,15 @@ func TestInflightByteBudgetRejects(t *testing.T) {
 	defer cancel()
 	go func() { _ = conn.Serve(ctx) }()
 
-	frame := `{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"s","prompt":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}}` + "\n"
-	if _, err := inWriter.Write([]byte(frame)); err != nil {
+	if _, err := inWriter.Write([]byte(frame1)); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(50 * time.Millisecond)
-	if _, err := inWriter.Write([]byte(`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"s","prompt":"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"}}` + "\n")); err != nil {
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first request did not start")
+	}
+	if _, err := inWriter.Write([]byte(frame2)); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(2 * time.Second)
