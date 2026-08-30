@@ -211,20 +211,24 @@ func (c *Conn) Serve(ctx context.Context) error {
 	// On exit, cancel in-flight handlers (so a blocked outbound Call unblocks via
 	// ctx) and then wait for them to finish writing their responses. Without this,
 	// a finite input stream (e.g. piped ndjson that EOFs right after a request)
-	// would race the dispatch goroutine and drop the response. When overloaded,
-	// skip waiting on wg so a handler already blocked inside a stalled transport
-	// Write does not retain Serve indefinitely.
+	// would race the dispatch goroutine and drop the response. Clean EOF/cancel
+	// waits for wg so admitted replies can flush. Overload keeps a bounded drain
+	// so a stalled Write cannot retain Serve indefinitely.
 	defer func() {
 		cancel()
-		done := make(chan struct{})
-		go func() {
-			c.wg.Wait()
-			close(done)
-		}()
-		select {
-		case <-done:
-		case <-time.After(overloadDrainTimeout):
+		if c.overloaded.Load() {
+			done := make(chan struct{})
+			go func() {
+				c.wg.Wait()
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(overloadDrainTimeout):
+			}
+			return
 		}
+		c.wg.Wait()
 	}()
 
 	interruptible := newInterruptibleReader(ctx, c.rawReader, c.readerCloser)
@@ -732,11 +736,11 @@ func (c *Conn) writeResult(ctx context.Context, id json.RawMessage, result any) 
 		c.writeError(ctx, id, &rpcError{Code: codeInternalError, Message: err.Error()})
 		return
 	}
-	_ = c.write(ctx, rpcMessage{JSONRPC: "2.0", ID: id, Result: raw})
+	_ = c.writeMsg(ctx, rpcMessage{JSONRPC: "2.0", ID: id, Result: raw}, c.overloaded.Load())
 }
 
 func (c *Conn) writeError(ctx context.Context, id json.RawMessage, e *rpcError) {
-	_ = c.write(ctx, rpcMessage{JSONRPC: "2.0", ID: id, Error: e})
+	_ = c.writeMsg(ctx, rpcMessage{JSONRPC: "2.0", ID: id, Error: e}, c.overloaded.Load())
 }
 
 func (c *Conn) tryEnqueueBusy(id json.RawMessage) bool {
