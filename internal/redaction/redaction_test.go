@@ -431,3 +431,98 @@ func TestRedactStringConditionalGates(t *testing.T) {
 		})
 	}
 }
+
+func TestRedactURLPasswords_HostlessFailClosed(t *testing.T) {
+	cases := []struct {
+		in     string
+		leaked string
+		keep   []string
+	}{
+		{in: "http://admin:secret@", leaked: "secret", keep: []string{"admin"}},
+		{in: "http://admin:secret@?q=1", leaked: "secret", keep: []string{"?q=1"}},
+		{in: "http://admin:secret@#fragment", leaked: "secret", keep: []string{"#fragment"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			got := redactURLPasswords(tc.in, RedactedSecret)
+			if strings.Contains(got, tc.leaked) {
+				t.Fatalf("leaked %q in %q", tc.leaked, got)
+			}
+			if !strings.Contains(got, RedactedSecret) {
+				t.Fatalf("expected literal %q in %q", RedactedSecret, got)
+			}
+			if strings.Contains(got, "%5BREDACTED%5D") {
+				t.Fatalf("marker was percent-encoded in %q", got)
+			}
+			for _, keep := range tc.keep {
+				if !strings.Contains(got, keep) {
+					t.Fatalf("want %q still in %q", keep, got)
+				}
+			}
+		})
+	}
+}
+
+func TestRedactString_URLPasswordHostlessFailClosed(t *testing.T) {
+	tests := []struct {
+		name   string
+		in     string
+		leaked []string
+		keep   []string
+	}{
+		{
+			name:   "hostless trailing at",
+			in:     "http://admin:secret@",
+			leaked: []string{"secret"},
+			keep:   []string{RedactedSecret, "admin"},
+		},
+		{
+			name:   "hostless query",
+			in:     "http://admin:secret@?q=1",
+			leaked: []string{"secret"},
+			keep:   []string{RedactedSecret, "?q=1"},
+		},
+		{
+			name:   "hostless fragment",
+			in:     "http://admin:secret@#fragment",
+			leaked: []string{"secret"},
+			keep:   []string{RedactedSecret, "#fragment"},
+		},
+		{
+			name:   "embedded hostless",
+			in:     "connecting to http://admin:hunter2@ now",
+			leaked: []string{"hunter2"},
+			keep:   []string{RedactedSecret, "connecting to ", " now"},
+		},
+		{
+			name:   "https proxy env hostless",
+			in:     "HTTPS_PROXY=http://proxyuser:pr0xyp4ss@",
+			leaked: []string{"pr0xyp4ss"},
+			keep:   []string{RedactedSecret, "HTTPS_PROXY=", "proxyuser"},
+		},
+		{
+			name:   "host present keeps encoded path and query",
+			in:     "https://user:secret@example.test/%5BREDACTED%5D?q=a%20b",
+			leaked: []string{"secret"},
+			keep:   []string{RedactedSecret, "/%5BREDACTED%5D", "q=a%20b"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RedactString(tc.in, Options{})
+			if strings.Contains(got, "%5BREDACTED%5D") && !strings.Contains(tc.in, "%5BREDACTED%5D") {
+				t.Fatalf("marker was percent-encoded: %q", got)
+			}
+			for _, leak := range tc.leaked {
+				if strings.Contains(got, leak) {
+					t.Fatalf("leaked %q in %q", leak, got)
+				}
+			}
+			for _, keep := range tc.keep {
+				if !strings.Contains(got, keep) {
+					t.Fatalf("want %q still in %q", keep, got)
+				}
+			}
+		})
+	}
+}
