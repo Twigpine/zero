@@ -704,3 +704,27 @@ func TestCompletionAdmissionReviewerSemanticPairs(t *testing.T) {
 		}
 	}
 }
+
+func TestCompletionAdmissionCoordinatesToolAndAbsenceConsequences(t *testing.T) {
+	for _, admission := range []string{
+		"I don't have a write tool available, and I did not complete the task.",
+		"I could not find any bugs. The fix remains unverified.",
+		"No write tool is available. The change remains unapplied.",
+		"I could not find any evidence that the fix works; the fix remains unverified.",
+	} {
+		if reason := selfReportedIncompletion(admission); reason == "" {
+			t.Errorf("coordinated failure consequence was exempted: %q", admission)
+		}
+	}
+
+	for _, complete := range []string{
+		"I don't have a write tool available, but I completed the requested review without edits.",
+		"I could not find any bugs. Separately, the optional release note remains unverified.",
+		"No write tool is available. Outside the scope, the example change remains unapplied.",
+		"I could not find any evidence that the issue is unresolved.",
+	} {
+		if reason := selfReportedIncompletion(complete); reason != "" {
+			t.Errorf("bounded successful result was reported incomplete: %q -> %s", complete, reason)
+		}
+	}
+}

@@ -770,7 +770,19 @@ var objectiveFailureMarkers = []string{
 	"do this task", "perform this task", "carry out this task",
 }
 
+var explicitObjectiveFailureOutcomes = []string{
+	"i did not complete the task", "i didn't complete the task",
+	"i did not complete this task", "i didn't complete this task",
+	"i did not finish the task", "i didn't finish the task",
+	"i did not finish this task", "i didn't finish this task",
+	"we did not complete the task", "we didn't complete the task",
+	"we did not finish the task", "we didn't finish the task",
+}
+
 func hasObjectiveFailure(sentence string) bool {
+	if containsAny(sentence, explicitObjectiveFailureOutcomes) {
+		return true
+	}
 	for _, marker := range objectiveFailureMarkers {
 		for start := 0; ; {
 			rel := strings.Index(sentence[start:], marker)
@@ -1012,7 +1024,8 @@ func reportedConsequence(sentence string, stemEnd int) string {
 		if index < 0 {
 			continue
 		}
-		explicit := strings.Contains(boundary, " so ") || strings.Contains(boundary, " but ") ||
+		explicit := strings.HasPrefix(boundary, ";") ||
+			strings.Contains(boundary, " so ") || strings.Contains(boundary, " but ") ||
 			strings.Contains(boundary, "therefore") || strings.Contains(boundary, "leaving") ||
 			strings.Contains(boundary, "because") || strings.Contains(boundary, "since")
 		if thatAt >= 0 && index > thatAt && !explicit {
@@ -1026,6 +1039,21 @@ func reportedConsequence(sentence string, stemEnd int) string {
 		return ""
 	}
 	return tail[earliest+width:]
+}
+
+// hasReportedFailureConsequence keeps the relationship decision made by the
+// sentence lookahead while applying the same failure-state test to both forms:
+// a consequence after punctuation in the current sentence, or the coordinated
+// next sentence. Topic-shifted sentences never enter blockedContext.
+func hasReportedFailureConsequence(sentence, blockedContext string, stemEnd int) bool {
+	if containsAny(reportedConsequence(sentence, stemEnd), unambiguousFailureStates) {
+		return true
+	}
+	if len(blockedContext) <= len(sentence) {
+		return false
+	}
+	next := strings.TrimSpace(blockedContext[len(sentence):])
+	return containsAny(next, unambiguousFailureStates)
 }
 
 // blockedStateMarkers describe WORK LEFT BLOCKED — unverified, unresolved,
@@ -1071,6 +1099,8 @@ var topicShiftMarkers = []string{
 	"separately", "unrelatedly", "unrelated", "as an aside", "aside from",
 	"out of scope", "outside the scope", "not in scope", "for a different",
 	"in a different", "on another", "elsewhere in", "in other news",
+	"future cleanup", "belongs to another", "belongs to a different",
+	"not part of this request", "never part of this request",
 }
 
 // countedLabelContent separates a counted markdown label from any content
@@ -1164,11 +1194,11 @@ func successfulNegativeObservation(tail string) (matched, strong bool) {
 func (claim inabilityClaim) exempt() bool {
 	if matched, strong := successfulNegativeObservation(claim.tail); matched {
 		if strong {
-			return !containsAny(reportedConsequence(claim.sentence, claim.stemAt+claim.stemLen), unambiguousFailureStates)
+			return !hasReportedFailureConsequence(claim.sentence, claim.blockedContext, claim.stemAt+claim.stemLen)
 		}
 		return !containsAny(claim.blockedContext, blockedWorkMarkers)
 	}
-	if hasObjectiveFailure(claim.scope) || containsAny(claim.blockedContext, blockedStateMarkers) {
+	if hasObjectiveFailure(claim.sentence) || containsAny(claim.blockedContext, blockedStateMarkers) {
 		return false
 	}
 	if capabilityOnlyToolFootnote(claim.sentence, claim.stemAt, claim.stemLen) {
@@ -1260,7 +1290,7 @@ func selfReportedIncompletion(text string) string {
 		// this narrow to a tool-grant statement plus an unambiguous consequence so
 		// ordinary discussion of an unavailable fixture or platform is not enough.
 		if hasUnavailableToolContext(sentence) &&
-			containsAny(reportedConsequence(sentence, 0), unambiguousFailureStates) {
+			hasReportedFailureConsequence(sentence, blockedContext, 0) {
 			return selfReportReason("tool limitation left work blocked")
 		}
 		for _, stem := range inabilityStems {
