@@ -1282,7 +1282,7 @@ func TestNotifyActiveIsBounded(t *testing.T) {
 	defer inWriter.Close()
 	conn := NewConn(inReader, io.Discard)
 	gate := make(chan struct{})
-	conn.HandleNotify("session/cancel", func(context.Context, json.RawMessage) {
+	conn.HandleNotify("custom/ping", func(context.Context, json.RawMessage) {
 		<-gate
 	})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1290,7 +1290,7 @@ func TestNotifyActiveIsBounded(t *testing.T) {
 	go func() { _ = conn.Serve(ctx) }()
 
 	for i := 0; i < maxNotifyActive+40; i++ {
-		frame := fmt.Sprintf(`{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s-%d"}}`+"\n", i)
+		frame := fmt.Sprintf(`{"jsonrpc":"2.0","method":"custom/ping","params":{"sessionId":"s-%d"}}`+"\n", i)
 		if _, err := inWriter.Write([]byte(frame)); err != nil {
 			t.Fatalf("write cancel %d: %v", i, err)
 		}
@@ -1310,4 +1310,125 @@ func TestNotifyActiveIsBounded(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	close(gate)
+}
+
+func TestSessionUpdatePreservesOrder(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	defer inWriter.Close()
+	conn := NewConn(inReader, io.Discard)
+	gate := make(chan struct{})
+	var got []string
+	var mu sync.Mutex
+	conn.HandleNotify(MethodSessionUpdate, func(_ context.Context, params json.RawMessage) {
+		<-gate
+		mu.Lock()
+		got = append(got, string(params))
+		mu.Unlock()
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = conn.Serve(ctx) }()
+
+	for i, payload := range []string{`{"sessionId":"s","n":1}`, `{"sessionId":"s","n":2}`, `{"sessionId":"s","n":3}`} {
+		frame := `{"jsonrpc":"2.0","method":"session/update","params":` + payload + `}` + "\n"
+		if _, err := inWriter.Write([]byte(frame)); err != nil {
+			t.Fatalf("write update %d: %v", i, err)
+		}
+	}
+	time.Sleep(50 * time.Millisecond)
+	close(gate)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		n := len(got)
+		mu.Unlock()
+		if n >= 3 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 3 {
+		t.Fatalf("got %d updates, want 3 (no coalescing): %v", len(got), got)
+	}
+}
+
+func TestSessionCancelExceedsNotifyCap(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	defer inWriter.Close()
+	conn := NewConn(inReader, io.Discard)
+	var started atomic.Int32
+	gate := make(chan struct{})
+	conn.HandleNotify(MethodSessionCancel, func(context.Context, json.RawMessage) {
+		started.Add(1)
+		<-gate
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = conn.Serve(ctx) }()
+
+	want := maxNotifyActive + 8
+	for i := 0; i < want; i++ {
+		frame := fmt.Sprintf(`{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s-%d"}}`+"\n", i)
+		if _, err := inWriter.Write([]byte(frame)); err != nil {
+			t.Fatalf("write cancel %d: %v", i, err)
+		}
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for started.Load() < int32(want) && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if started.Load() != int32(want) {
+		close(gate)
+		t.Fatalf("cancels started = %d, want %d", started.Load(), want)
+	}
+	close(gate)
+}
+
+func TestInflightByteBudgetRejects(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	defer inWriter.Close()
+	var mu sync.Mutex
+	var out strings.Builder
+	conn := NewConn(inReader, testWriter(func(p []byte) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return out.Write(p)
+	}))
+	conn.inflightLimit = 80
+	conn.sem = make(chan struct{}, 8)
+	gate := make(chan struct{})
+	conn.Handle("session/prompt", func(context.Context, json.RawMessage) (any, error) {
+		<-gate
+		return map[string]any{}, nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = conn.Serve(ctx) }()
+
+	frame := `{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"s","prompt":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}}` + "\n"
+	if _, err := inWriter.Write([]byte(frame)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if _, err := inWriter.Write([]byte(`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"s","prompt":"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"}}` + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	got := ""
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		got = out.String()
+		mu.Unlock()
+		if strings.Contains(got, "-32000") {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(gate)
+	_ = inWriter.Close()
+	if !strings.Contains(got, "-32000") {
+		t.Fatalf("expected busy from byte budget, got %q", got)
+	}
 }

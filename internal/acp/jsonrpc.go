@@ -88,8 +88,10 @@ const (
 	// the trailing newline delimiter (effective maximum payload is limit - 1).
 	maxFrameBytes         = 64 * 1024 * 1024
 	maxConcurrentRequests = 128
+	maxInflightBytes      = 64 * 1024 * 1024
 	maxBusyReplies        = 1
 	maxNotifyActive       = 32
+	maxUpdateFIFO         = 32
 	overloadDrainTimeout  = 100 * time.Millisecond
 )
 
@@ -125,9 +127,15 @@ type Conn struct {
 	writeAbort   chan struct{}
 	writeWaiters atomic.Int32
 
-	notifyMu sync.Mutex
-	notifyOn map[notifyKey]bool
-	notifyQ  map[notifyKey]json.RawMessage
+	notifyMu       sync.Mutex
+	notifyOn       map[notifyKey]bool
+	notifyQ        map[notifyKey]json.RawMessage
+	cancelOn       map[notifyKey]bool
+	updateOn       map[string]bool
+	sessionUpdateQ map[string][]json.RawMessage
+	admittedMu     sync.Mutex
+	admittedBytes  int64
+	inflightLimit  int64
 }
 
 type notifyKey struct {
@@ -156,16 +164,19 @@ func notifyTarget(params json.RawMessage) string {
 // lifetime.
 func NewConn(r io.Reader, w io.Writer) *Conn {
 	return &Conn{
-		rawReader:  r,
-		w:          w,
-		handlers:   make(map[string]HandlerFunc),
-		notifiers:  make(map[string]NotifyFunc),
-		pending:    make(map[int64]chan rpcMessage),
-		sem:        make(chan struct{}, maxConcurrentRequests),
-		busyCh:     make(chan json.RawMessage, maxBusyReplies),
-		writeAbort: make(chan struct{}),
-		notifyOn:   make(map[notifyKey]bool),
-		notifyQ:    make(map[notifyKey]json.RawMessage),
+		rawReader:      r,
+		w:              w,
+		handlers:       make(map[string]HandlerFunc),
+		notifiers:      make(map[string]NotifyFunc),
+		pending:        make(map[int64]chan rpcMessage),
+		sem:            make(chan struct{}, maxConcurrentRequests),
+		busyCh:         make(chan json.RawMessage, maxBusyReplies),
+		writeAbort:     make(chan struct{}),
+		notifyOn:       make(map[notifyKey]bool),
+		notifyQ:        make(map[notifyKey]json.RawMessage),
+		cancelOn:       make(map[notifyKey]bool),
+		updateOn:       make(map[string]bool),
+		sessionUpdateQ: make(map[string][]json.RawMessage),
 	}
 }
 
@@ -194,6 +205,7 @@ func (c *Conn) HandleNotify(method string, fn NotifyFunc) { c.notifiers[method] 
 func (c *Conn) Serve(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	c.serveCancel = cancel
+	c.wg.Add(1)
 	go c.writeBusyLoop(ctx)
 	// On exit, cancel in-flight handlers (so a blocked outbound Call unblocks via
 	// ctx) and then wait for them to finish writing their responses. Without this,
@@ -400,28 +412,20 @@ func (c *Conn) handleLine(ctx context.Context, line []byte) {
 	case msg.isResponse():
 		c.deliver(msg)
 	case msg.isRequest():
-		if c.sem != nil {
-			select {
-			case c.sem <- struct{}{}:
-				c.wg.Add(1)
-				go func(m rpcMessage) {
-					defer c.wg.Done()
-					defer c.releaseSem()
-					c.dispatchRequest(ctx, m)
-				}(msg)
-			default:
-				id := append(json.RawMessage(nil), msg.ID...)
-				if !c.tryEnqueueBusy(id) {
-					c.tripOverload()
-				}
+		n := int64(len(line))
+		if !c.tryAdmit(n) {
+			id := append(json.RawMessage(nil), msg.ID...)
+			if !c.tryEnqueueBusy(id) {
+				c.tripOverload()
 			}
-		} else {
-			c.wg.Add(1)
-			go func(m rpcMessage) {
-				defer c.wg.Done()
-				c.dispatchRequest(ctx, m)
-			}(msg)
+			break
 		}
+		c.wg.Add(1)
+		go func(m rpcMessage, bytes int64) {
+			defer c.wg.Done()
+			defer c.releaseAdmit(bytes)
+			c.dispatchRequest(ctx, m)
+		}(msg, n)
 	case msg.isNotify():
 		if !c.overloaded.Load() {
 			c.dispatchNotify(ctx, msg)
@@ -440,7 +444,86 @@ func (c *Conn) dispatchNotify(ctx context.Context, msg rpcMessage) {
 		return
 	}
 	params := append(json.RawMessage(nil), msg.Params...)
-	key := notifyKey{method: msg.Method, target: notifyTarget(params)}
+	switch msg.Method {
+	case MethodSessionUpdate:
+		c.dispatchSessionUpdate(ctx, fn, params)
+	case MethodSessionCancel:
+		c.dispatchCancel(ctx, fn, params)
+	default:
+		c.dispatchCoalescedNotify(ctx, msg.Method, fn, params)
+	}
+}
+
+func (c *Conn) dispatchSessionUpdate(ctx context.Context, fn NotifyFunc, params json.RawMessage) {
+	target := notifyTarget(params)
+	c.notifyMu.Lock()
+	if c.updateOn[target] {
+		q := c.sessionUpdateQ[target]
+		if len(q) >= maxUpdateFIFO {
+			c.notifyMu.Unlock()
+			c.tripOverload()
+			return
+		}
+		c.sessionUpdateQ[target] = append(q, params)
+		c.notifyMu.Unlock()
+		return
+	}
+	c.updateOn[target] = true
+	c.notifyMu.Unlock()
+	c.wg.Add(1)
+	go c.runSessionUpdate(ctx, target, fn, params)
+}
+
+func (c *Conn) runSessionUpdate(ctx context.Context, target string, fn NotifyFunc, params json.RawMessage) {
+	defer c.wg.Done()
+	for {
+		fn(ctx, params)
+		c.notifyMu.Lock()
+		q := c.sessionUpdateQ[target]
+		if len(q) == 0 {
+			delete(c.updateOn, target)
+			c.notifyMu.Unlock()
+			return
+		}
+		params = q[0]
+		c.sessionUpdateQ[target] = q[1:]
+		c.notifyMu.Unlock()
+	}
+}
+
+func (c *Conn) dispatchCancel(ctx context.Context, fn NotifyFunc, params json.RawMessage) {
+	key := notifyKey{method: MethodSessionCancel, target: notifyTarget(params)}
+	c.notifyMu.Lock()
+	if c.cancelOn[key] {
+		c.notifyQ[key] = params
+		c.notifyMu.Unlock()
+		return
+	}
+	c.cancelOn[key] = true
+	c.notifyMu.Unlock()
+	c.wg.Add(1)
+	go c.runCancel(ctx, key, fn, params)
+}
+
+func (c *Conn) runCancel(ctx context.Context, key notifyKey, fn NotifyFunc, params json.RawMessage) {
+	defer c.wg.Done()
+	for {
+		fn(ctx, params)
+		c.notifyMu.Lock()
+		next, ok := c.notifyQ[key]
+		if !ok {
+			delete(c.cancelOn, key)
+			c.notifyMu.Unlock()
+			return
+		}
+		delete(c.notifyQ, key)
+		c.notifyMu.Unlock()
+		params = next
+	}
+}
+
+func (c *Conn) dispatchCoalescedNotify(ctx context.Context, method string, fn NotifyFunc, params json.RawMessage) {
+	key := notifyKey{method: method, target: notifyTarget(params)}
 	c.notifyMu.Lock()
 	if c.notifyOn[key] {
 		c.notifyQ[key] = params
@@ -455,6 +538,45 @@ func (c *Conn) dispatchNotify(ctx context.Context, msg rpcMessage) {
 	c.notifyMu.Unlock()
 	c.wg.Add(1)
 	go c.runNotify(ctx, key, fn, params)
+}
+
+func (c *Conn) tryAdmit(n int64) bool {
+	limit := int64(maxInflightBytes)
+	if c.inflightLimit > 0 {
+		limit = c.inflightLimit
+	}
+	c.admittedMu.Lock()
+	if c.admittedBytes+n > limit {
+		c.admittedMu.Unlock()
+		return false
+	}
+	c.admittedBytes += n
+	c.admittedMu.Unlock()
+	if c.sem == nil {
+		return true
+	}
+	select {
+	case c.sem <- struct{}{}:
+		return true
+	default:
+		c.admittedMu.Lock()
+		c.admittedBytes -= n
+		if c.admittedBytes < 0 {
+			c.admittedBytes = 0
+		}
+		c.admittedMu.Unlock()
+		return false
+	}
+}
+
+func (c *Conn) releaseAdmit(n int64) {
+	c.releaseSem()
+	c.admittedMu.Lock()
+	c.admittedBytes -= n
+	if c.admittedBytes < 0 {
+		c.admittedBytes = 0
+	}
+	c.admittedMu.Unlock()
 }
 
 func (c *Conn) runNotify(ctx context.Context, key notifyKey, fn NotifyFunc, params json.RawMessage) {
@@ -631,6 +753,7 @@ func (c *Conn) tripOverload() {
 }
 
 func (c *Conn) writeBusyLoop(ctx context.Context) {
+	defer c.wg.Done()
 	busy := &rpcError{Code: codeServerBusy, Message: "server busy: max concurrent requests exceeded"}
 	for {
 		select {
