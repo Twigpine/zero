@@ -526,3 +526,26 @@ func TestRedactString_URLPasswordHostlessFailClosed(t *testing.T) {
 		})
 	}
 }
+
+func TestRedactString_QueryGateIsolatedFromAssignAndTextSecrets(t *testing.T) {
+	const opaque = "opaque-query-fixture-value"
+	in := "https://example.test/x?[password]=" + opaque
+
+	if !IsSensitiveKey("[password]", Options{}) {
+		t.Fatal("fixture key [password] must normalize to a sensitive key")
+	}
+	if assignPattern.MatchString(in) {
+		t.Fatal("fixture must not satisfy assignPattern; otherwise the query gate is not isolated")
+	}
+	if kept := RedactString(opaque, Options{}); kept != opaque {
+		t.Fatalf("opaque value must not match text-secret patterns, got %q", kept)
+	}
+
+	got := RedactString(in, Options{})
+	if strings.Contains(got, opaque) {
+		t.Fatalf("query gate missed the value: %q", got)
+	}
+	if !strings.Contains(got, RedactedSecret) {
+		t.Fatalf("query gate did not insert marker: %q", got)
+	}
+}
