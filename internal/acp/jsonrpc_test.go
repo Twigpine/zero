@@ -929,3 +929,231 @@ func TestCallCancelsWhileWriterHoldsWriteMu(t *testing.T) {
 		t.Fatal("Call did not return after context cancel while writeMu was held")
 	}
 }
+
+func TestOverloadUnblocksHandlerWaitingOnStalledWriter(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	defer inWriter.Close()
+
+	started := make(chan struct{})
+	gate := make(chan struct{})
+	defer close(gate)
+	conn := NewConn(inReader, &stallWriter{started: started, gate: gate})
+	conn.sem = make(chan struct{}, 1)
+
+	handlerStarted := make(chan struct{})
+	release := make(chan struct{})
+	conn.Handle("slow", func(ctx context.Context, _ json.RawMessage) (any, error) {
+		close(handlerStarted)
+		<-release
+		return "ok", nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- conn.Serve(ctx) }()
+
+	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","id":1,"method":"slow"}` + "\n"))
+	select {
+	case <-handlerStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("admitted handler did not start")
+	}
+
+	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","id":2,"method":"slow"}` + "\n"))
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for busy write to stall")
+	}
+
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for conn.writeWaiters.Load() < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("admitted handler did not block behind the stalled writer")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","id":3,"method":"slow"}` + "\n"))
+	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","id":4,"method":"slow"}` + "\n"))
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not exit on overload while a handler waited behind the stalled writer")
+	}
+}
+
+func TestNotificationFloodStaysBoundedWhileSaturatedRequestStillCancels(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	defer inWriter.Close()
+
+	conn := NewConn(inReader, io.Discard)
+	conn.sem = make(chan struct{}, 1)
+
+	started := make(chan struct{})
+	unblocked := make(chan struct{})
+	conn.Handle("slow", func(ctx context.Context, _ json.RawMessage) (any, error) {
+		close(started)
+		select {
+		case <-unblocked:
+			return "ok", nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	})
+
+	entered := make(chan struct{}, 1)
+	hold := make(chan struct{})
+	var inFlight atomic.Int64
+	conn.HandleNotify("session/cancel", func(_ context.Context, _ json.RawMessage) {
+		inFlight.Add(1)
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-hold
+		select {
+		case <-unblocked:
+		default:
+			close(unblocked)
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = conn.Serve(ctx) }()
+
+	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","id":1,"method":"slow"}` + "\n"))
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("saturated request did not start")
+	}
+
+	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","method":"session/cancel","params":{}}` + "\n"))
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancel notification was not delivered while the request slot was full")
+	}
+
+	before := runtime.NumGoroutine()
+	const flood = 200
+	for i := 0; i < flood; i++ {
+		_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","method":"session/cancel","params":{}}` + "\n"))
+	}
+
+	settle := time.Now().Add(2 * time.Second)
+	var delta int
+	for {
+		delta = runtime.NumGoroutine() - before
+		got := inFlight.Load()
+		if got <= 2 && delta <= 8 {
+			break
+		}
+		if time.Now().After(settle) {
+			t.Fatalf("notification flood in-flight=%d goroutine growth=%d, want bounded", got, delta)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	close(hold)
+	select {
+	case <-unblocked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("saturated request was not cancelled after coalesced session/cancel")
+	}
+}
+
+type gatedRecorder struct {
+	started chan struct{}
+	gate    chan struct{}
+	once    sync.Once
+	mu      sync.Mutex
+	got     string
+}
+
+func (w *gatedRecorder) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.started) })
+	<-w.gate
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.got += string(p)
+	return len(p), nil
+}
+
+func (w *gatedRecorder) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.got
+}
+
+func TestQueuedBusyReplySurvivesOverloadBurst(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	defer inWriter.Close()
+
+	started := make(chan struct{})
+	gate := make(chan struct{})
+	rec := &gatedRecorder{started: started, gate: gate}
+	conn := NewConn(inReader, rec)
+	conn.sem = make(chan struct{}, 1)
+
+	handlerStarted := make(chan struct{})
+	conn.Handle("slow", func(ctx context.Context, _ json.RawMessage) (any, error) {
+		close(handlerStarted)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- conn.Serve(ctx) }()
+
+	go func() { _ = conn.Notify("hold", nil) }()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for writer to stall")
+	}
+
+	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","id":1,"method":"slow"}` + "\n"))
+	select {
+	case <-handlerStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not start")
+	}
+
+	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","id":2,"method":"slow"}` + "\n"))
+	deadline := time.Now().Add(2 * time.Second)
+	for conn.writeWaiters.Load() < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("busy writer did not wait for writeMu")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","id":3,"method":"slow"}` + "\n"))
+	_, _ = inWriter.Write([]byte(`{"jsonrpc":"2.0","id":4,"method":"slow"}` + "\n"))
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not exit on overload")
+	}
+
+	close(gate)
+	waitUntil := time.Now().Add(2 * time.Second)
+	var got string
+	for time.Now().Before(waitUntil) {
+		got = rec.String()
+		hasQueued := strings.Contains(got, `"id":3`) && strings.Contains(got, "-32000")
+		hasInflight := strings.Contains(got, `"id":2`) && strings.Contains(got, "-32000")
+		if hasQueued && hasInflight {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("busy ids 2 (in-flight) and 3 (queued) must receive -32000; wrote %q", got)
+}
