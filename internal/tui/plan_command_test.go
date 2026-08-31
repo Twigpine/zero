@@ -1048,3 +1048,52 @@ func TestParsePlanFileLinesPreservesContinuationWhitespace(t *testing.T) {
 		t.Fatalf("notes = %q, want %q", items[0].Notes, expectedNotes)
 	}
 }
+
+func TestPlanModeHoldsQueuedMessageUntilExitOrDeliberateSubmission(t *testing.T) {
+	isolatePlanConfig(t)
+	dir := t.TempDir()
+	m := newPlanCommandTestModel(t, dir, agent.PermissionModeAsk)
+
+	// User has a queued prompt.
+	m.queuedMessage = "implement feature X"
+
+	// Enter plan mode.
+	updated, _ := m.handlePlanCommand("on")
+	m = updated.(model)
+
+	if m.permissionMode != agent.PermissionModePlan {
+		t.Fatalf("expected permissionMode to be plan, got %s", m.permissionMode)
+	}
+	if !m.hasQueuedMessage() {
+		t.Fatal("expected queuedMessage to stay preserved when entering plan mode")
+	}
+
+	// Trigger turn completion / idle transition.
+	updated, _ = m.Update(agentResponseMsg{runID: m.activeRunID})
+	next := updated.(model)
+
+	// The queued message must NOT have auto-launched under plan mode.
+	if next.pending {
+		t.Fatal("expected queued message not to auto-launch while plan mode is active")
+	}
+	if !next.hasQueuedMessage() || next.queuedMessage != "implement feature X" {
+		t.Fatalf("expected queued message to remain pending, got %q", next.queuedMessage)
+	}
+
+	// Exiting plan mode should now allow the queued prompt to launch.
+	updatedAfterExit, exitCmd := next.handlePlanCommand("off")
+	resumed := updatedAfterExit.(model)
+
+	if resumed.permissionMode != agent.PermissionModeAsk {
+		t.Fatalf("expected permission mode restored to ask, got %s", resumed.permissionMode)
+	}
+	if exitCmd == nil {
+		t.Fatal("expected /plan off to trigger launch of the pending queued prompt")
+	}
+	if resumed.hasQueuedMessage() {
+		t.Fatalf("expected queued message to be consumed on launch, still queued: %q", resumed.queuedMessage)
+	}
+	if !resumed.pending {
+		t.Fatal("expected model to transition to pending after queued message launched")
+	}
+}
