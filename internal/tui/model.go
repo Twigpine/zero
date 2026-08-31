@@ -5469,7 +5469,7 @@ func (m *model) ensureSpinnerTick() tea.Cmd {
 }
 
 func (m model) launchQueuedMessageIfReady() (model, tea.Cmd) {
-	if !m.hasQueuedMessage() || m.pending || m.exiting || m.pendingPermission != nil || m.pendingAskUser != nil || m.pendingSpecReview != nil {
+	if !m.hasQueuedMessage() || m.pending || m.exiting || m.pendingPermission != nil || m.pendingAskUser != nil || m.pendingSpecReview != nil || m.planModeBlocksContinuations() {
 		return m, nil
 	}
 	prompt := m.queuedMessage

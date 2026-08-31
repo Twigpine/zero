@@ -117,6 +117,10 @@ func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
 		m = m.exitPlanMode()
 		m = m.resumeLoopsAfterPlan()
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan mode\nExited. Permission mode restored to " + string(m.permissionMode) + "."})
+		m, queuedCmd := m.launchQueuedMessageIfReady()
+		if queuedCmd != nil {
+			return m, queuedCmd
+		}
 		return m.launchGoalContinuationIfReady()
 	case "open":
 		if m.pending || m.exiting {
