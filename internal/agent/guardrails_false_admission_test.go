@@ -728,3 +728,38 @@ func TestCompletionAdmissionCoordinatesToolAndAbsenceConsequences(t *testing.T) 
 		}
 	}
 }
+
+func TestCompletionAdmissionPreservesTargetsAndCapabilityOnlyScope(t *testing.T) {
+	for _, admission := range []string{
+		"I could not deploy the release to production because no deployment tool is available, so I deployed it to staging manually instead.",
+		"I could not publish the package to registry-a because no publishing tool is available, so I published it to registry-b manually instead.",
+		"I could not run the tests on Windows because no test tool is available, so I ran the tests on Linux manually instead.",
+		"I don't have write tools available to modify the production configuration.",
+		"I don't have a browser tool available, so the required UI was never inspected.",
+	} {
+		if reason := selfReportedIncompletion(admission); reason == "" {
+			t.Errorf("materially incomplete result was exempted: %q", admission)
+		}
+	}
+
+	for _, complete := range []string{
+		"I could not deploy the release to production because no deployment tool is available, so I deployed it to production manually instead.",
+		"I could not deploy the release because no deployment tool is available, so I deployed it manually instead.",
+		"I don't have an update_plan tool available in this specialist context; only read-only exploration tools were provided.",
+		"I don't have write tools available, but I completed the requested review without edits.",
+	} {
+		if reason := selfReportedIncompletion(complete); reason != "" {
+			t.Errorf("equivalent completion was rejected: %q -> %s", complete, reason)
+		}
+	}
+}
+
+func TestFallbackPreservesMaterialOperationTargets(t *testing.T) {
+	failed := "deploy the release to production because no deployment tool is available"
+	if alternativeMatchesFailedWork(failed, "i deployed it to staging manually instead") {
+		t.Fatal("staging deployment satisfied a production obligation")
+	}
+	if !alternativeMatchesFailedWork(failed, "i deployed it to production manually instead") {
+		t.Fatal("same-target manual deployment did not satisfy the production obligation")
+	}
+}

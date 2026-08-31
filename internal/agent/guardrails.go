@@ -352,17 +352,6 @@ func possessionDenialStem(stem string) bool {
 	return containsAny(stem, []string{"do not have", "don't have", "did not have", "didn't have"})
 }
 
-// firstIndexOfAny returns the earliest offset at which any marker occurs, or -1.
-func firstIndexOfAny(s string, markers []string) int {
-	best := -1
-	for _, marker := range markers {
-		if at := strings.Index(s, marker); at >= 0 && (best < 0 || at < best) {
-			best = at
-		}
-	}
-	return best
-}
-
 // firstStemBefore returns the offset and length of the earliest inability stem
 // that starts before limit, or -1.
 func firstStemBefore(s string, limit int) (int, int) {
@@ -494,10 +483,18 @@ func alternativeMatchesFailedWork(failed, fallback string) bool {
 		{"write", []string{"write", "edit", "change", "patch", "modify"}},
 		{"document", []string{"document", "documentation", "summary", "report", "answer"}},
 		{"migration", []string{"migration", "migrate"}},
-		{"deploy", []string{"deploy", "deployment"}},
-		{"publish", []string{"publish", "release"}},
+		{"deploy", []string{"deploy", "deployment", "deployed"}},
+		{"publish", []string{"publish", "publishing", "published", "release", "releasing", "released"}},
 	} {
 		failedInGroup := containsAlternativeTerm(failed, group.terms)
+		// "deploy the release" names the deployable object, not a second
+		// publishing obligation. Requiring both operations made a genuine
+		// same-target deployment fallback impossible to recognize.
+		if group.name == "publish" &&
+			!containsAlternativeTerm(failed, []string{"publish", "publishing"}) &&
+			containsAlternativeTerm(failed, []string{"deploy", "deployment"}) {
+			failedInGroup = false
+		}
 		if !failedInGroup {
 			continue
 		}
@@ -601,7 +598,53 @@ func fallbackCoversRequiredScope(failed, fallback string) bool {
 			return false
 		}
 	}
+	for _, target := range materialOperationTargets(failed) {
+		if !containsWord(materialOperationTargets(fallback), target) {
+			return false
+		}
+	}
 	return true
+}
+
+// materialOperationTargets extracts destination/environment qualifiers from an
+// operation clause ("to production", "on Windows", "in us-east-1"). These
+// qualifiers are part of the obligation: completing the same verb against a
+// different target is not an equivalent fallback.
+func materialOperationTargets(text string) []string {
+	for _, boundary := range []string{" because ", " since ", " due to ", " owing to ", " with no ", " without "} {
+		if at := strings.Index(text, boundary); at >= 0 {
+			text = text[:at]
+		}
+	}
+	words := strings.FieldsFunc(text, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '-' && r != '_'
+	})
+	var targets []string
+	for index, word := range words {
+		if !containsWord([]string{"to", "into", "onto", "on", "in", "against"}, word) || index+1 >= len(words) {
+			continue
+		}
+		target := words[index+1]
+		switch target {
+		case "the", "a", "an":
+			if index+2 >= len(words) {
+				continue
+			}
+			target = words[index+2]
+		}
+		switch target {
+		case "complete", "finish", "verify", "validate", "modify", "change", "write", "read", "run", "perform":
+			continue
+		case "prod":
+			target = "production"
+		case "stage":
+			target = "staging"
+		case "dev":
+			target = "development"
+		}
+		targets = append(targets, target)
+	}
+	return targets
 }
 
 func actionTargetsObligation(text string, objects, specificActions, genericActions []string) bool {
@@ -701,19 +744,51 @@ func capabilityOnlyToolFootnote(sentence string, stemAt, stemLen int) bool {
 	if localStem < 0 {
 		return false
 	}
-	toolAt := firstIndexOfAny(clause[localStem+stemLen:], toolCapabilityMarkers)
+	afterStem := clause[localStem+stemLen:]
+	toolAt, toolMarker := firstMarkerOfAny(afterStem, toolCapabilityMarkers)
 	if toolAt < 0 {
 		return false
 	}
-	between := clause[localStem+stemLen : localStem+stemLen+toolAt]
+	between := afterStem[:toolAt]
 	if containsClauseBoundary(between) {
 		return false
 	}
-	return !containsAny(between, []string{
+	if containsAny(between, []string{
 		"access", "repository", "file", "credential", "service", "network",
 		"inspect", "build", "edit", "change",
 		"publish", "deploy", "migrate", "verify", "validate",
+	}) {
+		return false
+	}
+	return capabilityQualifierOnly(afterStem[toolAt+len(toolMarker):])
+}
+
+func firstMarkerOfAny(text string, markers []string) (int, string) {
+	bestAt, bestMarker := -1, ""
+	for _, marker := range markers {
+		if at := strings.Index(text, marker); at >= 0 && (bestAt < 0 || at < bestAt) {
+			bestAt, bestMarker = at, marker
+		}
+	}
+	return bestAt, bestMarker
+}
+
+func capabilityQualifierOnly(text string) bool {
+	words := strings.FieldsFunc(text, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '-'
 	})
+	allowed := []string{
+		"in", "this", "the", "specialist", "context", "only", "read-only",
+		"read", "exploration", "tool", "tools", "toolset", "were", "was",
+		"provided", "given", "here", "current", "session", "environment",
+		"to", "me", "for", "available",
+	}
+	for _, word := range words {
+		if !containsWord(allowed, word) {
+			return false
+		}
+	}
+	return true
 }
 
 var completedObjectiveMarkers = []string{
@@ -988,6 +1063,12 @@ var unambiguousFailureStates = []string{
 	"left undone",
 }
 
+var passiveMissedWorkPattern = regexp.MustCompile(`\b(?:was|were)\s+(?:not|never)\s+(?:applied|built|changed|deployed|edited|inspected|migrated|modified|published|read|reviewed|tested|validated|verified|written)\b`)
+
+func containsUnambiguousFailureState(text string) bool {
+	return containsAny(text, unambiguousFailureStates) || passiveMissedWorkPattern.MatchString(text)
+}
+
 // consequenceBoundaries separate what was looked for from what followed.
 //
 // THE STATE HAS TO BE THE OUTCOME, NOT PART OF WHAT WAS NEGATED. Matching
@@ -1046,14 +1127,14 @@ func reportedConsequence(sentence string, stemEnd int) string {
 // a consequence after punctuation in the current sentence, or the coordinated
 // next sentence. Topic-shifted sentences never enter blockedContext.
 func hasReportedFailureConsequence(sentence, blockedContext string, stemEnd int) bool {
-	if containsAny(reportedConsequence(sentence, stemEnd), unambiguousFailureStates) {
+	if containsUnambiguousFailureState(reportedConsequence(sentence, stemEnd)) {
 		return true
 	}
 	if len(blockedContext) <= len(sentence) {
 		return false
 	}
 	next := strings.TrimSpace(blockedContext[len(sentence):])
-	return containsAny(next, unambiguousFailureStates)
+	return containsUnambiguousFailureState(next)
 }
 
 // blockedStateMarkers describe WORK LEFT BLOCKED — unverified, unresolved,
@@ -1198,7 +1279,9 @@ func (claim inabilityClaim) exempt() bool {
 		}
 		return !containsAny(claim.blockedContext, blockedWorkMarkers)
 	}
-	if hasObjectiveFailure(claim.sentence) || containsAny(claim.blockedContext, blockedStateMarkers) {
+	if hasObjectiveFailure(claim.sentence) ||
+		containsAny(claim.blockedContext, blockedStateMarkers) ||
+		containsUnambiguousFailureState(claim.blockedContext) {
 		return false
 	}
 	if capabilityOnlyToolFootnote(claim.sentence, claim.stemAt, claim.stemLen) {
