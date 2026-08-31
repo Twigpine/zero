@@ -839,8 +839,8 @@ func TestRunInjectsToolFailureHintWithSchema(t *testing.T) {
 }
 
 // An absence-establishing sentence is a finding; the same sentence that also
-// says the work is blocked is an admission. The allowance stems ("find the",
-// "reproduce ", "confirm any" …) head both, so the tail prefix alone cannot
+// says the work is blocked is an admission. Observation allowances such as
+// "reproduce" and "confirm any" can head both, so the tail prefix alone cannot
 // separate them — measured against real phrasings, TEN of eleven genuine
 // admissions passed the detector before blockedWorkMarkers existed.
 func TestIncompletionAllowanceYieldsToBlockedWork(t *testing.T) {

@@ -352,22 +352,6 @@ func possessionDenialStem(stem string) bool {
 	return containsAny(stem, []string{"do not have", "don't have", "did not have", "didn't have"})
 }
 
-// firstStemBefore returns the offset and length of the earliest inability stem
-// that starts before limit, or -1.
-func firstStemBefore(s string, limit int) (int, int) {
-	bestAt, bestLen := -1, 0
-	for _, stem := range inabilityStems {
-		at := strings.Index(s, stem)
-		if at < 0 || at >= limit {
-			continue
-		}
-		if bestAt < 0 || at < bestAt {
-			bestAt, bestLen = at, len(stem)
-		}
-	}
-	return bestAt, bestLen
-}
-
 // clauseBoundaries end the clause an inability was stated in. Punctuation and
 // connectives together, because a person separating two statements reaches for
 // either and the detector should not care which.
@@ -624,14 +608,16 @@ func materialOperationTargets(text string) []string {
 		if !containsWord([]string{"to", "into", "onto", "on", "in", "against"}, word) || index+1 >= len(words) {
 			continue
 		}
-		target := words[index+1]
-		switch target {
-		case "the", "a", "an":
-			if index+2 >= len(words) {
-				continue
-			}
-			target = words[index+2]
+		targetAt := index + 1
+		for targetAt < len(words) && containsWord([]string{
+			"the", "a", "an", "our", "my", "your", "their", "its", "this", "that",
+		}, words[targetAt]) {
+			targetAt++
 		}
+		if targetAt >= len(words) {
+			continue
+		}
+		target := words[targetAt]
 		switch target {
 		case "complete", "finish", "verify", "validate", "modify", "change", "write", "read", "run", "perform":
 			continue
@@ -753,14 +739,32 @@ func capabilityOnlyToolFootnote(sentence string, stemAt, stemLen int) bool {
 	if containsClauseBoundary(between) {
 		return false
 	}
-	if containsAny(between, []string{
-		"access", "repository", "file", "credential", "service", "network",
-		"inspect", "build", "edit", "change",
-		"publish", "deploy", "migrate", "verify", "validate",
-	}) {
+	if !capabilitySubjectOnly(between) {
 		return false
 	}
 	return capabilityQualifierOnly(afterStem[toolAt+len(toolMarker):])
+}
+
+// capabilitySubjectOnly is deliberately an allow-list because matching it
+// grants a completion exemption. Unknown nouns before the tool marker may name
+// the missing resource (an API key, repository, credential, or service), not
+// merely qualify the toolset.
+func capabilitySubjectOnly(text string) bool {
+	words := strings.FieldsFunc(text, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '-' && r != '_'
+	})
+	allowed := []string{
+		"a", "an", "any", "no", "the", "this", "these", "those", "current",
+		"specialist", "orchestration", "update_plan", "read-only", "read", "write",
+		"edit", "editing", "formatter", "formatting", "test", "testing", "migration",
+		"release", "deployment", "tool", "tools", "toolset",
+	}
+	for _, word := range words {
+		if !containsWord(allowed, word) {
+			return false
+		}
+	}
+	return true
 }
 
 func firstMarkerOfAny(text string, markers []string) (int, string) {
@@ -804,8 +808,7 @@ var harmlessGrantLimitedActions = []string{
 // orchestration tool made impossible. It does not generalize to product work
 // such as inspecting a page or running a migration.
 func harmlessToolLimitation(sentence string, stemAt, stemLen int) bool {
-	stem := sentence[stemAt : stemAt+stemLen]
-	if !hasUnavailableToolContext(sentence) && !possessionDenialStem(stem) {
+	if !hasUnavailableToolContext(sentence) {
 		return false
 	}
 	tail := strings.TrimSpace(sentence[stemAt+stemLen:])
@@ -865,7 +868,7 @@ func hasObjectiveFailure(sentence string) bool {
 				break
 			}
 			at := start + rel
-			stemAt, stemLen := firstStemBefore(sentence, at)
+			stemAt, stemLen := lastStemBefore(sentence, at)
 			if stemAt >= 0 && !containsClauseBoundary(sentence[stemAt+stemLen:at]) {
 				return true
 			}
@@ -873,6 +876,33 @@ func hasObjectiveFailure(sentence string) bool {
 		}
 	}
 	return false
+}
+
+// lastStemBefore returns the nearest inability stem before limit. Coordinated
+// clauses can contain an earlier capability footnote and a later objective
+// failure ("I do not have ... and could not complete the task"); the nearest
+// stem is the one that governs the objective phrase.
+func lastStemBefore(s string, limit int) (int, int) {
+	bestAt, bestLen := -1, 0
+	stems := append([]string{}, inabilityStems...)
+	// Coordinated clauses commonly elide the repeated first-person subject:
+	// "I do not have ... and could not complete the task." These short forms
+	// are considered only while locating an explicitly named objective failure.
+	stems = append(stems, "cannot ", "can't ", "can not ", "could not ", "couldn't ")
+	for _, stem := range stems {
+		for start := 0; start < limit; {
+			rel := strings.Index(s[start:limit], stem)
+			if rel < 0 {
+				break
+			}
+			at := start + rel
+			if at > bestAt {
+				bestAt, bestLen = at, len(stem)
+			}
+			start = at + len(stem)
+		}
+	}
+	return bestAt, bestLen
 }
 
 // blockedWorkMarkers are what turns an absence-establishing sentence back into
@@ -1127,14 +1157,20 @@ func reportedConsequence(sentence string, stemEnd int) string {
 // a consequence after punctuation in the current sentence, or the coordinated
 // next sentence. Topic-shifted sentences never enter blockedContext.
 func hasReportedFailureConsequence(sentence, blockedContext string, stemEnd int) bool {
-	if containsUnambiguousFailureState(reportedConsequence(sentence, stemEnd)) {
+	if containsFailureConsequence(reportedConsequence(sentence, stemEnd)) {
 		return true
 	}
 	if len(blockedContext) <= len(sentence) {
 		return false
 	}
 	next := strings.TrimSpace(blockedContext[len(sentence):])
-	return containsUnambiguousFailureState(next)
+	return containsFailureConsequence(next)
+}
+
+var explicitFailureConsequencePattern = regexp.MustCompile(`\b(?:it|that|this|the\s+[[:alnum:]_-]+)?\s*(?:failed|did\s+not\s+work|didn't\s+work)\b`)
+
+func containsFailureConsequence(text string) bool {
+	return containsUnambiguousFailureState(text) || explicitFailureConsequencePattern.MatchString(text)
 }
 
 // blockedStateMarkers describe WORK LEFT BLOCKED — unverified, unresolved,
@@ -1205,13 +1241,21 @@ func countedLabelContent(sentence string) (string, bool) {
 		return sentence, false
 	}
 	remainder := strings.TrimSpace(trimmed[match[1]:])
+	heading := strings.TrimSpace(trimmed[:match[1]])
 	// Only the counted HEADING is exempt. Attached prose or a same-line bullet is
 	// still ordinary report content and must pass through admission detection.
 	if remainder == "" {
+		if hasObjectiveFailure(heading) {
+			return heading, false
+		}
 		return "", true
 	}
 	if strings.HasPrefix(remainder, "- ") {
-		return strings.TrimSpace(strings.TrimPrefix(remainder, "- ")), true
+		content := strings.TrimSpace(strings.TrimPrefix(remainder, "- "))
+		if containsUnambiguousFailureState(content) || hasObjectiveFailure(heading) {
+			return heading + " " + content, false
+		}
+		return content, true
 	}
 	return sentence, false
 }
@@ -1251,12 +1295,12 @@ func newInabilityClaim(sentence, blockedContext, stem string, stemAt int) inabil
 }
 
 var boundedNegativeObservationTails = []string{
-	"find where", "find the", "find it", "find that", "find this",
-	"found where", "found the",
-	"locate where", "locate the", "locate it",
+	"find where", "found where", "locate where",
 	"determine where", "identify where", "see where",
 	"reproduce",
 }
+
+var boundedNegativeObservationPattern = regexp.MustCompile(`^find\s+the\s+[^,;:.]+\s+being\b`)
 
 // successfulNegativeObservation requires a positive proof that the inability
 // wording is actually the result: either a recognized absent object or a
@@ -1266,7 +1310,7 @@ func successfulNegativeObservation(tail string) (matched, strong bool) {
 	if strongAbsence(tail) {
 		return true, true
 	}
-	return hasAnyPrefix(tail, boundedNegativeObservationTails), false
+	return hasAnyPrefix(tail, boundedNegativeObservationTails) || boundedNegativeObservationPattern.MatchString(tail), false
 }
 
 // exempt reports whether this particular inability is proven harmless. Direct
@@ -1277,7 +1321,8 @@ func (claim inabilityClaim) exempt() bool {
 		if strong {
 			return !hasReportedFailureConsequence(claim.sentence, claim.blockedContext, claim.stemAt+claim.stemLen)
 		}
-		return !containsAny(claim.blockedContext, blockedWorkMarkers)
+		return !containsAny(claim.blockedContext, blockedWorkMarkers) &&
+			!hasReportedFailureConsequence(claim.sentence, claim.blockedContext, claim.stemAt+claim.stemLen)
 	}
 	if hasObjectiveFailure(claim.sentence) ||
 		containsAny(claim.blockedContext, blockedStateMarkers) ||

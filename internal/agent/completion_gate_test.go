@@ -203,3 +203,69 @@ func TestMaxTurnsCutoffIsIncompleteUnderGate(t *testing.T) {
 		t.Fatalf("IncompleteReason = %q, want it to cite max-turns", result.IncompleteReason)
 	}
 }
+
+// These cases exercise the public run loop rather than the classifier helpers.
+// Each final answer used to pass the headless completion gate even though it
+// explicitly admitted that the requested work was not complete.
+func TestCompletionGateRejectsCurrentHeadReviewAdmissions(t *testing.T) {
+	admissions := []string{
+		"I could not find the root cause.",
+		"I could not locate the migration script.",
+		"I was unable to determine where the regression was introduced, so the change was never applied.",
+		"I could not locate the file. The change was never applied.",
+		"I do not have the network access I needed, but the task is complete.",
+		"I do not have a write tool available in this context and could not complete the task.",
+		"Unable to complete the task (1):",
+		"**Unable to verify (1):** - the migration was never run",
+		"I could not run the migration because no migration tool is available, so I ran it manually instead, but it failed.",
+		"I could not run the migration because no migration tool is available, so I ran it manually instead. It failed.",
+		"I could not run the migration because no migration tool is available, so I ran it manually instead and it did not work.",
+		"I could not deploy to our production cluster because no deployment tool is available, so I deployed to our staging cluster manually instead.",
+		"I could not deploy to the main environment because no deployment tool is available, so I deployed to the staging environment manually instead.",
+		"I could not deploy to prod because no deployment tool is available, so I deployed to dev manually instead.",
+		"I do not have the API key or the tools available in this session.",
+	}
+
+	for _, admission := range admissions {
+		t.Run(admission, func(t *testing.T) {
+			provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{textTurn(admission)}}
+			result, err := Run(context.Background(), "complete the requested operation", provider, Options{
+				Registry:                tools.NewRegistry(),
+				MaxTurns:                2,
+				RequireCompletionSignal: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !result.Incomplete {
+				t.Fatalf("admission passed the production completion gate: %q", admission)
+			}
+		})
+	}
+}
+
+func TestCompletionGateKeepsCurrentHeadReviewControlsComplete(t *testing.T) {
+	complete := []string{
+		"I could not find where the regression was introduced; the source is the parser boundary.",
+		"**Unable to verify (1):** - MCP #3 claim was truncated.",
+		"I don't have an update_plan tool available in this specialist context; only read-only exploration tools were provided.",
+		"I could not deploy to our production cluster because no deployment tool is available, so I deployed to our production cluster manually instead.",
+	}
+
+	for _, answer := range complete {
+		t.Run(answer, func(t *testing.T) {
+			provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{textTurn(answer)}}
+			result, err := Run(context.Background(), "complete the requested operation", provider, Options{
+				Registry:                tools.NewRegistry(),
+				MaxTurns:                2,
+				RequireCompletionSignal: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Incomplete {
+				t.Fatalf("completed control was rejected: %q (%s)", answer, result.IncompleteReason)
+			}
+		})
+	}
+}
