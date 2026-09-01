@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -19,41 +18,24 @@ import (
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
-// isolatePlanConfig redirects XDG_CONFIG_HOME so durable plan files and
-// editor staging land under a throwaway directory. The directory is kept
-// outside os.TempDir(): StageForEditor rejects staging roots that sit in the
-// sandbox's default-writable temp tree.
+// isolatePlanConfig redirects user config/cache/profile directories so durable
+// plan files and editor staging land under a throwaway directory.
 func isolatePlanConfig(t *testing.T) {
 	t.Helper()
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatalf("UserHomeDir: %v", err)
-	}
-	// t.Name() can contain slashes (subtests); flatten so MkdirAll gets one leaf.
-	name := strings.Map(func(r rune) rune {
-		switch r {
-		case '/', '\\', ' ', ':':
-			return '_'
-		default:
-			return r
-		}
-	}, t.Name())
-	parent := filepath.Join(home, ".cache", "zero-planmode-test")
-	if err := os.MkdirAll(parent, 0o700); err != nil {
-		t.Fatalf("MkdirAll plan config parent: %v", err)
-	}
-	root, err := os.MkdirTemp(parent, name+"-")
-	if err != nil {
-		t.Fatalf("MkdirTemp plan config: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	// os.UserConfigDir (which config.UserConfigDir defers to outside darwin)
-	// reads %AppData% on Windows and ignores XDG_CONFIG_HOME there, so both
-	// must be set for this override to actually take effect cross-platform.
-	if runtime.GOOS == "windows" {
-		t.Setenv("AppData", root)
-	}
-	t.Setenv("XDG_CONFIG_HOME", root)
+	root := t.TempDir()
+	configDir := filepath.Join(root, "config")
+	tempDir := filepath.Join(root, "tmp")
+	_ = os.MkdirAll(configDir, 0o700)
+	_ = os.MkdirAll(tempDir, 0o700)
+
+	t.Setenv("HOME", root)
+	t.Setenv("USERPROFILE", root)
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(root, "cache"))
+	t.Setenv("AppData", configDir)
+	t.Setenv("LocalAppData", filepath.Join(root, "local"))
+	restore := planmode.SetEffectiveTempDirForTest(tempDir)
+	t.Cleanup(restore)
 }
 
 func newPlanCommandTestModel(t *testing.T, cwd string, permissionMode agent.PermissionMode) model {
@@ -1095,5 +1077,123 @@ func TestPlanModeHoldsQueuedMessageUntilExitOrDeliberateSubmission(t *testing.T)
 	}
 	if !resumed.pending {
 		t.Fatal("expected model to transition to pending after queued message launched")
+	}
+}
+
+// TestPlanCommandStatusReflectsActualPermissionMode is the regression for P2:
+// /plan status (planText) must truthfully distinguish whether PermissionModePlan
+// is active and whether a durable or draft plan exists, across mode transitions
+// and session operations.
+func TestPlanCommandStatusReflectsActualPermissionMode(t *testing.T) {
+	isolatePlanConfig(t)
+	dir := t.TempDir()
+	m := newPlanCommandTestModel(t, dir, agent.PermissionModeAsk)
+
+	// 1. Inactive mode with no plan
+	status := m.planText()
+	if !strings.Contains(status, "Plan mode is inactive. No plan written.") {
+		t.Fatalf("expected inactive notice with no plan, got: %q", status)
+	}
+
+	// 2. Active mode with no plan
+	m.permissionMode = agent.PermissionModePlan
+	status = m.planText()
+	if !strings.Contains(status, "Plan mode is active. No plan written yet.") {
+		t.Fatalf("expected active notice with no plan, got: %q", status)
+	}
+
+	// 3. Active mode with in-memory draft
+	planTool := tools.NewUpdatePlanTool()
+	planTool.SetPlan([]tools.PlanItem{{Content: "in-memory step", Status: "pending"}})
+	m.registry.Register(planTool)
+	status = m.planText()
+	if !strings.Contains(status, "Current Plan (plan mode active; draft in memory)") || !strings.Contains(status, "in-memory step") {
+		t.Fatalf("expected active status with draft in memory, got: %q", status)
+	}
+
+	// 4. Inactive mode with in-memory draft (e.g. after /plan off before disk save)
+	m.permissionMode = agent.PermissionModeAsk
+	status = m.planText()
+	if !strings.Contains(status, "Current Plan (plan mode inactive; draft in memory)") || !strings.Contains(status, "in-memory step") {
+		t.Fatalf("expected inactive status with draft in memory, got: %q", status)
+	}
+
+	// 5. Active mode with durable plan file
+	if _, err := planmode.WritePlan(dir, m.activeSession.SessionID, "1. [pending] durable step"); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+	m.permissionMode = agent.PermissionModePlan
+	status = m.planText()
+	if !strings.Contains(status, "Current Plan (plan mode active)") || !strings.Contains(status, "durable step") {
+		t.Fatalf("expected active status with durable plan, got: %q", status)
+	}
+
+	// 6. Inactive mode with durable plan file (after /plan off)
+	m.permissionMode = agent.PermissionModeAsk
+	status = m.planText()
+	if !strings.Contains(status, "Current Plan (plan mode inactive)") || !strings.Contains(status, "durable step") {
+		t.Fatalf("expected inactive status with durable plan, got: %q", status)
+	}
+}
+
+// TestPlanCommandPreservesSecretShapedPlanStepsInPanelAndFile is the regression
+// for P1: plan steps containing secret tokens must remain unredacted on disk,
+// in the UI panel, and across resume, while transcript Output was scrubbed.
+func TestPlanCommandPreservesSecretShapedPlanStepsInPanelAndFile(t *testing.T) {
+	isolatePlanConfig(t)
+	dir := t.TempDir()
+	m := newPlanCommandTestModel(t, dir, agent.PermissionModePlan)
+
+	secretToken := "ghp_123456789012345678901234567890123456"
+	stepContent := "Deploy with token " + secretToken
+
+	// Run update_plan tool via registry
+	res := m.registry.Run(context.Background(), "update_plan", map[string]any{
+		"plan": []any{
+			map[string]any{
+				"content": stepContent,
+				"status":  "in_progress",
+				"notes":   "Key: " + secretToken,
+			},
+		},
+	})
+	if res.Status != tools.StatusOK {
+		t.Fatalf("registry.Run failed: %+v", res)
+	}
+
+	// Output was redacted at registry boundary
+	if strings.Contains(res.Output, secretToken) {
+		t.Fatalf("res.Output leaked secretToken: %q", res.Output)
+	}
+
+	// Typed PlanSnapshot carries exact secret
+	items, ok := planSnapshotFromResult(agent.ToolResult{
+		Status:       res.Status,
+		Output:       res.Output,
+		PlanSnapshot: res.PlanSnapshot,
+	})
+	if !ok || len(items) != 1 || items[0].Content != stepContent {
+		t.Fatalf("planSnapshotFromResult returned invalid snapshot: ok=%v, items=%+v", ok, items)
+	}
+
+	// Update sticky panel and persist durable file
+	m.plan.updateFromItems(items, m.now())
+	if _, err := planmode.WritePlan(dir, m.activeSession.SessionID, formatPlanItems(items)); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+
+	// Verify durable file has exact secret
+	content, exists, err := planmode.ReadPlan(dir, m.activeSession.SessionID)
+	if err != nil || !exists {
+		t.Fatalf("ReadPlan failed: exists=%v, err=%v", exists, err)
+	}
+	if !strings.Contains(content, secretToken) {
+		t.Fatalf("durable plan file was improperly redacted: %q", content)
+	}
+
+	// Verify reload rehydrates exact secret
+	reloaded, reloadedOk, err := m.reloadPlanFromFile()
+	if err != nil || !reloadedOk || len(reloaded) != 1 || reloaded[0].Content != stepContent {
+		t.Fatalf("reloadPlanFromFile failed: ok=%v, err=%v, reloaded=%+v", reloadedOk, err, reloaded)
 	}
 }

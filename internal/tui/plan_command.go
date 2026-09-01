@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -477,14 +476,20 @@ func (m model) planText() string {
 	// draft below is only a fallback for a plan that predates any write.
 	path, pathErr := planmode.PlanFilePath(m.cwd, m.activeSession.SessionID)
 	content, exists, readErr := planmode.ReadPlan(m.cwd, m.activeSession.SessionID)
-	switch {
-	case readErr != nil:
+	if readErr != nil {
 		// A real I/O/permission failure, not just a not-yet-created file:
 		// surface it instead of silently falling back to the in-memory draft,
 		// which would hide the failure entirely.
 		return "plan file read error: " + readErr.Error()
-	case exists:
-		header := "Current Plan (plan mode)"
+	}
+
+	modeLabel := "inactive"
+	if m.permissionMode == agent.PermissionModePlan {
+		modeLabel = "active"
+	}
+
+	if exists && strings.TrimSpace(content) != "" {
+		header := fmt.Sprintf("Current Plan (plan mode %s)", modeLabel)
 		if pathErr == nil {
 			header += "\n" + path
 		}
@@ -492,10 +497,14 @@ func (m model) planText() string {
 	}
 
 	// Fall back to the update_plan list the agent has been building.
-	if draft := m.formatPlanDraft(); draft != "" {
-		return "Current Plan\n" + draft
+	if draft := m.formatPlanDraft(); strings.TrimSpace(draft) != "" {
+		return fmt.Sprintf("Current Plan (plan mode %s; draft in memory)\n%s", modeLabel, draft)
 	}
-	return "Plan mode is active. No plan written yet. Use update_plan to outline steps, or /plan open to draft the plan file."
+
+	if m.permissionMode == agent.PermissionModePlan {
+		return "Plan mode is active. No plan written yet. Use update_plan to outline steps, or /plan open to draft the plan file."
+	}
+	return "Plan mode is inactive. No plan written. Use /plan on to enter plan mode."
 }
 
 // formatPlanDraft renders the agent's in-memory update_plan items as plain
@@ -548,25 +557,20 @@ func formatPlanItems(items []tools.PlanItem) string {
 	return strings.Join(lines, "\n")
 }
 
-// planSnapshotFromResult decodes the plan items a successful update_plan call
-// carried in its result meta (tools.PlanSnapshotMeta). ok=false when the
-// snapshot is absent or undecodable — the caller then skips panel/file
-// updates rather than re-reading the shared tool, whose state may already
-// belong to another session by the time the result callback runs.
+// planSnapshotFromResult extracts the immutable plan items a successful update_plan
+// call carried in its typed PlanSnapshot field. ok=false when the snapshot is
+// absent or empty — the caller then skips panel/file updates rather than re-reading
+// the shared tool, whose state may already belong to another session by the time
+// the result callback runs.
 func planSnapshotFromResult(result agent.ToolResult) ([]tools.PlanItem, bool) {
-	encoded, ok := result.Meta[tools.PlanSnapshotMeta]
-	if !ok {
-		return nil, false
+	if len(result.PlanSnapshot) > 0 {
+		return append([]tools.PlanItem{}, result.PlanSnapshot...), true
 	}
-	var items []tools.PlanItem
-	if err := json.Unmarshal([]byte(encoded), &items); err != nil {
-		return nil, false
-	}
-	return items, true
+	return nil, false
 }
 
 // sessionToolResultMeta copies result.Meta for session event logging, omitting
-// PlanSnapshotMeta so the plan body is not persisted twice (durable plan file
+// PlanSnapshotMeta if present so the plan body is not persisted twice (durable plan file
 // plus event log).
 func sessionToolResultMeta(meta map[string]string) map[string]string {
 	if len(meta) == 0 {

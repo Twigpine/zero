@@ -1590,6 +1590,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		// the Run turn loop performs the actual provider switch. Empty for every
 		// ordinary tool result.
 		RequestedModel: result.Meta["escalate_to_model"],
+		PlanSnapshot:   result.PlanSnapshot,
 	}, nil
 }
 

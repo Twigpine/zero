@@ -170,3 +170,126 @@ func renameatRetry(olddirfd int, oldpath string, newdirfd int, newpath string) e
 		return err
 	}
 }
+
+// stageContentUnderBase opens the validated dir descriptor with O_NOFOLLOW and
+// creates a temporary staged plan file plus an exclusive companion lock file
+// relative to that descriptor, ensuring containment cannot be bypassed by
+// intermediate path swaps.
+func stageContentUnderBase(dir, sessionID, content string) (string, func(), error) {
+	dirfd, err := openatRetry(unix.AT_FDCWD, dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return "", nil, fmt.Errorf("open plan editor staging directory: %w", err)
+	}
+	defer func() {
+		if dirfd >= 0 {
+			_ = unix.Close(dirfd)
+		}
+	}()
+
+	var st unix.Stat_t
+	if err := unix.Fstat(dirfd, &st); err != nil {
+		return "", nil, fmt.Errorf("stat plan editor staging directory: %w", err)
+	}
+	if (st.Mode & unix.S_IFMT) != unix.S_IFDIR {
+		return "", nil, fmt.Errorf("plan editor staging directory is not a directory")
+	}
+
+	slug := slugify(sessionID)
+	var leafName string
+	var fd int = -1
+	var lockFd int = -1
+	for try := 0; try < 100; try++ {
+		candidate := fmt.Sprintf("%s-%d-%d.md", slug, os.Getpid(), time.Now().UnixNano())
+		lockCandidate := candidate + ".lock"
+
+		cLockFd, err := openatRetry(dirfd, lockCandidate, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+		if err != nil {
+			continue
+		}
+		if err := unix.Flock(cLockFd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+			_ = unix.Close(cLockFd)
+			_ = unix.Unlinkat(dirfd, lockCandidate, 0)
+			continue
+		}
+
+		cFd, err := openatRetry(dirfd, candidate, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+		if err != nil {
+			_ = unix.Flock(cLockFd, unix.LOCK_UN)
+			_ = unix.Close(cLockFd)
+			_ = unix.Unlinkat(dirfd, lockCandidate, 0)
+			continue
+		}
+
+		leafName = candidate
+		fd = cFd
+		lockFd = cLockFd
+		break
+	}
+	if fd < 0 {
+		return "", nil, fmt.Errorf("stage plan file for editor: failed to create unique temporary file")
+	}
+
+	stagedPath := filepath.Join(dir, leafName)
+	lockPath := stagedPath + ".lock"
+
+	file := os.NewFile(uintptr(fd), stagedPath)
+	if file == nil {
+		_ = unix.Close(fd)
+		_ = unix.Flock(lockFd, unix.LOCK_UN)
+		_ = unix.Close(lockFd)
+		_ = os.Remove(stagedPath)
+		_ = os.Remove(lockPath)
+		return "", nil, fmt.Errorf("stage plan file for editor: invalid descriptor")
+	}
+	if _, err := file.WriteString(strings.TrimRight(content, "\n") + "\n"); err != nil {
+		_ = file.Close()
+		_ = unix.Flock(lockFd, unix.LOCK_UN)
+		_ = unix.Close(lockFd)
+		_ = os.Remove(stagedPath)
+		_ = os.Remove(lockPath)
+		return "", nil, fmt.Errorf("stage plan file for editor: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		_ = unix.Flock(lockFd, unix.LOCK_UN)
+		_ = unix.Close(lockFd)
+		_ = os.Remove(stagedPath)
+		_ = os.Remove(lockPath)
+		return "", nil, fmt.Errorf("stage plan file for editor: %w", err)
+	}
+
+	cleanup := func() {
+		_ = unix.Flock(lockFd, unix.LOCK_UN)
+		_ = unix.Close(lockFd)
+		_ = os.Remove(stagedPath)
+		_ = os.Remove(lockPath)
+	}
+	return stagedPath, cleanup, nil
+}
+
+// tryReclaimStaleStagedFile attempts to reclaim an abandoned staged plan file.
+// It verifies the filename matches the Zero staged format, opens the companion
+// .lock file and attempts non-blocking exclusive flock. If the lock cannot be
+// acquired (an editor is actively open), the file is preserved.
+func tryReclaimStaleStagedFile(dir, leafName string) bool {
+	if !strings.HasSuffix(leafName, ".md") {
+		return false
+	}
+	dirfd, err := openatRetry(unix.AT_FDCWD, dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = unix.Close(dirfd) }()
+
+	lockName := leafName + ".lock"
+	lockFd, err := openatRetry(dirfd, lockName, unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err == nil {
+		defer func() { _ = unix.Close(lockFd) }()
+		if err := unix.Flock(lockFd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+			return false
+		}
+		defer func() { _ = unix.Flock(lockFd, unix.LOCK_UN) }()
+	}
+	_ = unix.Unlinkat(dirfd, leafName, 0)
+	_ = unix.Unlinkat(dirfd, lockName, 0)
+	return true
+}

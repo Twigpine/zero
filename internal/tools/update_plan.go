@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -90,12 +89,12 @@ func (tool *updatePlanTool) Run(ctx context.Context, args map[string]any) Result
 	}
 	tool.currentPlan = plan
 	result := okResult(formatPlan(plan))
-	// Carry this call's plan with its result: the TUI persists the plan from
-	// the result callback, which runs after Run releases the mutex, so
-	// re-reading CurrentPlan there could observe a later session's state.
-	if data, err := json.Marshal(plan); err == nil {
-		result.Meta = map[string]string{PlanSnapshotMeta: string(data)}
-	}
+	// Carry this call's plan with its typed result snapshot: the TUI persists
+	// the plan from the result callback, which runs after Run releases the
+	// mutex, so re-reading CurrentPlan there could observe a later session's state.
+	// We use the typed PlanSnapshot field rather than transcript metadata so
+	// downstream scrubbing cannot mutate secret-shaped plan step text.
+	result.PlanSnapshot = append([]PlanItem{}, plan...)
 	return result
 }
 
