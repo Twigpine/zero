@@ -617,18 +617,30 @@ func materialOperationTargets(text string) []string {
 		if targetAt >= len(words) {
 			continue
 		}
-		target := words[targetAt]
-		switch target {
+		first := words[targetAt]
+		switch first {
 		case "complete", "finish", "verify", "validate", "modify", "change", "write", "read", "run", "perform":
 			continue
-		case "prod":
-			target = "production"
-		case "stage":
-			target = "staging"
-		case "dev":
-			target = "development"
 		}
-		targets = append(targets, target)
+		end := targetAt
+		for end < len(words) && !containsWord([]string{
+			"to", "into", "onto", "on", "in", "against",
+			"manually", "directly", "instead", "successfully", "by", "using", "with",
+		}, words[end]) {
+			end++
+		}
+		targetWords := append([]string{}, words[targetAt:end]...)
+		for i, target := range targetWords {
+			switch target {
+			case "prod":
+				targetWords[i] = "production"
+			case "stage":
+				targetWords[i] = "staging"
+			case "dev":
+				targetWords[i] = "development"
+			}
+		}
+		targets = append(targets, strings.Join(targetWords, " "))
 	}
 	return targets
 }
@@ -1094,9 +1106,11 @@ var unambiguousFailureStates = []string{
 }
 
 var passiveMissedWorkPattern = regexp.MustCompile(`\b(?:was|were)\s+(?:not|never)\s+(?:applied|built|changed|deployed|edited|inspected|migrated|modified|published|read|reviewed|tested|validated|verified|written)\b`)
+var activeMissedWorkPattern = regexp.MustCompile(`\b(?:did\s+not|didn't)\s+(?:apply|build|change|deploy|edit|inspect|migrate|modify|publish|read|review|run|test|validate|verify|write)\b`)
 
 func containsUnambiguousFailureState(text string) bool {
-	return containsAny(text, unambiguousFailureStates) || passiveMissedWorkPattern.MatchString(text)
+	return containsAny(text, unambiguousFailureStates) ||
+		passiveMissedWorkPattern.MatchString(text) || activeMissedWorkPattern.MatchString(text)
 }
 
 // consequenceBoundaries separate what was looked for from what followed.
@@ -1252,7 +1266,7 @@ func countedLabelContent(sentence string) (string, bool) {
 	}
 	if strings.HasPrefix(remainder, "- ") {
 		content := strings.TrimSpace(strings.TrimPrefix(remainder, "- "))
-		if containsUnambiguousFailureState(content) || hasObjectiveFailure(heading) {
+		if containsFailureConsequence(content) || hasObjectiveFailure(heading) {
 			return heading + " " + content, false
 		}
 		return content, true
@@ -1295,12 +1309,11 @@ func newInabilityClaim(sentence, blockedContext, stem string, stemAt int) inabil
 }
 
 var boundedNegativeObservationTails = []string{
-	"find where", "found where", "locate where",
-	"determine where", "identify where", "see where",
 	"reproduce",
 }
 
 var boundedNegativeObservationPattern = regexp.MustCompile(`^find\s+the\s+[^,;:.]+\s+being\b`)
+var boundedLocationObservationPattern = regexp.MustCompile(`^(?:find|found|locate|determine|identify|see)\s+where\s+(?:.+\s+)?(?:is|are|was|were)\s+(?:set|defined|declared|configured|introduced|registered|used|referenced|called|created|written|stored|assigned|enabled|disabled)\b`)
 
 // successfulNegativeObservation requires a positive proof that the inability
 // wording is actually the result: either a recognized absent object or a
@@ -1310,7 +1323,9 @@ func successfulNegativeObservation(tail string) (matched, strong bool) {
 	if strongAbsence(tail) {
 		return true, true
 	}
-	return hasAnyPrefix(tail, boundedNegativeObservationTails) || boundedNegativeObservationPattern.MatchString(tail), false
+	return hasAnyPrefix(tail, boundedNegativeObservationTails) ||
+		boundedNegativeObservationPattern.MatchString(tail) ||
+		boundedLocationObservationPattern.MatchString(tail), false
 }
 
 // exempt reports whether this particular inability is proven harmless. Direct

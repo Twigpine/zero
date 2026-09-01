@@ -210,6 +210,7 @@ func TestMaxTurnsCutoffIsIncompleteUnderGate(t *testing.T) {
 func TestCompletionGateRejectsCurrentHeadReviewAdmissions(t *testing.T) {
 	admissions := []string{
 		"I could not find the root cause.",
+		"I could not find where to apply the fix.",
 		"I could not locate the migration script.",
 		"I was unable to determine where the regression was introduced, so the change was never applied.",
 		"I could not locate the file. The change was never applied.",
@@ -217,11 +218,15 @@ func TestCompletionGateRejectsCurrentHeadReviewAdmissions(t *testing.T) {
 		"I do not have a write tool available in this context and could not complete the task.",
 		"Unable to complete the task (1):",
 		"**Unable to verify (1):** - the migration was never run",
+		"Unable to deploy (1): - production deployment failed.",
+		"**Unable to verify (1):** - the migration did not run",
 		"I could not run the migration because no migration tool is available, so I ran it manually instead, but it failed.",
 		"I could not run the migration because no migration tool is available, so I ran it manually instead. It failed.",
 		"I could not run the migration because no migration tool is available, so I ran it manually instead and it did not work.",
 		"I could not deploy to our production cluster because no deployment tool is available, so I deployed to our staging cluster manually instead.",
 		"I could not deploy to the main environment because no deployment tool is available, so I deployed to the staging environment manually instead.",
+		"I could not deploy to the primary production environment because no deployment tool is available, so I deployed to the primary staging environment manually instead.",
+		"I could not publish to an internal production registry because no release tool is available, so I published to an internal staging registry manually instead.",
 		"I could not deploy to prod because no deployment tool is available, so I deployed to dev manually instead.",
 		"I do not have the API key or the tools available in this session.",
 	}
@@ -250,6 +255,7 @@ func TestCompletionGateKeepsCurrentHeadReviewControlsComplete(t *testing.T) {
 		"**Unable to verify (1):** - MCP #3 claim was truncated.",
 		"I don't have an update_plan tool available in this specialist context; only read-only exploration tools were provided.",
 		"I could not deploy to our production cluster because no deployment tool is available, so I deployed to our production cluster manually instead.",
+		"I could not deploy to the primary production environment because no deployment tool is available, so I deployed to the primary production environment manually instead.",
 	}
 
 	for _, answer := range complete {
