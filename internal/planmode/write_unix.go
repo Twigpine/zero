@@ -196,6 +196,9 @@ func stageContentUnderBase(dir, sessionID, content string) (string, func(), erro
 	if (st.Mode & unix.S_IFMT) != unix.S_IFDIR {
 		return "", nil, fmt.Errorf("plan editor staging directory is not a directory")
 	}
+	if err := unix.Fchmod(dirfd, 0o700); err != nil {
+		return "", nil, fmt.Errorf("restrict plan editor staging directory permissions: %w", err)
+	}
 
 	slug := slugify(sessionID)
 	var leafName string
