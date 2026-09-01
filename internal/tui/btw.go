@@ -7,6 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Twigpine/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/tools"
 	"github.com/Twigpine/zero/internal/usage"
 )
 
@@ -29,6 +30,7 @@ Nothing from this side conversation will be merged into the main session.`
 type btwState struct {
 	active           bool
 	parent           *model
+	parentPlanItems  []tools.PlanItem
 	sideRunIDBase    int
 	parentNeedsInput bool
 }
@@ -147,7 +149,15 @@ func (m model) handleBTWCommand(question string) (model, tea.Cmd) {
 	// side surface that inherited it would stay read-only, or leak the
 	// parent's draft into a conversation that never drafted it. Match
 	// /new and /resume: exit plan mode and clear plan state on the side
-	// only. The saved parent keeps its own plan mode and panel for restore.
+	// only. Capture the parent's current in-memory plan snapshot before
+	// resetting so returnFromBTW can restore it even if durable persistence
+	// was unavailable or reload encounters an error.
+	var parentPlanItems []tools.PlanItem
+	if reader, ok := parent.registry.Get("update_plan"); ok {
+		if r, ok := reader.(currentPlanReader); ok {
+			parentPlanItems = r.CurrentPlan()
+		}
+	}
 	side = side.exitPlanMode()
 	side = side.resetPlanForSessionSwitch()
 	side.planDetailGen++
@@ -157,9 +167,10 @@ func (m model) handleBTWCommand(question string) (model, tea.Cmd) {
 	side.clearStreamingToolCall()
 	side.resetStreamingFade()
 	side.btw = btwState{
-		active:        true,
-		parent:        &parent,
-		sideRunIDBase: side.runID,
+		active:          true,
+		parent:          &parent,
+		parentPlanItems: parentPlanItems,
+		sideRunIDBase:   side.runID,
 	}
 
 	if question == "" {
@@ -183,6 +194,7 @@ func (m model) leaveBTW() (model, tea.Cmd) {
 	}
 	m, _ = m.clearLoopsForSessionSwitch()
 	parent := *m.btw.parent
+	savedParentPlan := m.btw.parentPlanItems
 	parent.goalContinuationsSuspended = false
 	parent.btwRunIDSeq = maxInt(parent.btwRunIDSeq, m.runID)
 	parent.btw = btwState{}
@@ -209,12 +221,20 @@ func (m model) leaveBTW() (model, tea.Cmd) {
 	// same way /resume does after a session switch, so the restored surface
 	// matches the durable plan and not whatever the side conversation left.
 	// Surface I/O/parse failures so the restored panel and shared update_plan
-	// state are not silently left out of sync with the durable file.
+	// state are not silently left out of sync with the durable file, while
+	// restoring the captured parent plan snapshot if reload fails or is missing.
 	if items, ok, err := parent.reloadPlanFromFile(); err != nil {
-		// Side surface cleared shared update_plan on enter; do not restore a
-		// stale sticky panel when the durable reload fails (empty tool + old
-		// panel would desync). Clear parent plan state, then surface the error.
-		parent = parent.resetPlanForSessionSwitch()
+		// Durable reload failed: surface the error, but restore the saved
+		// parent plan snapshot into both the update_plan tool and the panel so
+		// an existing usable plan is not destroyed.
+		if reloader, ok := parent.registry.Get("update_plan"); ok {
+			if r, ok := reloader.(planFileReloader); ok {
+				r.SetPlan(savedParentPlan)
+			}
+		}
+		if len(savedParentPlan) > 0 {
+			parent.plan.updateFromItems(savedParentPlan, parent.now())
+		}
 		parent.transcript = reduceTranscript(parent.transcript, transcriptAction{
 			kind: actionAppendError,
 			text: "plan reload error: " + err.Error(),
@@ -222,11 +242,18 @@ func (m model) leaveBTW() (model, tea.Cmd) {
 	} else if ok {
 		parent.plan.updateFromItems(items, parent.now())
 	} else {
-		// Missing durable plan (ok=false, err=nil): enterBTW already cleared
-		// the shared update_plan tool. Clear the restored parent's sticky
-		// panel too so tool and panel stay consistent rather than leaving a
-		// stale panel with an empty tool.
-		parent = parent.resetPlanForSessionSwitch()
+		// Missing durable plan (ok=false, err=nil): restore the parent's
+		// captured in-memory plan draft and sticky panel.
+		if reloader, ok := parent.registry.Get("update_plan"); ok {
+			if r, ok := reloader.(planFileReloader); ok {
+				r.SetPlan(savedParentPlan)
+			}
+		}
+		if len(savedParentPlan) > 0 {
+			parent.plan.updateFromItems(savedParentPlan, parent.now())
+		} else {
+			parent.plan.clear()
+		}
 	}
 	parent.resetFlushFrontier("· returned from btw ·")
 	parent = parent.syncPeerIdentity()

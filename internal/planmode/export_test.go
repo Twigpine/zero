@@ -7,13 +7,6 @@ import "testing"
 // does not import testing.
 func SetTempDirForTest(t *testing.T, tempDir string) {
 	t.Helper()
-	tempDirMu.Lock()
-	old := tempDirFn
-	tempDirFn = func() string { return tempDir }
-	tempDirMu.Unlock()
-	t.Cleanup(func() {
-		tempDirMu.Lock()
-		tempDirFn = old
-		tempDirMu.Unlock()
-	})
+	restore := SetEffectiveTempDirForTest(tempDir)
+	t.Cleanup(restore)
 }

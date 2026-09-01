@@ -9,18 +9,17 @@ import (
 	"time"
 )
 
-// setUserConfigHomeEnv points config.UserConfigDir at dir. os.UserConfigDir
-// (which UserConfigDir defers to outside darwin) reads %AppData% on Windows
-// and ignores XDG_CONFIG_HOME there, so a test that only sets XDG_CONFIG_HOME
-// silently fails to isolate storage on Windows and falls through to the
-// runner's real profile directory.
+// setUserConfigHomeEnv points config.UserConfigDir and related user directories at dir.
+// It redirects HOME, USERPROFILE, XDG_CONFIG_HOME, XDG_CACHE_HOME, AppData, and LocalAppData
+// so tests are fully hermetic across Linux, macOS, and Windows.
 func setUserConfigHomeEnv(t *testing.T, dir string) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Setenv("AppData", dir)
-		return
-	}
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
 	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(dir, "cache"))
+	t.Setenv("AppData", dir)
+	t.Setenv("LocalAppData", filepath.Join(dir, "local"))
 }
 
 // isolatePlanStorage redirects the user config root so plan files land under a
@@ -817,13 +816,21 @@ func TestStageForEditorSweepsAbandonedStagedFiles(t *testing.T) {
 		t.Fatalf("WritePlan: %v", err)
 	}
 
-	// Simulate a staged file abandoned by a dropped tea.ExecProcess command:
-	// stage normally, then backdate its mtime past the sweep threshold instead
-	// of running its cleanup.
-	abandoned, _, err := StageForEditor(workspace, "session-1")
+	// Simulate a staged file abandoned by a prior dead process: create an old
+	// staged file and companion lockfile under the config staging directory.
+	stagingDir, err := editorStagingDir()
 	if err != nil {
-		t.Fatalf("StageForEditor (abandoned): %v", err)
+		t.Fatalf("editorStagingDir: %v", err)
 	}
+	if err := os.MkdirAll(stagingDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	abandoned := filepath.Join(stagingDir, "session_1-1234-5678.md")
+	if err := os.WriteFile(abandoned, []byte("old draft\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile abandoned: %v", err)
+	}
+	_ = os.WriteFile(abandoned+".lock", nil, 0o600)
+
 	old := time.Now().Add(-staleStagedEditThreshold - time.Hour)
 	if err := os.Chtimes(abandoned, old, old); err != nil {
 		t.Fatalf("Chtimes: %v", err)
@@ -1154,5 +1161,57 @@ func TestCommitStagedEditReturnsErrorForMissingStagedFile(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "read staged plan file") {
 		t.Fatalf("expected read error context, got: %v", err)
+	}
+}
+
+// TestSweepStaleStagedFilesSkipsLockedAndUnrelatedFiles is the regression for P2:
+// sweepStaleStagedFiles must not delete active staged files held by an editor,
+// and must never delete unrelated non-plan files in the staging directory.
+func TestSweepStaleStagedFilesSkipsLockedAndUnrelatedFiles(t *testing.T) {
+	isolatePlanStorage(t)
+	dir := t.TempDir()
+
+	// 1. Unrelated non-plan file with old mtime must NOT be deleted
+	unrelatedFile := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(unrelatedFile, []byte("important note"), 0o600); err != nil {
+		t.Fatalf("write unrelated: %v", err)
+	}
+	oldTime := time.Now().Add(-10 * time.Hour)
+	_ = os.Chtimes(unrelatedFile, oldTime, oldTime)
+
+	// 2. Staged file with active lock (open editor) must NOT be deleted even if old
+	stagedPath, cleanup, err := stageContentForEditor(dir, "session-locked", "draft")
+	if err != nil {
+		t.Fatalf("stageContentForEditor: %v", err)
+	}
+	defer cleanup()
+	_ = os.Chtimes(stagedPath, oldTime, oldTime)
+
+	// 3. Staged file with old mtime whose lock is released (abandoned editor) SHOULD be deleted
+	abandonedPath, abandonedCleanup, err := stageContentForEditor(dir, "session-abandoned", "old draft")
+	if err != nil {
+		t.Fatalf("stageContentForEditor: %v", err)
+	}
+	// Simulate editor crash/close by releasing lock but leaving file
+	abandonedCleanup()
+	_ = os.WriteFile(abandonedPath, []byte("abandoned content"), 0o600)
+	_ = os.Chtimes(abandonedPath, oldTime, oldTime)
+
+	// Run sweep
+	sweepStaleStagedFiles(dir)
+
+	// Verify unrelated file survived
+	if _, err := os.Stat(unrelatedFile); err != nil {
+		t.Fatalf("unrelated file was deleted by sweep: %v", err)
+	}
+
+	// Verify locked staged file survived
+	if _, err := os.Stat(stagedPath); err != nil {
+		t.Fatalf("active locked staged file was deleted by sweep: %v", err)
+	}
+
+	// Verify abandoned file was cleaned up
+	if _, err := os.Stat(abandonedPath); !os.IsNotExist(err) {
+		t.Fatalf("abandoned file was not cleaned up by sweep, stat err: %v", err)
 	}
 }

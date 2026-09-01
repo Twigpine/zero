@@ -2,7 +2,7 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -18,16 +18,8 @@ func TestUpdatePlanRefusesCancelledRun(t *testing.T) {
 	if result.Status != StatusOK {
 		t.Fatalf("live run: %+v", result)
 	}
-	raw, ok := result.Meta[PlanSnapshotMeta]
-	if !ok {
-		t.Fatalf("expected %s on successful run, got %#v", PlanSnapshotMeta, result.Meta)
-	}
-	var snap []PlanItem
-	if err := json.Unmarshal([]byte(raw), &snap); err != nil {
-		t.Fatalf("unmarshal snapshot: %v", err)
-	}
-	if len(snap) != 1 || snap[0].Content != "live" {
-		t.Fatalf("snapshot did not match installed plan: %+v", snap)
+	if len(result.PlanSnapshot) != 1 || result.PlanSnapshot[0].Content != "live" {
+		t.Fatalf("snapshot did not match installed plan: %+v", result.PlanSnapshot)
 	}
 
 	tool.SetPlan(nil) // the UI reset for a new session
@@ -36,11 +28,64 @@ func TestUpdatePlanRefusesCancelledRun(t *testing.T) {
 	if result.Status != StatusError {
 		t.Fatalf("cancelled run must be refused, got %+v", result)
 	}
-	if _, ok := result.Meta[PlanSnapshotMeta]; ok {
-		t.Fatalf("cancelled run must not attach plan_snapshot, got %#v", result.Meta)
+	if len(result.PlanSnapshot) != 0 {
+		t.Fatalf("cancelled run must not attach PlanSnapshot, got %#v", result.PlanSnapshot)
 	}
 	if items := tool.CurrentPlan(); len(items) != 0 {
 		t.Fatalf("cancelled run repopulated the shared plan: %+v", items)
+	}
+}
+
+// TestUpdatePlanPreservesSecretShapedPlanStepsAcrossScrubbing is the regression
+// for P1: plan steps containing secret-shaped strings or false-positive tokens
+// must be scrubbed from transcript Output and Meta, but the typed PlanSnapshot
+// and in-memory tool plan must remain identical to the accepted canonical input.
+func TestUpdatePlanPreservesSecretShapedPlanStepsAcrossScrubbing(t *testing.T) {
+	tool := NewUpdatePlanTool()
+	secretToken := "ghp_123456789012345678901234567890123456"
+	stepContent := "Configure API with secret key " + secretToken + " and verify"
+
+	result := tool.Run(context.Background(), map[string]any{
+		"plan": []any{
+			map[string]any{
+				"content": stepContent,
+				"status":  "in_progress",
+				"notes":   "Key value: " + secretToken,
+			},
+		},
+	})
+	if result.Status != StatusOK {
+		t.Fatalf("Run failed: %+v", result)
+	}
+
+	// Verify pre-scrub snapshot holds exact unredacted secret
+	if len(result.PlanSnapshot) != 1 || result.PlanSnapshot[0].Content != stepContent {
+		t.Fatalf("PlanSnapshot mismatch before scrubbing: %+v", result.PlanSnapshot)
+	}
+
+	// Run registry secret scrubbing boundary
+	scrubbed := scrubResultSecrets(result)
+
+	// Output must be redacted
+	if strings.Contains(scrubbed.Output, secretToken) {
+		t.Fatalf("Output was not redacted by scrubResultSecrets: %q", scrubbed.Output)
+	}
+
+	// PlanSnapshot must NOT be scrubbed/mutated
+	if len(scrubbed.PlanSnapshot) != 1 {
+		t.Fatalf("PlanSnapshot missing or corrupted after scrubbing: %+v", scrubbed.PlanSnapshot)
+	}
+	if scrubbed.PlanSnapshot[0].Content != stepContent {
+		t.Fatalf("PlanSnapshot content was mutated: got %q, want %q", scrubbed.PlanSnapshot[0].Content, stepContent)
+	}
+	if scrubbed.PlanSnapshot[0].Notes != "Key value: "+secretToken {
+		t.Fatalf("PlanSnapshot notes were mutated: got %q, want %q", scrubbed.PlanSnapshot[0].Notes, "Key value: "+secretToken)
+	}
+
+	// Tool currentPlan must also retain exact unredacted secret
+	stored := tool.CurrentPlan()
+	if len(stored) != 1 || stored[0].Content != stepContent || stored[0].Notes != "Key value: "+secretToken {
+		t.Fatalf("tool.CurrentPlan() corrupted: %+v", stored)
 	}
 }
 

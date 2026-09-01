@@ -205,8 +205,9 @@ func StageForEditor(workspaceRoot, sessionID string) (stagedPath string, cleanup
 const staleStagedEditThreshold = 6 * time.Hour
 
 // sweepStaleStagedFiles removes staged plan files in dir whose mtime is older
-// than staleStagedEditThreshold. Best-effort: errors are ignored, since a
-// failed sweep must not block staging a new file.
+// than staleStagedEditThreshold and whose lock is proven to be abandoned.
+// Best-effort: errors are ignored, since a failed sweep must not block staging
+// a new file. Unrelated files (not matching the plan format) are never touched.
 func sweepStaleStagedFiles(dir string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -217,42 +218,23 @@ func sweepStaleStagedFiles(dir string) {
 		if entry.IsDir() {
 			continue
 		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".md") {
+			continue
+		}
 		info, err := entry.Info()
 		if err != nil || info.ModTime().After(cutoff) {
 			continue
 		}
-		_ = os.Remove(filepath.Join(dir, entry.Name()))
+		tryReclaimStaleStagedFile(dir, name)
 	}
 }
 
 // stageContentForEditor creates a fresh, uniquely-named file under dir
-// holding content, for StageForEditor to hand to $EDITOR. Split out from
-// StageForEditor so the staging mechanics (CreateTemp, O_EXCL) are testable
-// against an arbitrary directory without needing to fake config.UserConfigDir
-// or XDG_CONFIG_HOME; the privacy check above is StageForEditor's job, not
-// this function's.
+// holding content, for StageForEditor to hand to $EDITOR. It binds creation to
+// the opened directory handle rather than repeating pathname traversals.
 func stageContentForEditor(dir, sessionID, content string) (stagedPath string, cleanup func(), err error) {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", nil, fmt.Errorf("create plan editor staging directory: %w", err)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return "", nil, fmt.Errorf("restrict plan editor staging directory permissions: %w", err)
-	}
-	file, err := os.CreateTemp(dir, slugify(sessionID)+"-*.md")
-	if err != nil {
-		return "", nil, fmt.Errorf("stage plan file for editor: %w", err)
-	}
-	path := file.Name()
-	if _, err := file.WriteString(strings.TrimRight(content, "\n") + "\n"); err != nil {
-		_ = file.Close()
-		_ = os.Remove(path)
-		return "", nil, fmt.Errorf("stage plan file for editor: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		_ = os.Remove(path)
-		return "", nil, fmt.Errorf("stage plan file for editor: %w", err)
-	}
-	return path, func() { _ = os.Remove(path) }, nil
+	return stageContentUnderBase(dir, sessionID, content)
 }
 
 // editorStagingDirIsPrivate reports whether dir avoids the sandbox's default
@@ -398,6 +380,20 @@ func effectiveTempDir() string {
 	tempDirMu.RLock()
 	defer tempDirMu.RUnlock()
 	return tempDirFn()
+}
+
+// SetEffectiveTempDirForTest overrides the temp dir func during tests, returning
+// a restore function to reset it.
+func SetEffectiveTempDirForTest(tempDir string) func() {
+	tempDirMu.Lock()
+	old := tempDirFn
+	tempDirFn = func() string { return tempDir }
+	tempDirMu.Unlock()
+	return func() {
+		tempDirMu.Lock()
+		tempDirFn = old
+		tempDirMu.Unlock()
+	}
 }
 
 // ensurePlanPathContained verifies that path stays under the config plans
