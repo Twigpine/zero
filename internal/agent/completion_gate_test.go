@@ -275,3 +275,49 @@ func TestCompletionGateKeepsCurrentHeadReviewControlsComplete(t *testing.T) {
 		})
 	}
 }
+
+func TestCompletionGateStructuralReviewerMatrix(t *testing.T) {
+	cases := []struct {
+		name       string
+		answer     string
+		incomplete bool
+	}{
+		{name: "capability note only", answer: "I don't have an update_plan tool available in this specialist context; only read-only exploration tools were provided."},
+		{name: "capability note followed by subject-elided failure", answer: "I don't have a write tool available in this context and could not apply the required fix.", incomplete: true},
+		{name: "same publish object completed", answer: "I could not publish the package because no publishing tool is available, so I published the package manually instead."},
+		{name: "different publish object", answer: "I could not publish the package because no publishing tool is available, so I published the release notes manually instead.", incomplete: true},
+		{name: "same destination completed", answer: "I could not publish the package for production because no publishing tool is available, so I published the package for production manually instead."},
+		{name: "different destination", answer: "I could not publish the package for production because no publishing tool is available, so I published the package for staging manually instead.", incomplete: true},
+		{name: "all coordinated tests completed", answer: "I could not run the unit and integration tests because no test tool is available, so I ran the unit and integration tests manually instead."},
+		{name: "coordinated test subset", answer: "I could not run the unit and integration tests because no test tool is available, so I ran the unit tests manually instead.", incomplete: true},
+		{name: "every test completed", answer: "I could not run every test because no test tool is available, so I ran every test manually instead."},
+		{name: "smoke substituted for every test", answer: "I could not run every test because no test tool is available, so I ran a smoke test manually instead.", incomplete: true},
+		{name: "affirmative fallback", answer: "I could not deploy the release because no deployment tool is available, so I deployed it manually instead."},
+		{name: "negated fallback", answer: "I could not deploy the release because no deployment tool is available, so I never deployed it manually instead.", incomplete: true},
+		{name: "partial fallback", answer: "I could not deploy the release because no deployment tool is available, so I partially deployed it manually instead.", incomplete: true},
+		{name: "unsuccessful fallback", answer: "I could not deploy the release because no deployment tool is available, so I unsuccessfully deployed it manually instead.", incomplete: true},
+		{name: "attempted fallback", answer: "I could not deploy the release because no deployment tool is available, so I attempted to deploy it manually instead.", incomplete: true},
+		{name: "fallback crashed", answer: "I could not run the migration because no migration tool is available, so I ran it manually instead, but it crashed.", incomplete: true},
+		{name: "benign counted audit bucket", answer: "**Unable to verify (1):** - MCP #3 claim was truncated."},
+		{name: "counted operation rejected", answer: "**Unable to publish (1):** - registry rejected the request.", incomplete: true},
+		{name: "exhaustive negative finding", answer: "I could not find any issues after inspecting every changed path."},
+		{name: "blocked negative finding", answer: "I could not find any issues due to running out of time.", incomplete: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{textTurn(tc.answer)}}
+			result, err := Run(context.Background(), "complete the requested operation", provider, Options{
+				Registry:                tools.NewRegistry(),
+				MaxTurns:                2,
+				RequireCompletionSignal: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Incomplete != tc.incomplete {
+				t.Fatalf("Incomplete = %v, want %v for %q (reason: %s)", result.Incomplete, tc.incomplete, tc.answer, result.IncompleteReason)
+			}
+		})
+	}
+}
