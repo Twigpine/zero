@@ -198,6 +198,10 @@ func StageForEditor(workspaceRoot, sessionID string) (stagedPath string, cleanup
 	return stageContentForEditor(resolvedDir, sessionID, content)
 }
 
+// StagedPlanFilePrefix is the dedicated prefix used for all temporary
+// staged plan files created for external $EDITOR inspection or edits.
+const StagedPlanFilePrefix = "zero-stage-"
+
 // staleStagedEditThreshold bounds how long an abandoned staged plan file can
 // linger before sweepStaleStagedFiles reclaims it. The window must comfortably
 // outlast any real interactive edit so a slow user never loses the file out
@@ -219,7 +223,7 @@ func sweepStaleStagedFiles(dir string) {
 			continue
 		}
 		name := entry.Name()
-		if !strings.HasSuffix(name, ".md") {
+		if !strings.HasPrefix(name, StagedPlanFilePrefix) || !strings.HasSuffix(name, ".md") {
 			continue
 		}
 		info, err := entry.Info()
@@ -334,11 +338,45 @@ func isUnderOrEqual(path, root string) bool {
 // CommitStagedEdit reads a file staged by StageForEditor (now edited by the
 // user's $EDITOR) and writes its content back into the durable plan store
 // via WritePlan. stagedPath must be a path produced by StageForEditor.
+// It verifies against the baseline content hash recorded at staging time:
+// no-op edits (content identical to baseline) do not rewrite durable storage,
+// and concurrent modifications to the durable plan are rejected as conflicts.
 func CommitStagedEdit(workspaceRoot, sessionID, stagedPath string) error {
 	data, err := os.ReadFile(stagedPath)
 	if err != nil {
 		return fmt.Errorf("read staged plan file: %w", err)
 	}
+
+	baseHashPath := stagedPath + ".basehash"
+	if baseHashBytes, err := os.ReadFile(baseHashPath); err == nil {
+		baseHash := strings.TrimSpace(string(baseHashBytes))
+		body := strings.TrimRight(string(data), "\n") + "\n"
+		stagedSum := sha256.Sum256([]byte(body))
+		stagedHash := hex.EncodeToString(stagedSum[:])
+
+		if stagedHash == baseHash {
+			// Content is unchanged from baseline: no-op edit.
+			return nil
+		}
+
+		durableContent, exists, err := ReadPlan(workspaceRoot, sessionID)
+		if err != nil {
+			return fmt.Errorf("verify durable plan baseline: %w", err)
+		}
+		var durableHash string
+		if exists {
+			durableBody := strings.TrimRight(durableContent, "\n") + "\n"
+			durableSum := sha256.Sum256([]byte(durableBody))
+			durableHash = hex.EncodeToString(durableSum[:])
+		} else {
+			emptySum := sha256.Sum256([]byte("\n"))
+			durableHash = hex.EncodeToString(emptySum[:])
+		}
+		if durableHash != baseHash {
+			return fmt.Errorf("plan file was modified concurrently while editing")
+		}
+	}
+
 	_, err = WritePlan(workspaceRoot, sessionID, string(data))
 	return err
 }

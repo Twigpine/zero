@@ -65,6 +65,34 @@ func TestWritePlanRefusesStorageRootReparsePoint(t *testing.T) {
 	}
 }
 
+func TestWritePlanAllowsBenignAncestorReparsePoint(t *testing.T) {
+	realCfg := t.TempDir()
+	junctionParent := t.TempDir()
+	junctionCfg := filepath.Join(junctionParent, "junction_cfg")
+	createWindowsDirReparse(t, junctionCfg, realCfg)
+
+	isolatePlanStorage(t)
+	t.Setenv("AppData", junctionCfg)
+	t.Setenv("XDG_CONFIG_HOME", junctionCfg)
+
+	workspace := t.TempDir()
+	path, err := WritePlan(workspace, "session-ancestor", "1. [pending] step\n")
+	if err != nil {
+		t.Fatalf("WritePlan failed through benign ancestor junction: %v", err)
+	}
+	if path == "" {
+		t.Fatal("expected non-empty plan path")
+	}
+
+	content, ok, err := ReadPlan(workspace, "session-ancestor")
+	if err != nil {
+		t.Fatalf("ReadPlan failed through benign ancestor junction: %v", err)
+	}
+	if !ok || !strings.Contains(content, "step") {
+		t.Fatalf("ReadPlan content mismatch: ok=%v, content=%q", ok, content)
+	}
+}
+
 func createWindowsDirReparse(t *testing.T, link, target string) {
 	t.Helper()
 	// Prefer a junction: unlike a directory symlink it needs no

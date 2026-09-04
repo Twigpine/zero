@@ -3,6 +3,8 @@
 package planmode
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -355,7 +357,7 @@ func stageContentUnderBase(dir, sessionID, content string) (string, func(), erro
 	var lockH windows.Handle = windows.InvalidHandle
 
 	for try := 0; try < 100; try++ {
-		candidate := fmt.Sprintf("%s-%d-%d.md", slug, os.Getpid(), time.Now().UnixNano())
+		candidate := fmt.Sprintf("%s%s-%d-%d.md", StagedPlanFilePrefix, slug, os.Getpid(), time.Now().UnixNano())
 		lockCandidate := candidate + ".lock"
 
 		cLockH, err := createFileNoFollow(parent, lockCandidate)
@@ -389,42 +391,51 @@ func stageContentUnderBase(dir, sessionID, content string) (string, func(), erro
 
 	stagedPath := filepath.Join(dir, leafName)
 	lockPath := stagedPath + ".lock"
+	baseHashPath := stagedPath + ".basehash"
+
+	cleanOnFailure := func() {
+		var overlapped windows.Overlapped
+		_ = windows.UnlockFileEx(lockH, 0, 1, 0, &overlapped)
+		_ = windows.CloseHandle(lockH)
+		_ = deleteAtWindows(parent, leafName)
+		_ = deleteAtWindows(parent, leafName+".lock")
+		_ = deleteAtWindows(parent, leafName+".basehash")
+	}
 
 	file := os.NewFile(uintptr(h), stagedPath)
 	if file == nil {
 		_ = windows.CloseHandle(h)
-		var overlapped windows.Overlapped
-		_ = windows.UnlockFileEx(lockH, 0, 1, 0, &overlapped)
-		_ = windows.CloseHandle(lockH)
-		_ = deleteAtWindows(parent, leafName)
-		_ = deleteAtWindows(parent, leafName+".lock")
+		cleanOnFailure()
 		return "", nil, fmt.Errorf("stage plan file for editor: invalid handle")
 	}
-	if _, err := file.WriteString(strings.TrimRight(content, "\n") + "\n"); err != nil {
+	body := strings.TrimRight(content, "\n") + "\n"
+	if _, err := file.WriteString(body); err != nil {
 		_ = file.Close()
-		var overlapped windows.Overlapped
-		_ = windows.UnlockFileEx(lockH, 0, 1, 0, &overlapped)
-		_ = windows.CloseHandle(lockH)
-		_ = deleteAtWindows(parent, leafName)
-		_ = deleteAtWindows(parent, leafName+".lock")
+		cleanOnFailure()
 		return "", nil, fmt.Errorf("stage plan file for editor: %w", err)
 	}
 	if err := file.Sync(); err != nil {
 		_ = file.Close()
-		var overlapped windows.Overlapped
-		_ = windows.UnlockFileEx(lockH, 0, 1, 0, &overlapped)
-		_ = windows.CloseHandle(lockH)
-		_ = deleteAtWindows(parent, leafName)
-		_ = deleteAtWindows(parent, leafName+".lock")
+		cleanOnFailure()
 		return "", nil, fmt.Errorf("stage plan file for editor: %w", err)
 	}
 	if err := file.Close(); err != nil {
-		var overlapped windows.Overlapped
-		_ = windows.UnlockFileEx(lockH, 0, 1, 0, &overlapped)
-		_ = windows.CloseHandle(lockH)
-		_ = deleteAtWindows(parent, leafName)
-		_ = deleteAtWindows(parent, leafName+".lock")
+		cleanOnFailure()
 		return "", nil, fmt.Errorf("stage plan file for editor: %w", err)
+	}
+
+	// Write baseline content hash for no-op and concurrent change detection.
+	baseSum := sha256.Sum256([]byte(body))
+	baseHashStr := hex.EncodeToString(baseSum[:]) + "\n"
+	if baseH, err := createFileNoFollow(parent, leafName+".basehash"); err == nil {
+		baseFile := os.NewFile(uintptr(baseH), baseHashPath)
+		if baseFile != nil {
+			_, _ = baseFile.WriteString(baseHashStr)
+			_ = baseFile.Sync()
+			_ = baseFile.Close()
+		} else {
+			_ = windows.CloseHandle(baseH)
+		}
 	}
 
 	cleanup := func() {
@@ -433,13 +444,14 @@ func stageContentUnderBase(dir, sessionID, content string) (string, func(), erro
 		_ = windows.CloseHandle(lockH)
 		_ = os.Remove(stagedPath)
 		_ = os.Remove(lockPath)
+		_ = os.Remove(baseHashPath)
 	}
 	return stagedPath, cleanup, nil
 }
 
 // tryReclaimStaleStagedFile attempts to reclaim an abandoned staged plan file on Windows.
 func tryReclaimStaleStagedFile(dir, leafName string) bool {
-	if !strings.HasSuffix(leafName, ".md") {
+	if !strings.HasPrefix(leafName, StagedPlanFilePrefix) || !strings.HasSuffix(leafName, ".md") {
 		return false
 	}
 	parent, err := openWindowsBaseDir(dir)
@@ -450,15 +462,19 @@ func tryReclaimStaleStagedFile(dir, leafName string) bool {
 
 	lockName := leafName + ".lock"
 	lockH, err := openatNoFollow(parent, lockName, false)
-	if err == nil {
-		defer func() { _ = windows.CloseHandle(lockH) }()
-		var overlapped windows.Overlapped
-		if err := windows.LockFileEx(lockH, windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &overlapped); err != nil {
-			return false
-		}
-		defer func() { _ = windows.UnlockFileEx(lockH, 0, 1, 0, &overlapped) }()
+	if err != nil {
+		// Companion .lock must exist to prove ownership before reclamation.
+		return false
 	}
+	defer func() { _ = windows.CloseHandle(lockH) }()
+	var overlapped windows.Overlapped
+	if err := windows.LockFileEx(lockH, windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &overlapped); err != nil {
+		return false
+	}
+	defer func() { _ = windows.UnlockFileEx(lockH, 0, 1, 0, &overlapped) }()
+
 	_ = deleteAtWindows(parent, leafName)
 	_ = deleteAtWindows(parent, lockName)
+	_ = deleteAtWindows(parent, leafName+".basehash")
 	return true
 }

@@ -67,13 +67,10 @@ func (m model) ensureActiveSession(prompt string) (model, error) {
 func (m model) startNewSession() model {
 	previousID := m.activeSession.SessionID
 
-	// Plan mode (and the mode /plan off would restore) belongs to the session
-	// that entered it — carrying it into a fresh session would silently make
-	// the new session read-only, or later restore the old session's mode into
-	// it. Exit it here rather than leaving it to a same-session-only /plan off.
-	// The plan itself belongs to the old session too, so clear it rather than
-	// leaking it into a session that never drafted it.
-	m = m.exitPlanMode()
+	// Reset the in-memory plan for the fresh session so old plan items do not
+	// leak into a session that never drafted them. Plan mode itself (and its
+	// read-only gate) is preserved across /new so authority does not widen
+	// implicitly without an explicit /plan off.
 	m = m.resetPlanForSessionSwitch()
 
 	m.activeSession = sessions.Metadata{}
@@ -242,10 +239,8 @@ func (m model) handleResumeCommand(args string) (model, string) {
 	// the already-active session, whose loops belong to it, not a "previous" one.
 	previousID := m.activeSession.SessionID
 	if session.SessionID != previousID {
-		// Plan mode (and the mode /plan off would restore) belongs to the
-		// session that entered it, not to whatever session becomes active —
-		// see the matching guard in startNewSession.
-		m = m.exitPlanMode()
+		// Reset plan state for the previous session; do not exit plan mode so
+		// the read-only gate remains active unless the user explicitly runs /plan off.
 		m = m.resetPlanForSessionSwitch()
 	}
 	m.activeSession = *session

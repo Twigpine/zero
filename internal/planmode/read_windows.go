@@ -113,31 +113,71 @@ func ntObjectPath(absPath string) string {
 
 // openWindowsBaseDir opens the storage base as a directory handle that can be
 // used as RootDirectory for subsequent relative NtCreateFile calls.
+//
+// To accommodate benign reparse points in ancestor paths (such as a junctioned
+// user profile or a subst drive), we resolve the parent directory handle first
+// without OBJ_DONT_REPARSE, then open the base directory relative to that parent
+// handle with OBJ_DONT_REPARSE. This ensures that the storage root itself and all
+// its descendants cannot be redirected via symlinks/junctions, while avoiding
+// false rejections from ancestor junctions.
 func openWindowsBaseDir(absBase string) (windows.Handle, error) {
-	path := ntObjectPath(absBase)
-	objName, err := windows.NewNTUnicodeString(path)
+	parentDir := filepath.Dir(absBase)
+	baseName := filepath.Base(absBase)
+	if parentDir == absBase || baseName == "." || baseName == string(filepath.Separator) {
+		path := ntObjectPath(absBase)
+		objName, err := windows.NewNTUnicodeString(path)
+		if err != nil {
+			return 0, err
+		}
+		oa := &windows.OBJECT_ATTRIBUTES{
+			ObjectName: objName,
+			Attributes: windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
+		}
+		oa.Length = uint32(unsafe.Sizeof(*oa))
+
+		var h windows.Handle
+		var iosb windows.IO_STATUS_BLOCK
+		err = windows.NtCreateFile(
+			&h,
+			windows.FILE_GENERIC_READ|windows.FILE_TRAVERSE|windows.SYNCHRONIZE,
+			oa,
+			&iosb,
+			nil,
+			windows.FILE_ATTRIBUTE_NORMAL,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+			windows.FILE_OPEN,
+			windows.FILE_DIRECTORY_FILE|windows.FILE_SYNCHRONOUS_IO_NONALERT|windows.FILE_OPEN_FOR_BACKUP_INTENT,
+			0,
+			0,
+		)
+		if err != nil {
+			mapped := mapWindowsOpenErr(err)
+			if isWindowsSymlinkErr(mapped) {
+				return 0, errPlanBaseSymlink(absBase)
+			}
+			return 0, mapped
+		}
+		return h, nil
+	}
+
+	// 1. Open parent directory without OBJ_DONT_REPARSE to permit benign ancestor redirection.
+	parentPath := ntObjectPath(parentDir)
+	parentObjName, err := windows.NewNTUnicodeString(parentPath)
 	if err != nil {
 		return 0, err
 	}
-	oa := &windows.OBJECT_ATTRIBUTES{
-		ObjectName: objName,
-		// OBJ_DONT_REPARSE on the base too, not just on the components walked
-		// under it. ensurePlanPathContained resolves the base and the plan path
-		// through the same links, so a reparse point at the plans root passes
-		// containment (it only fails when the target is the workspace or temp
-		// directory). Following it here would root the whole no-follow walk in
-		// the target directory, which is precisely the redirection the walk
-		// exists to prevent.
-		Attributes: windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
+	parentOA := &windows.OBJECT_ATTRIBUTES{
+		ObjectName: parentObjName,
+		Attributes: windows.OBJ_CASE_INSENSITIVE,
 	}
-	oa.Length = uint32(unsafe.Sizeof(*oa))
+	parentOA.Length = uint32(unsafe.Sizeof(*parentOA))
 
-	var h windows.Handle
+	var parent windows.Handle
 	var iosb windows.IO_STATUS_BLOCK
 	err = windows.NtCreateFile(
-		&h,
+		&parent,
 		windows.FILE_GENERIC_READ|windows.FILE_TRAVERSE|windows.SYNCHRONIZE,
-		oa,
+		parentOA,
 		&iosb,
 		nil,
 		windows.FILE_ATTRIBUTE_NORMAL,
@@ -148,11 +188,17 @@ func openWindowsBaseDir(absBase string) (windows.Handle, error) {
 		0,
 	)
 	if err != nil {
-		mapped := mapWindowsOpenErr(err)
-		if isWindowsSymlinkErr(mapped) {
+		return 0, mapWindowsOpenErr(err)
+	}
+	defer windows.CloseHandle(parent)
+
+	// 2. Open base directory relative to parent handle with OBJ_DONT_REPARSE.
+	h, err := openatNoFollow(parent, baseName, true)
+	if err != nil {
+		if isWindowsSymlinkErr(err) {
 			return 0, errPlanBaseSymlink(absBase)
 		}
-		return 0, mapped
+		return 0, err
 	}
 	return h, nil
 }
