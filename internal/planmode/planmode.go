@@ -104,6 +104,23 @@ func ReadPlan(workspaceRoot, sessionID string) (string, bool, error) {
 // path checks alone are a check-to-use race: an intermediate directory can
 // be replaced with a symlink between resolve and create, and pathname
 // MkdirAll/OpenFile/Rename would then land outside the storage tree.
+var (
+	planLocksMu sync.Mutex
+	planLocks   = make(map[string]*sync.Mutex)
+)
+
+func lockPlan(path string) func() {
+	planLocksMu.Lock()
+	m, ok := planLocks[path]
+	if !ok {
+		m = &sync.Mutex{}
+		planLocks[path] = m
+	}
+	planLocksMu.Unlock()
+	m.Lock()
+	return m.Unlock
+}
+
 func WritePlan(workspaceRoot, sessionID, content string) (string, error) {
 	path, err := PlanFilePath(workspaceRoot, sessionID)
 	if err != nil {
@@ -116,6 +133,9 @@ func WritePlan(workspaceRoot, sessionID, content string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	unlock := lockPlan(path)
+	defer unlock()
+
 	body := strings.TrimRight(content, "\n") + "\n"
 	if err := writePlanFile(base, path, body); err != nil {
 		return "", err
@@ -342,10 +362,25 @@ func isUnderOrEqual(path, root string) bool {
 // no-op edits (content identical to baseline) do not rewrite durable storage,
 // and concurrent modifications to the durable plan are rejected as conflicts.
 func CommitStagedEdit(workspaceRoot, sessionID, stagedPath string) error {
+	path, err := PlanFilePath(workspaceRoot, sessionID)
+	if err != nil {
+		return err
+	}
+	if err := ensurePlanPathContained(workspaceRoot, path); err != nil {
+		return err
+	}
+	base, _, err := planStorageBase(workspaceRoot)
+	if err != nil {
+		return err
+	}
+
 	data, err := os.ReadFile(stagedPath)
 	if err != nil {
 		return fmt.Errorf("read staged plan file: %w", err)
 	}
+
+	unlock := lockPlan(path)
+	defer unlock()
 
 	baseHashPath := stagedPath + ".basehash"
 	if baseHashBytes, err := os.ReadFile(baseHashPath); err == nil {
@@ -377,8 +412,8 @@ func CommitStagedEdit(workspaceRoot, sessionID, stagedPath string) error {
 		}
 	}
 
-	_, err = WritePlan(workspaceRoot, sessionID, string(data))
-	return err
+	body := strings.TrimRight(string(data), "\n") + "\n"
+	return writePlanFile(base, path, body)
 }
 
 // editorStagingDir is where plan files are staged for external $EDITOR

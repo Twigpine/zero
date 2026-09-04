@@ -42,7 +42,7 @@ func TestUpdatePlanRefusesCancelledRun(t *testing.T) {
 // and in-memory tool plan must remain identical to the accepted canonical input.
 func TestUpdatePlanPreservesSecretShapedPlanStepsAcrossScrubbing(t *testing.T) {
 	tool := NewUpdatePlanTool()
-	secretToken := "ghp_123456789012345678901234567890123456"
+	secretToken := "ghp_" + strings.Repeat("0", 36)
 	stepContent := "Configure API with secret key " + secretToken + " and verify"
 
 	result := tool.Run(context.Background(), map[string]any{

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -279,12 +280,15 @@ func stageContentUnderBase(dir, sessionID, content string) (string, func(), erro
 		}
 	}
 
+	var once sync.Once
 	cleanup := func() {
-		_ = unix.Flock(lockFd, unix.LOCK_UN)
-		_ = unix.Close(lockFd)
-		_ = os.Remove(stagedPath)
-		_ = os.Remove(lockPath)
-		_ = os.Remove(baseHashPath)
+		once.Do(func() {
+			_ = unix.Flock(lockFd, unix.LOCK_UN)
+			_ = unix.Close(lockFd)
+			_ = os.Remove(stagedPath)
+			_ = os.Remove(lockPath)
+			_ = os.Remove(baseHashPath)
+		})
 	}
 	return stagedPath, cleanup, nil
 }
