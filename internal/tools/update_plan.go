@@ -104,14 +104,31 @@ func (tool *updatePlanTool) CurrentPlan() []PlanItem {
 	return append([]PlanItem{}, tool.currentPlan...)
 }
 
+// CanonicalizePlanItems normalizes statuses, strips extraneous whitespace from
+// content and notes, and enforces that at most one item is in_progress.
+func CanonicalizePlanItems(plan []PlanItem) []PlanItem {
+	if len(plan) == 0 {
+		return plan
+	}
+	out := make([]PlanItem, len(plan))
+	for i, item := range plan {
+		out[i] = PlanItem{
+			ID:      item.ID,
+			Content: strings.TrimSpace(item.Content),
+			Status:  NormalizePlanStatus(item.Status),
+			Notes:   strings.TrimSpace(item.Notes),
+		}
+	}
+	return enforceSingleInProgress(out)
+}
+
 // SetPlan replaces the in-memory plan with already-parsed items. It is used to
 // sync a user-edited plan file (opened via /plan open) back into the agent's
 // source of truth; the file is only ever the seed/target, the in-memory plan
-// drives execution. The caller's slice is copied so enforceSingleInProgress
-// cannot mutate the caller's storage when demoting extra in_progress items.
+// drives execution. The caller's slice is copied and canonicalized so
+// callers, tools, and UI panels receive identical state.
 func (tool *updatePlanTool) SetPlan(plan []PlanItem) {
-	plan = append([]PlanItem{}, plan...)
-	plan = enforceSingleInProgress(plan)
+	plan = CanonicalizePlanItems(plan)
 	tool.mu.Lock()
 	tool.currentPlan = plan
 	tool.mu.Unlock()

@@ -43,6 +43,7 @@ func newPlanCommandTestModel(t *testing.T, cwd string, permissionMode agent.Perm
 	isolatePlanConfig(t)
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewUpdatePlanTool())
+	sessionStore := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
 	m := newModel(context.Background(), Options{
 		Cwd:            cwd,
 		ProviderName:   "openai",
@@ -50,6 +51,7 @@ func newPlanCommandTestModel(t *testing.T, cwd string, permissionMode agent.Perm
 		Provider:       &fakeProvider{},
 		Registry:       registry,
 		PermissionMode: permissionMode,
+		SessionStore:   sessionStore,
 	})
 	m.activeSession = sessions.Metadata{SessionID: "plan-test-session"}
 	return m

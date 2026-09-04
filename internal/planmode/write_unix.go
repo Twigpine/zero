@@ -3,6 +3,8 @@
 package planmode
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -205,7 +207,7 @@ func stageContentUnderBase(dir, sessionID, content string) (string, func(), erro
 	var fd int = -1
 	var lockFd int = -1
 	for try := 0; try < 100; try++ {
-		candidate := fmt.Sprintf("%s-%d-%d.md", slug, os.Getpid(), time.Now().UnixNano())
+		candidate := fmt.Sprintf("%s%s-%d-%d.md", StagedPlanFilePrefix, slug, os.Getpid(), time.Now().UnixNano())
 		lockCandidate := candidate + ".lock"
 
 		cLockFd, err := openatRetry(dirfd, lockCandidate, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
@@ -237,30 +239,44 @@ func stageContentUnderBase(dir, sessionID, content string) (string, func(), erro
 
 	stagedPath := filepath.Join(dir, leafName)
 	lockPath := stagedPath + ".lock"
+	baseHashPath := stagedPath + ".basehash"
+
+	cleanOnFailure := func() {
+		_ = unix.Flock(lockFd, unix.LOCK_UN)
+		_ = unix.Close(lockFd)
+		_ = unix.Unlinkat(dirfd, leafName, 0)
+		_ = unix.Unlinkat(dirfd, leafName+".lock", 0)
+		_ = unix.Unlinkat(dirfd, leafName+".basehash", 0)
+	}
 
 	file := os.NewFile(uintptr(fd), stagedPath)
 	if file == nil {
 		_ = unix.Close(fd)
-		_ = unix.Flock(lockFd, unix.LOCK_UN)
-		_ = unix.Close(lockFd)
-		_ = os.Remove(stagedPath)
-		_ = os.Remove(lockPath)
+		cleanOnFailure()
 		return "", nil, fmt.Errorf("stage plan file for editor: invalid descriptor")
 	}
-	if _, err := file.WriteString(strings.TrimRight(content, "\n") + "\n"); err != nil {
+	body := strings.TrimRight(content, "\n") + "\n"
+	if _, err := file.WriteString(body); err != nil {
 		_ = file.Close()
-		_ = unix.Flock(lockFd, unix.LOCK_UN)
-		_ = unix.Close(lockFd)
-		_ = os.Remove(stagedPath)
-		_ = os.Remove(lockPath)
+		cleanOnFailure()
 		return "", nil, fmt.Errorf("stage plan file for editor: %w", err)
 	}
 	if err := file.Close(); err != nil {
-		_ = unix.Flock(lockFd, unix.LOCK_UN)
-		_ = unix.Close(lockFd)
-		_ = os.Remove(stagedPath)
-		_ = os.Remove(lockPath)
+		cleanOnFailure()
 		return "", nil, fmt.Errorf("stage plan file for editor: %w", err)
+	}
+
+	// Write baseline content hash for no-op and concurrent change detection.
+	baseSum := sha256.Sum256([]byte(body))
+	baseHashStr := hex.EncodeToString(baseSum[:]) + "\n"
+	if baseFd, err := openatRetry(dirfd, leafName+".basehash", unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600); err == nil {
+		baseFile := os.NewFile(uintptr(baseFd), baseHashPath)
+		if baseFile != nil {
+			_, _ = baseFile.WriteString(baseHashStr)
+			_ = baseFile.Close()
+		} else {
+			_ = unix.Close(baseFd)
+		}
 	}
 
 	cleanup := func() {
@@ -268,6 +284,7 @@ func stageContentUnderBase(dir, sessionID, content string) (string, func(), erro
 		_ = unix.Close(lockFd)
 		_ = os.Remove(stagedPath)
 		_ = os.Remove(lockPath)
+		_ = os.Remove(baseHashPath)
 	}
 	return stagedPath, cleanup, nil
 }
@@ -277,7 +294,7 @@ func stageContentUnderBase(dir, sessionID, content string) (string, func(), erro
 // .lock file and attempts non-blocking exclusive flock. If the lock cannot be
 // acquired (an editor is actively open), the file is preserved.
 func tryReclaimStaleStagedFile(dir, leafName string) bool {
-	if !strings.HasSuffix(leafName, ".md") {
+	if !strings.HasPrefix(leafName, StagedPlanFilePrefix) || !strings.HasSuffix(leafName, ".md") {
 		return false
 	}
 	dirfd, err := openatRetry(unix.AT_FDCWD, dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
@@ -288,14 +305,18 @@ func tryReclaimStaleStagedFile(dir, leafName string) bool {
 
 	lockName := leafName + ".lock"
 	lockFd, err := openatRetry(dirfd, lockName, unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	if err == nil {
-		defer func() { _ = unix.Close(lockFd) }()
-		if err := unix.Flock(lockFd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
-			return false
-		}
-		defer func() { _ = unix.Flock(lockFd, unix.LOCK_UN) }()
+	if err != nil {
+		// Companion lock must exist to prove ownership before reclamation.
+		return false
 	}
+	defer func() { _ = unix.Close(lockFd) }()
+	if err := unix.Flock(lockFd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		return false
+	}
+	defer func() { _ = unix.Flock(lockFd, unix.LOCK_UN) }()
+
 	_ = unix.Unlinkat(dirfd, leafName, 0)
 	_ = unix.Unlinkat(dirfd, lockName, 0)
+	_ = unix.Unlinkat(dirfd, leafName+".basehash", 0)
 	return true
 }

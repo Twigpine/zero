@@ -34,9 +34,9 @@ func planItemsEqual(left, right []tools.PlanItem) bool {
 		return false
 	}
 	for index := range left {
-		if left[index].Content != right[index].Content ||
-			left[index].Status != right[index].Status ||
-			left[index].Notes != right[index].Notes {
+		if strings.TrimSpace(left[index].Content) != strings.TrimSpace(right[index].Content) ||
+			tools.NormalizePlanStatus(left[index].Status) != tools.NormalizePlanStatus(right[index].Status) ||
+			strings.TrimSpace(left[index].Notes) != strings.TrimSpace(right[index].Notes) {
 			return false
 		}
 	}
@@ -146,7 +146,7 @@ func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
 // the workspace or start a host process outside the plan-mode tool gate.
 func planModeCommandUnavailable(command parsedCommand) bool {
 	switch command.kind {
-	case commandRewind, commandExport, commandSandboxSetup, commandInit:
+	case commandRewind, commandExport, commandSandboxSetup, commandSpec, commandInit:
 		return true
 	case commandMCP:
 		return strings.TrimSpace(command.text) != ""
@@ -357,6 +357,7 @@ func (m model) reloadPlanFromFile() ([]tools.PlanItem, bool, error) {
 		return nil, false, nil
 	}
 	items := parsePlanFileLines(content)
+	items = tools.CanonicalizePlanItems(items)
 	if writer, ok := m.registry.Get("update_plan"); ok {
 		if reloader, ok := writer.(planFileReloader); ok {
 			reloader.SetPlan(items)
@@ -563,7 +564,7 @@ func formatPlanItems(items []tools.PlanItem) string {
 // the shared tool, whose state may already belong to another session by the time
 // the result callback runs.
 func planSnapshotFromResult(result agent.ToolResult) ([]tools.PlanItem, bool) {
-	if len(result.PlanSnapshot) > 0 {
+	if result.PlanSnapshot != nil {
 		return append([]tools.PlanItem{}, result.PlanSnapshot...), true
 	}
 	return nil, false

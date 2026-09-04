@@ -825,7 +825,7 @@ func TestStageForEditorSweepsAbandonedStagedFiles(t *testing.T) {
 	if err := os.MkdirAll(stagingDir, 0o700); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	abandoned := filepath.Join(stagingDir, "session_1-1234-5678.md")
+	abandoned := filepath.Join(stagingDir, StagedPlanFilePrefix+"session_1-1234-5678.md")
 	if err := os.WriteFile(abandoned, []byte("old draft\n"), 0o600); err != nil {
 		t.Fatalf("WriteFile abandoned: %v", err)
 	}
@@ -1164,6 +1164,71 @@ func TestCommitStagedEditReturnsErrorForMissingStagedFile(t *testing.T) {
 	}
 }
 
+func TestCommitStagedEditNoOp(t *testing.T) {
+	isolatePlanStorage(t)
+	workspace := t.TempDir()
+	sessionID := "session-noop"
+
+	initial := "1. [pending] step\n"
+	if _, err := WritePlan(workspace, sessionID, initial); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+
+	stagedPath, cleanup, err := StageForEditor(workspace, sessionID)
+	if err != nil {
+		t.Fatalf("StageForEditor: %v", err)
+	}
+	defer cleanup()
+
+	// Do not edit the staged file: commit directly
+	if err := CommitStagedEdit(workspace, sessionID, stagedPath); err != nil {
+		t.Fatalf("CommitStagedEdit (noop) returned error: %v", err)
+	}
+
+	// Durable plan is unchanged
+	content, ok, err := ReadPlan(workspace, sessionID)
+	if err != nil || !ok || content != initial {
+		t.Fatalf("durable plan changed unexpectedly: ok=%v, content=%q", ok, content)
+	}
+}
+
+func TestCommitStagedEditRejectsConcurrentModification(t *testing.T) {
+	isolatePlanStorage(t)
+	workspace := t.TempDir()
+	sessionID := "session-conflict"
+
+	initial := "1. [pending] original step\n"
+	if _, err := WritePlan(workspace, sessionID, initial); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+
+	stagedPath, cleanup, err := StageForEditor(workspace, sessionID)
+	if err != nil {
+		t.Fatalf("StageForEditor: %v", err)
+	}
+	defer cleanup()
+
+	// Concurrently modify the durable plan
+	concurrent := "1. [pending] modified by concurrent turn\n"
+	if _, err := WritePlan(workspace, sessionID, concurrent); err != nil {
+		t.Fatalf("concurrent WritePlan: %v", err)
+	}
+
+	// Now edit the staged file
+	if err := os.WriteFile(stagedPath, []byte("1. [completed] edited in editor\n"), 0o600); err != nil {
+		t.Fatalf("edit staged file: %v", err)
+	}
+
+	// Commit must fail due to concurrent modification
+	err = CommitStagedEdit(workspace, sessionID, stagedPath)
+	if err == nil {
+		t.Fatal("expected CommitStagedEdit to fail on concurrent modification")
+	}
+	if !strings.Contains(err.Error(), "concurrently") {
+		t.Fatalf("expected concurrent modification error, got: %v", err)
+	}
+}
+
 // TestSweepStaleStagedFilesSkipsLockedAndUnrelatedFiles is the regression for P2:
 // sweepStaleStagedFiles must not delete active staged files held by an editor,
 // and must never delete unrelated non-plan files in the staging directory.
@@ -1171,13 +1236,19 @@ func TestSweepStaleStagedFilesSkipsLockedAndUnrelatedFiles(t *testing.T) {
 	isolatePlanStorage(t)
 	dir := t.TempDir()
 
-	// 1. Unrelated non-plan file with old mtime must NOT be deleted
+	// 1. Unrelated non-plan files with old mtime must NOT be deleted,
+	// even if ending in .md like notes.md
 	unrelatedFile := filepath.Join(dir, "notes.txt")
 	if err := os.WriteFile(unrelatedFile, []byte("important note"), 0o600); err != nil {
 		t.Fatalf("write unrelated: %v", err)
 	}
+	unrelatedMd := filepath.Join(dir, "notes.md")
+	if err := os.WriteFile(unrelatedMd, []byte("# My Notes\n"), 0o600); err != nil {
+		t.Fatalf("write unrelated md: %v", err)
+	}
 	oldTime := time.Now().Add(-10 * time.Hour)
 	_ = os.Chtimes(unrelatedFile, oldTime, oldTime)
+	_ = os.Chtimes(unrelatedMd, oldTime, oldTime)
 
 	// 2. Staged file with active lock (open editor) must NOT be deleted even if old
 	stagedPath, cleanup, err := stageContentForEditor(dir, "session-locked", "draft")
@@ -1192,17 +1263,21 @@ func TestSweepStaleStagedFilesSkipsLockedAndUnrelatedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stageContentForEditor: %v", err)
 	}
-	// Simulate editor crash/close by releasing lock but leaving file
+	// Simulate editor crash/close by releasing lock but leaving file and lockfile
 	abandonedCleanup()
 	_ = os.WriteFile(abandonedPath, []byte("abandoned content"), 0o600)
+	_ = os.WriteFile(abandonedPath+".lock", nil, 0o600)
 	_ = os.Chtimes(abandonedPath, oldTime, oldTime)
 
 	// Run sweep
 	sweepStaleStagedFiles(dir)
 
-	// Verify unrelated file survived
+	// Verify unrelated files survived
 	if _, err := os.Stat(unrelatedFile); err != nil {
 		t.Fatalf("unrelated file was deleted by sweep: %v", err)
+	}
+	if _, err := os.Stat(unrelatedMd); err != nil {
+		t.Fatalf("unrelated md file was deleted by sweep: %v", err)
 	}
 
 	// Verify locked staged file survived

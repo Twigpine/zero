@@ -345,7 +345,9 @@ func (m model) routeBTWMessageToParent(msg tea.Msg) (model, tea.Cmd, bool) {
 	}
 	parent.btw = btwState{}
 	m.btw.parent = &parent
-	switch msg.(type) {
+	switch typed := msg.(type) {
+	case planUpdateMsg:
+		m.btw.parentPlanItems = append([]tools.PlanItem{}, typed.items...)
 	case permissionRequestMsg, askUserRequestMsg:
 		if !m.btw.parentNeedsInput {
 			m.btw.parentNeedsInput = true
