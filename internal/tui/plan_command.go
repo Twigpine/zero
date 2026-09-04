@@ -146,7 +146,7 @@ func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
 // the workspace or start a host process outside the plan-mode tool gate.
 func planModeCommandUnavailable(command parsedCommand) bool {
 	switch command.kind {
-	case commandRewind, commandExport, commandSandboxSetup, commandSpec, commandInit:
+	case commandRewind, commandExport, commandSandboxSetup, commandInit:
 		return true
 	case commandMCP:
 		return strings.TrimSpace(command.text) != ""

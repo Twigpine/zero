@@ -1225,11 +1225,9 @@ func TestPlanContinuationPreservesLiteralLeadingBackslash(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("reloadPlanFromFile: ok=%v, err=%v", ok, err)
 	}
-	if len(items) != 1 {
-		t.Fatalf("expected 1 item, got %d", len(items))
-	}
-	if !strings.Contains(items[0].Content, `\src\file`) {
-		t.Fatalf("expected item content to contain literal `\\src\\file`, got %q", items[0].Content)
+	expectedContent := "- [ ] first item\n\\src\\file"
+	if items[0].Content != expectedContent {
+		t.Fatalf("expected item content to equal %q, got %q", expectedContent, items[0].Content)
 	}
 
 	// Format and reload again to verify full roundtrip
@@ -1241,7 +1239,7 @@ func TestPlanContinuationPreservesLiteralLeadingBackslash(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("reloadPlanFromFile after roundtrip: ok=%v, err=%v", ok, err)
 	}
-	if !strings.Contains(roundtripItems[0].Content, `\src\file`) {
-		t.Fatalf("expected roundtrip item content to contain literal `\\src\\file`, got %q", roundtripItems[0].Content)
+	if roundtripItems[0].Content != expectedContent {
+		t.Fatalf("expected roundtrip item content to equal %q, got %q", expectedContent, roundtripItems[0].Content)
 	}
 }
