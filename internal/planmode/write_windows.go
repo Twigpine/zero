@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -438,13 +439,16 @@ func stageContentUnderBase(dir, sessionID, content string) (string, func(), erro
 		}
 	}
 
+	var once sync.Once
 	cleanup := func() {
-		var overlapped windows.Overlapped
-		_ = windows.UnlockFileEx(lockH, 0, 1, 0, &overlapped)
-		_ = windows.CloseHandle(lockH)
-		_ = os.Remove(stagedPath)
-		_ = os.Remove(lockPath)
-		_ = os.Remove(baseHashPath)
+		once.Do(func() {
+			var overlapped windows.Overlapped
+			_ = windows.UnlockFileEx(lockH, 0, 1, 0, &overlapped)
+			_ = windows.CloseHandle(lockH)
+			_ = os.Remove(stagedPath)
+			_ = os.Remove(lockPath)
+			_ = os.Remove(baseHashPath)
+		})
 	}
 	return stagedPath, cleanup, nil
 }

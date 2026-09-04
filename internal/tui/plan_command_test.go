@@ -1199,3 +1199,49 @@ func TestPlanCommandPreservesSecretShapedPlanStepsInPanelAndFile(t *testing.T) {
 		t.Fatalf("reloadPlanFromFile failed: ok=%v, err=%v, reloaded=%+v", reloadedOk, err, reloaded)
 	}
 }
+
+func TestPlanContinuationPreservesLiteralLeadingBackslash(t *testing.T) {
+	isolatePlanConfig(t)
+	dir := t.TempDir()
+	store := testSessionStore(t)
+	session, err := store.Create(sessions.CreateInput{Title: "Backslash Roundtrip"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	m := newModel(context.Background(), Options{
+		SessionStore: store,
+		Cwd:          dir,
+	})
+	m.activeSession = session
+
+	// User-edited file with a literal leading backslash in a continuation line
+	rawFileContent := "- [ ] first item\n   \\src\\file\n   Notes: check backslash\n"
+	if _, err := planmode.WritePlan(dir, session.SessionID, rawFileContent); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+
+	items, ok, err := m.reloadPlanFromFile()
+	if err != nil || !ok {
+		t.Fatalf("reloadPlanFromFile: ok=%v, err=%v", ok, err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+	if !strings.Contains(items[0].Content, `\src\file`) {
+		t.Fatalf("expected item content to contain literal `\\src\\file`, got %q", items[0].Content)
+	}
+
+	// Format and reload again to verify full roundtrip
+	formatted := formatPlanItems(items)
+	if _, err := planmode.WritePlan(dir, session.SessionID, formatted); err != nil {
+		t.Fatalf("WritePlan formatted: %v", err)
+	}
+	roundtripItems, ok, err := m.reloadPlanFromFile()
+	if err != nil || !ok {
+		t.Fatalf("reloadPlanFromFile after roundtrip: ok=%v, err=%v", ok, err)
+	}
+	if !strings.Contains(roundtripItems[0].Content, `\src\file`) {
+		t.Fatalf("expected roundtrip item content to contain literal `\\src\\file`, got %q", roundtripItems[0].Content)
+	}
+}

@@ -1035,12 +1035,12 @@ func TestNewSessionPreservesNonPlanPermissionMode(t *testing.T) {
 	isolatePlanConfig(t)
 	store := testSessionStore(t)
 	m := newModel(context.Background(), Options{SessionStore: store})
-	m.permissionMode = agent.PermissionModeAsk
+	m.permissionMode = agent.PermissionModeAuto
 
 	m = m.startNewSession()
 
-	if m.permissionMode != agent.PermissionModeAsk {
-		t.Fatalf("expected /new to preserve the explicit Ask permission mode, got %s", m.permissionMode)
+	if m.permissionMode != agent.PermissionModeAuto {
+		t.Fatalf("expected /new to preserve the explicit Auto permission mode, got %s", m.permissionMode)
 	}
 }
 
@@ -1057,12 +1057,12 @@ func TestResumeDifferentSessionPreservesNonPlanPermissionMode(t *testing.T) {
 	}
 	m := newModel(context.Background(), Options{SessionStore: store})
 	m.activeSession = active
-	m.permissionMode = agent.PermissionModeAsk
+	m.permissionMode = agent.PermissionModeAuto
 
 	m, _ = m.handleResumeCommand(other.SessionID)
 
-	if m.permissionMode != agent.PermissionModeAsk {
-		t.Fatalf("expected /resume to a different session to preserve the explicit Ask permission mode, got %s", m.permissionMode)
+	if m.permissionMode != agent.PermissionModeAuto {
+		t.Fatalf("expected /resume to a different session to preserve the explicit Auto permission mode, got %s", m.permissionMode)
 	}
 }
 

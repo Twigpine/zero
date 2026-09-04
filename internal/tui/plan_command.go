@@ -456,7 +456,10 @@ func escapePlanContinuation(line string) string {
 }
 
 func unescapePlanContinuation(line string) string {
-	if strings.HasPrefix(line, `\`) {
+	if strings.HasPrefix(line, `\\`) {
+		return line[1:]
+	}
+	if strings.HasPrefix(line, `\`) && strings.HasPrefix(strings.TrimSpace(line[1:]), "Notes:") {
 		return line[1:]
 	}
 	return line
