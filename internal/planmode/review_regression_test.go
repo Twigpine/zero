@@ -126,6 +126,16 @@ func TestStorageRejectsAllSandboxTempRoots(t *testing.T) {
 	root := t.TempDir()
 	first := filepath.Join(root, "temp")
 	second := filepath.Join(root, "tmp")
+	if runtime.GOOS != "windows" {
+		// Unix sandboxes allow /tmp as well as TMPDIR. macOS t.TempDir
+		// normally lives under /var/folders, so its sibling is not that root.
+		var err error
+		second, err = os.MkdirTemp("/tmp", "zero-plan-writable-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(second) })
+	}
 	for _, dir := range []string{first, second} {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			t.Fatal(err)
