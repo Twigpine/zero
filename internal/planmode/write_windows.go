@@ -3,8 +3,6 @@
 package planmode
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -345,7 +343,7 @@ func isWindowsExistErr(err error) bool {
 // and creates a temporary staged plan file plus an exclusive companion lock file
 // relative to that handle, ensuring containment cannot be bypassed by
 // intermediate path swaps.
-func stageContentUnderBase(dir, sessionID, content string) (string, func(), error) {
+func stageContentUnderBase(dir, sessionID, content string, writeBaseline editorBaselineWriter) (string, func(bool), error) {
 	parent, err := openWindowsBaseDir(dir)
 	if err != nil {
 		return "", nil, fmt.Errorf("open plan editor staging directory: %w", err)
@@ -394,13 +392,16 @@ func stageContentUnderBase(dir, sessionID, content string) (string, func(), erro
 	lockPath := stagedPath + ".lock"
 	baseHashPath := stagedPath + ".basehash"
 
+	baselineCreated := false
 	cleanOnFailure := func() {
 		var overlapped windows.Overlapped
 		_ = windows.UnlockFileEx(lockH, 0, 1, 0, &overlapped)
 		_ = windows.CloseHandle(lockH)
 		_ = deleteAtWindows(parent, leafName)
 		_ = deleteAtWindows(parent, leafName+".lock")
-		_ = deleteAtWindows(parent, leafName+".basehash")
+		if baselineCreated {
+			_ = deleteAtWindows(parent, leafName+".basehash")
+		}
 	}
 
 	file := os.NewFile(uintptr(h), stagedPath)
@@ -425,27 +426,26 @@ func stageContentUnderBase(dir, sessionID, content string) (string, func(), erro
 		return "", nil, fmt.Errorf("stage plan file for editor: %w", err)
 	}
 
-	// Write baseline content hash for no-op and concurrent change detection.
-	baseSum := sha256.Sum256([]byte(body))
-	baseHashStr := hex.EncodeToString(baseSum[:]) + "\n"
-	if baseH, err := createFileNoFollow(parent, leafName+".basehash"); err == nil {
-		baseFile := os.NewFile(uintptr(baseH), baseHashPath)
-		if baseFile != nil {
-			_, _ = baseFile.WriteString(baseHashStr)
-			_ = baseFile.Sync()
-			_ = baseFile.Close()
-		} else {
-			_ = windows.CloseHandle(baseH)
+	if err := writeBaseline(body, func() (*os.File, error) {
+		h, err := createFileNoFollow(parent, leafName+".basehash")
+		if err != nil {
+			return nil, err
 		}
+		baselineCreated = true
+		return os.NewFile(uintptr(h), baseHashPath), nil
+	}); err != nil {
+		cleanOnFailure()
+		return "", nil, fmt.Errorf("stage editor baseline: %w", err)
 	}
-
 	var once sync.Once
-	cleanup := func() {
+	cleanup := func(preserve bool) {
 		once.Do(func() {
 			var overlapped windows.Overlapped
 			_ = windows.UnlockFileEx(lockH, 0, 1, 0, &overlapped)
 			_ = windows.CloseHandle(lockH)
-			_ = os.Remove(stagedPath)
+			if !preserve {
+				_ = os.Remove(stagedPath)
+			}
 			_ = os.Remove(lockPath)
 			_ = os.Remove(baseHashPath)
 		})
@@ -480,5 +480,6 @@ func tryReclaimStaleStagedFile(dir, leafName string) bool {
 	_ = deleteAtWindows(parent, leafName)
 	_ = deleteAtWindows(parent, lockName)
 	_ = deleteAtWindows(parent, leafName+".basehash")
+
 	return true
 }

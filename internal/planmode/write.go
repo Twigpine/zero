@@ -1,6 +1,7 @@
 package planmode
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -42,4 +43,16 @@ func errPlanSymlinkWrite(path string) error {
 // the create is what refuses a colliding or pre-planted path.
 func planTempName(finalName string) string {
 	return fmt.Sprintf("%s.tmp-%d-%d", finalName, os.Getpid(), time.Now().UnixNano())
+}
+
+type editorBaselineWriter func(string, func() (*os.File, error)) error
+
+func writeEditorBaseline(content string, create func() (*os.File, error)) error {
+	file, err := create()
+	if err != nil {
+		return fmt.Errorf("create editor baseline: %w", err)
+	}
+	_, writeErr := file.WriteString(planContentHash(content) + "\n")
+	syncErr := file.Sync()
+	return errors.Join(writeErr, syncErr, file.Close())
 }

@@ -85,6 +85,9 @@ func TestSpecApproveStartsImplementationSession(t *testing.T) {
 	if next.activeSession.SessionKind != sessions.SessionKindSpecImpl {
 		t.Fatalf("expected active implementation session, got %#v", next.activeSession)
 	}
+	if next.permissionMode != agent.PermissionModeAsk || !transcriptContains(next.transcript, "Implementation uses ask permission mode.") {
+		t.Fatal("spec approval must restore and announce Ask permission mode")
+	}
 	if len(next.loops) != 0 {
 		t.Fatalf("expected approval to clear loops from the draft session, got %+v", next.loops)
 	}
@@ -318,6 +321,9 @@ func TestSpecCommandExitsPlanMode(t *testing.T) {
 	next := updated.(model)
 	if next.permissionMode == agent.PermissionModePlan {
 		t.Fatalf("expected /spec to exit plan mode, got %s", next.permissionMode)
+	}
+	if !transcriptContains(next.transcript, "Plan mode ended for the previous session.") {
+		t.Fatal("missing spec session Plan mode exit notice")
 	}
 	if next.permissionModeBeforePlan != "" {
 		t.Fatalf("expected permissionModeBeforePlan cleared after /spec, got %q", next.permissionModeBeforePlan)

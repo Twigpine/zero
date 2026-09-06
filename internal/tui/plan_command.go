@@ -77,7 +77,7 @@ func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.permissionMode == agent.PermissionModePlan {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan mode\nAlready active. Write and shell tools stay hidden until /plan off."})
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan mode\nAlready active. " + planEnterText(m)})
 			return m, nil
 		}
 		updated, err := m.ensureActiveSession("")
@@ -100,7 +100,7 @@ func (m model) handlePlanCommand(text string) (tea.Model, tea.Cmd) {
 		pausedLoops := 0
 		m, pausedLoops = m.pauseLoopsForPlan()
 		if pausedLoops > 0 || m.hasArmedGoalContinuation() {
-			reloadWarning += "\nAutomatic /loop and /goal continuations are paused until /plan off."
+			reloadWarning += "\nAutomatic /loop and /goal continuations are paused while Plan mode is active."
 		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Plan mode\n" + planEnterText(m) + reloadWarning})
 		return m.syncPeerIdentity(), nil
@@ -234,7 +234,7 @@ func (m model) openPlanInEditor() (tea.Model, tea.Cmd) {
 	// The editor is launched on a staged copy outside the workspace, not on
 	// path directly: see planmode.StageForEditor for why handing $EDITOR a
 	// workspace-relative path would leave a symlink-swap containment race.
-	stagedPath, cleanup, err := planmode.StageForEditor(m.cwd, m.activeSession.SessionID)
+	stagedPath, finish, err := planmode.StageEditor(m.cwd, m.activeSession.SessionID)
 	if err != nil {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "plan stage error: " + err.Error()})
 		return m, nil
@@ -249,7 +249,7 @@ func (m model) openPlanInEditor() (tea.Model, tea.Cmd) {
 	parts, err := splitEditorCommand(editor)
 	if err != nil || len(parts) == 0 {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "invalid $VISUAL/$EDITOR value: " + editor})
-		cleanup()
+		finish(false)
 		return m, nil
 	}
 	cmd := exec.Command(parts[0], append(parts[1:], stagedPath)...) //nolint:gosec // editor path from $VISUAL/$EDITOR
@@ -259,26 +259,39 @@ func (m model) openPlanInEditor() (tea.Model, tea.Cmd) {
 	workspaceRoot := m.cwd
 	sessionID := m.activeSession.SessionID
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-		defer cleanup()
-		if err != nil {
-			return planEditorFinishedMsg{err: err}
-		}
-		if commitErr := planmode.CommitStagedEdit(workspaceRoot, sessionID, stagedPath); commitErr != nil {
-			return planEditorFinishedMsg{err: commitErr}
-		}
-		return planEditorFinishedMsg{err: nil}
+		return finishPlanEditor(workspaceRoot, sessionID, stagedPath, finish, err)
 	})
 }
 
 // planEditorFinishedMsg reports a failed $VISUAL/$EDITOR run launched by
 // /plan open so the transcript can surface it.
-type planEditorFinishedMsg struct {
-	err error
+func finishPlanEditor(workspaceRoot, sessionID, stagedPath string, finish func(bool), editorErr error) planEditorFinishedMsg {
+	if editorErr != nil {
+		finish(false)
+		return planEditorFinishedMsg{err: editorErr}
+	}
+	outcome, err := planmode.CommitStagedEditResult(workspaceRoot, sessionID, stagedPath)
+	if err != nil {
+		recovery, recoveryErr := planmode.PreserveStagedEdit(stagedPath)
+		if recoveryErr != nil {
+			recovery = stagedPath
+			err = fmt.Errorf("%w; recovery rename failed: %v", err, recoveryErr)
+		}
+		finish(true)
+		return planEditorFinishedMsg{err: fmt.Errorf("%w; saved edits are recoverable at %s", err, recovery)}
+	}
+	finish(false)
+	return planEditorFinishedMsg{outcome: &outcome}
 }
 
-// splitEditorCommand parses $VISUAL/$EDITOR into argv. Quoted values and
+type planEditorFinishedMsg struct {
+	outcome *planmode.EditResult
+	err     error
+}
+
+// splitEditorCommand parses $VISUAL/$EDITOR into argv. Single-quoted values and
 // backslash-free values use POSIX shell.Fields (spaces inside quotes, $VAR
-// expansion). Unquoted Windows commands containing backslashes keep the
+// expansion). Other Windows commands containing backslashes keep the
 // separators literal via windowsEditorFields so `C:\Windows\notepad.exe` (or a
 // relative `.\tools\editor.exe`) is not mangled by POSIX escape processing.
 func splitEditorCommand(editor string) ([]string, error) {
@@ -290,7 +303,7 @@ func splitEditorCommandFor(goos, editor string) ([]string, error) {
 	if editor == "" {
 		return nil, fmt.Errorf("empty editor")
 	}
-	if goos == "windows" && strings.Contains(editor, `\`) && !isQuoteWrapped(editor) {
+	if goos == "windows" && strings.Contains(editor, `\`) && !strings.HasPrefix(editor, "'") {
 		parts, err := windowsEditorFields(editor)
 		if err != nil {
 			return nil, err
@@ -301,13 +314,6 @@ func splitEditorCommandFor(goos, editor string) ([]string, error) {
 		return parts, nil
 	}
 	return shell.Fields(editor, os.Getenv)
-}
-
-// isQuoteWrapped reports whether the value is wrapped in a leading quote, in
-// which case POSIX shell.Fields owns parsing (single quotes keep everything
-// literal; double quotes preserve backslashes before ordinary characters).
-func isQuoteWrapped(s string) bool {
-	return len(s) > 0 && (s[0] == '"' || s[0] == '\'')
 }
 
 // windowsEditorFields splits a Windows command line with literal backslashes.
@@ -470,7 +476,7 @@ func planEnterText(m model) string {
 	if path, err := planmode.PlanFilePath(m.cwd, m.activeSession.SessionID); err == nil {
 		planNote = "\nPlan file: " + path
 	}
-	return "Active: read-only planning. Write and shell tools are hidden until /plan off." + planNote
+	return "Active: read-only planning for this session. Write and shell tools are hidden. /plan off restores the previous permission mode. Starting or switching sessions exits Plan mode; returning from /btw restores the parent session's mode." + planNote
 }
 
 func (m model) planText() string {
@@ -492,7 +498,8 @@ func (m model) planText() string {
 		modeLabel = "active"
 	}
 
-	if exists && strings.TrimSpace(content) != "" {
+	if exists {
+		content = formatPlanItems(tools.CanonicalizePlanItems(parsePlanFileLines(content)))
 		header := fmt.Sprintf("Current Plan (plan mode %s)", modeLabel)
 		if pathErr == nil {
 			header += "\n" + path

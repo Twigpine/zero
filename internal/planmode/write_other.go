@@ -16,7 +16,7 @@ func writePlanUnderBase(_, _, displayPath, _ string) error {
 	return fmt.Errorf("plan file %s: writing plan files is not supported on this platform", displayPath)
 }
 
-func stageContentUnderBase(_, _, _ string) (string, func(), error) {
+func stageContentUnderBase(_, _, _ string, _ editorBaselineWriter) (string, func(bool), error) {
 	return "", nil, fmt.Errorf("stage plan file: staging is not supported on this platform")
 }
 

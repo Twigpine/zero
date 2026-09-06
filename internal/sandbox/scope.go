@@ -645,3 +645,8 @@ func pathWithinRoot(root string, candidate string) bool {
 	}
 	return relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative))
 }
+
+// DefaultTempWriteRoots returns every temporary root writable in the default sandbox.
+func DefaultTempWriteRoots() []string {
+	return defaultTempWriteRoots()
+}
