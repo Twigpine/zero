@@ -1243,3 +1243,22 @@ func TestPlanContinuationPreservesLiteralLeadingBackslash(t *testing.T) {
 		t.Fatalf("expected roundtrip item content to equal %q, got %q", expectedContent, roundtripItems[0].Content)
 	}
 }
+
+func TestSplitEditorCommandPreservesWindowsPrefixes(t *testing.T) {
+	for _, command := range []struct{ input, executable string }{
+		{`"\\server\shared tools\vim.exe" --wait`, `\\server\shared tools\vim.exe`},
+		{`\\server\tools\vim.exe --wait`, `\\server\tools\vim.exe`},
+		{`"\\?\C:\Program Files\vim.exe" --wait`, `\\?\C:\Program Files\vim.exe`},
+		{`"\\?\UNC\server\shared tools\vim.exe" --wait`, `\\?\UNC\server\shared tools\vim.exe`},
+	} {
+		t.Run(command.input, func(t *testing.T) {
+			got, err := splitEditorCommandFor("windows", command.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 2 || got[0] != command.executable || got[1] != "--wait" {
+				t.Fatalf("argv = %#v, want [%q --wait]", got, command.executable)
+			}
+		})
+	}
+}

@@ -1,6 +1,7 @@
 package planmode
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/lockutil"
+	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 // PlanDirName is the config-relative directory (under UserConfigDir) where
@@ -94,6 +97,27 @@ func ReadPlan(workspaceRoot, sessionID string) (string, bool, error) {
 	return string(data), true, nil
 }
 
+func lockPlan(base, path string) (*lockutil.FileLock, error) {
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		return nil, err
+	}
+	if info, err := os.Lstat(base); err != nil {
+		return nil, err
+	} else if info.Mode()&os.ModeSymlink != 0 || pathIsReparsePoint(base) {
+		return nil, errPlanBaseSymlink(base)
+	}
+	// Keep the lock inode stable and include the protected base in the no-follow walk.
+	lockPath := filepath.Join(base, filepath.Base(filepath.Dir(path))+"-"+filepath.Base(path)+".lock")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		lock, err := lockutil.TryAcquireFileLockAt(filepath.Dir(base), lockPath)
+		if !errors.Is(err, lockutil.ErrLockHeld) || time.Now().After(deadline) {
+			return lock, err
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // WritePlan writes (creating the directory as needed) the plan file for a
 // session and returns its path. The file is stored under the user config
 // directory, never inside the workspace, so an auto-allowed read-only tool
@@ -104,24 +128,16 @@ func ReadPlan(workspaceRoot, sessionID string) (string, bool, error) {
 // path checks alone are a check-to-use race: an intermediate directory can
 // be replaced with a symlink between resolve and create, and pathname
 // MkdirAll/OpenFile/Rename would then land outside the storage tree.
-var (
-	planLocksMu sync.Mutex
-	planLocks   = make(map[string]*sync.Mutex)
-)
-
-func lockPlan(path string) func() {
-	planLocksMu.Lock()
-	m, ok := planLocks[path]
-	if !ok {
-		m = &sync.Mutex{}
-		planLocks[path] = m
-	}
-	planLocksMu.Unlock()
-	m.Lock()
-	return m.Unlock
+func WritePlan(workspaceRoot, sessionID, content string) (string, error) {
+	return writePlan(context.Background(), workspaceRoot, sessionID, content, nil)
 }
 
-func WritePlan(workspaceRoot, sessionID, content string) (string, error) {
+// WritePlanIfUnchanged rejects publication based on an obsolete durable snapshot.
+func WritePlanIfUnchanged(ctx context.Context, workspaceRoot, sessionID, content, baseline string) (string, error) {
+	return writePlan(ctx, workspaceRoot, sessionID, content, &baseline)
+}
+
+func writePlan(ctx context.Context, workspaceRoot, sessionID, content string, baseline *string) (_ string, resultErr error) {
 	path, err := PlanFilePath(workspaceRoot, sessionID)
 	if err != nil {
 		return "", err
@@ -133,9 +149,23 @@ func WritePlan(workspaceRoot, sessionID, content string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	unlock := lockPlan(path)
-	defer unlock()
-
+	lock, err := lockPlan(base, path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { resultErr = errors.Join(resultErr, lock.Release()) }()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if baseline != nil {
+		durable, _, err := ReadPlan(workspaceRoot, sessionID)
+		if err != nil {
+			return "", err
+		}
+		if planContentHash(durable) != planContentHash(*baseline) {
+			return "", fmt.Errorf("plan changed since this run's last accepted update")
+		}
+	}
 	body := strings.TrimRight(content, "\n") + "\n"
 	if err := writePlanFile(base, path, body); err != nil {
 		return "", err
@@ -167,7 +197,16 @@ func WritePlan(workspaceRoot, sessionID, content string) (string, error) {
 // refused rather than followed if something is already there. The random
 // suffix also means two Zero instances editing the same resumed session no
 // longer collide on the same staged file.
-func StageForEditor(workspaceRoot, sessionID string) (stagedPath string, cleanup func(), err error) {
+func StageForEditor(workspaceRoot, sessionID string) (string, func(), error) {
+	path, finish, err := StageEditor(workspaceRoot, sessionID)
+	if err != nil {
+		return "", nil, err
+	}
+	return path, func() { finish(false) }, nil
+}
+
+// StageEditor stages an edit; finish releases its lock and optionally preserves the file.
+func StageEditor(workspaceRoot, sessionID string) (stagedPath string, finish func(bool), err error) {
 	content, _, err := ReadPlan(workspaceRoot, sessionID)
 	if err != nil {
 		return "", nil, err
@@ -193,8 +232,10 @@ func StageForEditor(workspaceRoot, sessionID string) (stagedPath string, cleanup
 	}
 	// Use effectiveTempDir (not os.TempDir) so SetTempDirForTest can redirect
 	// the privacy check the same way ensurePlanPathContained does.
-	if !editorStagingDirIsPrivate(resolvedDir, workspaceRoot, effectiveTempDir()) {
-		return "", nil, fmt.Errorf("plan editor staging directory %s resolves into a default sandbox-writable root (the workspace or the OS temp directory); check XDG_CONFIG_HOME", dir)
+	for _, tempRoot := range append(effectiveTempDirs(), "") {
+		if !editorStagingDirIsPrivate(resolvedDir, workspaceRoot, tempRoot) {
+			return "", nil, fmt.Errorf("plan editor staging directory %s resolves into a default sandbox-writable root (the workspace or the OS temp directory); check XDG_CONFIG_HOME", dir)
+		}
 	}
 	// MkdirAll's mode only applies at creation: tighten an existing directory
 	// only after validating its resolved target is safe to use.
@@ -215,7 +256,7 @@ func StageForEditor(workspaceRoot, sessionID string) (stagedPath string, cleanup
 	// removed leaks. Sweep those abandoned files on the next stage instead of
 	// relying on every shutdown path to run cleanup.
 	sweepStaleStagedFiles(resolvedDir)
-	return stageContentForEditor(resolvedDir, sessionID, content)
+	return stageContentUnderBase(resolvedDir, sessionID, content, writeEditorBaseline)
 }
 
 // StagedPlanFilePrefix is the dedicated prefix used for all temporary
@@ -258,7 +299,11 @@ func sweepStaleStagedFiles(dir string) {
 // holding content, for StageForEditor to hand to $EDITOR. It binds creation to
 // the opened directory handle rather than repeating pathname traversals.
 func stageContentForEditor(dir, sessionID, content string) (stagedPath string, cleanup func(), err error) {
-	return stageContentUnderBase(dir, sessionID, content)
+	path, finish, err := stageContentUnderBase(dir, sessionID, content, writeEditorBaseline)
+	if err != nil {
+		return "", nil, err
+	}
+	return path, func() { finish(false) }, nil
 }
 
 // editorStagingDirIsPrivate reports whether dir avoids the sandbox's default
@@ -272,7 +317,7 @@ func stageContentForEditor(dir, sessionID, content string) (stagedPath string, c
 // symlink cases without needing to plant links outside the real temp dir.
 func editorStagingDirIsPrivate(dir, workspaceRoot, tempDir string) bool {
 	dir = physicalPath(dir)
-	if isUnderOrEqual(dir, physicalPath(tempDir)) {
+	if tempDir != "" && isUnderOrEqual(dir, physicalPath(tempDir)) {
 		return false
 	}
 	// Fail closed if the workspace root cannot be resolved (e.g. deleted
@@ -362,58 +407,90 @@ func isUnderOrEqual(path, root string) bool {
 // no-op edits (content identical to baseline) do not rewrite durable storage,
 // and concurrent modifications to the durable plan are rejected as conflicts.
 func CommitStagedEdit(workspaceRoot, sessionID, stagedPath string) error {
+	_, err := CommitStagedEditResult(workspaceRoot, sessionID, stagedPath)
+	return err
+}
+
+// EditResult distinguishes user edits from unchanged files and external updates.
+type EditResult struct {
+	Edited bool
+	Reload bool
+}
+
+// CommitStagedEditResult accepts an editor snapshot against its required baseline.
+func CommitStagedEditResult(workspaceRoot, sessionID, stagedPath string) (result EditResult, resultErr error) {
 	path, err := PlanFilePath(workspaceRoot, sessionID)
 	if err != nil {
-		return err
+		return result, err
 	}
 	if err := ensurePlanPathContained(workspaceRoot, path); err != nil {
-		return err
+		return result, err
 	}
 	base, _, err := planStorageBase(workspaceRoot)
 	if err != nil {
-		return err
+		return result, err
 	}
-
 	data, err := os.ReadFile(stagedPath)
 	if err != nil {
-		return fmt.Errorf("read staged plan file: %w", err)
+		return result, fmt.Errorf("read staged plan file: %w", err)
 	}
-
-	unlock := lockPlan(path)
-	defer unlock()
-
-	baseHashPath := stagedPath + ".basehash"
-	if baseHashBytes, err := os.ReadFile(baseHashPath); err == nil {
-		baseHash := strings.TrimSpace(string(baseHashBytes))
-		body := strings.TrimRight(string(data), "\n") + "\n"
-		stagedSum := sha256.Sum256([]byte(body))
-		stagedHash := hex.EncodeToString(stagedSum[:])
-
-		if stagedHash == baseHash {
-			// Content is unchanged from baseline: no-op edit.
-			return nil
-		}
-
-		durableContent, exists, err := ReadPlan(workspaceRoot, sessionID)
-		if err != nil {
-			return fmt.Errorf("verify durable plan baseline: %w", err)
-		}
-		var durableHash string
-		if exists {
-			durableBody := strings.TrimRight(durableContent, "\n") + "\n"
-			durableSum := sha256.Sum256([]byte(durableBody))
-			durableHash = hex.EncodeToString(durableSum[:])
-		} else {
-			emptySum := sha256.Sum256([]byte("\n"))
-			durableHash = hex.EncodeToString(emptySum[:])
-		}
-		if durableHash != baseHash {
-			return fmt.Errorf("plan file was modified concurrently while editing")
-		}
+	baseline, err := os.ReadFile(stagedPath + ".basehash")
+	if err != nil {
+		return result, fmt.Errorf("read editor baseline: %w", err)
 	}
-
+	baseHash := strings.TrimSpace(string(baseline))
+	decoded, err := hex.DecodeString(baseHash)
+	if err != nil || len(decoded) != sha256.Size {
+		return result, fmt.Errorf("invalid editor baseline")
+	}
+	lock, err := lockPlan(base, path)
+	if err != nil {
+		return result, err
+	}
+	defer func() { resultErr = errors.Join(resultErr, lock.Release()) }()
+	durable, _, err := ReadPlan(workspaceRoot, sessionID)
+	if err != nil {
+		return result, fmt.Errorf("verify durable plan baseline: %w", err)
+	}
+	if planContentHash(string(data)) == baseHash {
+		return EditResult{Reload: planContentHash(durable) != baseHash}, nil
+	}
+	if planContentHash(durable) != baseHash {
+		return result, fmt.Errorf("plan file was modified concurrently while editing")
+	}
 	body := strings.TrimRight(string(data), "\n") + "\n"
-	return writePlanFile(base, path, body)
+	if err := writePlanFile(base, path, body); err != nil {
+		return result, err
+	}
+	return EditResult{Edited: true, Reload: true}, nil
+}
+
+func planContentHash(content string) string {
+	body := strings.TrimRight(content, "\n") + "\n"
+	sum := sha256.Sum256([]byte(body))
+	return hex.EncodeToString(sum[:])
+}
+
+// PreserveStagedEdit moves rejected user work outside the abandoned-stage sweep.
+func PreserveStagedEdit(stagedPath string) (string, error) {
+	name := filepath.Base(stagedPath)
+	if !strings.HasPrefix(name, StagedPlanFilePrefix) {
+		return "", fmt.Errorf("invalid staged plan name")
+	}
+	recovery := filepath.Join(filepath.Dir(stagedPath), "zero-recovered-"+strings.TrimPrefix(name, StagedPlanFilePrefix))
+	reserved, err := os.OpenFile(recovery, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", err
+	}
+	if err := reserved.Close(); err != nil {
+		_ = os.Remove(recovery)
+		return "", err
+	}
+	if err := os.Rename(stagedPath, recovery); err != nil {
+		_ = os.Remove(recovery)
+		return "", err
+	}
+	return recovery, nil
 }
 
 // editorStagingDir is where plan files are staged for external $EDITOR
@@ -446,10 +523,10 @@ func planStorageBase(workspaceRoot string) (base string, absWorkspace string, er
 
 var (
 	tempDirMu sync.RWMutex
-	tempDirFn = os.TempDir
+	tempDirFn = sandbox.DefaultTempWriteRoots
 )
 
-func effectiveTempDir() string {
+func effectiveTempDirs() []string {
 	tempDirMu.RLock()
 	defer tempDirMu.RUnlock()
 	return tempDirFn()
@@ -460,7 +537,7 @@ func effectiveTempDir() string {
 func SetEffectiveTempDirForTest(tempDir string) func() {
 	tempDirMu.Lock()
 	old := tempDirFn
-	tempDirFn = func() string { return tempDir }
+	tempDirFn = func() []string { return []string{tempDir} }
 	tempDirMu.Unlock()
 	return func() {
 		tempDirMu.Lock()
@@ -486,8 +563,10 @@ func ensurePlanPathContained(workspaceRoot, path string) error {
 	if isUnderOrEqual(physPath, physicalPath(absWorkspace)) {
 		return fmt.Errorf("plan storage %s resolves into the workspace; check XDG_CONFIG_HOME", path)
 	}
-	if physTemp := physicalPath(effectiveTempDir()); physTemp != "" && isUnderOrEqual(physPath, physTemp) {
-		return fmt.Errorf("plan storage %s resolves into temp directory %s; check XDG_CONFIG_HOME", path, physTemp)
+	for _, tempRoot := range effectiveTempDirs() {
+		if physTemp := physicalPath(tempRoot); physTemp != "" && isUnderOrEqual(physPath, physTemp) {
+			return fmt.Errorf("plan storage %s resolves into temp directory %s; check XDG_CONFIG_HOME", path, physTemp)
+		}
 	}
 	return nil
 }

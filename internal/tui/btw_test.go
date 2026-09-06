@@ -565,6 +565,9 @@ func TestBTWExitsPlanModeOnSideAndPreservesParent(t *testing.T) {
 	if side.permissionMode != agent.PermissionModeAsk {
 		t.Fatalf("BTW side permission mode = %s, want restored Ask", side.permissionMode)
 	}
+	if !transcriptContains(side.transcript, "This BTW session uses ask permission mode.") {
+		t.Fatal("missing BTW permission mode notice")
+	}
 	if side.permissionModeBeforePlan != "" {
 		t.Fatalf("BTW side left permissionModeBeforePlan set: %q", side.permissionModeBeforePlan)
 	}
@@ -590,6 +593,9 @@ func TestBTWExitsPlanModeOnSideAndPreservesParent(t *testing.T) {
 	returned, _ := side.leaveBTW()
 	if returned.permissionMode != agent.PermissionModePlan {
 		t.Fatalf("returning from BTW lost parent plan mode: %s", returned.permissionMode)
+	}
+	if !transcriptContains(returned.transcript, "Plan mode is active again.") {
+		t.Fatal("missing parent Plan mode restoration notice")
 	}
 	if returned.permissionModeBeforePlan != agent.PermissionModeAsk {
 		t.Fatalf("returning from BTW lost permissionModeBeforePlan: %q", returned.permissionModeBeforePlan)

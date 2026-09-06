@@ -854,6 +854,9 @@ func TestNewSessionExitsPlanMode(t *testing.T) {
 	if m.permissionMode != agent.PermissionModeAsk {
 		t.Fatalf("expected /new to exit plan mode and restore Ask, got %s", m.permissionMode)
 	}
+	if !transcriptContains(m.transcript, "Plan mode ended for the previous session. Permission mode restored to ask.") {
+		t.Fatal("missing Plan mode exit notice after /new")
+	}
 	if m.permissionModeBeforePlan != "" {
 		t.Fatalf("expected permissionModeBeforePlan to be cleared, got %q", m.permissionModeBeforePlan)
 	}
@@ -907,6 +910,9 @@ func TestResumeDifferentSessionExitsPlanMode(t *testing.T) {
 	}
 	if m.permissionMode != agent.PermissionModeAsk {
 		t.Fatalf("expected /resume to a different session to exit plan mode and restore Ask, got %s", m.permissionMode)
+	}
+	if !transcriptContains(m.transcript, "Plan mode ended for the previous session. Permission mode restored to ask.") {
+		t.Fatal("missing Plan mode exit notice after /resume")
 	}
 	if m.permissionModeBeforePlan != "" {
 		t.Fatalf("expected permissionModeBeforePlan to be cleared, got %q", m.permissionModeBeforePlan)

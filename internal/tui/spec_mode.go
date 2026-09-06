@@ -46,7 +46,11 @@ func (m model) handleSpecCommand(task string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m, _ = m.clearLoopsForSessionSwitch()
+	wasPlan := m.permissionMode == agent.PermissionModePlan
 	m = m.resetPlanForSessionSwitch().exitPlanMode()
+	if wasPlan {
+		m = m.appendSystemNotice("Plan mode ended for the previous session. The spec draft uses restricted spec-draft permissions until review.")
+	}
 	m, err = m.appendSessionEvent(sessions.EventMessage, map[string]any{
 		"role":    "user",
 		"content": task,
@@ -208,7 +212,11 @@ func (m model) approveSpecReview() (tea.Model, tea.Cmd) {
 	m.sessionEvents = append([]sessions.Event{}, events...)
 	m, _ = m.clearLoopsForSessionSwitch()
 	m = m.syncPeerIdentity()
+	wasPlan := m.permissionMode == agent.PermissionModePlan
 	m = m.resetPlanForSessionSwitch().exitPlanMode()
+	if wasPlan {
+		m = m.appendSystemNotice("Plan mode ended for the draft session. Implementation uses " + string(m.permissionMode) + " permission mode.")
+	}
 	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Spec approved. Starting implementation session " + impl.SessionID + "."})
 	runCtx, cancel := context.WithCancel(m.ctx)
 	m = m.beginRun(cancel)

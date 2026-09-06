@@ -3,8 +3,6 @@
 package planmode
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -181,7 +179,7 @@ func renameatRetry(olddirfd int, oldpath string, newdirfd int, newpath string) e
 // creates a temporary staged plan file plus an exclusive companion lock file
 // relative to that descriptor, ensuring containment cannot be bypassed by
 // intermediate path swaps.
-func stageContentUnderBase(dir, sessionID, content string) (string, func(), error) {
+func stageContentUnderBase(dir, sessionID, content string, writeBaseline editorBaselineWriter) (string, func(bool), error) {
 	dirfd, err := openatRetry(unix.AT_FDCWD, dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return "", nil, fmt.Errorf("open plan editor staging directory: %w", err)
@@ -205,8 +203,8 @@ func stageContentUnderBase(dir, sessionID, content string) (string, func(), erro
 
 	slug := slugify(sessionID)
 	var leafName string
-	var fd int = -1
-	var lockFd int = -1
+	fd := -1
+	lockFd := -1
 	for try := 0; try < 100; try++ {
 		candidate := fmt.Sprintf("%s%s-%d-%d.md", StagedPlanFilePrefix, slug, os.Getpid(), time.Now().UnixNano())
 		lockCandidate := candidate + ".lock"
@@ -242,12 +240,15 @@ func stageContentUnderBase(dir, sessionID, content string) (string, func(), erro
 	lockPath := stagedPath + ".lock"
 	baseHashPath := stagedPath + ".basehash"
 
+	baselineCreated := false
 	cleanOnFailure := func() {
 		_ = unix.Flock(lockFd, unix.LOCK_UN)
 		_ = unix.Close(lockFd)
 		_ = unix.Unlinkat(dirfd, leafName, 0)
 		_ = unix.Unlinkat(dirfd, leafName+".lock", 0)
-		_ = unix.Unlinkat(dirfd, leafName+".basehash", 0)
+		if baselineCreated {
+			_ = unix.Unlinkat(dirfd, leafName+".basehash", 0)
+		}
 	}
 
 	file := os.NewFile(uintptr(fd), stagedPath)
@@ -267,25 +268,25 @@ func stageContentUnderBase(dir, sessionID, content string) (string, func(), erro
 		return "", nil, fmt.Errorf("stage plan file for editor: %w", err)
 	}
 
-	// Write baseline content hash for no-op and concurrent change detection.
-	baseSum := sha256.Sum256([]byte(body))
-	baseHashStr := hex.EncodeToString(baseSum[:]) + "\n"
-	if baseFd, err := openatRetry(dirfd, leafName+".basehash", unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600); err == nil {
-		baseFile := os.NewFile(uintptr(baseFd), baseHashPath)
-		if baseFile != nil {
-			_, _ = baseFile.WriteString(baseHashStr)
-			_ = baseFile.Close()
-		} else {
-			_ = unix.Close(baseFd)
+	if err := writeBaseline(body, func() (*os.File, error) {
+		fd, err := openatRetry(dirfd, leafName+".basehash", unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+		if err != nil {
+			return nil, err
 		}
+		baselineCreated = true
+		return os.NewFile(uintptr(fd), baseHashPath), nil
+	}); err != nil {
+		cleanOnFailure()
+		return "", nil, fmt.Errorf("stage editor baseline: %w", err)
 	}
-
 	var once sync.Once
-	cleanup := func() {
+	cleanup := func(preserve bool) {
 		once.Do(func() {
 			_ = unix.Flock(lockFd, unix.LOCK_UN)
 			_ = unix.Close(lockFd)
-			_ = os.Remove(stagedPath)
+			if !preserve {
+				_ = os.Remove(stagedPath)
+			}
 			_ = os.Remove(lockPath)
 			_ = os.Remove(baseHashPath)
 		})
@@ -322,5 +323,6 @@ func tryReclaimStaleStagedFile(dir, leafName string) bool {
 	_ = unix.Unlinkat(dirfd, leafName, 0)
 	_ = unix.Unlinkat(dirfd, lockName, 0)
 	_ = unix.Unlinkat(dirfd, leafName+".basehash", 0)
+
 	return true
 }
