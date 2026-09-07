@@ -42,7 +42,9 @@ func (p *planPublication) Run(ctx context.Context, args map[string]any) tools.Re
 	}
 	content := formatPlanFile(result.PlanSnapshot)
 	err := p.baselineErr
+	stage := "read"
 	if err == nil && p.sessionID != "" {
+		stage = "write"
 		_, err = planmode.WritePlanIfUnchanged(ctx, p.workspace, p.sessionID, content, p.baseline)
 	}
 	p.updated = true
@@ -57,7 +59,7 @@ func (p *planPublication) Run(ctx context.Context, args map[string]any) tools.Re
 				p.baseline, p.baselineErr = current, nil
 			}
 		}
-		return tools.Result{Status: tools.StatusError, Output: "plan file write error: " + err.Error() + "; update not accepted"}
+		return tools.Result{Status: tools.StatusError, Output: "plan file " + stage + " error: " + err.Error() + "; update not accepted"}
 	}
 	p.accepted = append([]tools.PlanItem{}, result.PlanSnapshot...)
 	p.baseline = content
