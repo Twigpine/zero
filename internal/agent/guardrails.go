@@ -262,9 +262,43 @@ func stripQuoted(s string) string {
 // bullets are separate claims); the exact boundaries only need to keep an
 // admission next to its own narrative/negation context, not be grammatical.
 func admissionSentences(lower string) []string {
+	lower = attachCountedHeadingEntries(lower)
 	return strings.FieldsFunc(lower, func(r rune) bool {
 		return r == '.' || r == '!' || r == '?' || r == '\n'
 	})
+}
+
+// attachCountedHeadingEntries keeps a counted markdown heading and its
+// immediately following bullet in one classification unit. Markdown authors
+// commonly put the label and entry on separate lines; treating the newline as
+// a claim boundary discarded the operation named by the heading.
+func attachCountedHeadingEntries(text string) string {
+	lines := strings.Split(text, "\n")
+	joined := make([]string, 0, len(lines))
+	for index := 0; index < len(lines); index++ {
+		line := lines[index]
+		trimmed := strings.TrimLeft(strings.TrimSpace(line), "-*#> \t")
+		if !countedLabelHeading.MatchString(trimmed) || index+1 >= len(lines) {
+			joined = append(joined, line)
+			continue
+		}
+		firstEntry := index + 1
+		if !strings.HasPrefix(strings.TrimSpace(lines[firstEntry]), "- ") {
+			joined = append(joined, line)
+			continue
+		}
+		for index+1 < len(lines) {
+			entry := strings.TrimSpace(lines[index+1])
+			if !strings.HasPrefix(entry, "- ") {
+				break
+			}
+			// Repeat the heading for every entry so a benign first bullet cannot
+			// detach a later blocked result from the operation it describes.
+			joined = append(joined, line+" "+entry)
+			index++
+		}
+	}
+	return strings.Join(joined, "\n")
 }
 
 // selfReportedIncompletion returns a short reason when the model's final text
@@ -592,43 +626,107 @@ func fallbackCompletesObligation(name string, terms []string, fallback string) b
 // obligation attached to the operation. A smoke test is not a substitute for a
 // full suite, and checking one file is not a substitute for checking all files.
 func fallbackCoversRequiredScope(failed, fallback string) bool {
-	if requiredBreadth(failed) && !requiredBreadth(fallback) {
+	failedSpec := parseObligationSpec(failed)
+	fallbackSpec := parseObligationSpec(fallback)
+	if failedSpec.requiresBreadth && !fallbackSpec.requiresBreadth {
 		return false
 	}
-	for _, target := range materialOperationTargets(failed) {
-		if !containsWord(materialOperationTargets(fallback), target) {
+	for _, target := range failedSpec.targets {
+		if !containsWord(fallbackSpec.targets, target) {
 			return false
 		}
 	}
-	failedComponents := materialObligationComponents(failed)
-	fallbackComponents := materialObligationComponents(fallback)
+	for _, kind := range failedSpec.validationKinds {
+		if !containsWord(fallbackSpec.validationKinds, kind) {
+			return false
+		}
+	}
 	// A singular pronoun may carry one already-named object across the fallback
 	// clause ("deploy the release ... deployed it"). It cannot stand in for a
 	// coordinated set such as unit and integration tests.
-	pronounCarriesObject := len(failedComponents) == 1 && containsAlternativeTerm(fallback, []string{"it"})
-	for _, component := range failedComponents {
-		if !pronounCarriesObject && !containsWord(fallbackComponents, component) {
+	pronounCarriesObject := len(failedSpec.components) == 1 && containsAlternativeTerm(fallback, []string{"it"})
+	for _, component := range failedSpec.components {
+		if !pronounCarriesObject && !containsWord(fallbackSpec.components, component) {
 			return false
 		}
 	}
 	return true
 }
 
+type obligationSpec struct {
+	requiresBreadth bool
+	targets         []string
+	components      []string
+	validationKinds []string
+}
+
+// parseObligationSpec retains the dimensions that decide whether substitute
+// work is genuinely equivalent. In particular, a breadth bit cannot preserve
+// the validation kind by itself: a full smoke test is still not a full suite.
+func parseObligationSpec(text string) obligationSpec {
+	return obligationSpec{
+		requiresBreadth: requiredBreadth(text),
+		targets:         materialOperationTargets(text),
+		components:      materialObligationComponents(text),
+		validationKinds: materialValidationKinds(text),
+	}
+}
+
+func materialValidationKinds(text string) []string {
+	if !containsAlternativeTerm(text, []string{"test", "tests", "testing", "verify", "verification", "validate", "validation"}) {
+		return nil
+	}
+	kinds := []string{}
+	for _, word := range obligationWords(text) {
+		word = normalizeObligationWord(word)
+		switch word {
+		case "suite", "smoke", "unit", "integration", "package", "acceptance", "regression", "e2e", "end-to-end":
+			if !containsWord(kinds, word) {
+				kinds = append(kinds, word)
+			}
+		}
+	}
+	return kinds
+}
+
 var nonAffirmativeFallbackPattern = regexp.MustCompile(`\b(?:never|unsuccessfully|partial|partially|attempted|trying|tried|failed|crashed|errored|aborted|rejected)\b`)
+var negatedFallbackPredicatePattern = regexp.MustCompile(`\b(?:did|does|do|was|were|is|are|has|have|had)\s+not\b`)
+var affirmativeFallbackActionPattern = regexp.MustCompile(`\b(?:i|we)\s+(?:(?:have|had)\s+)?(?:(?:manually|directly|successfully)\s+){0,2}(?:ran|executed|performed|completed|did|planned|recorded|formatted|checked|verified|validated|reviewed|audited|inspected|analysed|analyzed|read|wrote|listed|provided|edited|changed|patched|modified|applied|documented|reported|summarised|summarized|migrated|tested|deployed|published|released)\b`)
+var affirmativeOutcomePattern = regexp.MustCompile(`\b(?:it|that|this|the\s+[[:alnum:]_-]+)\s+(?:succeeded|completed\s+successfully|was\s+successful)\b`)
 
 // fallbackOutcomeIsAffirmative is the single result-polarity gate for every
 // specific-action and pronoun path. Seeing a past-tense operation word is not
 // completion evidence when the same bounded fallback says it was negated,
-// partial, attempted-only, unsuccessful, or failed afterwards.
+// partial, attempted-only, unsuccessful, or failed afterwards. The positive
+// action pattern is the primary gate: absence of a known failure word is never
+// enough to manufacture success.
 func fallbackOutcomeIsAffirmative(fallback string) bool {
+	if !affirmativeFallbackActionPattern.MatchString(fallback) {
+		return false
+	}
 	if containsAny(fallback, []string{
 		"i did not", "i didn't", "i have not", "i haven't", "i could not", "i couldn't",
 		"i failed to", "i was unable to", "i wasn't able to", "i was not able to",
 	}) {
 		return false
 	}
-	return !nonAffirmativeFallbackPattern.MatchString(fallback) &&
+	return !fallbackHasUnprovenAdversativeOutcome(fallback) &&
+		!negatedFallbackPredicatePattern.MatchString(fallback) &&
+		!nonAffirmativeFallbackPattern.MatchString(fallback) &&
 		!containsFailureConsequence(fallback)
+}
+
+// fallbackHasUnprovenAdversativeOutcome treats a qualification of the claimed
+// substitute as unresolved unless that qualification itself affirms success.
+// This is intentionally structural: a new failure synonym after "but" cannot
+// become completion evidence just because it is absent from a deny-list.
+func fallbackHasUnprovenAdversativeOutcome(fallback string) bool {
+	for _, boundary := range []string{" but ", "; but ", ", but ", " however ", " although ", " yet "} {
+		if at := strings.Index(fallback, boundary); at >= 0 {
+			return !affirmativeOutcomePattern.MatchString(fallback[at+len(boundary):])
+		}
+	}
+	return false
 }
 
 func requiredBreadth(text string) bool {
@@ -657,7 +755,7 @@ func materialObligationComponents(text string) []string {
 		"because", "since", "due", "owing", "as", "so", "but", "then",
 		"no", "tool", "tools", "toolset", "available", "unavailable",
 		"manually", "directly", "instead", "by", "hand", "successfully",
-		"all", "every", "entire", "whole", "full", "complete", "only", "suite",
+		"all", "every", "entire", "whole", "full", "complete", "only",
 		"run", "ran", "execute", "executed", "perform", "performed", "check", "checked", "did", "do", "done",
 		"apply", "applied", "write", "wrote", "written", "edit", "edited", "change", "changed", "patch", "patched", "modify", "modified",
 		"plan", "planned", "record", "recorded", "format", "formatted", "formatting", "formatter", "style", "lint", "gofmt",
@@ -887,16 +985,30 @@ var subjectElidedInabilityStems = []string{
 // negative observation can still earn its own exemption.
 func hasUnexemptedSubjectElidedInability(sentence string, after int) bool {
 	for _, connector := range []string{" and ", " but ", " so ", " then ", " yet "} {
-		for _, stem := range subjectElidedInabilityStems {
-			needle := connector + stem
-			if rel := strings.Index(sentence[after:], needle); rel >= 0 {
-				remainder := strings.TrimSpace(sentence[after+rel+len(connector):])
+		searchFrom := after
+		for searchFrom < len(sentence) {
+			rel := strings.Index(sentence[searchFrom:], connector)
+			if rel < 0 {
+				break
+			}
+			remainder := strings.TrimSpace(sentence[searchFrom+rel+len(connector):])
+			for _, modifier := range []string{"therefore ", "then ", "still ", "also ", "ultimately ", "however ", "nevertheless "} {
+				if strings.HasPrefix(remainder, modifier) {
+					remainder = strings.TrimSpace(remainder[len(modifier):])
+					break
+				}
+			}
+			for _, stem := range subjectElidedInabilityStems {
+				if !strings.HasPrefix(remainder, stem) {
+					continue
+				}
 				synthetic := "i " + remainder
 				claim := newInabilityClaim(synthetic, synthetic, "i "+stem, 0)
 				if !claim.exempt() {
 					return true
 				}
 			}
+			searchFrom += rel + len(connector)
 		}
 	}
 	return false
@@ -952,11 +1064,6 @@ func capabilityQualifierOnly(text string) bool {
 	return true
 }
 
-var completedObjectiveMarkers = []string{
-	"task is complete", "task is now complete", "objective is complete", "objective is met",
-	"assignment is complete", "completed the analysis as requested", "here is what was asked for",
-}
-
 var harmlessGrantLimitedActions = []string{
 	"record a plan", "record the plan", "update the plan", "call update_plan", "use update_plan",
 }
@@ -974,7 +1081,7 @@ func harmlessToolLimitation(sentence string, stemAt, stemLen int) bool {
 			return true
 		}
 	}
-	return containsAny(sentence[stemAt+stemLen:], completedObjectiveMarkers)
+	return false
 }
 
 // objectiveFailureMarkers name the OBJECTIVE rather than a capability. A
@@ -1252,10 +1359,14 @@ var unambiguousFailureStates = []string{
 
 var passiveMissedWorkPattern = regexp.MustCompile(`\b(?:was|were)\s+(?:not|never)\s+(?:applied|built|changed|deployed|edited|inspected|migrated|modified|published|read|reviewed|tested|validated|verified|written)\b`)
 var activeMissedWorkPattern = regexp.MustCompile(`\b(?:did\s+not|didn't)\s+(?:apply|build|change|deploy|edit|inspect|migrate|modify|publish|read|review|run|test|validate|verify|write)\b`)
+var assertedIncompleteOutcomePattern = regexp.MustCompile(`\b(?:the\s+)?(?:task|work|fix|change|patch|migration|deployment|release)\s+(?:(?:is|was)\s+not\s+(?:done|complete|completed|applied)|(?:isn't|wasn't)\s+(?:done|complete|completed|applied)|(?:has|have|had)\s+not\s+been\s+(?:done|completed|applied))\b`)
+var madeNoChangePattern = regexp.MustCompile(`\b(?:i|we)\s+(?:made|make)\s+no\s+(?:change|changes)\b`)
+var readOnlyNoChangePattern = regexp.MustCompile(`\b(?:i|we)\s+(?:(?:did\s+not|didn't)\s+(?:change|edit|modify|write)|(?:made|make)\s+no\s+(?:change|changes))\b`)
 
 func containsUnambiguousFailureState(text string) bool {
 	return containsAny(text, unambiguousFailureStates) ||
-		passiveMissedWorkPattern.MatchString(text) || activeMissedWorkPattern.MatchString(text)
+		passiveMissedWorkPattern.MatchString(text) || activeMissedWorkPattern.MatchString(text) ||
+		assertedIncompleteOutcomePattern.MatchString(text) || madeNoChangePattern.MatchString(text)
 }
 
 // consequenceBoundaries separate what was looked for from what followed.
@@ -1326,7 +1437,7 @@ func hasReportedFailureConsequence(sentence, blockedContext string, stemEnd int)
 	return containsFailureConsequence(next)
 }
 
-var explicitFailureConsequencePattern = regexp.MustCompile(`\b(?:it|that|this|the\s+[[:alnum:]_-]+)?\s*(?:failed|did\s+not\s+work|didn't\s+work)\b`)
+var explicitFailureConsequencePattern = regexp.MustCompile(`\b(?:it|that|this|the\s+[[:alnum:]_-]+)\s+(?:failed|did\s+not\s+work|didn't\s+work)\b`)
 
 func containsFailureConsequence(text string) bool {
 	return containsUnambiguousFailureState(text) || explicitFailureConsequencePattern.MatchString(text)
@@ -1493,12 +1604,28 @@ var boundedLocationObservationPattern = regexp.MustCompile(`^(?:find|found|locat
 // bounded search/reproduction proposition. A mere verb shape such as
 // "produce any" cannot exempt an unrecognized deliverable.
 func successfulNegativeObservation(tail string) (matched, strong bool) {
-	if strongAbsence(tail) {
+	if strongAbsence(tail) || singularRecognizedAbsence(tail) {
 		return true, true
 	}
 	return hasAnyPrefix(tail, boundedNegativeObservationTails) ||
 		boundedNegativeObservationPattern.MatchString(tail) ||
 		boundedLocationObservationPattern.MatchString(tail), false
+}
+
+// singularRecognizedAbsence is the article form of a strong negative finding:
+// "find a bug" reports the absence of a recognized problem object, while
+// unknown deliverables such as "find a solution" remain admissions.
+func singularRecognizedAbsence(tail string) bool {
+	for _, prefix := range []string{"find a ", "find an ", "found a ", "found an ", "locate a ", "locate an ", "identify a ", "identify an ", "detect a ", "detect an "} {
+		if !strings.HasPrefix(tail, prefix) {
+			continue
+		}
+		word, _, ok := cutFirstWord(strings.TrimSpace(tail[len(prefix):]))
+		if ok && containsWord(strongAbsenceObjects, word) {
+			return true
+		}
+	}
+	return false
 }
 
 // exempt reports whether this particular inability is proven harmless. Direct
@@ -1547,10 +1674,38 @@ func strongAbsenceHasBlockedOutcome(claim inabilityClaim) bool {
 	// The regex-backed passive/active forms are part of the same unambiguous
 	// state contract. Apply them only when no negated `that ...` proposition can
 	// own the wording; reportedConsequence handles asserted text beyond one.
-	if thatAt < 0 && (passiveMissedWorkPattern.MatchString(tail) || activeMissedWorkPattern.MatchString(tail)) {
+	if thatAt < 0 && passiveMissedWorkPattern.MatchString(tail) {
 		return true
 	}
-	return hasReportedFailureConsequence(claim.sentence, claim.blockedContext, claim.stemAt+claim.stemLen)
+	if thatAt < 0 && activeMissedWorkPattern.MatchString(tail) && !readOnlyNoChangePattern.MatchString(tail) {
+		return true
+	}
+	consequence := reportedConsequence(claim.sentence, claim.stemAt+claim.stemLen)
+	if containsFailureConsequence(consequence) {
+		if !readOnlyNoChangeOnly(consequence) {
+			return true
+		}
+	}
+	if len(claim.blockedContext) <= len(claim.sentence) {
+		return false
+	}
+	next := strings.TrimSpace(claim.blockedContext[len(claim.sentence):])
+	// A negative audit finding followed by a read-only no-change report is a
+	// coherent success. The same wording after a failed mutating objective is
+	// still caught by the ordinary bounded-observation path.
+	if readOnlyNoChangeOnly(next) {
+		return false
+	}
+	return containsFailureConsequence(next)
+}
+
+func readOnlyNoChangeOnly(text string) bool {
+	return (activeMissedWorkPattern.MatchString(text) || madeNoChangePattern.MatchString(text)) &&
+		readOnlyNoChangePattern.MatchString(text) &&
+		!containsAny(text, unambiguousFailureStates) &&
+		!passiveMissedWorkPattern.MatchString(text) &&
+		!assertedIncompleteOutcomePattern.MatchString(text) &&
+		!explicitFailureConsequencePattern.MatchString(text)
 }
 
 func selfReportedIncompletion(text string) string {
