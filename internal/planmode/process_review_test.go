@@ -3,6 +3,8 @@ package planmode
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -172,6 +174,23 @@ func TestEditorProcessesShareDurableAcceptanceLock(t *testing.T) {
 	}
 	if accepted != 1 {
 		t.Fatalf("accepted %d competing editors from one baseline, want 1", accepted)
+	}
+}
+
+func TestPlanPublicationCancelsWhileLockIsHeld(t *testing.T) {
+	isolatePlanStorage(t)
+	workspace := t.TempDir()
+	if _, err := WritePlan(workspace, "session", "original"); err != nil {
+		t.Fatal(err)
+	}
+	holdPlanWriterLock(t, workspace)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := WritePlanIfUnchanged(ctx, workspace, "session", "cancelled", "original"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("blocked publication returned %v, want context deadline exceeded", err)
+	}
+	if got, _, err := ReadPlan(workspace, "session"); err != nil || got != "original\n" {
+		t.Fatalf("durable plan = %q, %v", got, err)
 	}
 }
 

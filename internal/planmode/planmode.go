@@ -97,7 +97,10 @@ func ReadPlan(workspaceRoot, sessionID string) (string, bool, error) {
 	return string(data), true, nil
 }
 
-func lockPlan(base, path string) (*lockutil.FileLock, error) {
+func lockPlan(ctx context.Context, base, path string) (*lockutil.FileLock, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		return nil, err
 	}
@@ -110,11 +113,20 @@ func lockPlan(base, path string) (*lockutil.FileLock, error) {
 	lockPath := filepath.Join(base, filepath.Base(filepath.Dir(path))+"-"+filepath.Base(path)+".lock")
 	deadline := time.Now().Add(5 * time.Second)
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		lock, err := lockutil.TryAcquireFileLockAt(filepath.Dir(base), lockPath)
 		if !errors.Is(err, lockutil.ErrLockHeld) || time.Now().After(deadline) {
 			return lock, err
 		}
-		time.Sleep(10 * time.Millisecond)
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
 	}
 }
 
@@ -149,7 +161,7 @@ func writePlan(ctx context.Context, workspaceRoot, sessionID, content string, ba
 	if err != nil {
 		return "", err
 	}
-	lock, err := lockPlan(base, path)
+	lock, err := lockPlan(ctx, base, path)
 	if err != nil {
 		return "", err
 	}
@@ -443,7 +455,7 @@ func CommitStagedEditResult(workspaceRoot, sessionID, stagedPath string) (result
 	if err != nil || len(decoded) != sha256.Size {
 		return result, fmt.Errorf("invalid editor baseline")
 	}
-	lock, err := lockPlan(base, path)
+	lock, err := lockPlan(context.Background(), base, path)
 	if err != nil {
 		return result, err
 	}
