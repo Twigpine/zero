@@ -153,6 +153,13 @@ func TestPlanPublicationFailureKeepsConsumersAligned(t *testing.T) {
 					for _, message := range request.Messages {
 						if message.ToolCallID == "plan" && message.IsError {
 							rejected = true
+							stage := "write"
+							if failure == "initial-read" || failure == "unreadable" {
+								stage = "read"
+							}
+							if !strings.HasPrefix(message.Content, "plan file "+stage+" error:") {
+								t.Errorf("publication failure reported the wrong operation: %q, want %s error", message.Content, stage)
+							}
 						}
 					}
 				}
