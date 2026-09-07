@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -218,7 +219,8 @@ func (m model) openPlanInEditor() (tea.Model, tea.Cmd) {
 		// rather than leaving it blank: once the file exists, planText prefers
 		// it over the draft, so starting empty would shadow real plan content
 		// the agent already captured.
-		if _, err := planmode.WritePlan(m.cwd, m.activeSession.SessionID, m.formatPlanDraft()); err != nil {
+		content := formatPlanFile(parsePlanFileLines(m.formatPlanDraft()))
+		if _, err := planmode.WritePlan(m.cwd, m.activeSession.SessionID, content); err != nil {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "plan write error: " + err.Error()})
 			return m, nil
 		}
@@ -234,7 +236,7 @@ func (m model) openPlanInEditor() (tea.Model, tea.Cmd) {
 	// The editor is launched on a staged copy outside the workspace, not on
 	// path directly: see planmode.StageForEditor for why handing $EDITOR a
 	// workspace-relative path would leave a symlink-swap containment race.
-	stagedPath, finish, err := planmode.StageEditor(m.cwd, m.activeSession.SessionID)
+	stagedPath, finish, err := stagePlanForEditor(m.ctx, m.cwd, m.activeSession.SessionID)
 	if err != nil {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "plan stage error: " + err.Error()})
 		return m, nil
@@ -261,6 +263,33 @@ func (m model) openPlanInEditor() (tea.Model, tea.Cmd) {
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return finishPlanEditor(workspaceRoot, sessionID, stagedPath, finish, err)
 	})
+}
+
+func stagePlanForEditor(ctx context.Context, workspace, sessionID string) (string, func(bool), error) {
+	content, _, err := planmode.ReadPlan(workspace, sessionID)
+	if err != nil {
+		return "", nil, err
+	}
+	// Convert before staging so unchanged editor bytes remain a no-op. The
+	// baseline comparison protects a competing writer's accepted plan.
+	if _, current := planFileBody(content); !current {
+		if _, err := planmode.WritePlanIfUnchanged(ctx, workspace, sessionID, formatPlanFile(parsePlanFileLines(content)), content); err != nil {
+			return "", nil, fmt.Errorf("convert plan format: %w", err)
+		}
+	}
+	path, finish, err := planmode.StageEditor(workspace, sessionID)
+	if err != nil {
+		return "", nil, err
+	}
+	staged, err := os.ReadFile(path)
+	if _, current := planFileBody(string(staged)); err != nil || !current {
+		finish(false)
+		if err != nil {
+			return "", nil, fmt.Errorf("read staged plan: %w", err)
+		}
+		return "", nil, fmt.Errorf("plan format changed concurrently; reopen the editor")
+	}
+	return path, finish, nil
 }
 
 // planEditorFinishedMsg reports a failed $VISUAL/$EDITOR run launched by
@@ -383,15 +412,15 @@ func (m model) reloadPlanFromFile() ([]tools.PlanItem, bool, error) {
 // "   ") always folds into the current item, even when its text happens to
 // look like a numbered step ("2. validate") — deciding by content first
 // would shatter such a continuation into a bogus new pending step. Within an
-// item, the first indented "Notes: ..." line switches from Content to Notes;
-// an indented continuation whose text itself begins with "Notes:" (or a
-// backslash) is escaped by formatPlanItems with a leading backslash, which
-// this parser strips, so real content is distinguishable from the notes
-// delimiter. A whitespace-only indented line is a preserved blank
+// item, the first indented "Notes: ..." line switches from Content to Notes.
+// Versioned files preserve backslashes literally and use "| " to quote a
+// structural continuation; unversioned files retain legacy backslash decoding.
+// A whitespace-only indented line is a preserved blank
 // continuation line; a fully blank line is a separator and is dropped. A
 // non-numbered line with NO leading indentation is a freeform new step (e.g.
 // one the user typed without bothering to number or indent it).
 func parsePlanFileLines(content string) []tools.PlanItem {
+	content, literalContinuations := planFileBody(content)
 	items := make([]tools.PlanItem, 0)
 	inNotes := false
 	for _, raw := range strings.Split(content, "\n") {
@@ -429,14 +458,20 @@ func parsePlanFileLines(content string) []tools.PlanItem {
 		}
 
 		last := &items[len(items)-1]
-		if !inNotes {
+		var line string
+		var quoted bool
+		if literalContinuations {
+			line, quoted = strings.CutPrefix(lineBody, "| ")
+		} else {
+			line = unescapePlanContinuation(lineBody)
+		}
+		if !inNotes && !quoted {
 			if notes, ok := strings.CutPrefix(strings.TrimSpace(lineBody), "Notes:"); ok {
 				last.Notes = strings.TrimSpace(notes)
 				inNotes = true
 				continue
 			}
 		}
-		line := unescapePlanContinuation(lineBody)
 		if inNotes {
 			if last.Notes == "" {
 				last.Notes = line
@@ -487,10 +522,13 @@ func (m model) planText() string {
 	path, pathErr := planmode.PlanFilePath(m.cwd, m.activeSession.SessionID)
 	content, exists, readErr := planmode.ReadPlan(m.cwd, m.activeSession.SessionID)
 	if readErr != nil {
-		// A real I/O/permission failure, not just a not-yet-created file:
-		// surface it instead of silently falling back to the in-memory draft,
-		// which would hide the failure entirely.
-		return "plan file read error: " + readErr.Error()
+		// Keep the accepted session snapshot visible without presenting it as
+		// a successful durable read.
+		text := "plan file read error: " + readErr.Error()
+		if accepted := m.formatPlanDraft(); accepted != "" {
+			text += "\nLast accepted plan in this session:\n" + accepted
+		}
+		return text
 	}
 
 	modeLabel := "inactive"
@@ -535,18 +573,47 @@ func (m model) formatPlanDraft() string {
 }
 
 // formatPlanItems renders update_plan items as plain text, or "" if there are
-// none. Shared by formatPlanDraft (in-memory fallback for display) and the
-// OnToolResult hook in model.go that persists every update_plan call to disk.
+// none. This is the display/legacy representation; formatPlanFile writes the
+// explicitly versioned representation used for durable storage and editing.
 //
 // A multi-line Content or Notes is rendered with each continuation line
 // indented ("   "), matching what parsePlanFileLines expects: it is the
 // indentation, not just the "Notes:" marker, that tells a reload apart a
 // continuation of the current item from a freeform new step.
 func formatPlanItems(items []tools.PlanItem) string {
+	return formatPlanItemsVersion(items, false)
+}
+
+// The marker makes legacy backslash escapes distinguishable from literal
+// editor text. V2 quotes structural continuation lines with "| " instead.
+const planFileFormatMarker = "<!-- zero-plan-format: 2 -->"
+
+func planFileBody(content string) (string, bool) {
+	first, rest, _ := strings.Cut(content, "\n")
+	if strings.TrimSuffix(first, "\r") == planFileFormatMarker {
+		return rest, true
+	}
+	return content, false
+}
+
+func formatPlanFile(items []tools.PlanItem) string {
+	return planFileFormatMarker + "\n" + formatPlanItemsVersion(items, true)
+}
+
+func formatPlanItemsVersion(items []tools.PlanItem, literalContinuations bool) string {
 	if len(items) == 0 {
 		return ""
 	}
 	lines := make([]string, 0, len(items))
+	escape := escapePlanContinuation
+	if literalContinuations {
+		escape = func(line string) string {
+			if strings.HasPrefix(line, "| ") || strings.HasPrefix(strings.TrimSpace(line), "Notes:") {
+				return "| " + line
+			}
+			return line
+		}
+	}
 	for index, item := range items {
 		contentLines := strings.Split(item.Content, "\n")
 		line := fmt.Sprintf("%d. [%s] %s", index+1, item.Status, contentLines[0])
@@ -554,13 +621,13 @@ func formatPlanItems(items []tools.PlanItem) string {
 		// to parsePlanFileLines, even when the text looks like "2. validate")
 		// and escaped where their literal text would read as structure.
 		for _, cont := range contentLines[1:] {
-			line += "\n   " + escapePlanContinuation(cont)
+			line += "\n   " + escape(cont)
 		}
 		if item.Notes != "" {
 			noteLines := strings.Split(item.Notes, "\n")
 			line += "\n   Notes: " + noteLines[0]
 			for _, cont := range noteLines[1:] {
-				line += "\n   " + escapePlanContinuation(cont)
+				line += "\n   " + escape(cont)
 			}
 		}
 		lines = append(lines, line)

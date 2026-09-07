@@ -345,6 +345,27 @@ func (m model) routeBTWParentMessage(msg tea.Msg) (model, tea.Cmd, bool) {
 }
 
 func (m model) routeBTWMessageToParent(msg tea.Msg) (model, tea.Cmd, bool) {
+	// Parent publication updates its captured accepted plan, never the shared
+	// tool currently serving the side conversation. Reject stale snapshots
+	// with the same run-ID check as the parent's panel.
+	var update *planUpdateMsg
+	switch typed := msg.(type) {
+	case planUpdateMsg:
+		typed.syncTool = false
+		update = &typed
+		msg = typed
+	case agentResponseMsg:
+		if typed.planUpdate != nil {
+			copy := *typed.planUpdate
+			copy.syncTool = false
+			typed.planUpdate = &copy
+			update = &copy
+			msg = typed
+		}
+	}
+	if update != nil && update.runID == m.btw.parent.activeRunID {
+		m.btw.parentPlanItems = append([]tools.PlanItem{}, update.items...)
+	}
 	parentNext, cmd := m.btw.parent.updateModel(msg)
 	parent, ok := parentNext.(model)
 	if !ok {
@@ -352,9 +373,7 @@ func (m model) routeBTWMessageToParent(msg tea.Msg) (model, tea.Cmd, bool) {
 	}
 	parent.btw = btwState{}
 	m.btw.parent = &parent
-	switch typed := msg.(type) {
-	case planUpdateMsg:
-		m.btw.parentPlanItems = append([]tools.PlanItem{}, typed.items...)
+	switch msg.(type) {
 	case permissionRequestMsg, askUserRequestMsg:
 		if !m.btw.parentNeedsInput {
 			m.btw.parentNeedsInput = true
