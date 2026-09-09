@@ -207,6 +207,13 @@ Flags:
       --timeout <duration>    Release check timeout (default 5s)
       --target <platform>     Release target to verify with --check (for example windows-x64); not valid with --apply
   -h, --help                  Show this help
+
+Environment:
+  ZERO_GITHUB_TOKEN     Token for update checks (takes precedence over GITHUB_TOKEN)
+                        Only sent to https://api.github.com over HTTPS; never sent to custom endpoints
+                        or on redirect to plain HTTP
+  GITHUB_TOKEN          Fallback token for update checks
+  ZERO_UPDATE_RELEASE_URL  Override the release API URL (same as --endpoint)
 `)
 	return err
 }
