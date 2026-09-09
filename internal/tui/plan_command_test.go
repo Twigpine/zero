@@ -1262,3 +1262,26 @@ func TestSplitEditorCommandPreservesWindowsPrefixes(t *testing.T) {
 		})
 	}
 }
+
+func TestPlanSnapshotFromResultDistinguishesEmptyFromAbsent(t *testing.T) {
+	// An intentionally empty plan (plan: []) sets PlanSnapshot to a non-nil
+	// empty slice. planSnapshotFromResult must return ok=true so the caller
+	// persists the cleared plan.
+	items, ok := planSnapshotFromResult(agent.ToolResult{
+		PlanSnapshot: []tools.PlanItem{},
+	})
+	if !ok {
+		t.Fatal("empty PlanSnapshot must return ok=true, not be treated as absent")
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected 0 items for empty plan, got %d", len(items))
+	}
+
+	// An absent snapshot (nil) must return ok=false.
+	_, ok = planSnapshotFromResult(agent.ToolResult{
+		PlanSnapshot: nil,
+	})
+	if ok {
+		t.Fatal("nil PlanSnapshot must return ok=false")
+	}
+}

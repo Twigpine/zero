@@ -637,9 +637,10 @@ func formatPlanItemsVersion(items []tools.PlanItem, literalContinuations bool) s
 
 // planSnapshotFromResult extracts the immutable plan items a successful update_plan
 // call carried in its typed PlanSnapshot field. ok=false when the snapshot is
-// absent or empty — the caller then skips panel/file updates rather than re-reading
-// the shared tool, whose state may already belong to another session by the time
-// the result callback runs.
+// absent (nil) — an intentionally empty plan (plan: []) returns ok=true with an
+// empty slice so the caller can persist the cleared plan. The caller skips
+// panel/file updates only for nil, whose state may already belong to another
+// session by the time the result callback runs.
 func planSnapshotFromResult(result agent.ToolResult) ([]tools.PlanItem, bool) {
 	if result.PlanSnapshot != nil {
 		return append([]tools.PlanItem{}, result.PlanSnapshot...), true
