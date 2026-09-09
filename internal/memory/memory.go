@@ -250,14 +250,6 @@ func (paths Paths) openScope(scope Scope) (*os.Root, string, error) {
 	return handle, relative, nil
 }
 
-// refuseReparseChain refuses a link or reparse point at every component of
-// relative, outermost first.
-//
-// Built on pathjail.RefuseReparse rather than reimplementing the test, so the
-// Windows junction handling and the trailing-separator care stay in one place.
-// Outermost first because that is the component whose redirection decides where
-// everything below it lands, and it makes the error name the link the caller can
-// actually act on.
 // storedEntryName returns the spelling the store actually holds for a note, and
 // whether anything holds it at all.
 //
@@ -308,6 +300,14 @@ func presentOnDisk(root string, relative string) bool {
 	return err == nil
 }
 
+// refuseReparseChain refuses a link or reparse point at every component of
+// relative, outermost first.
+//
+// Built on pathjail.RefuseReparse rather than reimplementing the test, so the
+// Windows junction handling and the trailing-separator care stay in one place.
+// Outermost first because that is the component whose redirection decides where
+// everything below it lands, and it makes the error name the link the caller can
+// actually act on.
 func refuseReparseChain(handle *os.Root, root string, relative string) error {
 	relative = filepath.Clean(relative)
 	if relative == "." || relative == string(filepath.Separator) {
@@ -622,7 +622,7 @@ func keepLocalScopePrivate(handle *os.Root, scope Scope, relative, dir string) e
 	// ignore is accepted leaves the same leak reachable by deleting the ignore
 	// from the worktree: O_EXCL would then create a fresh one, report a clean
 	// first write, and overwrite the tracked note anyway.
-	if err := refuseTrackedLocalStore(dir); err != nil {
+	if err := refuseTrackedLocalStore(handle, relative, dir); err != nil {
 		return err
 	}
 	ignorePath := filepath.Join(relative, gitignoreName)
@@ -710,7 +710,7 @@ func ignoresEverything(content string) bool {
 // on the second. Looking for .git separates them without running anything. Only
 // once a repository is found does the INDEX get consulted, and only there does
 // an unanswerable question become a refusal.
-func refuseTrackedLocalStore(dir string) error {
+func refuseTrackedLocalStore(handle *os.Root, relative, dir string) error {
 	// The physical path, because that is the one git will see: os/exec chdirs
 	// into it, and git discovers the repository from the resulting getcwd. A
 	// lexical walk up a symlinked workspace looks at ancestors the child process
@@ -729,7 +729,7 @@ func refuseTrackedLocalStore(dir string) error {
 	// this function, and this function's contract is that an unanswerable
 	// privacy question is a refusal. A future caller that skips the earlier
 	// guards would otherwise inherit a silent fail-open.
-	resolved, err := filepath.EvalSymlinks(dir)
+	resolved, err := resolvePhysicalPath(handle, relative, dir)
 	if err != nil {
 		return fmt.Errorf("%w: cannot resolve %s to ask git about it: %v", ErrNotPrivate, dir, err)
 	}
