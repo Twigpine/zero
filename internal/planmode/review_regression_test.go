@@ -155,6 +155,9 @@ func TestStorageRejectsAllSandboxTempRoots(t *testing.T) {
 	workspace := filepath.Join(root, "workspace")
 	for _, configRoot := range []string{first, second} {
 		t.Run(filepath.Base(configRoot), func(t *testing.T) {
+			if runtime.GOOS != "windows" {
+				t.Setenv("TMPDIR", configRoot)
+			}
 			setUserConfigHomeEnv(t, configRoot)
 			if _, err := WritePlan(workspace, "session", "unsafe"); err == nil {
 				t.Fatal("durable storage accepted a sandbox-writable root")
