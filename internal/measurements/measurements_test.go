@@ -120,6 +120,19 @@ func TestTestStdoutCannotBecomeTimingEvidence(t *testing.T) {
 	}
 }
 
+func TestCachedPackageLookupTimeIsNotTimingEvidence(t *testing.T) {
+	const stream = "" +
+		`{"Action":"output","Package":"example/cached","Output":"ok  \texample/cached\t(cached)\n"}` + "\n" +
+		`{"Action":"pass","Package":"example/cached","Elapsed":0.017}` + "\n" +
+		`{"Action":"output","Package":"example/fresh","Output":"ok  \texample/fresh\t1.234s\n"}` + "\n" +
+		`{"Action":"pass","Package":"example/fresh","Elapsed":1.234}` + "\n"
+
+	got := ParseGoTest(stream)
+	if len(got) != 1 || got[0].Package != "example/fresh" || got[0].Seconds != 1.234 {
+		t.Fatalf("cached package lookup became timing evidence: %+v", got)
+	}
+}
+
 func TestSameNamedTestsKeepTheirPackageIdentity(t *testing.T) {
 	const stream = "" +
 		`{"Action":"pass","Package":"example/a","Test":"TestFoo","Elapsed":1}` + "\n" +
@@ -1439,6 +1452,22 @@ func TestAConjunctionSeparatedThresholdIsNotTheResult(t *testing.T) {
 	recordGoTest(ledger, Run{}, "--- PASS: TestQuick (0.86s)\n")
 	if conflicts := ledger.Conflicts(Run{}, "TestQuick completed in 9.00s"); len(conflicts) != 1 || conflicts[0].Claimed != 9 {
 		t.Fatalf("an unambiguous wrong result stopped being detected: %+v", conflicts)
+	}
+}
+
+func TestAStandaloneThresholdIsNotTheResult(t *testing.T) {
+	for _, claim := range []string{
+		"TestQuick stayed under the 10s timeout",
+		"TestQuick has a 10s budget",
+		"TestQuick must finish within 10s",
+		"TestQuick is limited to at most 10s",
+		"TestQuick's budget is 10s",
+	} {
+		ledger := NewLedger()
+		recordGoTest(ledger, Run{}, "--- PASS: TestQuick (0.86s)\n")
+		if conflicts := ledger.Conflicts(Run{}, claim); len(conflicts) != 0 {
+			t.Errorf("standalone threshold became a result: %q -> %+v", claim, conflicts)
+		}
 	}
 }
 

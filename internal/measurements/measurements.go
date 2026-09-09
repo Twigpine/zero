@@ -315,9 +315,10 @@ func nextDurationToken(text string, start int) (begin, end int, seconds float64,
 // Plain `go test -v` output is deliberately not accepted. The test process and
 // the Go runner share that text stream, so a test can print a line shaped like
 // `--- PASS: TestName (99.00s)` before the runner prints the real result. Under
-// -json, test stdout is wrapped in an "output" event; admitting only
-// pass/fail/skip events establishes which values the runner produced. Malformed
-// or ordinary-text lines are silence, not evidence.
+// -json, test stdout is wrapped in an "output" event; only pass/fail/skip events
+// contribute timings. The package-level `(cached)` output marker is used solely
+// to suppress cmd/go's cache-lookup Elapsed value. Malformed or ordinary-text
+// lines are silence, not evidence.
 func ParseGoTest(text string) []Measurement {
 	if strings.TrimSpace(text) == "" {
 		return nil
@@ -326,12 +327,22 @@ func ParseGoTest(text string) []Measurement {
 		Action  string   `json:"Action"`
 		Package string   `json:"Package"`
 		Test    string   `json:"Test"`
+		Output  string   `json:"Output"`
 		Elapsed *float64 `json:"Elapsed"`
 	}
+	cachedPackages := make(map[string]struct{})
 	var out []Measurement
 	for _, line := range strings.Split(text, "\n") {
 		var item event
-		if err := json.Unmarshal([]byte(line), &item); err != nil || item.Elapsed == nil {
+		if err := json.Unmarshal([]byte(line), &item); err != nil {
+			continue
+		}
+		item.Test = strings.TrimSpace(item.Test)
+		item.Package = strings.TrimSpace(item.Package)
+		if item.Action == "output" && item.Test == "" && cachedGoTestPackageOutput(item.Output, item.Package) {
+			cachedPackages[item.Package] = struct{}{}
+		}
+		if item.Elapsed == nil {
 			continue
 		}
 		switch item.Action {
@@ -339,10 +350,12 @@ func ParseGoTest(text string) []Measurement {
 		default:
 			continue
 		}
-		item.Test = strings.TrimSpace(item.Test)
-		item.Package = strings.TrimSpace(item.Package)
 		name := item.Test
 		if name == "" {
+			if _, cached := cachedPackages[item.Package]; cached {
+				delete(cachedPackages, item.Package)
+				continue
+			}
 			name = item.Package
 		}
 		if name == "" || math.IsNaN(*item.Elapsed) || math.IsInf(*item.Elapsed, 0) || *item.Elapsed < 0 {
@@ -351,6 +364,11 @@ func ParseGoTest(text string) []Measurement {
 		out = append(out, Measurement{Name: name, Package: item.Package, Test: item.Test, Seconds: *item.Elapsed})
 	}
 	return out
+}
+
+func cachedGoTestPackageOutput(output, packageName string) bool {
+	fields := strings.Fields(output)
+	return packageName != "" && len(fields) == 3 && fields[0] == "ok" && fields[1] == packageName && fields[2] == "(cached)"
 }
 
 // Ledger is every timing this run observed, and which conflicts it has already
@@ -663,6 +681,9 @@ func claimedSecondsAllFor(claim, name string, known map[string][]float64) []floa
 			if _, _, _, _, second := nextDurationToken(clause, firstDurationEnd(clause)); second {
 				continue
 			}
+			if durationHasThresholdContext(clause) {
+				continue
+			}
 			if value, ok := parseClaimedDuration(clause); ok {
 				values = append(values, value)
 			}
@@ -767,19 +788,36 @@ func durationHasThresholdContext(text string) bool {
 	}
 	before := words(text[:begin])
 	after := words(text[end:])
-	if len(after) > 0 {
-		switch after[0] {
+	isThresholdNoun := func(word string) bool {
+		switch word {
 		case "timeout", "deadline", "budget", "limit", "target", "threshold":
+			return true
+		default:
+			return false
+		}
+	}
+	if len(after) > 0 {
+		if isThresholdNoun(after[0]) {
 			return true
 		}
 	}
 	if len(before) > 0 {
+		if isThresholdNoun(before[len(before)-1]) {
+			return true
+		}
 		switch before[len(before)-1] {
 		case "under", "within", "below":
 			return true
 		}
 	}
-	return len(before) >= 2 && before[len(before)-2] == "at" && before[len(before)-1] == "most"
+	if len(before) < 2 {
+		return false
+	}
+	penultimate, last := before[len(before)-2], before[len(before)-1]
+	if penultimate == "at" && last == "most" {
+		return true
+	}
+	return isThresholdNoun(penultimate) && (last == "is" || last == "was" || last == "of")
 }
 
 // separatorBreaksClause reports whether the text after a separator names a new
