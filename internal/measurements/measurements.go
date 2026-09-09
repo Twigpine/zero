@@ -316,9 +316,10 @@ func nextDurationToken(text string, start int) (begin, end int, seconds float64,
 // the Go runner share that text stream, so a test can print a line shaped like
 // `--- PASS: TestName (99.00s)` before the runner prints the real result. Under
 // -json, test stdout is wrapped in an "output" event; only pass/fail/skip events
-// contribute timings. The package-level `(cached)` output marker is used solely
-// to suppress cmd/go's cache-lookup Elapsed value. Malformed or ordinary-text
-// lines are silence, not evidence.
+// contribute timings. A package-level `(cached)` output marker makes every
+// timing event for that package inadmissible: cmd/go replays per-test pass
+// events with zero elapsed before it announces the cache hit. Malformed or
+// ordinary-text lines are silence, not evidence.
 func ParseGoTest(text string) []Measurement {
 	if strings.TrimSpace(text) == "" {
 		return nil
@@ -352,10 +353,6 @@ func ParseGoTest(text string) []Measurement {
 		}
 		name := item.Test
 		if name == "" {
-			if _, cached := cachedPackages[item.Package]; cached {
-				delete(cachedPackages, item.Package)
-				continue
-			}
 			name = item.Package
 		}
 		if name == "" || math.IsNaN(*item.Elapsed) || math.IsInf(*item.Elapsed, 0) || *item.Elapsed < 0 {
@@ -363,12 +360,22 @@ func ParseGoTest(text string) []Measurement {
 		}
 		out = append(out, Measurement{Name: name, Package: item.Package, Test: item.Test, Seconds: *item.Elapsed})
 	}
-	return out
+	if len(cachedPackages) == 0 {
+		return out
+	}
+	kept := out[:0]
+	for _, measurement := range out {
+		if _, cached := cachedPackages[measurement.Package]; cached {
+			continue
+		}
+		kept = append(kept, measurement)
+	}
+	return kept
 }
 
 func cachedGoTestPackageOutput(output, packageName string) bool {
 	fields := strings.Fields(output)
-	return packageName != "" && len(fields) == 3 && fields[0] == "ok" && fields[1] == packageName && fields[2] == "(cached)"
+	return packageName != "" && len(fields) >= 3 && fields[0] == "ok" && fields[1] == packageName && fields[2] == "(cached)"
 }
 
 // Ledger is every timing this run observed, and which conflicts it has already
@@ -790,7 +797,7 @@ func durationHasThresholdContext(text string) bool {
 	after := words(text[end:])
 	isThresholdNoun := func(word string) bool {
 		switch word {
-		case "timeout", "deadline", "budget", "limit", "target", "threshold":
+		case "timeout", "deadline", "budget", "limit", "cap", "target", "threshold":
 			return true
 		default:
 			return false
@@ -1177,11 +1184,25 @@ func bareUnitFollowedByWord(text string, begin, end int) bool {
 	default:
 		return false
 	}
-	at := end
-	for at < len(text) && text[at] == ' ' {
-		at++
+	if end >= len(text) {
+		return false
 	}
-	if at == end || at >= len(text) {
+	at := end
+	switch text[at] {
+	case '-', '_', '.':
+		// A connector only forms a count when word material follows it
+		// immediately. In particular, a sentence-ending dot in "took 5m. The"
+		// must not make the duration ambiguous.
+		at++
+	default:
+		for at < len(text) && text[at] == ' ' {
+			at++
+		}
+		if at == end {
+			return false
+		}
+	}
+	if at >= len(text) {
 		return false
 	}
 	letter := text[at]

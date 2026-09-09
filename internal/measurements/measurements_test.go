@@ -120,16 +120,68 @@ func TestTestStdoutCannotBecomeTimingEvidence(t *testing.T) {
 	}
 }
 
-func TestCachedPackageLookupTimeIsNotTimingEvidence(t *testing.T) {
-	const stream = "" +
-		`{"Action":"output","Package":"example/cached","Output":"ok  \texample/cached\t(cached)\n"}` + "\n" +
-		`{"Action":"pass","Package":"example/cached","Elapsed":0.017}` + "\n" +
-		`{"Action":"output","Package":"example/fresh","Output":"ok  \texample/fresh\t1.234s\n"}` + "\n" +
-		`{"Action":"pass","Package":"example/fresh","Elapsed":1.234}` + "\n"
+func TestCachedPackageProducesNoTimingEvidence(t *testing.T) {
+	// These are reduced captures from two real cached commands run against
+	// internal/minify. Timestamps and unrelated test events are omitted; the
+	// event order and cmd/go output strings are preserved.
+	for _, tc := range []struct {
+		name   string
+		stream string
+	}{
+		{
+			name: "plain",
+			stream: "" +
+				`{"Action":"run","Package":"github.com/Gitlawb/zero/internal/minify","Test":"TestStripC"}` + "\n" +
+				`{"Action":"output","Package":"github.com/Gitlawb/zero/internal/minify","Test":"TestStripC","Output":"--- PASS: TestStripC (0.00s)\n"}` + "\n" +
+				`{"Action":"pass","Package":"github.com/Gitlawb/zero/internal/minify","Test":"TestStripC","Elapsed":0}` + "\n" +
+				`{"Action":"output","Package":"github.com/Gitlawb/zero/internal/minify","Output":"PASS\n"}` + "\n" +
+				`{"Action":"output","Package":"github.com/Gitlawb/zero/internal/minify","Output":"ok  \tgithub.com/Gitlawb/zero/internal/minify\t(cached)\n"}` + "\n" +
+				`{"Action":"pass","Package":"github.com/Gitlawb/zero/internal/minify","Elapsed":0}` + "\n",
+		},
+		{
+			name: "cover",
+			stream: "" +
+				`{"Action":"pass","Package":"github.com/Gitlawb/zero/internal/minify","Test":"TestStripC","Elapsed":0}` + "\n" +
+				`{"Action":"output","Package":"github.com/Gitlawb/zero/internal/minify","Output":"coverage: 79.0% of statements\n"}` + "\n" +
+				`{"Action":"output","Package":"github.com/Gitlawb/zero/internal/minify","Output":"ok  \tgithub.com/Gitlawb/zero/internal/minify\t(cached)\tcoverage: 79.0% of statements\n"}` + "\n" +
+				`{"Action":"pass","Package":"github.com/Gitlawb/zero/internal/minify","Elapsed":0}` + "\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ParseGoTest(tc.stream); len(got) != 0 {
+				t.Fatalf("cached package events became timing evidence: %+v", got)
+			}
+			ledger := NewLedger()
+			if n := ledger.Record(Run{}, tc.stream); n != 0 {
+				t.Fatalf("recorded %d cached timings, want none", n)
+			}
+			if conflicts := ledger.Conflicts(Run{}, "TestStripC took 0.86s"); len(conflicts) != 0 {
+				t.Fatalf("cache metadata caused a false conflict: %+v", conflicts)
+			}
+		})
+	}
 
-	got := ParseGoTest(stream)
-	if len(got) != 1 || got[0].Package != "example/fresh" || got[0].Seconds != 1.234 {
-		t.Fatalf("cached package lookup became timing evidence: %+v", got)
+	const fresh = "" +
+		`{"Action":"pass","Package":"github.com/Gitlawb/zero/internal/minify","Test":"TestStripC","Elapsed":0.86}` + "\n" +
+		`{"Action":"output","Package":"github.com/Gitlawb/zero/internal/minify","Output":"ok  \tgithub.com/Gitlawb/zero/internal/minify\t1.234s\n"}` + "\n" +
+		`{"Action":"pass","Package":"github.com/Gitlawb/zero/internal/minify","Elapsed":1.234}` + "\n"
+	ledger := NewLedger()
+	if n := ledger.Record(Run{}, fresh); n != 2 {
+		t.Fatalf("recorded %d fresh timings, want test and package", n)
+	}
+	if conflicts := ledger.Conflicts(Run{}, "TestStripC took 9s"); len(conflicts) != 1 || conflicts[0].Claimed != 9 {
+		t.Fatalf("fresh-run fabrication stopped being detected: %+v", conflicts)
+	}
+
+	const mixed = "" +
+		`{"Action":"pass","Package":"example/cached","Test":"TestCached","Elapsed":0}` + "\n" +
+		`{"Action":"output","Package":"example/cached","Output":"ok  \texample/cached\t(cached)\n"}` + "\n" +
+		`{"Action":"pass","Package":"example/cached","Elapsed":0}` + "\n" +
+		`{"Action":"pass","Package":"example/fresh","Test":"TestFresh","Elapsed":0.5}` + "\n" +
+		`{"Action":"pass","Package":"example/fresh","Elapsed":0.75}` + "\n"
+	got := ParseGoTest(mixed)
+	if len(got) != 2 || got[0].Package != "example/fresh" || got[1].Package != "example/fresh" {
+		t.Fatalf("cache suppression escaped its package: %+v", got)
 	}
 }
 
@@ -1233,6 +1285,9 @@ func TestANonDurationUnitIsNotReadAsMinutes(t *testing.T) {
 		"TestParseCorpus processed 5m tokens",
 		"TestParseCorpus scanned 12m records and passed",
 		"TestParseCorpus walked 5m lines",
+		"TestParseCorpus walked 5m-row corpus",
+		"TestParseCorpus walked 5m_rows",
+		"TestParseCorpus walked 5m.rows",
 	} {
 		ledger := NewLedger()
 		recordGoTest(ledger, Run{}, "--- PASS: TestParseCorpus (0.86s)\n")
@@ -1251,6 +1306,9 @@ func TestANonDurationUnitIsNotReadAsMinutes(t *testing.T) {
 	}{
 		{" handled 5m rows in 0.86s", 0, false},
 		{" 5m rows", 0, false},
+		{" walked 5m-row corpus", 0, false},
+		{" walked 5m_rows", 0, false},
+		{" walked 5m.rows", 0, false},
 		{" 9h of wall time", 0, false},
 		{" took 2m to finish", 0, false},
 		{" took 2m", 120, true},
@@ -1440,6 +1498,7 @@ func TestAConjunctionSeparatedThresholdIsNotTheResult(t *testing.T) {
 	for _, claim := range []string{
 		"TestQuick stayed under the 10s timeout and completed in 0.86s",
 		"TestQuick met the 10s budget and actually ran in 0.86s",
+		"TestQuick stayed under the 10s cap and completed in 0.86s",
 	} {
 		ledger := NewLedger()
 		recordGoTest(ledger, Run{}, "--- PASS: TestQuick (0.86s)\n")
@@ -1459,6 +1518,7 @@ func TestAStandaloneThresholdIsNotTheResult(t *testing.T) {
 	for _, claim := range []string{
 		"TestQuick stayed under the 10s timeout",
 		"TestQuick has a 10s budget",
+		"TestQuick has a 10s cap",
 		"TestQuick must finish within 10s",
 		"TestQuick is limited to at most 10s",
 		"TestQuick's budget is 10s",
