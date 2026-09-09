@@ -849,6 +849,8 @@ func TestTheRepositoryIsFoundThroughALinkedWorkspace(t *testing.T) {
 
 	if _, err := Write(paths, ScopeLocal, "private", "d", "machine-local secret"); !errors.Is(err, ErrNotPrivate) {
 		t.Fatalf("Write through a linked workspace = %v, want ErrNotPrivate", err)
+	} else if !strings.Contains(err.Error(), "tracks private.md") {
+		t.Fatalf("Write through a linked workspace stopped before consulting the repository index: %v", err)
 	}
 	if status := runStoreGit(t, repo, "status", "--porcelain"); status != "" {
 		t.Errorf("git status = %q, want empty", status)
