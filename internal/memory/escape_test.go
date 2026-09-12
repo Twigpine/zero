@@ -2,6 +2,7 @@ package memory
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -796,6 +797,67 @@ func TestALocalWriteOutsideAnyRepositoryNeedsNoGit(t *testing.T) {
 	}
 	if note.Body != "machine-local secret\n" {
 		t.Errorf("note body = %q, want %q", note.Body, "machine-local secret\n")
+	}
+}
+
+func TestALocalWriteBelowStrayGitMarkers(t *testing.T) {
+	for _, marker := range []string{"empty-directory", "invalid-file", "missing-gitdir"} {
+		for _, withoutGit := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/no-git=%t", marker, withoutGit), func(t *testing.T) {
+				parent := t.TempDir()
+				gitPath := filepath.Join(parent, ".git")
+				if marker == "empty-directory" {
+					if err := os.Mkdir(gitPath, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					content := "not a git directory reference\n"
+					if marker == "missing-gitdir" {
+						content = "gitdir: missing\n"
+					}
+					if err := os.WriteFile(gitPath, []byte(content), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if withoutGit {
+					t.Setenv("PATH", "")
+				}
+				paths := DefaultPaths(filepath.Join(parent, "workspace"))
+				if _, err := Write(paths, ScopeLocal, "private", "d", "local note"); err != nil {
+					t.Fatalf("Write below stray %s = %v, want success", marker, err)
+				}
+				note, err := Read(paths, ScopeLocal, "private")
+				if err != nil || note.Body != "local note\n" {
+					t.Fatalf("Read = %#v, %v", note, err)
+				}
+			})
+		}
+	}
+}
+
+func TestAStrayGitMarkerCannotHideAnEnclosingRepository(t *testing.T) {
+	root := t.TempDir()
+	seedStoreRepo(t, root)
+	workspace := filepath.Join(root, "workspace")
+	paths := DefaultPaths(workspace)
+	writeStoreFile(t, paths, "private.md", "already tracked\n")
+	runStoreGit(t, root, "add", "workspace/.zero/memory/local/private.md")
+	if err := os.Mkdir(filepath.Join(workspace, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Write(paths, ScopeLocal, "private", "d", "new secret"); !errors.Is(err, ErrNotPrivate) {
+		t.Fatalf("Write through stray marker inside real repository = %v, want ErrNotPrivate", err)
+	}
+}
+
+func TestACorruptRepositoryStillRefusesLocalWrites(t *testing.T) {
+	root := t.TempDir()
+	seedStoreRepo(t, root)
+	if err := os.WriteFile(filepath.Join(root, ".git", "HEAD"), []byte("corrupt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Write(DefaultPaths(root), ScopeLocal, "private", "d", "secret"); !errors.Is(err, ErrNotPrivate) {
+		t.Fatalf("Write inside damaged repository = %v, want ErrNotPrivate", err)
 	}
 }
 

@@ -702,14 +702,11 @@ func ignoresEverything(content string) bool {
 
 // refuseTrackedLocalStore refuses a local write whose store git already TRACKS.
 //
-// The two questions are asked by different means on purpose. Whether a
-// repository encloses the store is answered from the FILESYSTEM, because "this
-// is not a repository" and "git is not installed" both come back from a
-// subprocess as an error, and a check that cannot tell them apart has to choose
-// between failing open on the first and breaking every non-repository workspace
-// on the second. Looking for .git separates them without running anything. Only
-// once a repository is found does the INDEX get consulted, and only there does
-// an unanswerable question become a refusal.
+// Filesystem discovery first excludes inert .git markers without requiring a
+// git installation. A marker containing repository metadata is only a candidate:
+// git must then answer the index question. A damaged repository or an unavailable
+// index remains a refusal; an empty directory or broken gitdir stub is not by
+// itself evidence that the store belongs to a repository.
 func refuseTrackedLocalStore(handle *os.Root, relative, dir string) error {
 	// The physical path, because that is the one git will see: os/exec chdirs
 	// into it, and git discovers the repository from the resulting getcwd. A
@@ -768,17 +765,16 @@ func refuseTrackedLocalStore(handle *os.Root, relative, dir string) error {
 }
 
 // enclosingGitRepo returns the nearest ancestor of dir, dir itself included,
-// carrying a .git entry, or "" when none does.
+// carrying possible repository metadata, or "" when none does. Inert markers
+// do not stop the walk: a real enclosing checkout may still track the store.
 func enclosingGitRepo(dir string) (string, error) {
 	for current := filepath.Clean(dir); ; {
-		_, err := os.Lstat(filepath.Join(current, gitDirName))
-		switch {
-		case err == nil:
-			return current, nil
-		case !errors.Is(err, fs.ErrNotExist):
-			// Unreadable is not absent. Reporting "no repository above this" from a
-			// permission error is the same fail-open shape in a smaller place.
+		candidate, err := gitMarkerHasMetadata(filepath.Join(current, gitDirName))
+		if err != nil {
 			return "", err
+		}
+		if candidate {
+			return current, nil
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
@@ -786,6 +782,66 @@ func enclosingGitRepo(dir string) (string, error) {
 		}
 		current = parent
 	}
+}
+
+// gitMarkerHasMetadata only rules out markers that cannot name a repository.
+// It does not certify one: even partial/corrupt metadata must reach git and fail
+// closed if the index cannot be read. Following a gitdir reference is read-only;
+// it never grants filesystem access for a note operation.
+func gitMarkerHasMetadata(marker string) (bool, error) {
+	info, err := os.Stat(marker)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	dir := marker
+	if !info.IsDir() {
+		if !info.Mode().IsRegular() || info.Size() > 4096 {
+			return false, fmt.Errorf("cannot classify git marker %s", marker)
+		}
+		file, err := os.Open(marker)
+		if err != nil {
+			return false, err
+		}
+		content, readErr := io.ReadAll(io.LimitReader(file, 4097))
+		closeErr := file.Close()
+		if err := errors.Join(readErr, closeErr); err != nil {
+			return false, err
+		}
+		if len(content) > 4096 {
+			return false, fmt.Errorf("git marker %s exceeds 4096 bytes", marker)
+		}
+		if !strings.HasPrefix(string(content), "gitdir: ") {
+			return false, nil
+		}
+		dir = strings.TrimRight(string(content[len("gitdir: "):]), "\r\n")
+		if dir == "" {
+			return false, nil
+		}
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(filepath.Dir(marker), dir)
+		}
+		info, err = os.Stat(dir)
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if !info.IsDir() {
+			return false, nil
+		}
+	}
+	for _, name := range []string{"HEAD", "objects", "refs", "index", "commondir", "config"} {
+		if _, err := os.Lstat(filepath.Join(dir, name)); err == nil {
+			return true, nil
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return false, err
+		}
+	}
+	return false, nil
 }
 
 // trackedStoreEntries lists what git's index holds under dir, named relative to
