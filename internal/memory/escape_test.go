@@ -744,6 +744,39 @@ func TestAFailedIgnoreCloseCanBeRetried(t *testing.T) {
 	}
 }
 
+func TestAFailedIgnoreCloseReportsCleanupFailure(t *testing.T) {
+	paths := DefaultPaths(t.TempDir())
+	closeFailure := errors.New("injected ignore close failure")
+	removeFailure := errors.New("injected ignore cleanup failure")
+	priorCloser := closeLocalIgnore
+	priorRemover := removeLocalIgnore
+	closeLocalIgnore = func(file *os.File) error {
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return closeFailure
+	}
+	removeLocalIgnore = func(*os.Root, string) error {
+		return removeFailure
+	}
+	t.Cleanup(func() {
+		closeLocalIgnore = priorCloser
+		removeLocalIgnore = priorRemover
+	})
+
+	_, err := Write(paths, ScopeLocal, "private", "d", "first")
+	if !errors.Is(err, closeFailure) || !errors.Is(err, removeFailure) {
+		t.Fatalf("Write error = %v, want close and cleanup failures", err)
+	}
+	if !strings.Contains(err.Error(), "remove incomplete") {
+		t.Fatalf("Write error = %v, want retained-placeholder context", err)
+	}
+	ignorePath := filepath.Join(paths.LocalDir, gitignoreName)
+	if _, statErr := os.Lstat(ignorePath); statErr != nil {
+		t.Fatalf("retained placeholder %s: %v", ignorePath, statErr)
+	}
+}
+
 // THE ORDINARY CASE KEEPS WORKING, which is the constraint the refusal above has
 // to live inside: a repository whose local store is untracked is the normal
 // state, and a note written there must still land and still be invisible to git.

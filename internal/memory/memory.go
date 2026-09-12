@@ -636,14 +636,14 @@ func keepLocalScopePrivate(handle *os.Root, scope Scope, relative, dir string) e
 			// Do not leave the exclusive-create placeholder behind. An empty or
 			// partial ignore makes every retry take the existing-file branch and
 			// fail as ErrNotPrivate instead of retrying the installation.
-			_ = handle.Remove(ignorePath)
-			return fmt.Errorf("write %s: %w", ignorePath, writeErr)
+			return removeIncompleteLocalIgnore(handle, ignorePath, fmt.Errorf("write %s: %w", ignorePath, writeErr))
 		}
 		if closeErr := closeLocalIgnore(file); closeErr != nil {
 			// A failed close does not establish that the ignore reached disk. Remove
-			// it for the same reason as a failed write so the next call can retry.
-			_ = handle.Remove(ignorePath)
-			return fmt.Errorf("close %s: %w", ignorePath, closeErr)
+			// it for the same reason as a failed write so the next call can retry. If
+			// cleanup also fails, preserve both errors: callers must know that an
+			// incomplete placeholder remains and needs manual recovery.
+			return removeIncompleteLocalIgnore(handle, ignorePath, fmt.Errorf("close %s: %w", ignorePath, closeErr))
 		}
 		return nil
 	case !errors.Is(err, fs.ErrExist):
@@ -675,6 +675,17 @@ var writeLocalIgnore = func(file *os.File) error {
 
 var closeLocalIgnore = func(file *os.File) error {
 	return file.Close()
+}
+
+var removeLocalIgnore = func(handle *os.Root, path string) error {
+	return handle.Remove(path)
+}
+
+func removeIncompleteLocalIgnore(handle *os.Root, path string, cause error) error {
+	if err := removeLocalIgnore(handle, path); err != nil {
+		return errors.Join(cause, fmt.Errorf("remove incomplete %s: %w", path, err))
+	}
+	return cause
 }
 
 // ignoresEverything reports whether an existing ignore file actually excludes the
