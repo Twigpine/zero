@@ -115,11 +115,9 @@ func (tool memoryTool) Run(_ context.Context, args map[string]any) Result {
 		}
 		return okResult(rendered)
 	}
-	// A failure in one scope must not hide a readable note in the next. Project is
-	// searched first, is checked in, and arrives with a clone; local is the user's
-	// own default write scope. An unreadable project note called "findings" would
-	// otherwise make the user's own local "findings" unreachable — the shared,
-	// externally-supplied scope masking the private one. The failure is carried and
+	// A failure in one scope must not hide a readable note in the next. Unscoped
+	// reads search local first because that is where an unscoped write lands, then
+	// fall back to the checked-in project scope. The failure is carried and
 	// reported only when nothing readable turns up.
 	var problems []error
 	for _, candidate := range scopes {

@@ -180,29 +180,29 @@ func TestAnUnreadableNoteDoesNotEmptyTheListing(t *testing.T) {
 	}
 }
 
-// A failure in the project scope must not hide the user's own local note.
-// Project is searched first and arrives with a clone; local is the default write
-// scope, so the shared scope masking the private one is the wrong way round.
-func TestAProjectFailureDoesNotHideTheLocalNote(t *testing.T) {
+// A failure in the local scope must not hide a readable project note. Unscoped
+// reads resolve local first, then continue to the checked-in project scope when
+// the local entry cannot be read.
+func TestALocalFailureDoesNotHideTheProjectNote(t *testing.T) {
 	paths := memoryTestPaths(t)
-	if _, err := memory.Write(paths, memory.ScopeLocal, "findings", "mine", "the local body"); err != nil {
+	if _, err := memory.Write(paths, memory.ScopeProject, "findings", "team", "the project body"); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(paths.ProjectDir, 0o700); err != nil {
+	if err := os.MkdirAll(paths.LocalDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// An unreadable project note of the SAME name, searched first.
+	// An unreadable local note of the SAME name, searched first.
 	oversized := strings.Repeat("x", 70<<10)
-	if err := os.WriteFile(filepath.Join(paths.ProjectDir, "findings.md"), []byte(oversized), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(paths.LocalDir, "findings.md"), []byte(oversized), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	result := NewMemoryTool(paths).Run(context.Background(), map[string]any{"name": "findings"})
 	if result.Status == StatusError {
-		t.Fatalf("a project-scope failure hid the readable local note: %q", result.Output)
+		t.Fatalf("a local-scope failure hid the readable project note: %q", result.Output)
 	}
-	if !strings.Contains(result.Output, "the local body") {
-		t.Errorf("the local note was not returned: %q", result.Output)
+	if !strings.Contains(result.Output, "the project body") {
+		t.Errorf("the project note was not returned: %q", result.Output)
 	}
 }
 

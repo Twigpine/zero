@@ -692,6 +692,33 @@ func TestALocalWriteIsRefusedWhenTrackedWithNoIgnorePresent(t *testing.T) {
 	}
 }
 
+func TestAFailedIgnoreWriteCanBeRetried(t *testing.T) {
+	paths := DefaultPaths(t.TempDir())
+	priorWriter := writeLocalIgnore
+	writeLocalIgnore = func(*os.File) error { return errors.New("injected ignore write failure") }
+	t.Cleanup(func() { writeLocalIgnore = priorWriter })
+
+	if _, err := Write(paths, ScopeLocal, "private", "d", "first"); err == nil || !strings.Contains(err.Error(), "injected ignore write failure") {
+		t.Fatalf("first Write error = %v, want injected write failure", err)
+	}
+	ignorePath := filepath.Join(paths.LocalDir, gitignoreName)
+	if _, err := os.Lstat(ignorePath); !os.IsNotExist(err) {
+		t.Fatalf("failed installation left %s behind: %v", ignorePath, err)
+	}
+
+	writeLocalIgnore = priorWriter
+	if _, err := Write(paths, ScopeLocal, "private", "d", "second"); err != nil {
+		t.Fatalf("retry after failed ignore installation = %v", err)
+	}
+	note, err := Read(paths, ScopeLocal, "private")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if note.Body != "second\n" {
+		t.Fatalf("retried note body = %q, want %q", note.Body, "second\n")
+	}
+}
+
 // THE ORDINARY CASE KEEPS WORKING, which is the constraint the refusal above has
 // to live inside: a repository whose local store is untracked is the normal
 // state, and a note written there must still land and still be invisible to git.
