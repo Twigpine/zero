@@ -688,7 +688,19 @@ func claimedSecondsAllFor(claim, name string, known map[string][]float64) []floa
 			if !nameBoundary(line, absolute, end) {
 				continue
 			}
-			clause := line[end:clauseEnd(line, end, known)]
+			// A quoted transcript or example is evidence being discussed, not a
+			// result the report itself asserts. Requiring an unquoted name keeps an
+			// otherwise valid-looking "took 9s" inside prose or a code span from
+			// becoming a correction.
+			clauseFrom := end
+			if insideASCIIQuote(line, absolute) {
+				var formatted bool
+				clauseFrom, formatted = formattedNameEnd(line, absolute, end)
+				if !formatted {
+					continue
+				}
+			}
+			clause := line[clauseFrom:clauseEnd(line, clauseFrom, known)]
 			// TWO DURATIONS IN ONE CLAUSE MEANS OWNERSHIP IS UNCLEAR, so the
 			// clause yields nothing.
 			//
@@ -707,10 +719,7 @@ func claimedSecondsAllFor(claim, name string, known map[string][]float64) []floa
 			if _, _, _, _, second := nextDurationToken(clause, firstDurationEnd(clause)); second {
 				continue
 			}
-			if durationHasThresholdContext(clause) {
-				continue
-			}
-			if value, ok := parseClaimedDuration(clause); ok {
+			if value, ok := elapsedClaimedDuration(clause); ok {
 				values = append(values, value)
 			}
 		}
@@ -778,17 +787,6 @@ func clauseEnd(line string, from int, known map[string][]float64) int {
 		// "TestFoo passed (the suite took 34.249s)" — so the test is whether any
 		// word appears between the separator and the next duration.
 		after := line[from+index+len(separator):]
-		// A CONJUNCTION AFTER A THRESHOLD DOES NOT PROVE NEW OWNERSHIP. Keeping the
-		// threshold and following result in one clause lets the ambiguity guard
-		// above refuse "under 10s and completed in 0.86s" instead of charging 10s
-		// to the test. A plain result followed by another subject still ends here.
-		if separator == " and " {
-			before := line[from : from+index]
-			_, _, _, _, afterDuration := nextDurationToken(after, 0)
-			if durationHasThresholdContext(before) && afterDuration {
-				continue
-			}
-		}
 		if !separatorBreaksClause(after) {
 			continue
 		}
@@ -798,55 +796,142 @@ func clauseEnd(line string, from int, known map[string][]float64) int {
 	return cut
 }
 
-// durationHasThresholdContext recognizes the bounded threshold grammar this
-// parser supports. The relationship is local to the duration: a comparative
-// immediately before it or a threshold noun immediately after it. Merely
-// finding one of these words elsewhere in the sentence is not enough.
-func durationHasThresholdContext(text string) bool {
+// elapsedClaimedDuration reads a duration only when its local syntax says that
+// it is this name's elapsed result. A duration is not a claim by proximity: it
+// may be a timeout, budget, bound, count, quotation, or another subject's value.
+//
+// The grammar is intentionally small and affirmative. It recognizes the result
+// forms this package has direct evidence for: "took D", a completed action "in
+// D", a presentation-owned "Name (D)"/"Name passed, D", and "D elapsed". A
+// miss is cheaper than inventing a correction, so every other role is silent.
+func elapsedClaimedDuration(text string) (float64, bool) {
 	begin, end, _, _, ok := nextDurationToken(text, 0)
 	if !ok {
+		return 0, false
+	}
+	if !durationHasElapsedRole(text, begin, end) {
+		return 0, false
+	}
+	// parseClaimedDuration remains the single authority for whether the token is
+	// a complete duration rather than an ambiguous count such as "5m rows".
+	return parseClaimedDuration(text)
+}
+
+func durationHasElapsedRole(text string, begin, end int) bool {
+	if insideASCIIQuote(text, begin) {
 		return false
 	}
-	words := func(value string) []string {
-		return strings.FieldsFunc(strings.ToLower(value), func(r rune) bool {
-			return (r < 'a' || r > 'z') && (r < '0' || r > '9')
-		})
+	before := strings.TrimSpace(text[:begin])
+	after := text[end:]
+	if elapsedFollowsDuration(after) && (before == "" || presentationOwnsDuration(before)) {
+		return true
 	}
-	before := words(text[:begin])
-	after := words(text[end:])
-	isThresholdNoun := func(word string) bool {
-		switch word {
-		case "timeout", "deadline", "budget", "limit", "cap", "target", "threshold", "maximum", "minimum":
+
+	lead, last := popLastASCIIWord(before)
+	if last == "took" && affirmativeCueLead(lead) {
+		return true
+	}
+	if last == "in" {
+		lead, verb := popLastASCIIWord(lead)
+		switch verb {
+		case "passed", "completed", "finished", "ran":
+			return affirmativeCueLead(lead)
+		}
+	}
+	return presentationOwnsDuration(before) && !containsLetter(after[:segmentEnd(after)])
+}
+
+// affirmativeCueLead binds the result verb to the measured name. These are the
+// only modifiers exercised by the package's established result fixtures. An
+// arbitrary noun phrase, negation, modal, or quoted example therefore cannot
+// borrow a later "took"/"finished in" substring as its own timing assertion.
+func affirmativeCueLead(text string) bool {
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "", "actually", "later":
+		return true
+	default:
+		return false
+	}
+}
+
+func presentationOwnsDuration(before string) bool {
+	before = strings.ToLower(strings.TrimSpace(before))
+	for _, prefix := range []string{"", "passed"} {
+		punctuation := strings.TrimSpace(strings.TrimPrefix(before, prefix))
+		if prefix != "" && punctuation == before {
+			continue
+		}
+		switch punctuation {
+		case "(", "-", "—", "–", "|", ",", ":":
 			return true
-		default:
+		}
+	}
+	return false
+}
+
+func popLastASCIIWord(text string) (string, string) {
+	text = strings.TrimSpace(text)
+	end := len(text)
+	start := end
+	for start > 0 {
+		c := text[start-1]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+			break
+		}
+		start--
+	}
+	if start == end {
+		return text, ""
+	}
+	return strings.TrimSpace(text[:start]), strings.ToLower(text[start:end])
+}
+
+func elapsedFollowsDuration(after string) bool {
+	after = strings.TrimSpace(after)
+	if len(after) < len("elapsed") || !strings.EqualFold(after[:len("elapsed")], "elapsed") {
+		return false
+	}
+	if len(after) > len("elapsed") {
+		next := after[len("elapsed")]
+		if (next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z') {
 			return false
 		}
 	}
-	if len(after) > 0 {
-		if isThresholdNoun(after[0]) {
-			return true
+	rest := after[len("elapsed"):]
+	return !containsLetter(rest[:segmentEnd(rest)])
+}
+
+func insideASCIIQuote(text string, at int) bool {
+	var double, backtick bool
+	escaped := false
+	for index := 0; index < at; index++ {
+		switch c := text[index]; {
+		case escaped:
+			escaped = false
+		case c == '\\':
+			escaped = true
+		case c == '"':
+			double = !double
+		case c == '`':
+			backtick = !backtick
 		}
 	}
-	if len(before) > 0 {
-		if isThresholdNoun(before[len(before)-1]) {
-			return true
-		}
-		switch before[len(before)-1] {
-		case "under", "within", "below":
-			return true
-		}
+	return double || backtick
+}
+
+// formattedNameEnd accepts a quote pair only when it wraps the matched name
+// itself. Markdown commonly writes "`TestX` took 9s"; that is an assertion with
+// a formatted subject, unlike "`TestX took 9s`", whose duration remains inside
+// the quoted example and must stay silent.
+func formattedNameEnd(text string, begin, end int) (int, bool) {
+	if begin == 0 || end >= len(text) || insideASCIIQuote(text, begin-1) {
+		return end, false
 	}
-	if len(before) < 2 {
-		return false
+	delimiter := text[begin-1]
+	if (delimiter != '`' && delimiter != '"') || text[end] != delimiter {
+		return end, false
 	}
-	penultimate, last := before[len(before)-2], before[len(before)-1]
-	if penultimate == "at" && last == "most" {
-		return true
-	}
-	if penultimate == "less" && last == "than" {
-		return true
-	}
-	return isThresholdNoun(penultimate) && (last == "is" || last == "was" || last == "of")
+	return end + 1, true
 }
 
 // separatorBreaksClause reports whether the text after a separator names a new
@@ -881,30 +966,12 @@ func separatorBreaksClause(after string) bool {
 	if containsLetter(after[:start]) {
 		return true
 	}
-	// A TRAILING WORD KEEPS THE CLAUSE AMBIGUOUS, and that stays deliberate.
-	//
-	// @jatmn is right that this misses a real fabrication: "TestFoo passed, 9.90s
-	// elapsed" reports nothing where the same sentence without "elapsed" is
-	// caught, because containsLetter cannot tell a noun phrase that OWNS the
-	// figure from a word that merely DESCRIBES it.
-	//
-	// I tried the fix he suggested first — recognise a subject rather than any
-	// letter, using the same measurement-name layer the clause bound uses — and it
-	// reopened the case this check exists for. "TestFoo passed; 4.20s was the
-	// whole suite." and five siblings went straight back to charging the suite's
-	// figure to the test, which is a FALSE ACCUSATION where the current behaviour
-	// is only a miss. Measured, not reasoned: all six of the following-subject
-	// tests failed.
-	//
-	// "the whole suite" and "elapsed" are both ordinary words. Separating them by
-	// vocabulary is the qualifier allowlist he explicitly ruled out, and it would
-	// reopen the same class at the next synonym. So the clause stays ambiguous,
-	// which fails toward silence — this file's own comments say a miss is cheaper
-	// than a fabricated correction, and that ordering has not changed. Closing the
-	// miss needs an ownership model that reads structure rather than words, and I
-	// do not have one that survives the six cases above.
 	tail := after[stop:]
-	return containsLetter(tail[:segmentEnd(tail)])
+	segment := tail[:segmentEnd(tail)]
+	if elapsedFollowsDuration(segment) {
+		return false
+	}
+	return containsLetter(segment)
 }
 
 // segmentEnd returns the offset at which text stops belonging to the segment it

@@ -1592,6 +1592,56 @@ func TestReviewedThresholdRolesDoNotBecomeElapsedClaims(t *testing.T) {
 	}
 }
 
+// AN ELAPSED RESULT NEEDS AN AFFIRMATIVE ROLE, not merely a duration somewhere
+// after the test name. A deny-list of threshold nouns made a duration an
+// elapsed claim by default, so each unlisted spelling of the same bound reopened
+// the package's worst failure: a truthful report received a fabricated
+// correction. None of these bounds owns the 10s as TestX's measured result.
+func TestOnlyAffirmativeElapsedRolesBecomeClaims(t *testing.T) {
+	for _, claim := range []string{
+		"TestX is capped at 10s; it took 0.86s.",
+		"TestX has a 10s ceiling and took 0.86s.",
+		"TestX must not exceed 10s; it took 0.86s.",
+		"TestX finished in no more than 10s.",
+		"TestX is allowed 10s and took 0.86s.",
+		"TestX is limited to 10s; it took 0.86s.",
+		"TestX never took 9s.",
+		"TestX never reached 9s elapsed.",
+		"TestX should have completed in 9s.",
+		`TestX's documentation says "took 9s" is an example.`,
+		`"TestX took 9s" is an example, not a result.`,
+		"`TestX took 9s` is an example, not a result.",
+		`TestX documentation gives "9s elapsed" as a counterexample.`,
+	} {
+		t.Run("silent/"+claim, func(t *testing.T) {
+			ledger := NewLedger()
+			handle, _ := ledger.Record(Run{}, goTestJSON("--- PASS: TestX (0.86s)\n"))
+			if conflicts := ledger.Conflicts(handle, claim); len(conflicts) != 0 {
+				t.Errorf("non-result duration became an elapsed claim: %+v", conflicts)
+			}
+		})
+	}
+
+	for _, claim := range []string{
+		"TestX took 9s.",
+		"TestX finished in 9s.",
+		"TestX (9s).",
+		"TestX 9s elapsed.",
+		"TestX passed, 9s elapsed.",
+		"`TestX` took 9s.",
+		`"TestX" took 9s.`,
+	} {
+		t.Run("conflict/"+claim, func(t *testing.T) {
+			ledger := NewLedger()
+			handle, _ := ledger.Record(Run{}, goTestJSON("--- PASS: TestX (0.86s)\n"))
+			conflicts := ledger.Conflicts(handle, claim)
+			if len(conflicts) != 1 || conflicts[0].Claimed != 9 {
+				t.Errorf("affirmative elapsed claim = %+v, want one 9s conflict", conflicts)
+			}
+		})
+	}
+}
+
 func TestPackageCacheMarkerSuppressesEveryStatus(t *testing.T) {
 	// Defensive event fixtures: Go currently caches only successful test runs.
 	// The ingestion contract rejects package cache markers independently of the
