@@ -222,9 +222,13 @@ func (p *Pool) Run(ctx context.Context, spec WorkerSpec, sink Sink) (int, error)
 			return 0, ErrPoolDraining
 		}
 		code, err := p.runOnce(ctx, stat.id, spec, sink)
-		// A run can observe a normal worker result just as Drain starts. Check
-		// again before classifying it so shutdown remains terminal rather than
-		// entering a retry path or reporting ErrPermanent.
+		// Fully completed work remains successful even during the drain grace
+		// window. Failed or killed workers must still take the terminal path.
+		if err == nil && code == 0 {
+			return 0, nil
+		}
+		// A failed run can finish just as Drain starts. Recheck before retrying
+		// or classifying the failure as permanent.
 		if p.isDraining() {
 			return 0, ErrPoolDraining
 		}
@@ -240,8 +244,6 @@ func (p *Pool) Run(ctx context.Context, spec WorkerSpec, sink Sink) (int, error)
 				return 0, ErrPoolDraining
 			}
 			p.logf("worker %d launch/run error: %v", stat.id, err)
-		case code == 0:
-			return 0, nil // clean success
 		case code == ExitPermanent:
 			p.logf("worker %d exited permanently (code=%d) — not retrying", stat.id, code)
 			return code, ErrPermanent
@@ -275,6 +277,12 @@ func (p *Pool) Run(ctx context.Context, spec WorkerSpec, sink Sink) (int, error)
 			return 0, ctx.Err()
 		}
 	}
+	// On the final tempfail attempt, sleep can select an expired timer while
+	// the drain channel is also ready. There is no next iteration to recheck
+	// shutdown, so do it before reporting attempt exhaustion.
+	if p.isDraining() {
+		return 0, ErrPoolDraining
+	}
 	if lastErr == nil {
 		lastErr = ErrPermanent
 	}
@@ -303,6 +311,8 @@ func (p *Pool) runOnce(ctx context.Context, id int, spec WorkerSpec, sink Sink) 
 	p.mu.Lock()
 	draining := p.draining
 	if err == nil && !draining {
+		// Key by the monotonic worker id, not the reusable OS pid, so an older
+		// worker's untrack cannot remove a newly launched handle (D10).
 		p.active[id] = handle
 		p.launching--
 		inLaunch = false

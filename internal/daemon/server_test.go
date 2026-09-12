@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -545,6 +546,12 @@ func TestServerShutdownMakesRetryDelaysDrainTerminal(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewServer: %v", err)
 			}
+			closeEntered := make(chan struct{})
+			releaseClose := make(chan struct{})
+			release := sync.OnceFunc(func() { close(releaseClose) })
+			local, peer := net.Pipe()
+			srv.trackConn(&shutdownCloseGate{Conn: local, entered: closeEntered, release: releaseClose})
+			t.Cleanup(func() { release(); srv.Shutdown(); _ = local.Close(); _ = peer.Close() })
 			sess, err := mgr.Start(srv.ctx, WorkerSpec{Session: "a"})
 			if err != nil {
 				t.Fatalf("Start: %v", err)
@@ -554,7 +561,13 @@ func TestServerShutdownMakesRetryDelaysDrainTerminal(t *testing.T) {
 			case <-time.After(2 * time.Second):
 				t.Fatal("session did not enter retry delay")
 			}
-			srv.Shutdown()
+			shutdownDone := make(chan struct{})
+			go func() { srv.Shutdown(); close(shutdownDone) }()
+			select {
+			case <-closeEntered:
+			case <-time.After(2 * time.Second):
+				t.Fatal("Shutdown did not reach connection cleanup")
+			}
 			select {
 			case <-sess.Done():
 				if !errors.Is(sess.Err(), ErrPoolDraining) {
@@ -563,6 +576,26 @@ func TestServerShutdownMakesRetryDelaysDrainTerminal(t *testing.T) {
 			case <-time.After(2 * time.Second):
 				t.Fatal("session did not finish after shutdown")
 			}
+			release()
+			select {
+			case <-shutdownDone:
+			case <-time.After(2 * time.Second):
+				t.Fatal("Shutdown did not finish after connection cleanup")
+			}
 		})
 	}
+}
+
+// shutdownCloseGate parks Shutdown after cancellation but before Pool.Drain.
+// Embedding a pipe preserves net.Conn behavior outside that ordering boundary.
+type shutdownCloseGate struct {
+	net.Conn
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (c *shutdownCloseGate) Close() error {
+	close(c.entered)
+	<-c.release
+	return c.Conn.Close()
 }

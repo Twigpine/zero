@@ -480,3 +480,69 @@ func TestPoolRunSurfacesStdoutReadError(t *testing.T) {
 		t.Error("the worker should be killed on a read error to avoid a pipe-block hang")
 	}
 }
+
+// Drain must preserve work that finished cleanly, while failed or killed workers
+// still report shutdown rather than a retryable or permanent worker failure.
+func TestPoolDrainClassifiesCompletedWorker(t *testing.T) {
+	for _, code := range []int{0, -1, ExitPermanent} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			releaseWait := make(chan struct{})
+			release := sync.OnceFunc(func() { close(releaseWait) })
+			worker := &fakeWorker{pid: 1, exitCode: code, waitCh: releaseWait}
+			launcher, _ := seqLauncher(worker)
+			pool, err := NewPool(PoolOptions{Size: 1, Launcher: launcher})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { release(); pool.Drain() })
+			result := make(chan error, 1)
+			go func() {
+				_, err := pool.Run(context.Background(), WorkerSpec{Session: "a"}, nil)
+				result <- err
+			}()
+			testutil.WaitFor(t, "worker tracked", func() bool { return len(pool.WorkerStats()) == 1 })
+			pool.beginDrain()
+			release()
+			select {
+			case err := <-result:
+				if code == 0 && err != nil {
+					t.Fatalf("completed worker error = %v, want nil", err)
+				}
+				if code != 0 && !errors.Is(err, ErrPoolDraining) {
+					t.Fatalf("failed worker error = %v, want ErrPoolDraining", err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("Run did not finish after worker exit")
+			}
+		})
+	}
+}
+
+func TestPoolDrainDuringFinalTempfailDelay(t *testing.T) {
+	// An expired timer and the drain channel may both be ready. Exercise both
+	// select outcomes: exhausting the last attempt must not turn drain permanent.
+	for iteration := 0; iteration < 100; iteration++ {
+		var pool *Pool
+		launcher, calls := seqLauncher(&fakeWorker{pid: 1, exitCode: ExitTempfail})
+		var err error
+		pool, err = NewPool(PoolOptions{
+			Size: 1, Launcher: launcher, MaxAttempts: 1, TempfailDelay: time.Nanosecond,
+			Log: func(message string) {
+				if strings.Contains(message, "retry after") {
+					pool.beginDrain()
+				}
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = pool.Run(context.Background(), WorkerSpec{Session: "a"}, nil)
+		pool.Drain()
+		if !errors.Is(err, ErrPoolDraining) {
+			t.Fatalf("iteration %d: Run error = %v, want ErrPoolDraining", iteration, err)
+		}
+		if atomic.LoadInt32(calls) != 1 {
+			t.Fatal("Run retried after drain began")
+		}
+	}
+}
