@@ -156,6 +156,33 @@ func TestMemoryForgetReportsAbsenceRatherThanClaimingSuccess(t *testing.T) {
 	}
 }
 
+func TestMemoryForgetPreservesANoteThatCannotBeRead(t *testing.T) {
+	paths := memoryTestPaths(t)
+	if err := os.MkdirAll(paths.LocalDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	notePath := filepath.Join(paths.LocalDir, "unreadable.md")
+	// Oversize input is a deterministic, cross-platform read failure; unlike
+	// permission bits, it behaves the same when tests run with elevated access.
+	if err := os.WriteFile(notePath, []byte(strings.Repeat("x", 70<<10)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := memory.Read(paths, memory.ScopeLocal, "unreadable"); err == nil {
+		t.Fatal("oversized fixture unexpectedly remained readable")
+	}
+
+	result := NewMemoryForgetTool(paths).Run(context.Background(), map[string]any{"name": "unreadable"})
+	if result.Status != StatusError {
+		t.Fatalf("memory_forget deleted an unreadable note: %q", result.Output)
+	}
+	if !strings.Contains(strings.ToLower(result.Output), "cannot read") {
+		t.Fatalf("memory_forget hid the read failure: %q", result.Output)
+	}
+	if _, err := os.Stat(notePath); err != nil {
+		t.Fatalf("memory_forget removed the unreadable note: %v", err)
+	}
+}
+
 // One unreadable note must not empty the listing. memory.List deliberately
 // returns what it could read alongside the failures; the tool returning an error
 // instead threw that away, turning partial success back into total failure one
