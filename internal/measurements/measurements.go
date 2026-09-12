@@ -375,7 +375,23 @@ func ParseGoTest(text string) []Measurement {
 
 func cachedGoTestPackageOutput(output, packageName string) bool {
 	fields := strings.Fields(output)
-	return packageName != "" && len(fields) >= 3 && fields[0] == "ok" && fields[1] == packageName && fields[2] == "(cached)"
+	if packageName == "" || len(fields) < 3 || fields[1] != packageName {
+		return false
+	}
+	for _, field := range fields[2:] {
+		if field == "(cached)" {
+			return true
+		}
+	}
+	return false
+}
+
+// RecordedRun is an immutable identity returned by Record. Keep it for later
+// per-run checks; the command builder's Run may be reused or changed meanwhile.
+// A zero handle, or a handle from another ledger, cannot select observations.
+type RecordedRun struct {
+	ledger *Ledger
+	key    string
 }
 
 // Ledger is every timing this run observed, and which conflicts it has already
@@ -467,24 +483,26 @@ func (l *Ledger) ensureMaps() {
 }
 
 // Record reads any timings out of a command's output and remembers them against
-// the run that produced it. Returns how many it took, which is what a test
-// asserts on.
+// the run that produced it. Returns its immutable identity and the number of
+// timings accepted. Repeated records of the same command retain the existing
+// grouping; changing the command builder produces a different identity.
 //
 // Pass the command actually executed. A zero Run says this caller does not
 // distinguish runs, which is a legitimate answer — but it is now said out loud at
 // the call site rather than being the only thing the type could express.
-func (l *Ledger) Record(run Run, text string) int {
+func (l *Ledger) Record(run Run, text string) (RecordedRun, int) {
 	if l == nil {
-		return 0
-	}
-	found := ParseGoTest(text)
-	if len(found) == 0 {
-		return 0
+		return RecordedRun{}, 0
 	}
 	run = run.snapshot()
+	key := run.key()
+	handle := RecordedRun{ledger: l, key: key}
+	found := ParseGoTest(text)
+	if len(found) == 0 {
+		return handle, 0
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	key := run.key()
 	l.ensureMaps()
 	byName := l.observed[key]
 	if byName == nil {
@@ -496,7 +514,7 @@ func (l *Ledger) Record(run Run, text string) int {
 		id := m.identity()
 		byName[id] = append(byName[id], m.Seconds)
 	}
-	return len(found)
+	return handle, len(found)
 }
 
 // tolerance reports whether two timings are close enough to be the same result
@@ -562,8 +580,8 @@ func measurementDisplayNames(observed map[measurementID][]float64) (map[measurem
 // over the same answer is silent, so the caller can feed a correction back to the
 // model without the possibility of a loop — while a differently wrong number for
 // the same name is a new thing to say and is reported.
-func (l *Ledger) Conflicts(run Run, claim string) []Conflict {
-	if l == nil || strings.TrimSpace(claim) == "" {
+func (l *Ledger) Conflicts(handle RecordedRun, claim string) []Conflict {
+	if l == nil || handle.ledger != l || strings.TrimSpace(claim) == "" {
 		return nil
 	}
 	l.mu.Lock()
@@ -572,7 +590,7 @@ func (l *Ledger) Conflicts(run Run, claim string) []Conflict {
 
 	// ONLY THIS RUN'S VALUES. A claim about `go test ./...` is not answered by a
 	// number that only `go test -race ./...` ever printed.
-	key := run.key()
+	key := handle.key
 	observed := l.observed[key]
 	if len(observed) == 0 {
 		return nil
@@ -582,8 +600,9 @@ func (l *Ledger) Conflicts(run Run, claim string) []Conflict {
 	// later Nudge must still name the command that produced these observations.
 	attributedRun, ok := l.runs[key]
 	if !ok {
-		attributedRun = run.snapshot()
+		return nil
 	}
+	run := attributedRun
 	names, known := measurementDisplayNames(observed)
 	var out []Conflict
 	for id, recorded := range observed {
@@ -797,7 +816,7 @@ func durationHasThresholdContext(text string) bool {
 	after := words(text[end:])
 	isThresholdNoun := func(word string) bool {
 		switch word {
-		case "timeout", "deadline", "budget", "limit", "cap", "target", "threshold":
+		case "timeout", "deadline", "budget", "limit", "cap", "target", "threshold", "maximum", "minimum":
 			return true
 		default:
 			return false
@@ -822,6 +841,9 @@ func durationHasThresholdContext(text string) bool {
 	}
 	penultimate, last := before[len(before)-2], before[len(before)-1]
 	if penultimate == "at" && last == "most" {
+		return true
+	}
+	if penultimate == "less" && last == "than" {
 		return true
 	}
 	return isThresholdNoun(penultimate) && (last == "is" || last == "was" || last == "of")
