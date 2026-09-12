@@ -631,11 +631,15 @@ func keepLocalScopePrivate(handle *os.Root, scope Scope, relative, dir string) e
 	file, err := handle.OpenFile(ignorePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	switch {
 	case err == nil:
-		defer file.Close()
-		if _, writeErr := file.WriteString(localIgnoreContent); writeErr != nil {
+		if writeErr := writeLocalIgnore(file); writeErr != nil {
+			_ = file.Close()
+			// Do not leave the exclusive-create placeholder behind. An empty or
+			// partial ignore makes every retry take the existing-file branch and
+			// fail as ErrNotPrivate instead of retrying the installation.
+			_ = handle.Remove(ignorePath)
 			return fmt.Errorf("write %s: %w", ignorePath, writeErr)
 		}
-		return nil
+		return file.Close()
 	case !errors.Is(err, fs.ErrExist):
 		return fmt.Errorf("create %s: %w", ignorePath, err)
 	}
@@ -656,6 +660,11 @@ func keepLocalScopePrivate(handle *os.Root, scope Scope, relative, dir string) e
 		return fmt.Errorf("%w: %s does not ignore the whole store", ErrNotPrivate, ignorePath)
 	}
 	return nil
+}
+
+var writeLocalIgnore = func(file *os.File) error {
+	_, err := file.WriteString(localIgnoreContent)
+	return err
 }
 
 // ignoresEverything reports whether an existing ignore file actually excludes the
