@@ -270,8 +270,14 @@ func (tool memoryForgetTool) Run(_ context.Context, args map[string]any) Result 
 	// missing note is not an error at the store layer — but saying "Forgot" for a
 	// note that never existed tells a model which misspelled the name that the
 	// deletion happened, and it stops looking for the real one.
-	if _, err := memory.Read(tool.paths, scope, name); errors.Is(err, memory.ErrNotFound) {
-		return okResult(fmt.Sprintf("No note named %q in %s, so there was nothing to forget.", name, scope))
+	if _, readErr := memory.Read(tool.paths, scope, name); readErr != nil {
+		if errors.Is(readErr, memory.ErrNotFound) {
+			return okResult(fmt.Sprintf("No note named %q in %s, so there was nothing to forget.", name, scope))
+		}
+		// Read-before-delete is a safety gate, not only an existence probe. If the
+		// note cannot be read, deleting it would destroy the only copy without the
+		// caller ever being able to inspect what the destructive tool removed.
+		return errorResult(fmt.Sprintf("Error: cannot read memory %q in %s before deleting it: %v", name, scope, readErr))
 	}
 	if err := memory.Forget(tool.paths, scope, name); err != nil {
 		return errorResult("Error: " + err.Error())
