@@ -276,29 +276,70 @@ func attachCountedHeadingEntries(text string) string {
 	lines := strings.Split(text, "\n")
 	joined := make([]string, 0, len(lines))
 	for index := 0; index < len(lines); index++ {
-		line := lines[index]
+		line := canonicalizeCountedHeadingInlineList(lines[index])
 		trimmed := strings.TrimLeft(strings.TrimSpace(line), "-*#> \t")
 		if !countedLabelHeading.MatchString(trimmed) || index+1 >= len(lines) {
 			joined = append(joined, line)
 			continue
 		}
 		firstEntry := index + 1
-		if !strings.HasPrefix(strings.TrimSpace(lines[firstEntry]), "- ") {
+		if strings.TrimSpace(lines[firstEntry]) == "" {
+			firstEntry++
+		}
+		if firstEntry >= len(lines) {
 			joined = append(joined, line)
 			continue
 		}
-		for index+1 < len(lines) {
-			entry := strings.TrimSpace(lines[index+1])
-			if !strings.HasPrefix(entry, "- ") {
+		if _, ok := markdownListEntryContent(lines[firstEntry]); !ok {
+			joined = append(joined, line)
+			continue
+		}
+		for entryAt := firstEntry; entryAt < len(lines); {
+			content, ok := markdownListEntryContent(lines[entryAt])
+			if !ok {
 				break
 			}
 			// Repeat the heading for every entry so a benign first bullet cannot
 			// detach a later blocked result from the operation it describes.
-			joined = append(joined, line+" "+entry)
-			index++
+			// Canonicalize the marker before sentence splitting: an ordered `1.`
+			// marker is punctuation, not the end of the heading's claim.
+			joined = append(joined, line+" - "+content)
+			index = entryAt
+			entryAt++
+			// A single blank line is valid markdown list spacing and must not
+			// detach the following item from its counted heading.
+			if entryAt < len(lines) && strings.TrimSpace(lines[entryAt]) == "" {
+				entryAt++
+			}
 		}
 	}
 	return strings.Join(joined, "\n")
+}
+
+var markdownListEntryPattern = regexp.MustCompile(`^(?:[-+*]|[0-9]+[.)])\s+(.+)$`)
+
+// markdownListEntryContent recognizes the marker families CommonMark accepts
+// for unordered and ordered list items. The marker is presentation; whether the
+// attached text reports unfinished work is the semantic question.
+func markdownListEntryContent(line string) (string, bool) {
+	match := markdownListEntryPattern.FindStringSubmatch(strings.TrimSpace(line))
+	if match == nil {
+		return "", false
+	}
+	return strings.TrimSpace(match[1]), true
+}
+
+func canonicalizeCountedHeadingInlineList(line string) string {
+	trimmed := strings.TrimLeft(strings.TrimSpace(line), "-*#> \t")
+	match := countedLabelHeading.FindStringIndex(trimmed)
+	if match == nil {
+		return line
+	}
+	content, ok := markdownListEntryContent(trimmed[match[1]:])
+	if !ok {
+		return line
+	}
+	return strings.TrimSpace(trimmed[:match[1]]) + " - " + content
 }
 
 // selfReportedIncompletion returns a short reason when the model's final text
@@ -992,17 +1033,12 @@ func hasUnexemptedSubjectElidedInability(sentence string, after int) bool {
 				break
 			}
 			remainder := strings.TrimSpace(sentence[searchFrom+rel+len(connector):])
-			for _, modifier := range []string{"therefore ", "then ", "still ", "also ", "ultimately ", "however ", "nevertheless "} {
-				if strings.HasPrefix(remainder, modifier) {
-					remainder = strings.TrimSpace(remainder[len(modifier):])
-					break
+			failure, stem, ok := subjectElidedFailure(remainder)
+			if ok {
+				if stem == "" {
+					return true
 				}
-			}
-			for _, stem := range subjectElidedInabilityStems {
-				if !strings.HasPrefix(remainder, stem) {
-					continue
-				}
-				synthetic := "i " + remainder
+				synthetic := "i " + failure
 				claim := newInabilityClaim(synthetic, synthetic, "i "+stem, 0)
 				if !claim.exempt() {
 					return true
@@ -1012,6 +1048,33 @@ func hasUnexemptedSubjectElidedInability(sentence string, after int) bool {
 		}
 	}
 	return false
+}
+
+var subjectElidedMissedWorkPattern = regexp.MustCompile(`^never\s+(?:applied|built|changed|completed|deployed|edited|finished|implemented|migrated|modified|published|ran|reviewed|tested|validated|verified|wrote)\b`)
+
+// subjectElidedFailure finds the failure predicate after a coordinating
+// connector. The subject may be inherited from the first clause and ordinary
+// prose may insert an arbitrary leading adverbial ("consequently", "thus",
+// "as a result", and so on). Classifying from the predicate instead of naming
+// those modifiers prevents each neighbouring wording from reopening the gate.
+func subjectElidedFailure(remainder string) (failure, stem string, ok bool) {
+	for at := 0; at < len(remainder); {
+		candidate := strings.TrimSpace(remainder[at:])
+		for _, candidateStem := range subjectElidedInabilityStems {
+			if strings.HasPrefix(candidate, candidateStem) {
+				return candidate, candidateStem, true
+			}
+		}
+		if subjectElidedMissedWorkPattern.MatchString(candidate) {
+			return candidate, "", true
+		}
+		next := strings.IndexByte(remainder[at:], ' ')
+		if next < 0 {
+			break
+		}
+		at += next + 1
+	}
+	return "", "", false
 }
 
 // capabilitySubjectOnly is deliberately an allow-list because matching it
@@ -1388,6 +1451,26 @@ var consequenceBoundaries = []string{
 	" because ", " since ", "; ", ": ", " - ", " -- ", " and ", ", ",
 }
 
+func explicitConsequenceBoundary(boundary string) bool {
+	return strings.HasPrefix(boundary, ";") ||
+		strings.Contains(boundary, " so ") || strings.Contains(boundary, " but ") ||
+		strings.Contains(boundary, "therefore") || strings.Contains(boundary, "leaving") ||
+		strings.Contains(boundary, "because") || strings.Contains(boundary, "since")
+}
+
+func hasExplicitConsequenceBoundary(sentence string, stemEnd int) bool {
+	if stemEnd < 0 || stemEnd >= len(sentence) {
+		return false
+	}
+	tail := sentence[stemEnd:]
+	for _, boundary := range consequenceBoundaries {
+		if explicitConsequenceBoundary(boundary) && strings.Contains(tail, boundary) {
+			return true
+		}
+	}
+	return false
+}
+
 // reportedConsequence returns an asserted outcome after one matched inability.
 // Separators before the stem are irrelevant, and weak separators inside a
 // `that ...` negated proposition remain part of what was not found. Explicit
@@ -1405,10 +1488,7 @@ func reportedConsequence(sentence string, stemEnd int) string {
 		if index < 0 {
 			continue
 		}
-		explicit := strings.HasPrefix(boundary, ";") ||
-			strings.Contains(boundary, " so ") || strings.Contains(boundary, " but ") ||
-			strings.Contains(boundary, "therefore") || strings.Contains(boundary, "leaving") ||
-			strings.Contains(boundary, "because") || strings.Contains(boundary, "since")
+		explicit := explicitConsequenceBoundary(boundary)
 		if thatAt >= 0 && index > thatAt && !explicit {
 			continue
 		}
@@ -1490,6 +1570,38 @@ var topicShiftMarkers = []string{
 	"not part of this request", "never part of this request",
 }
 
+var affirmativeObservationConsequencePattern = regexp.MustCompile(`\b(?:(?:the\s+)?(?:cause|source|root\s+cause|value|setting|definition|registration|owner|result)\s+(?:is|was)\b|(?:the\s+)?concern\s+(?:does|did)\s+not\s+apply\b|(?:it|the\s+(?:issue|bug|problem|change|fix|guard))\s+(?:is|was|looks|remains)\s+(?:resolved|fixed|complete|completed|done|correct|valid|safe|neutral|unaffected)\b|(?:the\s+)?(?:fix|guard|check)\s+holds\b)`)
+
+// observationConsequenceIsAffirmative is deliberately an allow-list: an
+// unfamiliar consequence must not turn an admitted inability into success just
+// because its failure wording is absent from a deny-list. It recognizes either
+// an explicit completed action or a bounded positive result of the observation.
+func observationConsequenceIsAffirmative(consequence string) bool {
+	return affirmativeObservationConsequencePattern.MatchString(consequence) ||
+		fallbackOutcomeIsAffirmative(consequence)
+}
+
+// boundedObservationHasUnresolvedConsequence keeps a bounded search inability
+// attached to the consequence it introduces. A consequence stays incomplete by
+// default; only an affirmative result or an explicit topic shift releases it.
+// This is the inverse of enumerating every synonym for work that did not land.
+func boundedObservationHasUnresolvedConsequence(claim inabilityClaim) bool {
+	consequence := strings.TrimSpace(reportedConsequence(claim.sentence, claim.stemAt+claim.stemLen))
+	if consequence != "" && hasExplicitConsequenceBoundary(claim.sentence, claim.stemAt+claim.stemLen) &&
+		carriesTheConsequence(consequence) &&
+		!observationConsequenceIsAffirmative(consequence) {
+		return true
+	}
+	if containsFailureConsequence(consequence) {
+		return true
+	}
+	if len(claim.blockedContext) <= len(claim.sentence) {
+		return false
+	}
+	next := strings.TrimSpace(claim.blockedContext[len(claim.sentence):])
+	return containsFailureConsequence(next)
+}
+
 // countedLabelContent separates a counted markdown label from any content
 // attached to it. A standalone label is not a claim about the objective; a
 // same-line bullet still is report content and must be classified normally.
@@ -1520,8 +1632,7 @@ func countedLabelContent(sentence string) (string, bool) {
 		}
 		return "", true
 	}
-	if strings.HasPrefix(remainder, "- ") {
-		content := strings.TrimSpace(strings.TrimPrefix(remainder, "- "))
+	if content, listEntry := markdownListEntryContent(remainder); listEntry {
 		if containsFailureConsequence(content) || hasObjectiveFailure(heading) ||
 			countedHeadingIsOperational(heading) || !countedContentIsBenignFinding(content) {
 			return heading + " " + content, false
@@ -1637,7 +1748,7 @@ func (claim inabilityClaim) exempt() bool {
 			return !strongAbsenceHasBlockedOutcome(claim)
 		}
 		return !containsAny(claim.blockedContext, blockedWorkMarkers) &&
-			!hasReportedFailureConsequence(claim.sentence, claim.blockedContext, claim.stemAt+claim.stemLen)
+			!boundedObservationHasUnresolvedConsequence(claim)
 	}
 	if hasObjectiveFailure(claim.sentence) ||
 		containsAny(claim.blockedContext, blockedStateMarkers) ||
