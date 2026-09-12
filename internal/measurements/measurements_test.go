@@ -1179,7 +1179,10 @@ func TestTheReportIsIdenticalBetweenIdenticalPasses(t *testing.T) {
 	race := Run{Command: "go", Args: []string{"test", "-race", "./..."}}
 	const fromPlain = "--- PASS: TestAlpha (1.00s)\n--- PASS: TestBravo (2.00s)\n--- PASS: TestShared (1.00s)\n"
 	const fromRace = "--- PASS: TestCharlie (3.00s)\n--- PASS: TestShared (9.00s)\n"
-	const claim = "TestAlpha took 45.00s; TestBravo took 46.00s; TestCharlie took 47.00s; TestShared took 48.00s"
+	// Put TestAlpha's claims in descending order. The report contract sorts the
+	// values independently of claim order, so a Name-only comparator cannot pass
+	// this case by merely preserving the adjacent inputs.
+	const claim = "TestAlpha took 49.00s; TestAlpha took 45.00s; TestBravo took 46.00s; TestCharlie took 47.00s; TestShared took 48.00s"
 
 	report := func(conflicts []Conflict) string {
 		var b strings.Builder
@@ -1192,8 +1195,8 @@ func TestTheReportIsIdenticalBetweenIdenticalPasses(t *testing.T) {
 	// TestShared is recorded by BOTH runs deliberately: its label is dropped as
 	// untrue of either one, so the ordering has a fourth distinct rendering to
 	// get wrong rather than three that differ only in their command.
-	const wantAcross = `TestAlpha=45@"go test ./..."[1]|TestBravo=46@"go test ./..."[2]|TestCharlie=47@"go test -race ./..."[3]|TestShared=48@""[1 9]|`
-	const wantPerRun = `TestAlpha=45@"go test ./..."[1]|TestBravo=46@"go test ./..."[2]|TestShared=48@"go test ./..."[1]|`
+	const wantAcross = `TestAlpha=45@"go test ./..."[1]|TestAlpha=49@"go test ./..."[1]|TestBravo=46@"go test ./..."[2]|TestCharlie=47@"go test -race ./..."[3]|TestShared=48@""[1 9]|`
+	const wantPerRun = `TestAlpha=45@"go test ./..."[1]|TestAlpha=49@"go test ./..."[1]|TestBravo=46@"go test ./..."[2]|TestShared=48@"go test ./..."[1]|`
 
 	// A fresh ledger each pass: the dedupe is per-Ledger, so a reused one would
 	// report nothing after the first attempt and the loop would assert on empty.

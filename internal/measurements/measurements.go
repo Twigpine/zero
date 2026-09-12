@@ -644,7 +644,12 @@ func (l *Ledger) Conflicts(handle RecordedRun, claim string) []Conflict {
 	}
 	// Deterministic order: this text reaches a model, and a set that reshuffles
 	// between identical runs is a diff nobody can read.
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].Claimed < out[j].Claimed
+	})
 	for _, conflict := range out {
 		l.raised[newRaisedKey(run, conflict.Name, conflict.Claimed)] = true
 	}
@@ -1418,7 +1423,12 @@ func (l *Ledger) ConflictsAcrossRuns(claim string) []Conflict {
 			out = append(out, Conflict{Name: name, Claimed: claimed, Recorded: values, Run: attributed})
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].Claimed < out[j].Claimed
+	})
 	for _, conflict := range out {
 		l.raised[newAcrossRunsKey(conflict.Name, conflict.Claimed)] = true
 	}
