@@ -719,6 +719,31 @@ func TestAFailedIgnoreWriteCanBeRetried(t *testing.T) {
 	}
 }
 
+func TestAFailedIgnoreCloseCanBeRetried(t *testing.T) {
+	paths := DefaultPaths(t.TempDir())
+	priorCloser := closeLocalIgnore
+	closeLocalIgnore = func(file *os.File) error {
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return errors.New("injected ignore close failure")
+	}
+	t.Cleanup(func() { closeLocalIgnore = priorCloser })
+
+	if _, err := Write(paths, ScopeLocal, "private", "d", "first"); err == nil || !strings.Contains(err.Error(), "injected ignore close failure") {
+		t.Fatalf("first Write error = %v, want injected close failure", err)
+	}
+	ignorePath := filepath.Join(paths.LocalDir, gitignoreName)
+	if _, err := os.Lstat(ignorePath); !os.IsNotExist(err) {
+		t.Fatalf("failed close left %s behind: %v", ignorePath, err)
+	}
+
+	closeLocalIgnore = priorCloser
+	if _, err := Write(paths, ScopeLocal, "private", "d", "second"); err != nil {
+		t.Fatalf("retry after failed ignore close = %v", err)
+	}
+}
+
 // THE ORDINARY CASE KEEPS WORKING, which is the constraint the refusal above has
 // to live inside: a repository whose local store is untracked is the normal
 // state, and a note written there must still land and still be invisible to git.
