@@ -639,7 +639,13 @@ func keepLocalScopePrivate(handle *os.Root, scope Scope, relative, dir string) e
 			_ = handle.Remove(ignorePath)
 			return fmt.Errorf("write %s: %w", ignorePath, writeErr)
 		}
-		return file.Close()
+		if closeErr := closeLocalIgnore(file); closeErr != nil {
+			// A failed close does not establish that the ignore reached disk. Remove
+			// it for the same reason as a failed write so the next call can retry.
+			_ = handle.Remove(ignorePath)
+			return fmt.Errorf("close %s: %w", ignorePath, closeErr)
+		}
+		return nil
 	case !errors.Is(err, fs.ErrExist):
 		return fmt.Errorf("create %s: %w", ignorePath, err)
 	}
@@ -665,6 +671,10 @@ func keepLocalScopePrivate(handle *os.Root, scope Scope, relative, dir string) e
 var writeLocalIgnore = func(file *os.File) error {
 	_, err := file.WriteString(localIgnoreContent)
 	return err
+}
+
+var closeLocalIgnore = func(file *os.File) error {
+	return file.Close()
 }
 
 // ignoresEverything reports whether an existing ignore file actually excludes the
