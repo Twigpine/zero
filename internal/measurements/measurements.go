@@ -828,6 +828,7 @@ func governingClauseStart(line string, nameAt int) int {
 }
 
 func asciiWords(text string) []string {
+	text = strings.NewReplacer("\u2019", "'", "\u2018", "'", "\u02bc", "'").Replace(text)
 	return strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
 		return (r < 'a' || r > 'z') && r != '\''
 	})
