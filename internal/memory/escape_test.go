@@ -284,7 +284,7 @@ func TestALinkedIgnoreIsNotProofOfPrivacy(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(paths.LocalDir, "decoy"), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		linkDir(t, "decoy", filepath.Join(paths.LocalDir, ".gitignore"))
+		linkDir(t, filepath.Join(paths.LocalDir, "decoy"), filepath.Join(paths.LocalDir, ".gitignore"))
 		if _, err := Write(paths, ScopeLocal, "private", "d", "secret"); err == nil {
 			t.Error("a reparse point at the ignore path was accepted as privacy")
 		}
