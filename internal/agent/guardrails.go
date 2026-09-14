@@ -241,6 +241,12 @@ func stripQuoted(s string) string {
 		switch {
 		case open != 0:
 			if (open == '"' && r == '"') || (open == '“' && r == '”') || (open == '`' && r == '`') {
+				if open == '`' {
+					content := strings.TrimPrefix(span.String(), "`")
+					if inlineCodeIdentity(content) {
+						b.WriteString(content)
+					}
+				}
 				open = 0
 				span.Reset()
 				continue
@@ -255,6 +261,28 @@ func stripQuoted(s string) string {
 	}
 	b.WriteString(span.String()) // dangling delimiter: restore the span verbatim
 	return b.String()
+}
+
+// inlineCodeIdentity preserves identifier-shaped code spans while still
+// removing quoted admissions and log text. Destination, package, and registry
+// identities are material to fallback equivalence even when Markdown formats
+// them as code; discarding them makes a different target look equivalent.
+func inlineCodeIdentity(text string) bool {
+	if text == "" {
+		return false
+	}
+	for _, r := range text {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			continue
+		}
+		switch r {
+		case '_', '-', '.', '/', ':', '@':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // admissionSentences splits lowered text into sentence-ish fragments so the
@@ -291,6 +319,12 @@ func attachCountedHeadingEntries(text string) string {
 			continue
 		}
 		if _, ok := markdownListEntryContent(lines[firstEntry]); !ok {
+			content := strings.TrimSpace(lines[firstEntry])
+			if countedHeadingIsOperational(strings.TrimSpace(trimmed)) && paragraphReportsFailedOutcome(content) {
+				joined = append(joined, line+" - "+content)
+				index = firstEntry
+				continue
+			}
 			joined = append(joined, line)
 			continue
 		}
@@ -314,6 +348,12 @@ func attachCountedHeadingEntries(text string) string {
 		}
 	}
 	return strings.Join(joined, "\n")
+}
+
+var failedOutcomeParagraphPattern = regexp.MustCompile(`\b(?:failed|crashed|errored|aborted|rejected|expired|timed\s+out|was\s+cancelled|was\s+canceled|did\s+not\s+(?:finish|succeed|complete)|was\s+not\s+successful)\b`)
+
+func paragraphReportsFailedOutcome(text string) bool {
+	return failedOutcomeParagraphPattern.MatchString(text) || containsFailureConsequence(text)
 }
 
 var markdownListEntryPattern = regexp.MustCompile(`^(?:[-+*]|[0-9]+[.)])\s+(.+)$`)
@@ -682,6 +722,15 @@ func fallbackCoversRequiredScope(failed, fallback string) bool {
 			return false
 		}
 	}
+	if len(failedSpec.validationKinds) > 0 && !fallbackExecutesValidationKinds(fallback, failedSpec.validationKinds) {
+		return false
+	}
+	pronounCarriesPrimaryObject := len(failedSpec.operationObjects) == 1 && containsAlternativeTerm(fallback, []string{"it"})
+	for _, object := range failedSpec.operationObjects {
+		if !pronounCarriesPrimaryObject && !containsWord(fallbackSpec.operationObjects, object) {
+			return false
+		}
+	}
 	// A singular pronoun may carry one already-named object across the fallback
 	// clause ("deploy the release ... deployed it"). It cannot stand in for a
 	// coordinated set such as unit and integration tests.
@@ -695,10 +744,11 @@ func fallbackCoversRequiredScope(failed, fallback string) bool {
 }
 
 type obligationSpec struct {
-	requiresBreadth bool
-	targets         []string
-	components      []string
-	validationKinds []string
+	requiresBreadth  bool
+	targets          []string
+	components       []string
+	validationKinds  []string
+	operationObjects []string
 }
 
 // parseObligationSpec retains the dimensions that decide whether substitute
@@ -706,11 +756,65 @@ type obligationSpec struct {
 // the validation kind by itself: a full smoke test is still not a full suite.
 func parseObligationSpec(text string) obligationSpec {
 	return obligationSpec{
-		requiresBreadth: requiredBreadth(text),
-		targets:         materialOperationTargets(text),
-		components:      materialObligationComponents(text),
-		validationKinds: materialValidationKinds(text),
+		requiresBreadth:  requiredBreadth(text),
+		targets:          materialOperationTargets(text),
+		components:       materialObligationComponents(text),
+		validationKinds:  materialValidationKinds(text),
+		operationObjects: materialOperationObjects(text),
 	}
+}
+
+// fallbackExecutesValidationKinds keeps each named suite attached to the action
+// that covers it. A shared "ran" may cover "unit and integration tests", but a
+// later "read integration tests" changes the action and is not execution proof.
+func fallbackExecutesValidationKinds(text string, required []string) bool {
+	words := obligationWords(text)
+	covered := make(map[string]bool, len(required))
+	executed := false
+	for _, raw := range words {
+		word := normalizeObligationWord(raw)
+		switch word {
+		case "ran", "executed", "tested", "verified", "validated", "performed", "completed", "did":
+			executed = true
+		case "read", "reviewed", "inspected", "documented", "wrote", "planned", "reported":
+			executed = false
+		}
+		if executed && containsWord(required, word) {
+			covered[word] = true
+		}
+	}
+	for _, kind := range required {
+		if !covered[kind] {
+			return false
+		}
+	}
+	return true
+}
+
+// materialOperationObjects retains direct objects whose words can also name an
+// operation elsewhere. In "deploy the release", release is what must be
+// deployed; treating it only as publish vocabulary lets deploying documentation
+// satisfy a different obligation.
+func materialOperationObjects(text string) []string {
+	words := obligationWords(text)
+	objects := []string{}
+	for index, word := range words {
+		if !containsWord([]string{"deploy", "deployed", "deployment", "publish", "published", "migrate", "migrated"}, word) {
+			continue
+		}
+		objectAt := index + 1
+		for objectAt < len(words) && containsWord([]string{"the", "a", "an", "our", "my", "your", "their"}, words[objectAt]) {
+			objectAt++
+		}
+		if objectAt >= len(words) || containsWord([]string{"it", "manually", "directly", "instead", "to", "for", "on", "in"}, words[objectAt]) {
+			continue
+		}
+		object := normalizeObligationWord(words[objectAt])
+		if object != "" && !containsWord(objects, object) {
+			objects = append(objects, object)
+		}
+	}
+	return objects
 }
 
 func materialValidationKinds(text string) []string {
@@ -730,7 +834,7 @@ func materialValidationKinds(text string) []string {
 	return kinds
 }
 
-var nonAffirmativeFallbackPattern = regexp.MustCompile(`\b(?:never|unsuccessfully|partial|partially|attempted|trying|tried|failed|crashed|errored|aborted|rejected)\b`)
+var nonAffirmativeFallbackPattern = regexp.MustCompile(`\b(?:never|unsuccessfully|partial|partially|attempted|trying|tried|failed|crashed|errored|aborted|rejected|expired|incomplete|timed\s+out|cancelled|canceled|did\s+not\s+finish|was\s+not\s+successful)\b`)
 var negatedFallbackPredicatePattern = regexp.MustCompile(`\b(?:did|does|do|was|were|is|are|has|have|had)\s+not\b`)
 var affirmativeFallbackActionPattern = regexp.MustCompile(`\b(?:i|we)\s+(?:(?:have|had)\s+)?(?:(?:manually|directly|successfully)\s+){0,2}(?:ran|executed|performed|completed|did|planned|recorded|formatted|checked|verified|validated|reviewed|audited|inspected|analysed|analyzed|read|wrote|listed|provided|edited|changed|patched|modified|applied|documented|reported|summarised|summarized|migrated|tested|deployed|published|released)\b`)
 var affirmativeOutcomePattern = regexp.MustCompile(`\b(?:it|that|this|the\s+[[:alnum:]_-]+)\s+(?:succeeded|completed\s+successfully|was\s+successful)\b`)
@@ -1141,6 +1245,10 @@ func harmlessToolLimitation(sentence string, stemAt, stemLen int) bool {
 	tail := strings.TrimSpace(sentence[stemAt+stemLen:])
 	for _, action := range harmlessGrantLimitedActions {
 		if strings.HasPrefix(tail, action) {
+			remainder := strings.TrimSpace(tail[len(action):])
+			if strings.HasPrefix(remainder, "and ") || strings.HasPrefix(remainder, "or ") {
+				return false
+			}
 			return true
 		}
 	}
@@ -1561,6 +1669,9 @@ var exhaustiveObservationEvidencePattern = regexp.MustCompile(`^after\s+(?:(?:[[
 // because its failure wording is absent from a deny-list. It recognizes either
 // an explicit completed action or a bounded positive result of the observation.
 func observationConsequenceIsAffirmative(consequence string) bool {
+	if containsFailureConsequence(consequence) {
+		return false
+	}
 	return affirmativeObservationConsequencePattern.MatchString(consequence) ||
 		exhaustiveObservationEvidencePattern.MatchString(consequence) ||
 		fallbackOutcomeIsAffirmative(consequence)
@@ -1744,7 +1855,7 @@ func (claim inabilityClaim) exempt() bool {
 		return !hasUnexemptedSubjectElidedInability(claim.sentence, claim.stemAt+claim.stemLen)
 	}
 	return hasUnavailableToolContext(claim.scope) &&
-		deliveredAlternativeAfter(claim.sentence, claim.stemAt+claim.stemLen)
+		deliveredAlternativeAfter(claim.blockedContext, claim.stemAt+claim.stemLen)
 }
 
 // strongAbsenceHasBlockedOutcome decides whether blocked-state text is outside

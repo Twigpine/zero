@@ -276,6 +276,54 @@ func TestCompletionGateKeepsCurrentHeadReviewControlsComplete(t *testing.T) {
 	}
 }
 
+func TestCompletionGateKeepsEvidenceAttachedToTheObligationItClears(t *testing.T) {
+	cases := []struct {
+		name       string
+		answer     string
+		incomplete bool
+	}{
+		{name: "affirmative observation cannot erase unfinished result", answer: "I could not find where the flag is set; the source is the parser, but the task is not done.", incomplete: true},
+		{name: "affirmative observation result", answer: "I could not find where the flag is set; the source is the parser boundary."},
+		{name: "different inline-code destination", answer: "I could not deploy the release to `production` because no deployment tool is available, so I deployed it to `staging` manually instead.", incomplete: true},
+		{name: "same inline-code destination", answer: "I could not deploy the release to `production` because no deployment tool is available, so I deployed it to `production` manually instead."},
+		{name: "different inline-code package", answer: "I could not publish the `alpha` package because no publishing tool is available, so I published the `beta` package manually instead.", incomplete: true},
+		{name: "same inline-code package", answer: "I could not publish the `alpha` package because no publishing tool is available, so I published the `alpha` package manually instead."},
+		{name: "fallback failed after and", answer: "I could not run the migration because no migration tool is available, so I ran it manually instead and it timed out.", incomplete: true},
+		{name: "fallback failed in next sentence", answer: "I could not run the migration because no migration tool is available, so I ran it manually instead. It timed out.", incomplete: true},
+		{name: "fallback cancelled in next sentence", answer: "I could not run the migration because no migration tool is available, so I ran it manually instead. It was cancelled.", incomplete: true},
+		{name: "fallback crashed in next sentence", answer: "I could not run the migration because no migration tool is available, so I ran it manually instead. It crashed.", incomplete: true},
+		{name: "fallback succeeded in next sentence", answer: "I could not run the migration because no migration tool is available, so I ran it manually instead. It was successful."},
+		{name: "bookkeeping and substantive duty share inability", answer: "I could not record the plan and deploy the release because no update_plan tool is available.", incomplete: true},
+		{name: "bookkeeping or patch share inability", answer: "I could not call update_plan or apply the patch because no update_plan tool is available.", incomplete: true},
+		{name: "bookkeeping only", answer: "I could not record the plan because no update_plan tool is available."},
+		{name: "operational heading with prose failure", answer: "**Unable to deploy (1):**\nProduction rollout failed.", incomplete: true},
+		{name: "operational heading with bullet failure", answer: "**Unable to deploy (1):**\n- Production rollout failed.", incomplete: true},
+		{name: "benign audit bucket", answer: "**Unable to verify (1):**\n- MCP #3 claim was truncated."},
+		{name: "one suite merely read", answer: "I could not run the unit and integration tests because no test tool is available, so I ran the unit tests manually instead and read the integration tests.", incomplete: true},
+		{name: "both suites executed", answer: "I could not run the unit and integration tests because no test tool is available, so I ran the unit and integration tests manually instead."},
+		{name: "different deployment object", answer: "I could not deploy the release because no deployment tool is available, so I deployed the documentation manually instead.", incomplete: true},
+		{name: "same deployment object", answer: "I could not deploy the release because no deployment tool is available, so I deployed the release manually instead."},
+		{name: "pronoun carries deployment object", answer: "I could not deploy the release because no deployment tool is available, so I deployed it manually instead."},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{textTurn(tc.answer)}}
+			result, err := Run(context.Background(), "complete the requested operation", provider, Options{
+				Registry:                tools.NewRegistry(),
+				MaxTurns:                2,
+				RequireCompletionSignal: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Incomplete != tc.incomplete {
+				t.Fatalf("Incomplete = %v, want %v for %q (reason: %s)", result.Incomplete, tc.incomplete, tc.answer, result.IncompleteReason)
+			}
+		})
+	}
+}
+
 func TestCompletionGateStructuralReviewerMatrix(t *testing.T) {
 	cases := []struct {
 		name       string
