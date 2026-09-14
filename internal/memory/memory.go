@@ -1102,22 +1102,6 @@ func renderNote(name, description, body string) string {
 	return b.String()
 }
 
-// splitFrontmatter returns the description and the body. A note without
-// frontmatter is not an error — it is a file someone wrote by hand, and losing
-// it because it lacks a header would be the store punishing the reader it exists
-// to serve.
-//
-// CRLF is accepted as well as LF. Project-scope notes are checked in, and Git for
-// Windows defaults to autocrlf=true, so a note that merely round-trips through a
-// clone comes back with "---\r\n" — under an LF-only split the whole header,
-// delimiters included, fell through into the body and the description was lost.
-//
-// LINE ENDINGS ARE NORMALISED TO LF in what this returns, on every path. The
-// earlier version normalised only for the split and then returned the body from
-// whichever string that path happened to hold, so a note WITH frontmatter came
-// back as LF and one WITHOUT kept its CRLF — a difference no caller asked for and
-// nothing documented. The file on disk is untouched either way; this is only
-// what the reader is handed.
 // boundedDescription caps the summary so one note cannot crowd out the listing.
 // Truncated on a rune boundary with an ellipsis, so the result stays readable and
 // is visibly cut rather than looking like the whole of a short description.
@@ -1147,6 +1131,22 @@ func boundedDescription(text string) string {
 	return text[:cut] + ellipsis
 }
 
+// splitFrontmatter returns the description and the body. A note without
+// frontmatter is not an error — it is a file someone wrote by hand, and losing
+// it because it lacks a header would be the store punishing the reader it exists
+// to serve.
+//
+// CRLF is accepted as well as LF. Project-scope notes are checked in, and Git for
+// Windows defaults to autocrlf=true, so a note that merely round-trips through a
+// clone comes back with "---\r\n" — under an LF-only split the whole header,
+// delimiters included, fell through into the body and the description was lost.
+//
+// LINE ENDINGS ARE NORMALISED TO LF in what this returns, on every path. The
+// earlier version normalised only for the split and then returned the body from
+// whichever string that path happened to hold, so a note WITH frontmatter came
+// back as LF and one WITHOUT kept its CRLF — a difference no caller asked for and
+// nothing documented. The file on disk is untouched either way; this is only
+// what the reader is handed.
 func splitFrontmatter(content string) (description string, body string) {
 	normalized := strings.ReplaceAll(content, "\r\n", "\n")
 	if !strings.HasPrefix(normalized, "---\n") {
