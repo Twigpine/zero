@@ -615,6 +615,51 @@ func TestStrictConflictKeepsRecordedRunAfterQueryArgsMutate(t *testing.T) {
 	}
 }
 
+func TestReturnedConflictRunDoesNotAliasLedgerProvenance(t *testing.T) {
+	for _, entry := range []struct {
+		name  string
+		first func(*Ledger, RecordedRun) []Conflict
+		next  func(*Ledger, RecordedRun) []Conflict
+	}{
+		{
+			name: "per-run",
+			first: func(ledger *Ledger, handle RecordedRun) []Conflict {
+				return ledger.Conflicts(handle, "TestSlow took 9s")
+			},
+			next: func(ledger *Ledger, handle RecordedRun) []Conflict {
+				return ledger.Conflicts(handle, "TestSlow took 10s")
+			},
+		},
+		{
+			name: "across-runs",
+			first: func(ledger *Ledger, _ RecordedRun) []Conflict {
+				return ledger.ConflictsAcrossRuns("TestSlow took 9s")
+			},
+			next: func(ledger *Ledger, _ RecordedRun) []Conflict {
+				return ledger.ConflictsAcrossRuns("TestSlow took 10s")
+			},
+		},
+	} {
+		t.Run(entry.name, func(t *testing.T) {
+			ledger := NewLedger()
+			handle, _ := ledger.Record(
+				Run{Command: "go", Args: []string{"test", "./original"}},
+				goTestJSON("--- PASS: TestSlow (1.00s)\n"),
+			)
+			first := entry.first(ledger, handle)
+			if len(first) != 1 {
+				t.Fatalf("first conflicts = %+v, want one", first)
+			}
+			first[0].Run.Args[1] = "./mutated-by-caller"
+
+			next := entry.next(ledger, handle)
+			if len(next) != 1 || next[0].Run.Label() != "go test ./original" {
+				t.Fatalf("returned conflict mutated retained provenance: %+v", next)
+			}
+		})
+	}
+}
+
 func TestRecordedIdentitySurvivesBuilderReuse(t *testing.T) {
 	ledger := NewLedger()
 	args := []string{"test", "./a"}
@@ -1496,6 +1541,38 @@ func TestSignedTimingDeltaIsNotElapsedTimeEvidence(t *testing.T) {
 	}
 }
 
+func TestRangesAndComparisonsAreNotElapsedTimeEvidence(t *testing.T) {
+	for _, claim := range []string{
+		"TestX took 1s-10s.",
+		"TestX took 1s - 10s.",
+		"TestX took 1s–10s.",
+		"TestX took 9s less than the suite.",
+		"TestX took 9s more than the baseline.",
+	} {
+		for _, entry := range []struct {
+			name  string
+			check func(*Ledger, RecordedRun) []Conflict
+		}{
+			{"per-run", func(ledger *Ledger, handle RecordedRun) []Conflict { return ledger.Conflicts(handle, claim) }},
+			{"across-runs", func(ledger *Ledger, _ RecordedRun) []Conflict { return ledger.ConflictsAcrossRuns(claim) }},
+		} {
+			t.Run(entry.name+"/"+claim, func(t *testing.T) {
+				ledger := NewLedger()
+				handle, _ := ledger.Record(Run{}, goTestJSON("--- PASS: TestX (0.10s)\n"))
+				if conflicts := entry.check(ledger, handle); len(conflicts) != 0 {
+					t.Fatalf("range or relative duration became elapsed evidence: %+v", conflicts)
+				}
+			})
+		}
+	}
+
+	ledger := NewLedger()
+	handle, _ := ledger.Record(Run{}, goTestJSON("--- PASS: TestX (0.10s)\n"))
+	if conflicts := ledger.Conflicts(handle, "TestX took 9s."); len(conflicts) != 1 || conflicts[0].Claimed != 9 {
+		t.Fatalf("scalar elapsed-time control stopped being detected: %+v", conflicts)
+	}
+}
+
 // EVERY TIMED MENTION IS CHECKED, not the first that parsed.
 //
 // claimedSecondsFor returned at its first successful occurrence, so an agreeing
@@ -1642,6 +1719,61 @@ func TestOnlyAffirmativeElapsedRolesBecomeClaims(t *testing.T) {
 				t.Errorf("affirmative elapsed claim = %+v, want one 9s conflict", conflicts)
 			}
 		})
+	}
+}
+
+func TestGoverningDenialAndHypothesisRemainAttachedToName(t *testing.T) {
+	for _, claim := range []string{
+		"It is false that TestX took 9s.",
+		"It is not true that TestX took 9s.",
+		"If TestX took 9s, it would exceed the budget.",
+		"Unless TestX took 9s, the premise does not apply.",
+	} {
+		for _, entry := range []struct {
+			name  string
+			check func(*Ledger, RecordedRun) []Conflict
+		}{
+			{"per-run", func(ledger *Ledger, handle RecordedRun) []Conflict { return ledger.Conflicts(handle, claim) }},
+			{"across-runs", func(ledger *Ledger, _ RecordedRun) []Conflict { return ledger.ConflictsAcrossRuns(claim) }},
+		} {
+			t.Run(entry.name+"/"+claim, func(t *testing.T) {
+				ledger := NewLedger()
+				handle, _ := ledger.Record(Run{}, goTestJSON("--- PASS: TestX (0.86s)\n"))
+				if conflicts := entry.check(ledger, handle); len(conflicts) != 0 {
+					t.Fatalf("governing non-assertion became elapsed evidence: %+v", conflicts)
+				}
+			})
+		}
+	}
+}
+
+func TestMultilineQuotesAndFencesDoNotBecomeTimingClaims(t *testing.T) {
+	for _, claim := range []string{
+		"The documentation says:\n\"This example reports\nTestX took 9s\nbut it is not a result.\"",
+		"Example transcript:\n```text\nTestX took 9s\n```",
+	} {
+		for _, entry := range []struct {
+			name  string
+			check func(*Ledger, RecordedRun) []Conflict
+		}{
+			{"per-run", func(ledger *Ledger, handle RecordedRun) []Conflict { return ledger.Conflicts(handle, claim) }},
+			{"across-runs", func(ledger *Ledger, _ RecordedRun) []Conflict { return ledger.ConflictsAcrossRuns(claim) }},
+		} {
+			t.Run(entry.name+"/quoted", func(t *testing.T) {
+				ledger := NewLedger()
+				handle, _ := ledger.Record(Run{}, goTestJSON("--- PASS: TestX (0.86s)\n"))
+				if conflicts := entry.check(ledger, handle); len(conflicts) != 0 {
+					t.Fatalf("multiline quoted example became a claim: %+v", conflicts)
+				}
+			})
+		}
+	}
+
+	ledger := NewLedger()
+	handle, _ := ledger.Record(Run{}, goTestJSON("--- PASS: TestX (0.86s)\n"))
+	claim := "```text\nTestX took 90s\n```\nTestX took 9s."
+	if conflicts := ledger.Conflicts(handle, claim); len(conflicts) != 1 || conflicts[0].Claimed != 9 {
+		t.Fatalf("assertion after closing fence was not checked independently: %+v", conflicts)
 	}
 }
 

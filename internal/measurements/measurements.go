@@ -198,7 +198,7 @@ func tokenLeftBoundary(text string, index int) bool {
 		return false
 	case previous == '.', previous == ',':
 		return false
-	case previous == '+', previous == '-', previous == '−':
+	case previous == '+', previous == '-', previous == '−', previous == '–', previous == '—':
 		// A signed number is a delta or another numeric expression, not an
 		// unsigned elapsed-time claim. Starting at the digit would discard the
 		// sign and turn "improved by -4.20s" into a claim that the test took
@@ -207,6 +207,109 @@ func tokenLeftBoundary(text string, index int) bool {
 	default:
 		return true
 	}
+}
+
+// scanDurationToken reads duration components without deciding whether the
+// surrounding text gives the token an independent elapsed-time meaning. Keeping
+// that lexical work separate lets durationTokenAt reject both endpoints of a
+// range without recursively asking itself whether the neighbouring endpoint is
+// another duration.
+func scanDurationToken(text string, index int) (end int, seconds float64, unitCount int, ok bool) {
+	at := index
+	for {
+		numberEnd := scanNumber(text, at)
+		if numberEnd == at {
+			break
+		}
+		matched := false
+		for _, unit := range durationUnits {
+			if !strings.HasPrefix(text[numberEnd:], unit.suffix) {
+				continue
+			}
+			value, err := strconv.ParseFloat(text[at:numberEnd], 64)
+			if err != nil {
+				return 0, 0, 0, false
+			}
+			seconds += value * unit.seconds
+			at = numberEnd + len(unit.suffix)
+			unitCount++
+			matched = true
+			break
+		}
+		if !matched {
+			return 0, 0, 0, false
+		}
+	}
+	return at, seconds, unitCount, unitCount > 0
+}
+
+func skipASCIISpaceForward(text string, at int) int {
+	for at < len(text) && (text[at] == ' ' || text[at] == '\t') {
+		at++
+	}
+	return at
+}
+
+func skipASCIISpaceBackward(text string, at int) int {
+	for at > 0 && (text[at-1] == ' ' || text[at-1] == '\t') {
+		at--
+	}
+	return at
+}
+
+func rangeDashAt(text string, at int) (int, bool) {
+	if at >= len(text) {
+		return at, false
+	}
+	r, size := utf8.DecodeRuneInString(text[at:])
+	switch r {
+	case '-', '–', '—':
+		return at + size, true
+	default:
+		return at, false
+	}
+}
+
+// durationRangeContinuation identifies "1s-10s" (and spaced or typographic
+// dash variants). A range is a bound, not evidence that either endpoint was the
+// measured elapsed result.
+func durationRangeContinuation(text string, end int) bool {
+	at := skipASCIISpaceForward(text, end)
+	afterDash, ok := rangeDashAt(text, at)
+	if !ok {
+		return false
+	}
+	at = skipASCIISpaceForward(text, afterDash)
+	secondEnd, _, _, ok := scanDurationToken(text, at)
+	return ok && tokenRightBoundary(text, secondEnd)
+}
+
+// durationRangePredecessor rejects the second endpoint when the token scanner
+// resumes after refusing the first one. This matters for spaced ranges, where a
+// plain left-boundary check would otherwise accept "10s" independently.
+func durationRangePredecessor(text string, index int) bool {
+	dashEnd := skipASCIISpaceBackward(text, index)
+	if dashEnd == 0 {
+		return false
+	}
+	dash, dashSize := utf8.DecodeLastRuneInString(text[:dashEnd])
+	switch dash {
+	case '-', '–', '—':
+	default:
+		return false
+	}
+	previousEnd := skipASCIISpaceBackward(text, dashEnd-dashSize)
+	start := previousEnd
+	for start > 0 {
+		r, size := utf8.DecodeLastRuneInString(text[:start])
+		if (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '.' {
+			start -= size
+			continue
+		}
+		break
+	}
+	end, _, _, ok := scanDurationToken(text, start)
+	return ok && end == previousEnd && tokenLeftBoundary(text, start)
 }
 
 // tokenRightBoundary reports whether a duration may END at index.
@@ -256,37 +359,11 @@ func scanNumber(text string, index int) int {
 // second-best reading: an unsupported form is not evidence, and guessing at one
 // is exactly how a fabricated number reaches the model.
 func durationTokenAt(text string, index int) (end int, seconds float64, unitCount int, ok bool) {
-	if !tokenLeftBoundary(text, index) {
+	if !tokenLeftBoundary(text, index) || durationRangePredecessor(text, index) {
 		return 0, 0, 0, false
 	}
-	at := index
-	for {
-		numberEnd := scanNumber(text, at)
-		if numberEnd == at {
-			break
-		}
-		matched := false
-		for _, unit := range durationUnits {
-			if !strings.HasPrefix(text[numberEnd:], unit.suffix) {
-				continue
-			}
-			value, err := strconv.ParseFloat(text[at:numberEnd], 64)
-			if err != nil {
-				return 0, 0, 0, false
-			}
-			seconds += value * unit.seconds
-			at = numberEnd + len(unit.suffix)
-			unitCount++
-			matched = true
-			break
-		}
-		if !matched {
-			// A figure with no unit, or an unsupported one. The token is not a
-			// duration, and no prefix of it is either.
-			return 0, 0, 0, false
-		}
-	}
-	if unitCount == 0 || !tokenRightBoundary(text, at) {
+	at, seconds, unitCount, ok := scanDurationToken(text, index)
+	if !ok || !tokenRightBoundary(text, at) || durationRangeContinuation(text, at) {
 		return 0, 0, 0, false
 	}
 	return at, seconds, unitCount, true
@@ -639,7 +716,7 @@ func (l *Ledger) Conflicts(handle RecordedRun, claim string) []Conflict {
 			}
 			values := append([]float64(nil), recorded...)
 			sort.Float64s(values)
-			out = append(out, Conflict{Name: name, Claimed: claimed, Recorded: values, Run: attributedRun})
+			out = append(out, Conflict{Name: name, Claimed: claimed, Recorded: values, Run: attributedRun.snapshot()})
 		}
 	}
 	// Deterministic order: this text reaches a model, and a set that reshuffles
@@ -681,6 +758,7 @@ func firstDurationEnd(clause string) int {
 // @jatmn.
 func claimedSecondsAllFor(claim, name string, known map[string][]float64) []float64 {
 	var values []float64
+	quoteState := claimQuoteState{}
 	for _, line := range strings.Split(claim, "\n") {
 		for start := 0; start < len(line); {
 			index := strings.Index(line[start:], name)
@@ -698,13 +776,14 @@ func claimedSecondsAllFor(claim, name string, known map[string][]float64) []floa
 			// otherwise valid-looking "took 9s" inside prose or a code span from
 			// becoming a correction.
 			clauseFrom := end
-			if insideASCIIQuote(line, absolute) {
+			if quoteStateAt(line, absolute, quoteState).quoted() {
 				var formatted bool
-				clauseFrom, formatted = formattedNameEnd(line, absolute, end)
+				clauseFrom, formatted = formattedNameEndWithState(line, absolute, end, quoteState)
 				if !formatted {
 					continue
 				}
 			}
+			governing := line[governingClauseStart(line, absolute):absolute]
 			clause := line[clauseFrom:clauseEnd(line, clauseFrom, known)]
 			// TWO DURATIONS IN ONE CLAUSE MEANS OWNERSHIP IS UNCLEAR, so the
 			// clause yields nothing.
@@ -724,12 +803,46 @@ func claimedSecondsAllFor(claim, name string, known map[string][]float64) []floa
 			if _, _, _, _, second := nextDurationToken(clause, firstDurationEnd(clause)); second {
 				continue
 			}
-			if value, ok := elapsedClaimedDuration(clause); ok {
+			if value, ok := elapsedClaimedDuration(clause, governing); ok {
 				values = append(values, value)
 			}
 		}
+		quoteState = quoteStateAt(line, len(line), quoteState)
 	}
 	return values
+}
+
+// governingClauseStart keeps denial and hypothetical markers that appear before
+// the measured name attached to the assertion they govern. Punctuation that
+// starts a new presentation clause bounds that context just as it bounds the
+// duration search after the name.
+func governingClauseStart(line string, nameAt int) int {
+	start := 0
+	for index := 0; index < nameAt; index++ {
+		switch line[index] {
+		case ';', ':', '.', '!', '?':
+			start = index + 1
+		}
+	}
+	return start
+}
+
+func asciiWords(text string) []string {
+	return strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
+		return (r < 'a' || r > 'z') && r != '\''
+	})
+}
+
+func governingMentionIsAffirmative(text string) bool {
+	for _, word := range asciiWords(text) {
+		switch word {
+		case "if", "unless", "whether", "assuming", "supposing",
+			"false", "not", "never", "neither", "deny", "denies", "denied",
+			"didn't", "doesn't", "cannot", "can't":
+			return false
+		}
+	}
+	return true
 }
 
 // clauseEnd returns the offset in line at which this name's clause stops.
@@ -809,7 +922,10 @@ func clauseEnd(line string, from int, known map[string][]float64) int {
 // forms this package has direct evidence for: "took D", a completed action "in
 // D", a presentation-owned "Name (D)"/"Name passed, D", and "D elapsed". A
 // miss is cheaper than inventing a correction, so every other role is silent.
-func elapsedClaimedDuration(text string) (float64, bool) {
+func elapsedClaimedDuration(text, governing string) (float64, bool) {
+	if !governingMentionIsAffirmative(governing) {
+		return 0, false
+	}
 	begin, end, _, _, ok := nextDurationToken(text, 0)
 	if !ok {
 		return 0, false
@@ -828,6 +944,9 @@ func durationHasElapsedRole(text string, begin, end int) bool {
 	}
 	before := strings.TrimSpace(text[:begin])
 	after := text[end:]
+	if comparativeDurationSuffix(after) {
+		return false
+	}
 	if elapsedFollowsDuration(after) && (before == "" || presentationOwnsDuration(before)) {
 		return true
 	}
@@ -844,6 +963,12 @@ func durationHasElapsedRole(text string, begin, end int) bool {
 		}
 	}
 	return presentationOwnsDuration(before) && !containsLetter(after[:segmentEnd(after)])
+}
+
+func comparativeDurationSuffix(text string) bool {
+	words := asciiWords(strings.TrimSpace(text))
+	return len(words) >= 2 && words[1] == "than" &&
+		(words[0] == "less" || words[0] == "more" || words[0] == "faster" || words[0] == "slower")
 }
 
 // affirmativeCueLead binds the result verb to the measured name. These are the
@@ -906,30 +1031,53 @@ func elapsedFollowsDuration(after string) bool {
 	return !containsLetter(rest[:segmentEnd(rest)])
 }
 
-func insideASCIIQuote(text string, at int) bool {
-	var double, backtick bool
+type claimQuoteState struct {
+	double   bool
+	backtick bool
+	fence    bool
+}
+
+func (state claimQuoteState) quoted() bool {
+	return state.double || state.backtick || state.fence
+}
+
+func quoteStateAt(text string, at int, state claimQuoteState) claimQuoteState {
 	escaped := false
-	for index := 0; index < at; index++ {
+	for index := 0; index < at; {
+		if strings.HasPrefix(text[index:], "```") {
+			state.fence = !state.fence
+			index += len("```")
+			continue
+		}
+		if state.fence {
+			index++
+			continue
+		}
 		switch c := text[index]; {
 		case escaped:
 			escaped = false
 		case c == '\\':
 			escaped = true
 		case c == '"':
-			double = !double
+			state.double = !state.double
 		case c == '`':
-			backtick = !backtick
+			state.backtick = !state.backtick
 		}
+		index++
 	}
-	return double || backtick
+	return state
 }
 
-// formattedNameEnd accepts a quote pair only when it wraps the matched name
+func insideASCIIQuote(text string, at int) bool {
+	return quoteStateAt(text, at, claimQuoteState{}).quoted()
+}
+
+// formattedNameEndWithState accepts a quote pair only when it wraps the matched name
 // itself. Markdown commonly writes "`TestX` took 9s"; that is an assertion with
 // a formatted subject, unlike "`TestX took 9s`", whose duration remains inside
 // the quoted example and must stay silent.
-func formattedNameEnd(text string, begin, end int) (int, bool) {
-	if begin == 0 || end >= len(text) || insideASCIIQuote(text, begin-1) {
+func formattedNameEndWithState(text string, begin, end int, initial claimQuoteState) (int, bool) {
+	if begin == 0 || end >= len(text) || quoteStateAt(text, begin-1, initial).quoted() {
 		return end, false
 	}
 	delimiter := text[begin-1]
@@ -1420,7 +1568,7 @@ func (l *Ledger) ConflictsAcrossRuns(claim string) []Conflict {
 			if seen.runs > 1 {
 				attributed = Run{}
 			}
-			out = append(out, Conflict{Name: name, Claimed: claimed, Recorded: values, Run: attributed})
+			out = append(out, Conflict{Name: name, Claimed: claimed, Recorded: values, Run: attributed.snapshot()})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
