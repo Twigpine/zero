@@ -1726,6 +1726,7 @@ func TestGoverningDenialAndHypothesisRemainAttachedToName(t *testing.T) {
 	for _, claim := range []string{
 		"It is false that TestX took 9s.",
 		"It is not true that TestX took 9s.",
+		"It isn't true that TestX took 9s.",
 		"If TestX took 9s, it would exceed the budget.",
 		"Unless TestX took 9s, the premise does not apply.",
 	} {
