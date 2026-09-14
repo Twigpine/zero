@@ -276,6 +276,41 @@ func TestCompletionGateKeepsCurrentHeadReviewControlsComplete(t *testing.T) {
 	}
 }
 
+func TestCollectiveInabilityStemsReachClassifierAndCompletionGate(t *testing.T) {
+	cases := []struct {
+		name       string
+		answer     string
+		incomplete bool
+	}{
+		{name: "could not leaves work blocked", answer: "We could not complete the requested migration because the build never succeeded.", incomplete: true},
+		{name: "do not have leaves work blocked", answer: "We do not have enough evidence to answer the question.", incomplete: true},
+		{name: "could not reports exhaustive negative finding", answer: "We could not find any remaining issues after inspecting every changed path."},
+		{name: "do not have reports capability-only caveat", answer: "We do not have an update_plan tool available in this specialist context; only read-only exploration tools were provided."},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reason := selfReportedIncompletion(tc.answer)
+			if got := reason != ""; got != tc.incomplete {
+				t.Fatalf("selfReportedIncompletion(%q) returned %q; incomplete = %v, want %v", tc.answer, reason, got, tc.incomplete)
+			}
+
+			provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{textTurn(tc.answer)}}
+			result, err := Run(context.Background(), "complete the requested operation", provider, Options{
+				Registry:                tools.NewRegistry(),
+				MaxTurns:                2,
+				RequireCompletionSignal: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Incomplete != tc.incomplete {
+				t.Fatalf("completion gate Incomplete = %v, want %v for %q (reason: %s)", result.Incomplete, tc.incomplete, tc.answer, result.IncompleteReason)
+			}
+		})
+	}
+}
+
 func TestCompletionGateKeepsEvidenceAttachedToTheObligationItClears(t *testing.T) {
 	cases := []struct {
 		name       string

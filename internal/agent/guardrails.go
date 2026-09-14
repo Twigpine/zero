@@ -187,7 +187,10 @@ var inabilityStems = []string{
 	"i cannot ", "i can't ", "i can not ", "i could not ", "i couldn't ",
 	"i am unable to", "i'm unable to", "i was unable to", "i wasn't able to",
 	"i was not able to", "i do not have", "i don't have",
-	"we are unable to", "we were unable to",
+	"we are unable to", "we're unable to", "we were unable to",
+	"we weren't able to", "we were not able to",
+	"we cannot ", "we can't ", "we can not ", "we could not ", "we couldn't ",
+	"we do not have", "we don't have",
 	// THE SUBJECTLESS STEM IS KEPT, and the heading it fired on is handled where
 	// the heading is, not by deleting the stem.
 	//
