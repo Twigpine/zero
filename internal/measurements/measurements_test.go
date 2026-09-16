@@ -1734,6 +1734,8 @@ func TestGoverningDenialAndHypothesisRemainAttachedToName(t *testing.T) {
 		"It is not true that in v1.2 TestX took 9s.",
 		"If TestX took 9s, it would exceed the budget.",
 		"Unless TestX took 9s, the premise does not apply.",
+		"Assume TestX took 9s; the premise would exceed the budget.",
+		"Suppose TestX took 9s; the premise would exceed the budget.",
 	} {
 		for _, entry := range []struct {
 			name  string

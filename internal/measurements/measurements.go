@@ -841,7 +841,7 @@ func asciiWords(text string) []string {
 func governingMentionIsAffirmative(text string) bool {
 	for _, word := range asciiWords(text) {
 		switch word {
-		case "if", "unless", "whether", "assuming", "supposing",
+		case "if", "unless", "whether", "assume", "assuming", "suppose", "supposing",
 			"false", "not", "never", "neither", "deny", "denies", "denied",
 			"isn't", "aren't", "wasn't", "weren't", "won't", "wouldn't", "shouldn't", "couldn't",
 			"didn't", "doesn't", "don't", "hasn't", "haven't", "hadn't", "cannot", "can't":
