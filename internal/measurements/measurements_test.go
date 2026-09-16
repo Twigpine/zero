@@ -1548,6 +1548,8 @@ func TestRangesAndComparisonsAreNotElapsedTimeEvidence(t *testing.T) {
 		"TestX took 1s–10s.",
 		"TestX took 9s less than the suite.",
 		"TestX took 9s more than the baseline.",
+		"TestX took 9s longer than TestY.",
+		"TestX took 9s shorter than the suite.",
 	} {
 		for _, entry := range []struct {
 			name  string
@@ -1728,6 +1730,8 @@ func TestGoverningDenialAndHypothesisRemainAttachedToName(t *testing.T) {
 		"It is not true that TestX took 9s.",
 		"It isn't true that TestX took 9s.",
 		"It isn’t true that TestX took 9s.",
+		"It is not true that after 0.5s TestX took 9s.",
+		"It is not true that in v1.2 TestX took 9s.",
 		"If TestX took 9s, it would exceed the budget.",
 		"Unless TestX took 9s, the premise does not apply.",
 	} {

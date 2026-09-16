@@ -820,8 +820,12 @@ func governingClauseStart(line string, nameAt int) int {
 	start := 0
 	for index := 0; index < nameAt; index++ {
 		switch line[index] {
-		case ';', ':', '.', '!', '?':
+		case ';', ':':
 			start = index + 1
+		default:
+			if sentenceTerminatorAt(line, index) {
+				start = index + 1
+			}
 		}
 	}
 	return start
@@ -969,8 +973,7 @@ func durationHasElapsedRole(text string, begin, end int) bool {
 
 func comparativeDurationSuffix(text string) bool {
 	words := asciiWords(strings.TrimSpace(text))
-	return len(words) >= 2 && words[1] == "than" &&
-		(words[0] == "less" || words[0] == "more" || words[0] == "faster" || words[0] == "slower")
+	return len(words) >= 2 && words[1] == "than"
 }
 
 // affirmativeCueLead binds the result verb to the measured name. These are the
@@ -1217,20 +1220,27 @@ var clauseSeparators = []string{
 // sits between two digits.
 func sentenceEnd(line string, from int) int {
 	for index := from; index < len(line); index++ {
-		switch line[index] {
-		case '.', '!', '?':
-		default:
-			continue
-		}
-		if line[index] == '.' && index > 0 && index+1 < len(line) &&
-			isDigitByte(line[index-1]) && isDigitByte(line[index+1]) {
-			continue
-		}
-		if index+1 >= len(line) || line[index+1] == ' ' || line[index+1] == '\t' {
+		if sentenceTerminatorAt(line, index) {
 			return index
 		}
 	}
 	return -1
+}
+
+func sentenceTerminatorAt(line string, index int) bool {
+	if index < 0 || index >= len(line) {
+		return false
+	}
+	switch line[index] {
+	case '.', '!', '?':
+	default:
+		return false
+	}
+	if line[index] == '.' && index > 0 && index+1 < len(line) &&
+		isDigitByte(line[index-1]) && isDigitByte(line[index+1]) {
+		return false
+	}
+	return index+1 >= len(line) || line[index+1] == ' ' || line[index+1] == '\t'
 }
 
 func isDigitByte(b byte) bool { return b >= '0' && b <= '9' }
