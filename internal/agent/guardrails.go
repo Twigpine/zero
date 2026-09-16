@@ -346,7 +346,8 @@ func attachCountedHeadingEntries(text string) string {
 		}
 		if _, ok := markdownListEntryContent(lines[firstEntry]); !ok {
 			content := strings.TrimSpace(lines[firstEntry])
-			if countedHeadingIsOperational(strings.TrimSpace(trimmed)) &&
+			if (countedHeadingIsOperational(strings.TrimSpace(trimmed)) ||
+				containsFailureConsequence(content)) &&
 				!paragraphReportsAffirmativeOutcome(content) {
 				joined = append(joined, line+" - "+content)
 				index = firstEntry

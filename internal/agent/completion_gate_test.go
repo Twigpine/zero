@@ -427,6 +427,7 @@ func TestCompletionGateStructuralReviewerMatrix(t *testing.T) {
 		{name: "multiline asterisk counted operation failure", answer: "**Unable to deploy (2):**\n* production deployment failed.\n* staging deployment failed.", incomplete: true},
 		{name: "multiline ordered counted operation failure", answer: "**Unable to deploy (1):**\n1. production deployment failed.", incomplete: true},
 		{name: "multiline counted operation after blank line", answer: "**Unable to deploy (1):**\n\n+ production deployment failed.", incomplete: true},
+		{name: "multiline counted observation prose failure", answer: "**Unable to verify (1):**\nThe migration was never run.", incomplete: true},
 		{name: "multiline benign audit bucket", answer: "**Unable to verify (1):**\n- MCP #3 source record was truncated."},
 		{name: "multiline benign audit asterisk after blank line", answer: "**Unable to verify (1):**\n\n* MCP #3 source record was truncated."},
 		{name: "multiline benign audit ordered entry", answer: "**Unable to verify (1):**\n1. MCP #3 source record was truncated."},
