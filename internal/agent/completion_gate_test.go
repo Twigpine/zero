@@ -339,6 +339,20 @@ func TestCompletionGateKeepsEvidenceAttachedToTheObligationItClears(t *testing.T
 		{name: "different deployment object", answer: "I could not deploy the release because no deployment tool is available, so I deployed the documentation manually instead.", incomplete: true},
 		{name: "same deployment object", answer: "I could not deploy the release because no deployment tool is available, so I deployed the release manually instead."},
 		{name: "pronoun carries deployment object", answer: "I could not deploy the release because no deployment tool is available, so I deployed it manually instead."},
+		{name: "observation consequence says nothing changed", answer: "I could not find where the regression was introduced; the source is the parser, but nothing was changed.", incomplete: true},
+		{name: "observation consequence still pending", answer: "I could not find where the regression was introduced; the source is the parser, though the fix is still pending.", incomplete: true},
+		{name: "multiword inline-code destination differs", answer: "I could not deploy the release to `production cluster` because no deployment tool is available, so I deployed it to `staging cluster` manually instead.", incomplete: true},
+		{name: "multiword inline-code destination declines exemption", answer: "I could not deploy the release to `production cluster` because no deployment tool is available, so I deployed it to `production cluster` manually instead.", incomplete: true},
+		{name: "fallback killed by oom", answer: "I could not run the migration because no migration tool is available, so I ran it manually instead. The run was killed by the OOM killer.", incomplete: true},
+		{name: "bookkeeping comma substantive duty", answer: "I could not record the plan, and deploy the release, because no update_plan tool is available.", incomplete: true},
+		{name: "bookkeeping nor substantive duty", answer: "I could not record the plan nor deploy the release because no update_plan tool is available.", incomplete: true},
+		{name: "bookkeeping as-well-as substantive duty", answer: "I could not record the plan as well as deploy the release because no update_plan tool is available.", incomplete: true},
+		{name: "operational heading remains pending", answer: "**Unable to deploy (1):**\nProduction rollout is still pending.", incomplete: true},
+		{name: "operational heading reports success", answer: "**Unable to deploy (1):**\nProduction rollout completed successfully."},
+		{name: "one suite skipped", answer: "I could not run the unit and integration tests because no test tool is available, so I ran the unit tests manually instead and skipped the integration tests.", incomplete: true},
+		{name: "one suite left for later", answer: "I could not run the unit and integration tests because no test tool is available, so I ran the unit tests manually instead and left the integration tests for later.", incomplete: true},
+		{name: "release notes are not the release", answer: "I could not deploy the release because no deployment tool is available, so I deployed the release notes manually instead.", incomplete: true},
+		{name: "same multiword deployment object", answer: "I could not deploy the release notes because no deployment tool is available, so I deployed the release notes manually instead."},
 	}
 
 	for _, tc := range cases {

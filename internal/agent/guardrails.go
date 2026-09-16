@@ -240,6 +240,7 @@ func stripQuoted(s string) string {
 	var b strings.Builder
 	var span strings.Builder // pending text since the open delimiter, kept if it never closes
 	open := rune(0)
+	opaqueCodeSpan := 0
 	for _, r := range s {
 		switch {
 		case open != 0:
@@ -248,6 +249,9 @@ func stripQuoted(s string) string {
 					content := strings.TrimPrefix(span.String(), "`")
 					if inlineCodeIdentity(content) {
 						b.WriteString(content)
+					} else if content != "" {
+						opaqueCodeSpan++
+						b.WriteString(opaqueInlineCodeIdentity(content, opaqueCodeSpan))
 					}
 				}
 				open = 0
@@ -288,6 +292,25 @@ func inlineCodeIdentity(text string) bool {
 	return true
 }
 
+// opaqueInlineCodeIdentity gives each non-identifier code span a distinct token
+// without exposing its prose to the admission classifier. Distinct occurrence
+// tokens deliberately decline the fallback-equivalence exemption: dropping the
+// spans made different multiword destinations compare as the same empty target,
+// while replaying their prose would turn a quoted log line into a current
+// admission.
+func opaqueInlineCodeIdentity(text string, ordinal int) string {
+	const (
+		offset64 = uint64(14695981039346656037)
+		prime64  = uint64(1099511628211)
+	)
+	hash := offset64
+	for _, b := range []byte(text) {
+		hash ^= uint64(b)
+		hash *= prime64
+	}
+	return "inline_code_" + strconv.Itoa(ordinal) + "_" + strconv.FormatUint(hash, 16)
+}
+
 // admissionSentences splits lowered text into sentence-ish fragments so the
 // detector judges each claim in its own context. Newlines split too (markdown
 // bullets are separate claims); the exact boundaries only need to keep an
@@ -323,7 +346,8 @@ func attachCountedHeadingEntries(text string) string {
 		}
 		if _, ok := markdownListEntryContent(lines[firstEntry]); !ok {
 			content := strings.TrimSpace(lines[firstEntry])
-			if countedHeadingIsOperational(strings.TrimSpace(trimmed)) && paragraphReportsFailedOutcome(content) {
+			if countedHeadingIsOperational(strings.TrimSpace(trimmed)) &&
+				!paragraphReportsAffirmativeOutcome(content) {
 				joined = append(joined, line+" - "+content)
 				index = firstEntry
 				continue
@@ -353,10 +377,10 @@ func attachCountedHeadingEntries(text string) string {
 	return strings.Join(joined, "\n")
 }
 
-var failedOutcomeParagraphPattern = regexp.MustCompile(`\b(?:failed|crashed|errored|aborted|rejected|expired|timed\s+out|was\s+cancelled|was\s+canceled|did\s+not\s+(?:finish|succeed|complete)|was\s+not\s+successful)\b`)
+var affirmativeOutcomeParagraphPattern = regexp.MustCompile(`^(?:the\s+)?(?:[[:alnum:]_-]+\s+){0,4}(?:succeeded|completed\s+successfully|was\s+successful|is\s+(?:complete|completed|done))[.!]?$`)
 
-func paragraphReportsFailedOutcome(text string) bool {
-	return failedOutcomeParagraphPattern.MatchString(text) || containsFailureConsequence(text)
+func paragraphReportsAffirmativeOutcome(text string) bool {
+	return affirmativeOutcomeParagraphPattern.MatchString(text)
 }
 
 var markdownListEntryPattern = regexp.MustCompile(`^(?:[-+*]|[0-9]+[.)])\s+(.+)$`)
@@ -776,14 +800,21 @@ func fallbackExecutesValidationKinds(text string, required []string) bool {
 	executed := false
 	for _, raw := range words {
 		word := normalizeObligationWord(raw)
-		switch word {
-		case "ran", "executed", "tested", "verified", "validated", "performed", "completed", "did":
+		if containsWord([]string{"ran", "executed", "tested", "verified", "validated", "performed", "completed", "did"}, word) {
 			executed = true
-		case "read", "reviewed", "inspected", "documented", "wrote", "planned", "reported":
-			executed = false
+			continue
 		}
-		if executed && containsWord(required, word) {
-			covered[word] = true
+		if containsWord(required, word) {
+			if executed {
+				covered[word] = true
+			}
+			continue
+		}
+		if executed && !containsWord([]string{
+			"i", "we", "the", "a", "an", "all", "every", "full", "complete",
+			"test", "and", "or", "as", "well", "both",
+		}, word) {
+			executed = false
 		}
 	}
 	for _, kind := range required {
@@ -809,10 +840,20 @@ func materialOperationObjects(text string) []string {
 		for objectAt < len(words) && containsWord([]string{"the", "a", "an", "our", "my", "your", "their"}, words[objectAt]) {
 			objectAt++
 		}
-		if objectAt >= len(words) || containsWord([]string{"it", "manually", "directly", "instead", "to", "for", "on", "in"}, words[objectAt]) {
+		if objectAt >= len(words) || words[objectAt] == "it" {
 			continue
 		}
-		object := normalizeObligationWord(words[objectAt])
+		objectEnd := objectAt
+		for objectEnd < len(words) && !containsWord([]string{
+			"manually", "directly", "instead", "to", "for", "on", "in", "into", "onto",
+			"against", "with", "by", "because", "since", "due", "owing", "so", "but", "and", "or",
+		}, words[objectEnd]) {
+			objectEnd++
+		}
+		if objectEnd == objectAt {
+			continue
+		}
+		object := normalizeObligationWord(words[objectEnd-1])
 		if object != "" && !containsWord(objects, object) {
 			objects = append(objects, object)
 		}
@@ -869,7 +910,7 @@ func fallbackOutcomeIsAffirmative(fallback string) bool {
 // This is intentionally structural: a new failure synonym after "but" cannot
 // become completion evidence just because it is absent from a deny-list.
 func fallbackHasUnprovenAdversativeOutcome(fallback string) bool {
-	for _, boundary := range []string{" but ", "; but ", ", but ", " however ", " although ", " yet "} {
+	for _, boundary := range []string{" but ", "; but ", ", but ", " however ", " although ", " though ", " yet ", "\n"} {
 		if at := strings.Index(fallback, boundary); at >= 0 {
 			return !affirmativeOutcomePattern.MatchString(fallback[at+len(boundary):])
 		}
@@ -1249,14 +1290,41 @@ func harmlessToolLimitation(sentence string, stemAt, stemLen int) bool {
 	for _, action := range harmlessGrantLimitedActions {
 		if strings.HasPrefix(tail, action) {
 			remainder := strings.TrimSpace(tail[len(action):])
-			if strings.HasPrefix(remainder, "and ") || strings.HasPrefix(remainder, "or ") {
-				return false
-			}
-			return true
+			return harmlessToolLimitationRemainder(remainder)
 		}
 	}
 	return false
 }
+
+// harmlessToolLimitationRemainder grants the bookkeeping exemption only when
+// the matched action is followed directly by its capability explanation. Any
+// intervening words are another duty, regardless of whether punctuation,
+// "nor", or a longer connective joins it to the bookkeeping action.
+func harmlessToolLimitationRemainder(remainder string) bool {
+	if strings.Trim(remainder, " ,;:\t") == "" {
+		return true
+	}
+	if harmlessCompletedObjectiveRemainderPattern.MatchString(remainder) {
+		return true
+	}
+	for _, boundary := range []string{"because ", "since ", "due to ", "owing to ", "as "} {
+		for start := 0; start < len(remainder); {
+			rel := strings.Index(remainder[start:], boundary)
+			if rel < 0 {
+				break
+			}
+			at := start + rel
+			if boundary == "as " && strings.HasPrefix(remainder[at:], "as well as ") {
+				start = at + len(boundary)
+				continue
+			}
+			return strings.Trim(remainder[:at], " ,;:\t") == ""
+		}
+	}
+	return false
+}
+
+var harmlessCompletedObjectiveRemainderPattern = regexp.MustCompile(`^[,;:\s]*(?:the\s+)?(?:task|objective|assignment)\b[^.;]*\b(?:is|was)\s+(?:now\s+)?(?:complete|completed|done)\b`)
 
 // objectiveFailureMarkers name the OBJECTIVE rather than a capability. A
 // sentence carrying one is about whether the job got done, so the tool-grant
@@ -1675,6 +1743,9 @@ func observationConsequenceIsAffirmative(consequence string) bool {
 	if containsFailureConsequence(consequence) {
 		return false
 	}
+	if fallbackHasUnprovenAdversativeOutcome(consequence) {
+		return false
+	}
 	return affirmativeObservationConsequencePattern.MatchString(consequence) ||
 		exhaustiveObservationEvidencePattern.MatchString(consequence) ||
 		fallbackOutcomeIsAffirmative(consequence)
@@ -1938,7 +2009,7 @@ func selfReportedIncompletion(text string) string {
 		// one sentence cannot be paired with an allowance tail in another.
 		blockedContext := sentence
 		if index+1 < len(sentences) && carriesTheConsequence(sentences[index+1]) {
-			blockedContext += " " + sentences[index+1]
+			blockedContext += "\n" + sentences[index+1]
 		}
 		if containsAny(sentence, narrativeMarkers) {
 			continue
