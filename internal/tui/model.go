@@ -682,10 +682,10 @@ type agentUsageMsg struct {
 }
 
 type agentResponseMsg struct {
-	planUpdate    *planUpdateMsg // fallback when no live runtime message sink is configured
-	runID         int
-	rows          []transcriptRow
-	usageEvents   []zeroruntime.Usage
+	planUpdate  *planUpdateMsg // fallback when no live runtime message sink is configured
+	runID       int
+	rows        []transcriptRow
+	usageEvents []zeroruntime.Usage
 	// usageModelID is the model in force when the run ended. usageModelIDs is
 	// the model in force when each usageEvents entry fired: a mid-run
 	// escalation changes it partway through the run, and billing the events
