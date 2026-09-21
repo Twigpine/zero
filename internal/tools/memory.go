@@ -103,6 +103,22 @@ func (tool memoryTool) Run(_ context.Context, args map[string]any) Result {
 			listScopes = nil
 		}
 		notes, listErr := memory.List(tool.paths, listScopes...)
+		// NOTHING READABLE PLUS A FAILURE IS NOT AN EMPTY STORE. The two are
+		// indistinguishable to a model, and it acts on the difference: told
+		// "No saved notes yet", it writes the note again, or proceeds as though
+		// nothing was ever recorded. That is exactly the confusion
+		// memory.List's error return exists to prevent — escape_test.go pins it
+		// at the library ("returning an empty list would tell the caller there
+		// are no notes") — and the tool layer put it straight back by rendering
+		// the empty-store copy first and appending the failure underneath.
+		//
+		// So the failure leads, and the result is an error: a redirected .zero,
+		// an unreadable scope, or every entry failing to read are all states
+		// where the store's contents are UNKNOWN, not known to be empty.
+		// Reported by @jatmn.
+		if listErr != nil && len(notes) == 0 {
+			return errorResult(memoryListFailure(listErr))
+		}
 		// BESIDE the notes, not instead of them. memory.List deliberately returns
 		// what it could read alongside the failures, and returning an error here
 		// threw that away — turning the library's careful partial success back
@@ -111,7 +127,7 @@ func (tool memoryTool) Run(_ context.Context, args map[string]any) Result {
 		// appended rather than substituted.
 		rendered := renderMemoryList(notes)
 		if listErr != nil {
-			rendered += "\n\nSome notes could not be read: " + listErr.Error()
+			rendered += "\n\n" + memoryListCaveat(listErr)
 		}
 		return okResult(rendered)
 	}
@@ -283,6 +299,31 @@ func (tool memoryForgetTool) Run(_ context.Context, args map[string]any) Result 
 		return errorResult("Error: " + err.Error())
 	}
 	return okResult(fmt.Sprintf("Forgot %q (%s).", name, scope))
+}
+
+// memoryListFailure is the whole message when the listing produced nothing and
+// failed. It must not read like an empty store, so it says what is unknown and
+// what would make it knowable again.
+func memoryListFailure(listErr error) string {
+	return "The memory store could not be read, so its contents are unknown — this is NOT the same as having no notes. " +
+		"Do not assume memory is empty or rewrite notes that may already exist.\n\n" +
+		memoryListCaveat(listErr)
+}
+
+// memoryListCaveat names what went wrong in terms that match the failure.
+// "Some notes could not be read" is true of an unreadable entry and false of a
+// containment refusal, where the store was never opened at all — telling an
+// operator that notes were unreadable sends them looking for corrupt files
+// instead of the redirected directory that actually caused it.
+func memoryListCaveat(listErr error) string {
+	switch {
+	case errors.Is(listErr, memory.ErrIsSymlink):
+		return "The memory store is a link pointing outside the workspace and was refused: " + listErr.Error()
+	case errors.Is(listErr, memory.ErrUnreadable):
+		return "The memory store exists but could not be opened: " + listErr.Error()
+	default:
+		return "Some notes could not be read: " + listErr.Error()
+	}
 }
 
 func renderMemoryList(notes []memory.Note) string {
