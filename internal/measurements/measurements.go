@@ -34,22 +34,26 @@ import (
 
 // Measurement is one timing a command reported: what was measured, and how long
 // it took in seconds.
+//
+// Package-scoped by construction. ParseGoTest admits only the runner's own
+// package result (see its doc comment for why a per-test timing cannot be
+// attributed to anyone), so Name and Package are the same import path and there
+// is no test-level identity to carry. The per-test Test field, the qualified
+// "pkg.TestName" display it fed, and the collision handling that display needed
+// were removed with the admission rule that populated them: unreachable
+// branches invite someone to restore the producer without the reason it was
+// closed.
 type Measurement struct {
 	Name    string
 	Package string
-	Test    string
 	Seconds float64
 }
 
 type measurementID struct {
 	Package string
-	Test    string
 }
 
 func (m Measurement) identity() measurementID {
-	if m.Test != "" {
-		return measurementID{Package: m.Package, Test: m.Test}
-	}
 	return measurementID{Package: m.Name}
 }
 
@@ -387,16 +391,44 @@ func nextDurationToken(text string, start int) (begin, end int, seconds float64,
 	return 0, 0, 0, 0, false
 }
 
-// ParseGoTest pulls timings only from structured `go test -json` result events.
+// ParseGoTest pulls timings only from `go test -json` events cmd/go itself
+// produced: the PACKAGE-LEVEL pass/fail/skip results, whose Elapsed is the
+// runner's own measurement of the test process.
 //
-// Plain `go test -v` output is deliberately not accepted. The test process and
-// the Go runner share that text stream, so a test can print a line shaped like
-// `--- PASS: TestName (99.00s)` before the runner prints the real result. Under
-// -json, test stdout is wrapped in an "output" event; only pass/fail/skip events
-// contribute timings. A package-level `(cached)` output marker makes every
-// timing event for that package inadmissible: cmd/go replays per-test pass
-// events with zero elapsed before it announces the cache hit. Malformed or
-// ordinary-text lines are silence, not evidence.
+// PER-TEST TIMINGS ARE NOT ADMISSIBLE, and the earlier reasoning for admitting
+// them was wrong in a way worth writing down. It held that -json fixes the
+// shared-stream problem because test stdout arrives wrapped in an "output"
+// event. It does not. test2json is a parser over the test process's stdout, and
+// the framing byte that marks a result line is a byte like any other: a test
+// that prints
+//
+//	fmt.Print("\x16--- PASS: TestForged (99.00s)\n")
+//
+// makes a real `{"Action":"pass","Test":"TestForged","Elapsed":99}` event, for a
+// test that does not exist. Verified against this repository's Go toolchain;
+// `fail` and `skip` forge the same way. A preceding `run` event proves nothing
+// either — `\x16=== RUN   TestForged` forges that too — so no combination of
+// per-test fields establishes origin. The child owns the whole file descriptor;
+// the JSON wrapper is a re-encoding of what the child said, not a second
+// witness to it.
+//
+// That matters here more than it would elsewhere, because the process whose
+// claims this package checks is usually the same one that writes the tests. A
+// per-test elapsed value is therefore self-certification with extra steps: the
+// exact thing this package exists to refuse.
+//
+// The package-level event is different in kind. cmd/go emits it when the test
+// binary exits, timing that process from outside; a test printing
+// `\x16ok  \tpkg\t88.000s` does not move it (verified — the real 0.51s stood).
+// So that one value has an established producer, and it is the only one kept.
+//
+// Conservative rather than clever: a claim about a single test now finds no
+// evidence and is answered with silence, which is honest, instead of being
+// validated by a number the claimant supplied. Plain `go test -v` output stays
+// inadmissible for the original reason. A package-level `(cached)` output
+// marker still makes that package's timing inadmissible: cmd/go replays events
+// with zero elapsed before announcing the cache hit. Malformed or ordinary-text
+// lines are silence, not evidence. Reported by @jatmn.
 func ParseGoTest(text string) []Measurement {
 	if strings.TrimSpace(text) == "" {
 		return nil
@@ -428,14 +460,17 @@ func ParseGoTest(text string) []Measurement {
 		default:
 			continue
 		}
-		name := item.Test
-		if name == "" {
-			name = item.Package
-		}
-		if name == "" || math.IsNaN(*item.Elapsed) || math.IsInf(*item.Elapsed, 0) || *item.Elapsed < 0 {
+		// The producer boundary, and the whole admission rule: an event naming a
+		// test was parsed out of the test process's own stdout and cannot be
+		// attributed to anyone else. Only the package-level result carries
+		// cmd/go's own measurement. See the doc comment above.
+		if item.Test != "" {
 			continue
 		}
-		out = append(out, Measurement{Name: name, Package: item.Package, Test: item.Test, Seconds: *item.Elapsed})
+		if item.Package == "" || math.IsNaN(*item.Elapsed) || math.IsInf(*item.Elapsed, 0) || *item.Elapsed < 0 {
+			continue
+		}
+		out = append(out, Measurement{Name: item.Package, Package: item.Package, Seconds: *item.Elapsed})
 	}
 	if len(cachedPackages) == 0 {
 		return out
@@ -605,42 +640,31 @@ func tolerance(a, b float64) bool {
 	return math.Abs(a-b) <= spread
 }
 
+// measurementDisplayNames maps each recorded identity to the text a claim has to
+// name to be checked against it, and pools the values under that text.
+//
+// One identity, one name, since an identity IS its package path. The earlier
+// version resolved a test name against its package and fell back to a qualified
+// "pkg.TestName" when two packages held the same test — and had to fail silent
+// when that rendered identically to a real package of that name. None of those
+// shapes can occur now that only package results are admitted; the collision
+// check is kept because the map is still keyed by text and a duplicate would
+// silently pool two packages' numbers.
 func measurementDisplayNames(observed map[measurementID][]float64) (map[measurementID]string, map[string][]float64) {
-	testOwners := map[string]int{}
-	for id := range observed {
-		if id.Test != "" {
-			testOwners[id.Test]++
-		}
-	}
-	candidates := make(map[measurementID]string, len(observed))
 	owners := make(map[string]int, len(observed))
 	for id := range observed {
-		name := id.Package
-		if id.Test != "" {
-			name = id.Test
-			if testOwners[id.Test] > 1 {
-				name = id.Package + "." + id.Test
-			}
+		if id.Package != "" {
+			owners[id.Package]++
 		}
-		if name == "" {
-			continue
-		}
-		candidates[id] = name
-		owners[name]++
 	}
-	names := make(map[measurementID]string, len(candidates))
-	known := make(map[string][]float64, len(candidates))
-	for id, name := range candidates {
-		// Package results and package-qualified test results occupy distinct
-		// identities but can render to the same text (package "example/a.TestFoo"
-		// versus TestFoo in package "example/a"). Such a claim has no unique
-		// owner, so fail silent rather than pooling values or emitting two
-		// incompatible corrections.
-		if owners[name] != 1 {
+	names := make(map[measurementID]string, len(observed))
+	known := make(map[string][]float64, len(observed))
+	for id := range observed {
+		if id.Package == "" || owners[id.Package] != 1 {
 			continue
 		}
-		names[id] = name
-		known[name] = append(known[name], observed[id]...)
+		names[id] = id.Package
+		known[id.Package] = append(known[id.Package], observed[id]...)
 	}
 	return names, known
 }
@@ -784,7 +808,17 @@ func claimedSecondsAllFor(claim, name string, known map[string][]float64) []floa
 				}
 			}
 			governing := line[governingClauseStart(line, absolute):absolute]
-			clause := line[clauseFrom:clauseEnd(line, clauseFrom, known)]
+			cut, asksAQuestion := clauseEnd(line, clauseFrom, known)
+			// A QUESTION ABOUT A TIMING IS NOT A CLAIM ABOUT IT. "TestX took 9s?"
+			// and "Is it true that TestX took 9s?" ask whether the number is
+			// right; treating either as an assertion answers a question with an
+			// accusation. The affirmative grammar below cannot see this — the
+			// clause it receives ends before the punctuation — so the sentence's
+			// own mood has to be applied here, where it is still known.
+			if asksAQuestion {
+				continue
+			}
+			clause := line[clauseFrom:cut]
 			// TWO DURATIONS IN ONE CLAUSE MEANS OWNERSHIP IS UNCLEAR, so the
 			// clause yields nothing.
 			//
@@ -869,11 +903,28 @@ func governingMentionIsAffirmative(text string) bool {
 // All three only ever SHORTEN the search, so each can cost a detection but none
 // can invent one — the right direction for a check whose worst failure is
 // accusing a correct number of being wrong.
-func clauseEnd(line string, from int, known map[string][]float64) int {
+// clauseEnd returns where this name's clause stops, and whether that stop is the
+// sentence's own QUESTION MARK.
+//
+// THE TERMINATOR IS MEANING, NOT JUST A BOUNDARY. The scanner already
+// recognized `?` — sentenceTerminatorAt lists it beside `.` and `!` — but only
+// as an offset, and the caller slices the clause up to that offset. So
+// "TestX took 9s?" and "TestX took 9s." both arrive at the role classifier as
+// the identical tail " took 9s", and the question was scored as an assertion:
+// asking whether a number is right produced a conflict claiming the asker had
+// stated it. The mood is decided at the boundary and was being discarded there,
+// so it is returned with the offset instead. Reported by @jatmn.
+//
+// Only a SENTENCE terminator carries mood. A cut made by the next name or by a
+// clause separator is structural and says nothing about the sentence, and no
+// separator in clauseSeparators is "?" — so the two cannot be confused.
+func clauseEnd(line string, from int, known map[string][]float64) (int, bool) {
 	cut := len(line)
+	interrogative := false
 	consider := func(at int) {
 		if at >= 0 && at < cut {
 			cut = at
+			interrogative = false
 		}
 	}
 	for other := range known {
@@ -916,8 +967,13 @@ func clauseEnd(line string, from int, known map[string][]float64) int {
 		}
 		consider(from + index)
 	}
-	consider(sentenceEnd(line, from))
-	return cut
+	if at := sentenceEnd(line, from); at >= 0 {
+		consider(at)
+		if cut == at {
+			interrogative = line[at] == '?'
+		}
+	}
+	return cut, interrogative
 }
 
 // elapsedClaimedDuration reads a duration only when its local syntax says that

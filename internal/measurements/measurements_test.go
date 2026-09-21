@@ -17,8 +17,16 @@ var (
 )
 
 // goTestJSON keeps the conflict-classifier fixtures concise while feeding the
-// production parser only the trusted event shape emitted by `go test -json`.
-// Parser trust-boundary behavior itself is tested directly below.
+// production parser only the ADMISSIBLE event shape: a package-level result,
+// whose Elapsed cmd/go measured itself.
+//
+// Both legacy shapes below therefore become package events. A `--- PASS: TestX`
+// line in a fixture is shorthand for "an observation named TestX lasting N
+// seconds" — the classifier tests it feeds are about duration grammar, clause
+// boundaries and dedupe, none of which care whether a name is a package path or
+// a test. Per-test EVENTS are no longer admissible at all (see ParseGoTest), and
+// the tests that prove that build the per-test shape explicitly rather than
+// through this helper, so nothing here can quietly re-admit them.
 func goTestJSON(legacy string) string {
 	type event struct {
 		Action  string  `json:"Action"`
@@ -44,7 +52,7 @@ func goTestJSON(legacy string) string {
 	}
 	for _, match := range legacyTestResult.FindAllStringSubmatch(legacy, -1) {
 		seconds, _ := strconv.ParseFloat(match[3], 64)
-		appendEvent(event{Action: strings.ToLower(match[1]), Package: "example.test", Test: match[2], Elapsed: seconds})
+		appendEvent(event{Action: strings.ToLower(match[1]), Package: match[2], Elapsed: seconds})
 	}
 	return strings.Join(lines, "\n")
 }
@@ -111,20 +119,105 @@ func TestParseGoTestReadsBothLineShapes(t *testing.T) {
 	}
 }
 
+// A TEST CAN MINT ITS OWN RESULT EVENTS, so a JSON status is not provenance.
+//
+// The stream below is a REAL `go test -json` capture, not a hand-written
+// fixture: the earlier regression built an "output" event itself and therefore
+// never crossed the boundary it was meant to police. The package under capture
+// contains exactly two tests, TestFraming and TestHonest. TestFraming prints
+// three lines carrying test2json's framing byte, and cmd/go's converter turns
+// each into a genuine per-test result event — pass at 99s, fail at 77s, skip at
+// 55s — for three tests that DO NOT EXIST. The forged run/pass pair in
+// TestAPrintedRunEventIsNoProvenanceEither shows a preceding `run` event is no
+// help either.
+//
+// Nothing per-test survives admission. The package-level 0.33s does: cmd/go
+// timed that process from outside, and the forged `ok ... 88s` line in the
+// companion test does not move it.
 func TestTestStdoutCannotBecomeTimingEvidence(t *testing.T) {
-	const stream = "" +
-		`{"Action":"output","Package":"example.test","Test":"TestSpoofed","Output":"--- PASS: TestSpoofed (99.00s)\\n"}` + "\n" +
-		`{"Action":"pass","Package":"example.test","Test":"TestSpoofed","Elapsed":1}` + "\n"
+	const capture = "" +
+		`{"Action":"start","Package":"framing"}` + "\n" +
+		`{"Action":"run","Package":"framing","Test":"TestFraming"}` + "\n" +
+		`{"Action":"output","Package":"framing","Test":"TestFraming","Output":"=== RUN   TestFraming\n"}` + "\n" +
+		`{"Action":"output","Package":"framing","Test":"TestForged","Output":"--- PASS: TestForged (99.00s)\n"}` + "\n" +
+		`{"Action":"pass","Package":"framing","Test":"TestForged","Elapsed":99}` + "\n" +
+		`{"Action":"output","Package":"framing","Test":"TestGhost","Output":"--- FAIL: TestGhost (77.00s)\n"}` + "\n" +
+		`{"Action":"fail","Package":"framing","Test":"TestGhost","Elapsed":77}` + "\n" +
+		`{"Action":"output","Package":"framing","Test":"TestPhantom","Output":"--- SKIP: TestPhantom (55.00s)\n"}` + "\n" +
+		`{"Action":"skip","Package":"framing","Test":"TestPhantom","Elapsed":55}` + "\n" +
+		`{"Action":"output","Package":"framing","Test":"TestFraming","Output":"--- PASS: TestFraming (0.00s)\n"}` + "\n" +
+		`{"Action":"pass","Package":"framing","Test":"TestFraming","Elapsed":0}` + "\n" +
+		`{"Action":"run","Package":"framing","Test":"TestHonest"}` + "\n" +
+		`{"Action":"output","Package":"framing","Test":"TestHonest","Output":"--- PASS: TestHonest (0.00s)\n"}` + "\n" +
+		`{"Action":"pass","Package":"framing","Test":"TestHonest","Elapsed":0}` + "\n" +
+		`{"Action":"output","Package":"framing","Output":"ok  \tframing\t0.330s\n"}` + "\n" +
+		`{"Action":"pass","Package":"framing","Elapsed":0.33}` + "\n"
+
+	got := ParseGoTest(capture)
+	if len(got) != 1 {
+		t.Fatalf("admitted %d observations, want only the runner's package result: %+v", len(got), got)
+	}
+	if got[0].Name != "framing" || got[0].Package != "framing" || got[0].Seconds != 0.33 {
+		t.Fatalf("the admitted observation is not cmd/go's own package timing: %+v", got[0])
+	}
+
+	// All three forged actions, for identities that never ran, and the two
+	// genuine per-test results — none may reach a checker.
 	ledger := NewLedger()
-	if _, n := ledger.Record(Run{}, stream); n != 1 {
-		t.Fatalf("recorded %d events, want only the runner result", n)
+	ledger.Record(Run{}, capture)
+	handle := recordedRun(ledger, Run{})
+	for _, claim := range []string{
+		"TestForged took 99s",  // forged pass, nonexistent test
+		"TestGhost took 77s",   // forged fail, nonexistent test
+		"TestPhantom took 55s", // forged skip, nonexistent test
+		"TestFraming took 99s", // real test, forged number
+		"TestHonest took 99s",  // real test, fabricated number
+	} {
+		if conflicts := ledger.Conflicts(handle, claim); len(conflicts) != 0 {
+			t.Errorf("per-test evidence reached a checker for %q: %+v", claim, conflicts)
+		}
+		if conflicts := ledger.ConflictsAcrossRuns(claim); len(conflicts) != 0 {
+			t.Errorf("per-test evidence reached the across-runs checker for %q: %+v", claim, conflicts)
+		}
 	}
-	conflicts := ledger.Conflicts(recordedRun(ledger, Run{}), "TestSpoofed took 99s")
-	if len(conflicts) != 1 || len(conflicts[0].Recorded) != 1 || conflicts[0].Recorded[0] != 1 {
-		t.Fatalf("test stdout satisfied a fabricated claim: %+v", conflicts)
+
+	// A forged value must also never become a purported measured CORRECTION:
+	// the package timing is the only number that can appear in a nudge.
+	conflicts := ledger.Conflicts(handle, "framing took 9s")
+	if len(conflicts) != 1 || len(conflicts[0].Recorded) != 1 || conflicts[0].Recorded[0] != 0.33 {
+		t.Fatalf("the authenticated package timing stopped being checkable: %+v", conflicts)
 	}
+	if nudge := Nudge(conflicts); !strings.Contains(nudge, "0.33") ||
+		strings.Contains(nudge, "99") || strings.Contains(nudge, "77") || strings.Contains(nudge, "55") {
+		t.Fatalf("a forged value surfaced as a measured correction: %q", nudge)
+	}
+
+	// Plain -v text was already inadmissible and stays so.
 	if got := ParseGoTest("--- PASS: TestSpoofed (99.00s)\nok example.test 99.00s\n"); len(got) != 0 {
 		t.Fatalf("plain mixed-origin output became evidence: %+v", got)
+	}
+}
+
+// A PRECEDING `run` EVENT PROVES NOTHING. Captured the same way: the test
+// prints framing for both `=== RUN` and `--- PASS`, and cmd/go emits a complete,
+// well-formed run/pass pair for a test that does not exist. The forged
+// `ok ... 88.000s` package line is in the capture too and did not move the
+// package result, which is cmd/go's own 0.51s.
+func TestAPrintedRunEventIsNoProvenanceEither(t *testing.T) {
+	const capture = "" +
+		`{"Action":"run","Package":"framing2","Test":"TestAttack"}` + "\n" +
+		`{"Action":"run","Package":"framing2","Test":"TestFullyForged"}` + "\n" +
+		`{"Action":"pass","Package":"framing2","Test":"TestFullyForged","Elapsed":42}` + "\n" +
+		`{"Action":"pass","Package":"framing2","Test":"TestAttack","Elapsed":0}` + "\n" +
+		`{"Action":"pass","Package":"framing2","Elapsed":0.51}` + "\n"
+	got := ParseGoTest(capture)
+	if len(got) != 1 || got[0].Name != "framing2" || got[0].Seconds != 0.51 {
+		t.Fatalf("a forged run/pass pair survived admission: %+v", got)
+	}
+	ledger := NewLedger()
+	ledger.Record(Run{}, capture)
+	if conflicts := ledger.Conflicts(recordedRun(ledger, Run{}), "TestFullyForged took 42s"); len(conflicts) != 0 {
+		t.Fatalf("a forged run/pass pair satisfied a claim: %+v", conflicts)
 	}
 }
 
@@ -169,18 +262,23 @@ func TestCachedPackageProducesNoTimingEvidence(t *testing.T) {
 		})
 	}
 
+	// A fresh run still yields its package timing, and a fabricated claim about
+	// it is still caught. Only the per-test event is gone (see ParseGoTest).
 	const fresh = "" +
 		`{"Action":"pass","Package":"github.com/Gitlawb/zero/internal/minify","Test":"TestStripC","Elapsed":0.86}` + "\n" +
 		`{"Action":"output","Package":"github.com/Gitlawb/zero/internal/minify","Output":"ok  \tgithub.com/Gitlawb/zero/internal/minify\t1.234s\n"}` + "\n" +
 		`{"Action":"pass","Package":"github.com/Gitlawb/zero/internal/minify","Elapsed":1.234}` + "\n"
 	ledger := NewLedger()
-	if _, n := ledger.Record(Run{}, fresh); n != 2 {
-		t.Fatalf("recorded %d fresh timings, want test and package", n)
+	if _, n := ledger.Record(Run{}, fresh); n != 1 {
+		t.Fatalf("recorded %d fresh timings, want only the package result", n)
 	}
-	if conflicts := ledger.Conflicts(recordedRun(ledger, Run{}), "TestStripC took 9s"); len(conflicts) != 1 || conflicts[0].Claimed != 9 {
+	if conflicts := ledger.Conflicts(recordedRun(ledger, Run{}),
+		"github.com/Gitlawb/zero/internal/minify took 9s"); len(conflicts) != 1 || conflicts[0].Claimed != 9 {
 		t.Fatalf("fresh-run fabrication stopped being detected: %+v", conflicts)
 	}
 
+	// Cache suppression is still per package: the cached one contributes
+	// nothing, the fresh one contributes its own result.
 	const mixed = "" +
 		`{"Action":"pass","Package":"example/cached","Test":"TestCached","Elapsed":0}` + "\n" +
 		`{"Action":"output","Package":"example/cached","Output":"ok  \texample/cached\t(cached)\n"}` + "\n" +
@@ -188,66 +286,49 @@ func TestCachedPackageProducesNoTimingEvidence(t *testing.T) {
 		`{"Action":"pass","Package":"example/fresh","Test":"TestFresh","Elapsed":0.5}` + "\n" +
 		`{"Action":"pass","Package":"example/fresh","Elapsed":0.75}` + "\n"
 	got := ParseGoTest(mixed)
-	if len(got) != 2 || got[0].Package != "example/fresh" || got[1].Package != "example/fresh" {
+	if len(got) != 1 || got[0].Package != "example/fresh" || got[0].Seconds != 0.75 {
 		t.Fatalf("cache suppression escaped its package: %+v", got)
 	}
 }
 
-func TestSameNamedTestsKeepTheirPackageIdentity(t *testing.T) {
+// PACKAGE IDENTITY IS STILL EXACT, AND IT IS NOW THE ONLY IDENTITY.
+//
+// These replace two tests that covered the qualified `pkg.TestName` display:
+// that identity was built from a per-test event's Test field, which no longer
+// reaches a Measurement at all, so the collision it guarded against can no
+// longer be constructed. What remains has to keep working — two packages with
+// timings of their own must not borrow each other's number — and per-test
+// events must stay silent no matter which package carries them.
+func TestPackageIdentityIsExactAndPerTestEventsAreSilent(t *testing.T) {
 	const stream = "" +
 		`{"Action":"pass","Package":"example/a","Test":"TestFoo","Elapsed":1}` + "\n" +
-		`{"Action":"pass","Package":"example/b","Test":"TestFoo","Elapsed":9}` + "\n"
+		`{"Action":"pass","Package":"example/a","Elapsed":1}` + "\n" +
+		`{"Action":"pass","Package":"example/b","Test":"TestFoo","Elapsed":9}` + "\n" +
+		`{"Action":"pass","Package":"example/b","Elapsed":9}` + "\n"
 	run := Run{Command: "go", Args: []string{"test", "-json", "./..."}}
 
 	wrong := NewLedger()
 	wrong.Record(run, stream)
-	conflicts := wrong.Conflicts(recordedRun(wrong, run), "example/a.TestFoo took 9s")
-	if len(conflicts) != 1 || conflicts[0].Name != "example/a.TestFoo" || conflicts[0].Recorded[0] != 1 {
-		t.Fatalf("a same-named test in another package satisfied the claim: %+v", conflicts)
+	conflicts := wrong.Conflicts(recordedRun(wrong, run), "example/a took 9s")
+	if len(conflicts) != 1 || conflicts[0].Name != "example/a" || conflicts[0].Recorded[0] != 1 {
+		t.Fatalf("a same-shaped value from another package satisfied the claim: %+v", conflicts)
 	}
 
 	honest := NewLedger()
 	honest.Record(run, stream)
-	if conflicts := honest.Conflicts(recordedRun(honest, run), "example/a.TestFoo took 1s"); len(conflicts) != 0 {
+	if conflicts := honest.Conflicts(recordedRun(honest, run), "example/a took 1s"); len(conflicts) != 0 {
 		t.Fatalf("the owning package value was rejected: %+v", conflicts)
 	}
 
-	ambiguous := NewLedger()
-	ambiguous.Record(run, stream)
-	if conflicts := ambiguous.Conflicts(recordedRun(ambiguous, run), "TestFoo took 9s"); len(conflicts) != 0 {
-		t.Fatalf("an unqualified ambiguous test borrowed a package identity: %+v", conflicts)
-	}
-}
-
-func TestPackageAndQualifiedTestDisplayCollisionFailsSilent(t *testing.T) {
-	const stream = "" +
-		`{"Action":"pass","Package":"example/a.TestFoo","Elapsed":1}` + "\n" +
-		`{"Action":"pass","Package":"example/a","Test":"TestFoo","Elapsed":9}` + "\n" +
-		`{"Action":"pass","Package":"example/b","Test":"TestFoo","Elapsed":2}` + "\n"
-	run := Run{Command: "go", Args: []string{"test", "-json", "./..."}}
-
-	for _, entry := range []struct {
-		name  string
-		check func(*Ledger, string) []Conflict
-	}{
-		{"per-run", func(ledger *Ledger, claim string) []Conflict {
-			return ledger.Conflicts(recordedRun(ledger, run), claim)
-		}},
-		{"across-runs", func(ledger *Ledger, claim string) []Conflict { return ledger.ConflictsAcrossRuns(claim) }},
-	} {
-		t.Run(entry.name, func(t *testing.T) {
-			ledger := NewLedger()
-			ledger.Record(run, stream)
-			if conflicts := entry.check(ledger, "example/a.TestFoo took 30s"); len(conflicts) != 0 {
-				t.Fatalf("ambiguous package/test display identity produced conflicts: %+v", conflicts)
-			}
-
-			// The collision is local to example/a.TestFoo. A distinct qualified
-			// identity must remain enforceable rather than disabling the detector.
-			if conflicts := entry.check(ledger, "example/b.TestFoo took 30s"); len(conflicts) != 1 || conflicts[0].Name != "example/b.TestFoo" {
-				t.Fatalf("non-colliding qualified test stopped being checked: %+v", conflicts)
-			}
-		})
+	// The per-test events in the same stream are evidence for nothing, under
+	// either package, qualified or bare.
+	silent := NewLedger()
+	silent.Record(run, stream)
+	handle := recordedRun(silent, run)
+	for _, claim := range []string{"TestFoo took 9s", "example/a.TestFoo took 9s", "example/b.TestFoo took 1s"} {
+		if conflicts := silent.Conflicts(handle, claim); len(conflicts) != 0 {
+			t.Errorf("a per-test claim found evidence for %q: %+v", claim, conflicts)
+		}
 	}
 }
 
@@ -1281,7 +1362,7 @@ func TestTheRunOrderTheMergeWalksIsStable(t *testing.T) {
 	}
 	observed := map[string]map[measurementID][]float64{}
 	for _, run := range runs {
-		observed[run.key()] = map[measurementID][]float64{{Test: "TestFoo"}: {1}}
+		observed[run.key()] = map[measurementID][]float64{{Package: "example/foo"}: {1}}
 	}
 	want := []string{
 		runs[0].key(), runs[1].key(), runs[2].key(), runs[3].key(), runs[4].key(),
@@ -1853,5 +1934,78 @@ func TestAnUnrecordedPackageNeighbourBoundsTheClause(t *testing.T) {
 	recordGoTest(ledger, Run{}, "ok  \tgithub.com/x/first\t0.10s\n")
 	if conflicts := ledger.Conflicts(recordedRun(ledger, Run{}), "github.com/x/first took 4.20s"); len(conflicts) != 1 {
 		t.Errorf("a genuine package fabrication stopped being caught: %+v", conflicts)
+	}
+}
+
+// ASKING ABOUT A TIMING IS NOT ASSERTING IT. The scanner already recognized
+// "?" as a sentence terminator, but only as an offset to cut at, and the clause
+// handed to the affirmative role classifier ended before it — so "example/x took
+// 9s?" arrived identical to "example/x took 9s." and a question was answered
+// with a correction the asker never earned.
+//
+// Both question forms are paired with the fabricated and truthful statements, on
+// both public checkers, with fresh ledgers so the once-only dedupe cannot mask a
+// result.
+func TestATimingQuestionIsNotAnElapsedClaim(t *testing.T) {
+	const stream = `{"Action":"pass","Package":"example/x","Elapsed":1}`
+	run := Run{Command: "go", Args: []string{"test", "-json", "./..."}}
+
+	for _, api := range []struct {
+		name  string
+		check func(*Ledger, string) []Conflict
+	}{
+		{"per-run", func(l *Ledger, claim string) []Conflict { return l.Conflicts(recordedRun(l, run), claim) }},
+		{"across-runs", func(l *Ledger, claim string) []Conflict { return l.ConflictsAcrossRuns(claim) }},
+	} {
+		t.Run(api.name, func(t *testing.T) {
+			for _, question := range []string{
+				"Is it true that example/x took 9s?",
+				"example/x took 9s?",
+				"Did example/x take 9s? ",
+			} {
+				ledger := NewLedger()
+				ledger.Record(run, stream)
+				if conflicts := api.check(ledger, question); len(conflicts) != 0 {
+					t.Errorf("a timing question produced a correction: %q -> %+v", question, conflicts)
+				}
+			}
+
+			// The period-ended control still conflicts, or the fix is just
+			// "stop checking".
+			fabricated := NewLedger()
+			fabricated.Record(run, stream)
+			conflicts := api.check(fabricated, "example/x took 9s.")
+			if len(conflicts) != 1 || conflicts[0].Claimed != 9 || conflicts[0].Recorded[0] != 1 {
+				t.Fatalf("the fabricated statement stopped being caught: %+v", conflicts)
+			}
+
+			// And a truthful statement stays silent.
+			truthful := NewLedger()
+			truthful.Record(run, stream)
+			if conflicts := api.check(truthful, "example/x took 1s."); len(conflicts) != 0 {
+				t.Errorf("a truthful statement produced a conflict: %+v", conflicts)
+			}
+		})
+	}
+
+	// AN EARLIER QUESTION MUST NOT SUPPRESS A LATER AFFIRMATIVE SENTENCE. The
+	// once-per-name-and-value dedupe is keyed on what was reported; a question
+	// reports nothing, so it must not enter that ledger and swallow the
+	// assertion that follows it — in the same answer or in a later pass.
+	sameAnswer := NewLedger()
+	sameAnswer.Record(run, stream)
+	conflicts := sameAnswer.Conflicts(recordedRun(sameAnswer, run), "example/x took 9s? example/x took 9s.")
+	if len(conflicts) != 1 || conflicts[0].Claimed != 9 {
+		t.Fatalf("a question swallowed the assertion beside it: %+v", conflicts)
+	}
+
+	acrossPasses := NewLedger()
+	acrossPasses.Record(run, stream)
+	handle := recordedRun(acrossPasses, run)
+	if conflicts := acrossPasses.Conflicts(handle, "example/x took 9s?"); len(conflicts) != 0 {
+		t.Fatalf("the question was not silent: %+v", conflicts)
+	}
+	if conflicts := acrossPasses.Conflicts(handle, "example/x took 9s."); len(conflicts) != 1 {
+		t.Fatalf("an earlier question entered the dedupe and suppressed a real fabrication: %+v", conflicts)
 	}
 }
