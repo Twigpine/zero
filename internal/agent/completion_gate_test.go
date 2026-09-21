@@ -423,6 +423,27 @@ func TestCompletionGateStructuralReviewerMatrix(t *testing.T) {
 		{name: "direct capability footnote", answer: "I don't have an update_plan tool available in this specialist context; only read-only exploration tools were provided."},
 		{name: "completion declaration cannot self certify", answer: "I could not run the migration because no migration tool is available, but the task is complete.", incomplete: true},
 		{name: "plan capability note remains complete", answer: "I could not call update_plan because that tool is unavailable, but the task is complete."},
+		// A MISSING TOOL OFFERED AS THE REASON THE WORK IS DONE. The row above
+		// needs an inability stem to fire; drop the stem and the same
+		// self-certification used to pass. The concessive and method-naming
+		// rows beneath it are the shapes that must stay complete, and they are
+		// what keeps this from becoming "any sentence mentioning a tool and a
+		// completion is an admission".
+		{name: "causal tool grant certifies the fix", answer: "No write tool is available, so the fix is complete.", incomplete: true},
+		{name: "causal tool grant certifies the task", answer: "No write tool is available, so the task is complete.", incomplete: true},
+		{name: "causal tool grant certifies via therefore", answer: "No edit tool is available, therefore the change is complete.", incomplete: true},
+		{name: "concessive tool grant stays complete", answer: "I have no browser tool available here, yet the assignment is complete."},
+		{name: "causal tool grant naming the method stays complete", answer: "No write tool is available to me, so the objective was achieved by reading alone."},
+		// Parallel specialist footnotes: the update_plan row above passes and
+		// these are the same sentence with a different tool in the grant.
+		{name: "shell capability footnote", answer: "I don't have a shell tool available in this specialist context; only read-only tools were provided."},
+		{name: "browser capability footnote", answer: "I don't have a browser tool available in this specialist context; only read-only tools were provided."},
+		// A manual fallback is proved in its own sentence; an ordinary next
+		// sentence must not withdraw it, and a blocked or refuting one must.
+		{name: "manual fallback alone", answer: "I could not run the formatter because no formatter tool is available, so I checked it by hand."},
+		{name: "manual fallback with neutral follow-on", answer: "I could not run the formatter because no formatter tool is available, so I checked it by hand. Documentation is outdated."},
+		{name: "manual fallback with blocked follow-on", answer: "I could not run the formatter because no formatter tool is available, so I checked it by hand. Tests remain unverified.", incomplete: true},
+		{name: "manual fallback refuted next sentence", answer: "I could not run the migration because no migration tool is available, so I ran it manually instead. It timed out.", incomplete: true},
 		{name: "multiline counted operation failure", answer: "**Unable to deploy (1):**\n- production deployment failed.", incomplete: true},
 		{name: "multiline asterisk counted operation failure", answer: "**Unable to deploy (2):**\n* production deployment failed.\n* staging deployment failed.", incomplete: true},
 		{name: "multiline ordered counted operation failure", answer: "**Unable to deploy (1):**\n1. production deployment failed.", incomplete: true},

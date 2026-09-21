@@ -1239,6 +1239,16 @@ func capabilitySubjectOnly(text string) bool {
 		"specialist", "orchestration", "update_plan", "read-only", "read", "write",
 		"edit", "editing", "formatter", "formatting", "test", "testing", "migration",
 		"release", "deployment", "tool", "tools", "toolset",
+		// THE FOOTNOTE IS THE SAME SHAPE WHICHEVER TOOL IT NAMES. A read-only
+		// specialist discloses its grant with "I don't have a shell tool
+		// available in this specialist context; only read-only tools were
+		// provided" exactly as it does for update_plan — same stem, same
+		// qualifier, same meaning — and the allow-list decided the two differently
+		// only because it had never been given these nouns. The structurally
+		// identical update_plan row passed while these finalized as incomplete.
+		// They name tools in the grant, not a missing resource, which is the
+		// distinction this list exists to draw. Reported by @jatmn.
+		"shell", "bash", "terminal", "browser",
 	}
 	for _, word := range words {
 		if !containsWord(allowed, word) {
@@ -1665,6 +1675,52 @@ func reportedConsequence(sentence string, stemEnd int) string {
 	return tail[earliest+width:]
 }
 
+// causalConsequenceConnectives present what follows as CAUSED by what preceded.
+// Concessives ("but", "yet", "however", "still", "nevertheless") are deliberately
+// absent: they assert the opposite relationship, and that difference is the
+// whole discrimination in selfCertifiedCompletionAfterToolGrant.
+var causalConsequenceConnectives = []string{
+	", so ", " so ", ", therefore ", " therefore ", ", thus ", " thus ",
+	", hence ", " hence ", ", as a result ", " as a result ", ", which means ",
+}
+
+// bareCompletionDeclarations assert the work is finished and say nothing about
+// how. A remainder that adds an account of the work — "the objective was
+// achieved by reading alone" — is not one of these and is left alone.
+var bareCompletionDeclarations = []string{
+	"the fix is complete", "the fix is done", "the fix is now complete",
+	"the task is complete", "the task is done", "the task is now complete",
+	"the change is complete", "the change is done", "the change is now complete",
+	"the work is complete", "the work is done", "the work is now complete",
+	"the objective is complete", "the objective is met", "the objective is now complete",
+	"the assignment is complete", "the assignment is done",
+	"the implementation is complete", "the implementation is done",
+	"it is complete", "it is done", "this is complete", "this is done",
+}
+
+// selfCertifiedCompletionAfterToolGrant reports a sentence that offers an
+// unavailable tool as the reason its work is finished. See the call site for
+// why the connective decides it and why the declaration must stand alone.
+func selfCertifiedCompletionAfterToolGrant(sentence string) bool {
+	if !hasUnavailableToolContext(sentence) {
+		return false
+	}
+	for _, connective := range causalConsequenceConnectives {
+		at := strings.LastIndex(sentence, connective)
+		if at < 0 {
+			continue
+		}
+		remainder := strings.TrimSpace(sentence[at+len(connective):])
+		remainder = strings.TrimRight(remainder, " .!;:,")
+		for _, declaration := range bareCompletionDeclarations {
+			if remainder == declaration {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // hasReportedFailureConsequence keeps the relationship decision made by the
 // sentence lookahead while applying the same failure-state test to both forms:
 // a consequence after punctuation in the current sentence, or the coordinated
@@ -1929,9 +1985,65 @@ func (claim inabilityClaim) exempt() bool {
 	if harmlessToolLimitation(claim.sentence, claim.stemAt, claim.stemLen) {
 		return !hasUnexemptedSubjectElidedInability(claim.sentence, claim.stemAt+claim.stemLen)
 	}
+	// THE FALLBACK IS PROVED IN THE SENTENCE THAT MAKES IT, not in the merged
+	// lookahead. blockedContext appends the following sentence so a consequence
+	// stated next door can still be seen — which is right for detecting blocked
+	// STATE, and wrong for re-scoring an affirmative substitute. Evaluated on the
+	// merged tail, "I could not run the formatter because no formatter tool is
+	// available, so I checked it by hand." stopped being exempt the moment an
+	// ordinary second sentence followed it: "Documentation is outdated." is not
+	// blocked work and carries no topic-shift phrase, so it simply dragged
+	// fallbackOutcomeIsAffirmative to false and turned finished work into an
+	// admission. A false positive here is the expensive direction.
+	//
+	// Blocked-state and consequence detection above still read blockedContext, so
+	// "…so I checked it by hand. Tests remain unverified." is still an admission.
+	// Reported by @jatmn.
 	return hasUnavailableToolContext(claim.scope) &&
-		deliveredAlternativeAfter(claim.blockedContext, claim.stemAt+claim.stemLen)
+		deliveredAlternativeAfter(claim.sentence, claim.stemAt+claim.stemLen) &&
+		!fallbackContradictedByNextSentence(claim)
 }
+
+// fallbackContradictedByNextSentence lets the lookahead REFUTE a substitute
+// without being required to PROVE one.
+//
+// That asymmetry is the whole correction. Proof was taken from the merged
+// sentence pair, so any ordinary follow-on that failed to re-affirm the
+// fallback — "Documentation is outdated." — silently withdrew it. Refutation is
+// different: "…so I ran it manually instead. It timed out." really does say the
+// substitute did not work, and the next sentence is where that is said. So the
+// substitute is proved in its own sentence and can still be taken back by the
+// one after it, which is the only direction that was ever load-bearing.
+func fallbackContradictedByNextSentence(claim inabilityClaim) bool {
+	if len(claim.blockedContext) <= len(claim.sentence) {
+		return false
+	}
+	next := strings.TrimSpace(claim.blockedContext[len(claim.sentence):])
+	if next == "" {
+		return false
+	}
+	if nonAffirmativeFallbackPattern.MatchString(next) ||
+		negatedFallbackPredicatePattern.MatchString(next) ||
+		containsFailureConsequence(next) {
+		return true
+	}
+	// A SENTENCE THAT SPEAKS ABOUT THE SUBSTITUTE HAS TO AFFIRM IT. Structural
+	// on purpose, for the reason fallbackHasUnprovenAdversativeOutcome gives: a
+	// new failure synonym must not become completion evidence merely by being
+	// absent from a deny-list. "The run was killed by the OOM killer." carries no
+	// listed failure word, and adding "killed" would leave the next synonym
+	// open. What it does carry is a back-reference subject — it is a report ON
+	// the substitute — and a report on the substitute that does not affirm it
+	// takes it back. A sentence about something else ("Documentation is
+	// outdated.") has no such subject and is left alone, which is exactly the
+	// neutral follow-on this correction protects.
+	return fallbackBackReferenceSubject.MatchString(next) &&
+		!affirmativeOutcomePattern.MatchString(next)
+}
+
+// fallbackBackReferenceSubject matches a sentence opening that refers back to
+// the substitute just described, rather than introducing a new subject.
+var fallbackBackReferenceSubject = regexp.MustCompile(`^(?:it|that|this|they|the\s+[[:alnum:]_-]+)\b`)
 
 // strongAbsenceHasBlockedOutcome decides whether blocked-state text is outside
 // the proposition whose absence was observed. This makes the relationship
@@ -2068,6 +2180,28 @@ func selfReportedIncompletion(text string) string {
 		if hasUnavailableToolContext(sentence) &&
 			hasReportedFailureConsequence(sentence, blockedContext, 0) {
 			return selfReportReason("tool limitation left work blocked")
+		}
+		// A MISSING TOOL CANNOT BE THE REASON THE WORK IS DONE. The gate already
+		// refuses "I could not run the migration … but the task is complete."
+		// — a completion declaration cannot certify itself — but that rule only
+		// ran for sentences carrying an inability stem. Drop the stem and the
+		// same self-certification walked through: "No write tool is available, so
+		// the fix is complete." has no stem and no blocked marker, so nothing
+		// looked at it, and a model could assert the fix was finished ON THE
+		// STRENGTH of the tool it never had.
+		//
+		// The discrimination is the connective, and it is doing real work rather
+		// than keyword-matching. A CAUSAL one offers the absent tool as the cause
+		// of completion, which is the non sequitur. A concessive one says the
+		// opposite — the tool was missing AND the work still finished, so it was
+		// not needed — and those are legitimate: "I have no browser tool
+		// available here, yet the assignment is complete." Nor does this touch a
+		// causal sentence that says HOW: "No write tool is available to me, so
+		// the objective was achieved by reading alone" names the substitute, and
+		// only a remainder that is the bare declaration and nothing else is
+		// treated as self-certification. Reported by @jatmn.
+		if selfCertifiedCompletionAfterToolGrant(sentence) {
+			return selfReportReason("completion asserted from an unavailable tool")
 		}
 		for _, stem := range inabilityStems {
 			// Scan EVERY occurrence of the stem, not just the first: an earlier

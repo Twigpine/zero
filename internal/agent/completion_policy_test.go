@@ -97,6 +97,18 @@ func TestCompletionPolicyReviewerSemanticPairs(t *testing.T) {
 		{"I could not apply the edit because no write tool is available, so I applied the edit manually instead.", CompletionComplete},
 		{"I could not run the full test suite because no test tool is available, so I manually tested only a smoke test.", CompletionIncomplete},
 		{"I could not run the full test suite because no test tool is available, so I manually ran the full test suite instead.", CompletionComplete},
+		// The same three corrections, through evaluate rather than the gate, so
+		// neither consumer can drift from the other.
+		{"No write tool is available, so the fix is complete.", CompletionIncomplete},
+		{"No write tool is available, so the task is complete.", CompletionIncomplete},
+		{"I have no browser tool available here, yet the assignment is complete.", CompletionComplete},
+		{"No write tool is available to me, so the objective was achieved by reading alone.", CompletionComplete},
+		{"I don't have a shell tool available in this specialist context; only read-only tools were provided.", CompletionComplete},
+		{"I don't have a browser tool available in this specialist context; only read-only tools were provided.", CompletionComplete},
+		{"I could not run the formatter because no formatter tool is available, so I checked it by hand.", CompletionComplete},
+		{"I could not run the formatter because no formatter tool is available, so I checked it by hand. Documentation is outdated.", CompletionComplete},
+		{"I could not run the formatter because no formatter tool is available, so I checked it by hand. Tests remain unverified.", CompletionIncomplete},
+		{"I could not run the migration because no migration tool is available, so I ran it manually instead. It crashed.", CompletionIncomplete},
 	}
 	for _, tc := range cases {
 		got := newCompletionPolicy(false).evaluate(tc.text, completionContext{})
