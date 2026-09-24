@@ -45,7 +45,10 @@ func (m model) handleSpecCommand(task string) (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "session create error: " + err.Error()})
 		return m, nil
 	}
-	m, _ = m.clearLoopsForSessionSwitch()
+	if updated, cleared := m.clearLoopsForSessionSwitch(); cleared > 0 {
+		m = updated
+		m = m.appendSystemNotice(fmt.Sprintf("Stopped %d loop(s) tied to the previous session.", cleared))
+	}
 	wasPlan := m.permissionMode == agent.PermissionModePlan
 	m = m.resetPlanForSessionSwitch().exitPlanMode()
 	if wasPlan {
@@ -210,7 +213,10 @@ func (m model) approveSpecReview() (tea.Model, tea.Cmd) {
 	m.pendingSpecReview = nil
 	m.activeSession = impl
 	m.sessionEvents = append([]sessions.Event{}, events...)
-	m, _ = m.clearLoopsForSessionSwitch()
+	if updated, cleared := m.clearLoopsForSessionSwitch(); cleared > 0 {
+		m = updated
+		m = m.appendSystemNotice(fmt.Sprintf("Stopped %d loop(s) tied to the draft session.", cleared))
+	}
 	m = m.syncPeerIdentity()
 	wasPlan := m.permissionMode == agent.PermissionModePlan
 	m = m.resetPlanForSessionSwitch().exitPlanMode()
