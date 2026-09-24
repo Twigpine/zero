@@ -132,7 +132,7 @@ func TestStorageRejectsAllSandboxTempRoots(t *testing.T) {
 		var err error
 		second, err = os.MkdirTemp("/tmp", "zero-plan-writable-*")
 		if err != nil {
-			t.Fatal(err)
+			t.Skipf("/tmp fixture root unavailable: %v", err)
 		}
 		t.Cleanup(func() { _ = os.RemoveAll(second) })
 	}
@@ -173,7 +173,7 @@ func TestStorageRejectsAllSandboxTempRoots(t *testing.T) {
 		var err error
 		safe, err = os.MkdirTemp("/var/tmp", "zero-plan-private-*")
 		if err != nil {
-			t.Fatal(err)
+			t.Skipf("/var/tmp fixture root unavailable: %v", err)
 		}
 		t.Cleanup(func() { _ = os.RemoveAll(safe) })
 	}
