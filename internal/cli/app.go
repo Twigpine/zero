@@ -899,7 +899,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	}
 	sessionStore := deps.newSessionStore()
 	peerClass := peermsg.PermissionPrompting
-	if permissionMode == agent.PermissionModeUnsafe {
+	if permissionMode == agent.PermissionModeFullAuto {
 		peerClass = peermsg.PermissionBypass
 	}
 	peerService, peerErr := peermsg.New(peermsg.Options{
@@ -1300,7 +1300,7 @@ func shouldRegisterExecSpecialistTools(options execOptions, resolved agent.Permi
 	// `--permission-mode full-auto|full_auto|unsafe|high`) resolves to the same
 	// value, so a new alias cannot create an unequal capability set the way
 	// `--permission-mode full-auto` did.
-	if resolved == agent.PermissionModeUnsafe {
+	if resolved == agent.PermissionModeFullAuto {
 		return true
 	}
 	autonomy := strings.ToLower(strings.TrimSpace(options.autonomy))

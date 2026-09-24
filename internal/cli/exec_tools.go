@@ -90,7 +90,7 @@ func resolveExecPermissionMode(options execOptions) (agent.PermissionMode, error
 		// canonical value here, `--permission-mode full-auto` failed usage
 		// validation before NormalizePermissionMode was ever reached.
 		case "full-auto", "full_auto", "unsafe", "high":
-			return agent.PermissionModeUnsafe, nil
+			return agent.PermissionModeFullAuto, nil
 		default:
 			return "", execUsageError{fmt.Sprintf("Invalid permission mode %q. Expected plan, spec-draft, auto, member, ask, or full-auto.", options.permissionMode)}
 		}
