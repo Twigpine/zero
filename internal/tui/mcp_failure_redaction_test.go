@@ -67,7 +67,7 @@ func TestFailedServerReasonRedactsASecretSplitByControlBytes(t *testing.T) {
 		{name: "backspace", splitter: "\x08"},
 		{name: "NUL", splitter: "\x00"},
 		{name: "DEL", splitter: "\x7f"},
-		{name: "C1 control", splitter: ""},
+		{name: "C1 control", splitter: "\u0090"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			split := "wk-live-" + testCase.splitter + "4f9c2b7ae1d8"

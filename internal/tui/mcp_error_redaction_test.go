@@ -73,8 +73,10 @@ func TestShortConfiguredValuesDoNotShredTheMessage(t *testing.T) {
 
 	state := BuildMCPViewState(MCPStateOptions{Config: cfg, Skipped: skipped})
 	got := state.Servers[0].Error
-	if !strings.Contains(got, "connection refused") {
-		t.Fatalf("the error text was destroyed by redacting trivial configured values: %q", got)
+	// The WHOLE message, because the short values are the point. Checking only
+	// "connection refused" passed just as well with the 1 and the true redacted.
+	if want := "connection refused after 1 attempt in true isolation"; got != want {
+		t.Fatalf("the error text was altered by redacting trivial configured values:\n got %q\nwant %q", got, want)
 	}
 }
 
