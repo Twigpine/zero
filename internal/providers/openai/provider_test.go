@@ -647,6 +647,25 @@ func TestStreamCompletionStreamedErrorCarriesStatusCodeAndCause(t *testing.T) {
 	}
 }
 
+// An error inside a 200 OK SSE payload whose code is not a known status was
+// never an observed HTTP status, so none must be reported (#674 review).
+func TestStreamCompletionStreamedErrorWithUnknownCodeReportsNoStatus(t *testing.T) {
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"error":{"message":"model overloaded","code":"server_error"}}`)
+	})
+
+	events := collectProviderEvents(t, provider)
+	if len(events) != 1 || events[0].Type != zeroruntime.StreamEventError {
+		t.Fatalf("events = %#v, want one error", events)
+	}
+	if events[0].StatusCode != 0 {
+		t.Fatalf("StatusCode = %d, want 0 (no HTTP status was observed)", events[0].StatusCode)
+	}
+	if !strings.Contains(events[0].Cause, "model overloaded") {
+		t.Fatalf("Cause = %q, want the upstream detail", events[0].Cause)
+	}
+}
+
 func TestStreamCompletionEmitsErrorForMalformedJSON(t *testing.T) {
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":`)

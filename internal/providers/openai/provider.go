@@ -298,27 +298,31 @@ func (provider *Provider) emitPayload(ctx context.Context, data string, state *t
 	if chunk.Error != nil {
 		state.flushContent(ctx, events)
 		state.closeOpen(ctx, events)
+		// statusCode buckets the error for classification only. The HTTP response
+		// was 200, so observedStatus stays 0 unless the payload's code maps to a
+		// known status; a bucket default must not be persisted as a real status.
 		statusCode := http.StatusInternalServerError
+		observedStatus := 0
 		if chunk.Error.Code != nil {
 			switch c := chunk.Error.Code.(type) {
 			case string:
 				if code, ok := openAIStreamErrorStatusByCode[c]; ok {
-					statusCode = code
+					statusCode, observedStatus = code, code
 				}
 			case float64:
 				if code, ok := openAIStreamErrorStatusByCode[strconv.Itoa(int(c))]; ok {
-					statusCode = code
+					statusCode, observedStatus = code, code
 				}
 			case int:
 				if code, ok := openAIStreamErrorStatusByCode[strconv.Itoa(c)]; ok {
-					statusCode = code
+					statusCode, observedStatus = code, code
 				}
 			}
 		}
 		sendEvent(ctx, events, zeroruntime.StreamEvent{
 			Type:       zeroruntime.StreamEventError,
 			Error:      provider.classifiedError(statusCode, chunk.Error.Message),
-			StatusCode: statusCode,
+			StatusCode: observedStatus,
 			Cause:      provider.redact(chunk.Error.Message),
 		})
 		state.done = true
