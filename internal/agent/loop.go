@@ -404,7 +404,8 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// collected and a non-nil stop error when the run must end now.
 		recoverStreamError := func(collected zeroruntime.CollectedStream) (zeroruntime.CollectedStream, error) {
 			if isImageRejectionError(errors.New(collected.Error)) {
-				return collected, fmt.Errorf("model %s rejected the image: %s. The model may not support image input — try switching to a vision-capable model (claude, gpt-4o, gemini)", options.Model, collected.Error)
+				cause := &zeroruntime.StreamError{Message: collected.Error, StatusCode: collected.ErrorStatusCode, Cause: collected.ErrorCause}
+				return collected, fmt.Errorf("model %s rejected the image: %w. The model may not support image input — try switching to a vision-capable model (claude, gpt-4o, gemini)", options.Model, cause)
 			}
 			// REACTIVE compaction: the streamed error may also be a context limit
 			// (some providers surface it mid-stream). Compact and retry once.
