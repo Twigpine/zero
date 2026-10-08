@@ -73,6 +73,37 @@ func newDeferredFixtureRegistry() *Registry {
 	return reg
 }
 
+func TestRegistryCloneKeepsToolSearchOnFrozenSnapshot(t *testing.T) {
+	live := newDeferredFixtureRegistry()
+	live.Register(NewToolSearchTool(live))
+	runRegistry := live.Clone()
+	live.Register(searchFakeTool{
+		name:        "late_lookup",
+		description: "Registered after the run snapshot.",
+		parameters:  Schema{Type: "object", AdditionalProperties: false},
+	})
+
+	result := runRegistry.Run(context.Background(), ToolSearchToolName, map[string]any{
+		"query": "select:late_lookup",
+	})
+	if result.Status != StatusOK {
+		t.Fatalf("tool_search status = %s: %s", result.Status, result.Output)
+	}
+	if loaded := result.Meta["load_tools"]; loaded != "" {
+		t.Fatalf("snapshot tool_search loaded late tool %q", loaded)
+	}
+	if direct := runRegistry.Run(context.Background(), "late_lookup", map[string]any{}); direct.Status != StatusError {
+		t.Fatalf("late tool unexpectedly executable in run snapshot: %#v", direct)
+	}
+
+	known := runRegistry.Run(context.Background(), ToolSearchToolName, map[string]any{
+		"query": "select:weather_lookup",
+	})
+	if loaded := known.Meta["load_tools"]; loaded != "weather_lookup" {
+		t.Fatalf("snapshot tool_search lost existing tool: load_tools=%q output=%q", loaded, known.Output)
+	}
+}
+
 func TestToolSearchExposesExpectedSafetyAndSchema(t *testing.T) {
 	tool := NewToolSearchTool(NewRegistry())
 

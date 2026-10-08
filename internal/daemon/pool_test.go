@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/testutil"
 )
 
 // --- test doubles ---------------------------------------------------------
@@ -191,7 +193,7 @@ func TestPoolQueuesWhenFull(t *testing.T) {
 	}()
 	<-started
 	// Wait until the first run holds the only slot.
-	waitFor(t, func() bool { return pool.QueueDepth() == 1 })
+	testutil.WaitFor(t, "queue depth 1", func() bool { return pool.QueueDepth() == 1 })
 
 	secondDone := make(chan struct{})
 	go func() {
@@ -224,7 +226,7 @@ func TestPoolDrainKillsStraggler(t *testing.T) {
 		_, _ = pool.Run(context.Background(), WorkerSpec{Session: "a"}, &collectSink{})
 		close(runDone)
 	}()
-	waitFor(t, func() bool { return pool.QueueDepth() == 1 })
+	testutil.WaitFor(t, "queue depth 1", func() bool { return pool.QueueDepth() == 1 })
 
 	pool.Drain() // KillTimeout elapses, straggler is force-killed
 	if atomic.LoadInt32(&straggler.killed) != 1 {
@@ -240,18 +242,6 @@ func TestPoolDrainKillsStraggler(t *testing.T) {
 	if _, err := pool.Run(context.Background(), WorkerSpec{Session: "b"}, &collectSink{}); !errors.Is(err, ErrPoolDraining) {
 		t.Fatalf("Run after drain err = %v, want ErrPoolDraining", err)
 	}
-}
-
-func waitFor(t *testing.T, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatal("condition not met within timeout")
 }
 
 func TestPoolRunSurfacesStdoutReadError(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/providers/providerio"
 	"github.com/coder/websocket"
 )
 
@@ -60,7 +61,15 @@ func (d *deepgramTranscriber) StreamTranscribe(ctx context.Context, chunks <-cha
 		HTTPHeader: http.Header{"Authorization": {"Token " + d.cfg.APIKey}},
 	})
 	if err != nil {
-		return "", fmt.Errorf("connecting to Deepgram: %w", err)
+		// Preserve the context.Canceled sentinel (it carries no key) so an
+		// Esc-abort during dial still matches the UI's errors.Is check. Key
+		// on ctx.Err() itself rather than unwrapping err: a cancellation can
+		// surface as a plain transport error (e.g. "closed network
+		// connection") rather than context.Canceled directly.
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("connecting to Deepgram: %s", providerio.Redact(err.Error(), d.cfg.APIKey))
 	}
 	defer conn.CloseNow()
 
@@ -68,15 +77,26 @@ func (d *deepgramTranscriber) StreamTranscribe(ctx context.Context, chunks <-cha
 	// so no conversion (unlike sherpa-onnx, which wants float32).
 	writeErrCh := make(chan error, 1)
 	go func() {
-		for chunk := range chunks {
-			if err := conn.Write(ctx, websocket.MessageBinary, chunk); err != nil {
-				writeErrCh <- err
+		// Select on ctx.Done() while waiting for the next chunk so a cancelled
+		// session does not leave this goroutine blocked on an open idle channel.
+		for {
+			select {
+			case <-ctx.Done():
+				writeErrCh <- ctx.Err()
 				return
+			case chunk, ok := <-chunks:
+				if !ok {
+					// CloseStream flushes any buffered audio and returns final
+					// results before Deepgram closes the socket.
+					writeErrCh <- conn.Write(ctx, websocket.MessageText, []byte(`{"type":"CloseStream"}`))
+					return
+				}
+				if err := conn.Write(ctx, websocket.MessageBinary, chunk); err != nil {
+					writeErrCh <- err
+					return
+				}
 			}
 		}
-		// CloseStream flushes any buffered audio and returns final results before
-		// Deepgram closes the socket.
-		writeErrCh <- conn.Write(ctx, websocket.MessageText, []byte(`{"type":"CloseStream"}`))
 	}()
 
 	// Deepgram results are per-utterance segments, not cumulative: accumulate the
@@ -100,7 +120,18 @@ func (d *deepgramTranscriber) StreamTranscribe(ctx context.Context, chunks <-cha
 				}
 			default:
 			}
-			return compose(), fmt.Errorf("Deepgram stream error: %w", err) //nolint:staticcheck // Preserve established user-facing error text.
+			// A user abort cancels the streaming context; the UI matches it
+			// with errors.Is(err, context.Canceled), so return the sentinel
+			// itself (it carries no key) instead of a flat redacted string.
+			// Key on ctx.Err() rather than unwrapping err: the writeErrCh
+			// swap above can replace err with a plain transport error (e.g.
+			// "closed network connection") that doesn't itself unwrap to
+			// context.Canceled even though the cancellation is what caused it.
+			if ctx.Err() != nil {
+				return compose(), ctx.Err()
+			}
+			//nolint:staticcheck // Preserve established user-facing error text.
+			return compose(), fmt.Errorf("Deepgram stream error: %s", providerio.Redact(err.Error(), d.cfg.APIKey))
 		}
 		if typ != websocket.MessageText {
 			continue

@@ -7,6 +7,7 @@ import (
 type BackendOptions struct {
 	GOOS             string
 	LookupExecutable func(string) (string, error)
+	DetectWSL        func() WSLInfo
 }
 
 type Backend struct {
@@ -53,6 +54,7 @@ func SelectBackend(options BackendOptions) Backend {
 	return NewSandboxManager(SandboxManagerOptions{
 		GOOS:             options.GOOS,
 		LookupExecutable: options.LookupExecutable,
+		DetectWSL:        options.DetectWSL,
 	}).Backend()
 }
 

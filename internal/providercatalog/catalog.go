@@ -115,6 +115,7 @@ var descriptors = []Descriptor{
 	openAICompat("ollama-cloud", "Ollama Cloud", "https://ollama.com/v1", "qwen3-coder:480b", []string{"OLLAMA_API_KEY"}, "ollama.com", "ollama cloud"),
 	localOpenAI("ollama", "Ollama Local", "http://localhost:11434/v1", "llama3.1", "ollama local"),
 	localOpenAI("lmstudio", "LM Studio", "http://localhost:1234/v1", "local-model", "lm-studio", "lm studio"),
+	localOpenAI("atomic-chat-local", "Atomic Chat Local", "http://127.0.0.1:1337/v1", "local-model", "atomic chat local"),
 	oauthProvider(openAICompat("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", "openai/gpt-4.1", []string{"OPENROUTER_API_KEY"}), true, false),
 	// Hugging Face Inference Providers — OpenAI-compatible router at
 	// https://router.huggingface.co/v1 exposes hundreds of OSS models. OAuth

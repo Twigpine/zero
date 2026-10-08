@@ -10,6 +10,12 @@ import (
 )
 
 func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) int {
+	// Do not provision DenyRead ACLs for a token mode that cannot launch normal
+	// tools with DenyRead under the narrow restricting-SID set (PR #640).
+	if err := windowsDenyReadRestrictedTokenUnsupportedProfile(config.PermissionProfile); err != nil {
+		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
+		return 1
+	}
 	// Applying the WFP network filters and workspace ACLs requires Administrator
 	// rights; without them WFP fails deep inside with a raw ACCESS_DENIED (0x5).
 	// Check up front and return an actionable message instead.

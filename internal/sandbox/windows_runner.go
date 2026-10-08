@@ -317,6 +317,12 @@ func ParseWindowsSandboxCommandArgs(args []string) (WindowsSandboxCommandConfig,
 }
 
 func windowsRestrictedTokenCommandPlan(execRequest SandboxExecutionRequest, policy Policy) (CommandPlan, error) {
+	// Reject DenyRead before provisioning either restricted-token runner level.
+	// Both elevated and unelevated build the same fully restricted narrow-SID
+	// token for DenyRead profiles, which cannot load ordinary system binaries.
+	if err := windowsDenyReadRestrictedTokenUnsupportedProfile(execRequest.PermissionProfile); err != nil {
+		return CommandPlan{}, err
+	}
 	spec := execRequest.Command
 	var sandboxHomeEnv map[string]string
 	if spec.Env != nil {
@@ -329,7 +335,7 @@ func windowsRestrictedTokenCommandPlan(execRequest SandboxExecutionRequest, poli
 	childEnv := sandboxEnvironmentForCommandWithSensitiveEnv(spec.Env, policy, BackendWindowsRestrictedToken, execRequest.WorkspaceRoot, spec.sensitiveEnvKeys)
 	childEnv = sandboxRuntimeEnvironment(childEnv, execRequest.PermissionProfile.Runtime)
 	// The unelevated enforcement tier maps to the runner's unelevated level: same
-	// restricted token, but the runner applies the workspace ACLs itself instead
+	// restricted token, but the runner applies the workspace ACL plan itself instead
 	// of requiring the elevated setup marker.
 	level := WindowsSandboxLevelRestrictedToken
 	if execRequest.EnforcementLevel == EnforcementUnelevated {

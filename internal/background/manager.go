@@ -453,7 +453,12 @@ func (manager *Manager) normalizeLoadedTask(fileTaskID string, task Task) (Task,
 	}
 	outputFile, err := manager.outputFile(task.ID, task.OutputFile)
 	if err != nil {
-		return Task{}, false, err
+		var migrated bool
+		outputFile, migrated = manager.migrateLegacyOutputFile(task.ID, task.OutputFile)
+		if !migrated {
+			return Task{}, false, err
+		}
+		changed = true
 	}
 	if outputFile != task.OutputFile {
 		changed = true
@@ -560,6 +565,32 @@ func (manager *Manager) outputFile(taskID string, requested string) (string, err
 		return "", fmt.Errorf("background task output file must be inside %s", manager.rootDir)
 	}
 	return path, nil
+}
+
+// migrateLegacyOutputFile recovers task metadata written under a previous home
+// or XDG data root. It accepts only the canonical per-task output
+// name in the historic zero/background layout, and only when the corresponding
+// regular file already exists inside the active manager root.
+func (manager *Manager) migrateLegacyOutputFile(taskID string, requested string) (string, bool) {
+	requested = strings.TrimSpace(requested)
+	if !filepath.IsAbs(requested) {
+		return "", false
+	}
+	requested = filepath.Clean(requested)
+	expectedName := taskID + ".ndjson"
+	if filepath.Base(requested) != expectedName {
+		return "", false
+	}
+	legacyRoot := filepath.Dir(requested)
+	if filepath.Base(legacyRoot) != "background" || filepath.Base(filepath.Dir(legacyRoot)) != "zero" {
+		return "", false
+	}
+	canonical := filepath.Join(manager.rootDir, expectedName)
+	info, err := os.Lstat(canonical)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", false
+	}
+	return canonical, true
 }
 
 func validTaskID(taskID string) bool {

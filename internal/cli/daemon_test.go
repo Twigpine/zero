@@ -2,8 +2,15 @@ package cli
 
 import (
 	"bytes"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/Gitlawb/zero/internal/background"
 )
 
 // isolateDaemonPaths points DefaultPaths at a temp dir so the test never touches
@@ -119,5 +126,86 @@ func TestDaemonSubcommandsRejectExtraArgs(t *testing.T) {
 		if code != exitUsage {
 			t.Fatalf("%v exit = %d, want exitUsage (reject extra args); stderr=%q", args, code, errb)
 		}
+	}
+}
+
+func TestWaitForDaemonReadinessChecksTimeoutBoundary(t *testing.T) {
+	checks := 0
+	ready := waitForDaemonReadiness(func() bool {
+		checks++
+		return checks == 2
+	}, 0, time.Millisecond)
+	if !ready {
+		t.Fatal("daemon that became reachable at the timeout boundary was not detected")
+	}
+	if checks != 2 {
+		t.Fatalf("reachability checks = %d, want initial and final checks", checks)
+	}
+}
+
+func TestTerminateAndReapDaemonProcess(t *testing.T) {
+	cmd := daemonDetachedChildCommand("hang")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper process: %v", err)
+	}
+
+	if err := terminateAndReapDaemonProcess(cmd); err != nil {
+		t.Fatalf("terminate and reap helper process: %v", err)
+	}
+	if cmd.ProcessState == nil {
+		t.Fatalf("helper process was not reaped: state=%v", cmd.ProcessState)
+	}
+	if cmd.ProcessState.Success() {
+		t.Fatalf("helper process unexpectedly exited successfully: %v", cmd.ProcessState)
+	}
+}
+
+func TestStartAndAwaitDaemonProcessTimeoutTerminatesAndReaps(t *testing.T) {
+	cmd := daemonDetachedChildCommand("hang")
+	if err := startAndAwaitDaemonProcess(cmd, func() bool { return false }, 0, time.Millisecond); !errors.Is(err, errDaemonStartTimeout) {
+		t.Fatalf("start and await error = %v, want timeout", err)
+	}
+	if cmd.ProcessState == nil {
+		t.Fatal("timed-out helper process was not reaped")
+	}
+}
+
+func TestStartAndAwaitDaemonProcessReleasesReadyChild(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "child-finished")
+	cmd := daemonDetachedChildCommand("mark", "ZERO_TEST_DAEMON_CHILD_MARKER="+marker)
+	if err := startAndAwaitDaemonProcess(cmd, func() bool { return true }, time.Second, time.Millisecond); err != nil {
+		t.Fatalf("start and await ready helper: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(marker); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("released helper process did not remain alive to write its marker")
+}
+
+func daemonDetachedChildCommand(mode string, extraEnv ...string) *exec.Cmd {
+	cmd := exec.Command(os.Args[0], "-test.run=TestDaemonDetachedChildProcess")
+	cmd.Env = append(os.Environ(), "ZERO_TEST_DAEMON_DETACHED_CHILD="+mode)
+	cmd.Env = append(cmd.Env, extraEnv...)
+	background.ConfigureChildProcessGroup(cmd)
+	return cmd
+}
+
+func TestDaemonDetachedChildProcess(t *testing.T) {
+	switch os.Getenv("ZERO_TEST_DAEMON_DETACHED_CHILD") {
+	case "":
+		return
+	case "mark":
+		if err := os.WriteFile(os.Getenv("ZERO_TEST_DAEMON_CHILD_MARKER"), []byte("ready"), 0o600); err != nil {
+			os.Exit(2)
+		}
+		os.Exit(0)
+	}
+	for {
+		time.Sleep(time.Hour)
 	}
 }

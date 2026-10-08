@@ -316,7 +316,7 @@ func (m model) activateManagerSelection() (model, tea.Cmd) {
 		wizard.manageStatus = "Cannot switch providers while a run is active."
 		return m, nil
 	}
-	next, text, switched, cmd := m.switchProviderModel(row.profile.Name, row.profile.Model)
+	next, text, switched, cmd, _ := m.switchProviderModel(row.profile.Name, row.profile.Model)
 	if switched {
 		next.providerWizard = nil
 		next.transcript = reduceTranscript(next.transcript, transcriptAction{kind: actionAppendSystem, text: text})

@@ -1,12 +1,12 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -146,11 +146,7 @@ func runDaemonStartDetached(paths daemon.Paths, stdout io.Writer, stderr io.Writ
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
-	if err := os.MkdirAll(filepath.Dir(paths.Socket), 0o700); err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
-	}
-	logPath := filepath.Join(filepath.Dir(paths.Socket), "daemon.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	logFile, logPath, err := daemon.OpenRuntimeLog(paths)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
@@ -160,20 +156,61 @@ func runDaemonStartDetached(paths daemon.Paths, stdout io.Writer, stderr io.Writ
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	background.ConfigureChildProcessGroup(cmd) // own process group: outlives this shell
-	if err := cmd.Start(); err != nil {
+	if err := startAndAwaitDaemonProcess(cmd, func() bool { return daemonReachable(paths) }, 5*time.Second, 25*time.Millisecond); err != nil {
+		if errors.Is(err, errDaemonStartTimeout) {
+			return writeAppError(stderr, err.Error()+"; see "+logPath, exitCrash)
+		}
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
-	_ = cmd.Process.Release()
+	fmt.Fprintf(stdout, "zero daemon started (socket %s)\n", paths.Socket)
+	return exitSuccess
+}
 
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if daemonReachable(paths) {
-			fmt.Fprintf(stdout, "zero daemon started (socket %s)\n", paths.Socket)
-			return exitSuccess
-		}
-		time.Sleep(25 * time.Millisecond)
+var errDaemonStartTimeout = errors.New("daemon did not come up within timeout")
+
+func startAndAwaitDaemonProcess(cmd *exec.Cmd, reachable func() bool, timeout time.Duration, pollInterval time.Duration) error {
+	if err := cmd.Start(); err != nil {
+		return err
 	}
-	return writeAppError(stderr, "daemon did not come up within timeout; see "+logPath, exitCrash)
+	if waitForDaemonReadiness(reachable, timeout, pollInterval) {
+		if err := cmd.Process.Release(); err != nil {
+			cleanupErr := terminateAndReapDaemonProcess(cmd)
+			if cleanupErr != nil {
+				return fmt.Errorf("release daemon process: %w (cleanup failed: %v)", err, cleanupErr)
+			}
+			return fmt.Errorf("release daemon process: %w", err)
+		}
+		return nil
+	}
+	if err := terminateAndReapDaemonProcess(cmd); err != nil {
+		return fmt.Errorf("%w; cleanup failed: %v", errDaemonStartTimeout, err)
+	}
+	return errDaemonStartTimeout
+}
+
+func waitForDaemonReadiness(reachable func() bool, timeout time.Duration, pollInterval time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if reachable() {
+			return true
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		time.Sleep(min(pollInterval, remaining))
+	}
+	// The loop's last reachable() call already ran immediately before this one
+	// (right after the final Sleep, with the same deadline check separating
+	// them), so this adds no extra waiting time and is not a grace window for a
+	// slow-starting daemon — it only re-checks the same instant in case
+	// reachable() itself is non-deterministic. To tolerate a genuinely slow
+	// start, raise the timeout passed to startAndAwaitDaemonProcess instead.
+	return reachable()
+}
+
+func terminateAndReapDaemonProcess(cmd *exec.Cmd) error {
+	return background.TerminateCommand(cmd)
 }
 
 func runDaemonStop(args []string, stdout io.Writer, stderr io.Writer) int {

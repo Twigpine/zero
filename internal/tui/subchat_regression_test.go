@@ -7,30 +7,27 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-// The subchat drill-in (viewing a subagent/swarm child session) swaps the on-screen
-// transcript to m.subchat.childRows, but mouse hit-testing and the footer's pinned
-// plan panel were never made subchat-aware — they kept operating on/showing the
-// PARENT run's state while the child session was on screen. These tests guard the
-// fix: mouse selection must resolve against the child rows, the plan panel must not
-// show in that view, and a selection in progress must extend across a wheel-scroll
-// instead of freezing at whatever was visible when the drag started.
+// The subchat drill-in (viewing a subagent/swarm child session) swaps the
+// on-screen transcript to m.subchat.childRows. These tests guard that mouse
+// selection resolves against those child rows, plans are never pinned above the
+// composer, and selection extends across wheel scrolling.
 
-func TestFooterHidesPlanPanelDuringSubchat(t *testing.T) {
+func TestFooterDoesNotPinPlanDuringSubchat(t *testing.T) {
 	m := runningPlanModel(t, 3)
 	m.altScreen = true
 	m.height = 30
 	width := m.chatColumnWidth()
 
 	withoutSubchat := m.footerView(width)
-	if !strings.Contains(withoutSubchat, "Step number 1 here") {
-		t.Fatalf("sanity check failed: pinned plan panel should render outside subchat, got:\n%s", withoutSubchat)
+	if strings.Contains(withoutSubchat, "Step number 1 here") {
+		t.Fatalf("plan must render in the transcript rather than footer, got:\n%s", withoutSubchat)
 	}
 
 	m.subchat.active = true
 	m.subchat.childSessionID = "child-1"
 	withSubchat := m.footerView(width)
 	if strings.Contains(withSubchat, "Step number 1 here") {
-		t.Fatalf("plan panel must NOT show while viewing a subchat child session, got:\n%s", withSubchat)
+		t.Fatalf("plan must not appear in a child-session footer, got:\n%s", withSubchat)
 	}
 }
 

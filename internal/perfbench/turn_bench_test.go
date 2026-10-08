@@ -74,6 +74,7 @@ func TestRunTurnBenchAggregation(t *testing.T) {
 		"t3": cannedTrace(150, 20, 1500),
 		"t4": cannedTrace(300, 10, 1000),
 	}
+	canned["t1"].Counters = append(canned["t1"].Counters, trace.Counter{Name: trace.CounterCacheWriteTokens, Value: 125})
 	cfg := TurnBenchConfig{
 		Model:      "fake-model",
 		Iterations: 1,
@@ -154,6 +155,9 @@ func TestRunTurnBenchAggregation(t *testing.T) {
 	}
 	if result.Totals.InputTokens != 5500 {
 		t.Fatalf("inputTokens = %d, want 5500", result.Totals.InputTokens)
+	}
+	if result.Totals.CacheWriteTokens != 125 {
+		t.Fatalf("cacheWriteTokens = %d, want 125", result.Totals.CacheWriteTokens)
 	}
 	if result.Totals.OutputTokens != 2750 {
 		t.Fatalf("outputTokens = %d, want 2750", result.Totals.OutputTokens)
@@ -331,6 +335,35 @@ func TestFormatTurnBenchSummaryNamesTopSources(t *testing.T) {
 	}
 	if !strings.Contains(summary, trace.SpanGeneration) {
 		t.Fatalf("summary missing top span name %q:\n%s", trace.SpanGeneration, summary)
+	}
+}
+
+func TestUncachedInputTokensClampsInconsistentTotals(t *testing.T) {
+	tests := []struct {
+		name   string
+		totals TurnBenchTotals
+		want   int64
+	}{
+		{name: "normal", totals: TurnBenchTotals{InputTokens: 100, CachedInputTokens: 30, CacheWriteTokens: 20}, want: 50},
+		{name: "cached exceeds input", totals: TurnBenchTotals{InputTokens: 100, CachedInputTokens: 120}, want: 0},
+		{name: "write exceeds remainder", totals: TurnBenchTotals{InputTokens: 100, CachedInputTokens: 20, CacheWriteTokens: 90}, want: 0},
+		{name: "overflowing inconsistent counters", totals: TurnBenchTotals{CachedInputTokens: 1<<63 - 1, CacheWriteTokens: 1<<63 - 1}, want: 0},
+		{name: "overflowing counters with input", totals: TurnBenchTotals{InputTokens: 100, CachedInputTokens: 1<<63 - 1, CacheWriteTokens: 1<<63 - 1}, want: 0},
+		{name: "negative cache counters ignored", totals: TurnBenchTotals{InputTokens: 100, CachedInputTokens: -20, CacheWriteTokens: -10}, want: 100},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := uncachedInputTokens(test.totals); got != test.want {
+				t.Fatalf("uncachedInputTokens(%+v) = %d, want %d", test.totals, got, test.want)
+			}
+		})
+	}
+	summary := FormatTurnBenchSummary(TurnBenchResult{Totals: TurnBenchTotals{
+		CachedInputTokens: 1<<63 - 1,
+		CacheWriteTokens:  1<<63 - 1,
+	}})
+	if !strings.Contains(summary, "uncached 0") {
+		t.Fatalf("summary did not clamp inconsistent cache totals:\n%s", summary)
 	}
 }
 

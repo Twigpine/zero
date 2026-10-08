@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -161,9 +162,9 @@ func TestFileViewSwapsTranscriptBody(t *testing.T) {
 	}
 }
 
-// TestSubchatEntryClosesFileView: drilling into an AGENTS row while a file view
-// is open closes the file view first (the subchat owns the single-column view).
-func TestSubchatEntryClosesFileView(t *testing.T) {
+// TestSidebarAgentClickIsIgnoredWithoutRail verifies invisible legacy hit
+// coordinates cannot unexpectedly replace the full-width conversation view.
+func TestSidebarAgentClickIsIgnoredWithoutRail(t *testing.T) {
 	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
 	if _, err := store.Create(sessions.CreateInput{SessionID: "sess-1"}); err != nil {
 		t.Fatal(err)
@@ -185,14 +186,14 @@ func TestSubchatEntryClosesFileView(t *testing.T) {
 	}
 	click := testMouseClick(tea.MouseLeft, m.chatColumnWidth()+3, agents[0].lineOffset)
 	updated, _, handled := m.handleTranscriptSelectionMouse(click)
-	if !handled {
-		t.Fatal("agent row click should be handled")
+	if handled {
+		t.Fatal("invisible rail coordinates must not handle clicks")
 	}
-	if updated.fileView.active {
-		t.Fatal("entering the subchat should close the file view")
+	if !updated.fileView.active {
+		t.Fatal("an ignored rail click must leave the active file view alone")
 	}
-	if !updated.subchat.active {
-		t.Fatal("subchat should be active")
+	if updated.subchat.active {
+		t.Fatal("an ignored rail click must not enter a subchat")
 	}
 }
 
@@ -214,6 +215,29 @@ func TestChangedFilesRehydration(t *testing.T) {
 	}
 	if summaries := rows[0].changeSummaries; len(summaries) != 1 || summaries[0].Path != "node_modules/" || !summaries[0].Aggregated {
 		t.Fatalf("changeSummaries not rehydrated: %#v", summaries)
+	}
+}
+
+// TestResumedFileEditUsesPersistedDisplayPreview keeps the reviewable diff a
+// user saw while the run was live. The provider-facing output is intentionally
+// a short confirmation, so it cannot substitute for the card-only preview.
+func TestResumedFileEditUsesPersistedDisplayPreview(t *testing.T) {
+	preview := "--- a/calculator.go\n+++ b/calculator.go\n@@ -4,1 +4,1 @@\n-oldValue := 1\n+newValue := 2"
+	events := []sessions.Event{{
+		Type:    sessions.EventToolResult,
+		Payload: json.RawMessage(`{"toolCallId":"edit-1","name":"edit_file","status":"ok","output":"Successfully edited calculator.go (replaced 1 occurrence).","displayPreview":` + strconv.Quote(preview) + `}`),
+	}}
+
+	rows := transcriptRowsFromSessionEvents(events)
+	if len(rows) != 1 {
+		t.Fatalf("expected one restored row, got %d", len(rows))
+	}
+	if rows[0].detail != preview {
+		t.Fatalf("resume should restore the saved diff preview, got %q", rows[0].detail)
+	}
+	card := renderToolResultCard(rows[0], 80, rowContext{}, cardRenderOptions{})
+	if plain := plainRender(t, card); !strings.Contains(plain, "newValue := 2") {
+		t.Fatalf("resumed edit should render its diff preview, got %q", plain)
 	}
 }
 

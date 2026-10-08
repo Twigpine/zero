@@ -15,6 +15,7 @@ func TestContextPlannerPreservesProviderRequest(t *testing.T) {
 	}
 	toolDefs := []zeroruntime.ToolDefinition{{
 		Name: "read_file", Description: "Read a file",
+		Format: &zeroruntime.ToolDefinitionFormat{Type: "grammar", Syntax: "lark", Definition: "start: PATH"},
 		Parameters: map[string]any{
 			"type":       "object",
 			"required":   []string{"path"},
@@ -25,6 +26,7 @@ func TestContextPlannerPreservesProviderRequest(t *testing.T) {
 	planner := newContextPlanner(contextPlannerConfig{
 		contextWindow:  128_000,
 		promptCacheKey: "session-1",
+		serviceTier:    "priority",
 		promptParts:    systemPromptParts{prompt: "system", baseInstructions: "system"},
 	})
 
@@ -33,6 +35,7 @@ func TestContextPlannerPreservesProviderRequest(t *testing.T) {
 		Messages:        copyMessages(messages),
 		Tools:           toolDefs,
 		ReasoningEffort: "medium",
+		ServiceTier:     "priority",
 		PromptCacheKey:  "session-1",
 	}
 	if !reflect.DeepEqual(plan.Request, want) {
@@ -51,10 +54,12 @@ func TestContextPlannerPreservesProviderRequest(t *testing.T) {
 	toolDefs[0].Parameters["required"].([]string)[0] = "other"
 	toolDefs[0].Parameters["properties"].(map[string]any)["path"].(map[string]any)["type"] = "integer"
 	toolDefs[0].Parameters["anyOf"].([]any)[0].(map[string]any)["type"] = "array"
+	toolDefs[0].Format.Definition = "changed"
 	if plan.Request.Messages[1].Content != "inspect this" || plan.Request.Messages[1].Images[0].Data[0] != 1 {
 		t.Fatalf("planned messages alias caller state: %#v", plan.Request.Messages[1])
 	}
 	if plan.Request.Tools[0].Name != "read_file" ||
+		plan.Request.Tools[0].Format == nil || plan.Request.Tools[0].Format.Definition != "start: PATH" ||
 		plan.Request.Tools[0].Parameters["required"].([]string)[0] != "path" ||
 		plan.Request.Tools[0].Parameters["properties"].(map[string]any)["path"].(map[string]any)["type"] != "string" ||
 		plan.Request.Tools[0].Parameters["anyOf"].([]any)[0].(map[string]any)["type"] != "object" {

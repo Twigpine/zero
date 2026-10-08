@@ -23,6 +23,9 @@ const defaultConnectTimeout = 8 * time.Second
 type RegisterOptions struct {
 	PermissionStore *PermissionStore
 	Autonomy        PermissionAutonomy
+	// AdvertiseInAuto exposes prompt-gated MCP tools to model surfaces whose
+	// default mode is auto while preserving the execution-time prompt.
+	AdvertiseInAuto bool
 	ClientFactory   func(context.Context, Server) (ToolClient, error)
 	// ConnectTimeout bounds the per-server connect+list at startup. Zero uses
 	// defaultConnectTimeout.
@@ -176,9 +179,11 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 			staged = append(staged, tool)
 		}
 	}
-	for _, tool := range staged {
-		registry.Register(tool)
+	registered := make([]tools.Tool, 0, len(staged))
+	for index := range staged {
+		registered = append(registered, staged[index])
 	}
+	registry.RegisterBatch(registered)
 	return runtime, nil
 }
 
@@ -269,9 +274,10 @@ func newRegistryTool(server Server, remote RemoteTool, client ToolClient, option
 		client:     client,
 		parameters: SchemaFromMCP(remote.InputSchema),
 		safety: tools.Safety{
-			SideEffect: tools.SideEffectNetwork,
-			Permission: permission,
-			Reason:     fmt.Sprintf("MCP tool %s/%s runs through the configured %s server.", server.Name, remote.Name, server.Type),
+			SideEffect:      tools.SideEffectNetwork,
+			Permission:      permission,
+			Reason:          fmt.Sprintf("MCP tool %s/%s runs through the configured %s server.", server.Name, remote.Name, server.Type),
+			AdvertiseInAuto: options.AdvertiseInAuto,
 		},
 	}
 }

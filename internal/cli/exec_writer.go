@@ -267,23 +267,29 @@ func streamJSONPermissionEventType(event agent.PermissionEvent) streamjson.Event
 func (writer *execEventWriter) usage(usage agent.Usage) {
 	if writer.format == execOutputJSON {
 		writer.writeJSON(map[string]any{
-			"type":              "usage",
-			"prompt_tokens":     usage.PromptTokens,
-			"completion_tokens": usage.CompletionTokens,
-			"total_tokens":      usage.TotalTokens(),
+			"type":                "usage",
+			"prompt_tokens":       usage.PromptTokens,
+			"completion_tokens":   usage.CompletionTokens,
+			"cached_input_tokens": usage.CachedInputTokens,
+			"cache_write_tokens":  usage.CacheWriteTokens,
+			"total_tokens":        usage.TotalTokens(),
 		})
 		return
 	}
 	if writer.format == execOutputStreamJSON {
 		promptTokens := usage.EffectiveInputTokens()
 		completionTokens := usage.EffectiveOutputTokens()
+		cachedInputTokens := usage.CachedInputTokens
+		cacheWriteTokens := usage.CacheWriteTokens
 		totalTokens := usage.TotalTokens()
 		writer.writeStreamJSON(streamjson.Event{
-			Type:             streamjson.EventUsage,
-			RunID:            writer.runID,
-			PromptTokens:     &promptTokens,
-			CompletionTokens: &completionTokens,
-			TotalTokens:      &totalTokens,
+			Type:              streamjson.EventUsage,
+			RunID:             writer.runID,
+			PromptTokens:      &promptTokens,
+			CompletionTokens:  &completionTokens,
+			CachedInputTokens: &cachedInputTokens,
+			CacheWriteTokens:  &cacheWriteTokens,
+			TotalTokens:       &totalTokens,
 		})
 	}
 }

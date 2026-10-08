@@ -94,6 +94,8 @@ type Event struct {
 	Meta              map[string]string `json:"meta,omitempty"`
 	PromptTokens      *int              `json:"promptTokens,omitempty"`
 	CompletionTokens  *int              `json:"completionTokens,omitempty"`
+	CachedInputTokens *int              `json:"cachedInputTokens,omitempty"`
+	CacheWriteTokens  *int              `json:"cacheWriteTokens,omitempty"`
 	TotalTokens       *int              `json:"totalTokens,omitempty"`
 	CostUSD           *float64          `json:"costUsd,omitempty"`
 	Text              string            `json:"text,omitempty"`

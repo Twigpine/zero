@@ -9,6 +9,7 @@ package credstore
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -125,14 +126,27 @@ func (s *Store) Backend() string { return s.backend }
 func (s *Store) Encrypted() bool { return s.backend == "keyring" || s.backend == "encrypted-file" }
 
 // Set stores (or overwrites) the API key for provider.
-func (s *Store) Set(provider, key string) error {
+func (s *Store) Set(provider, key string) (err error) {
 	provider = normalizeProvider(provider)
 	if provider == "" {
 		return fmt.Errorf("credstore: provider is required")
 	}
 	if s.backend == "keyring" {
+		// The OS keyring serializes its own writes; the file lock guards the
+		// file backends only.
 		return s.kr.Set(keyringService, keyringPrefix+provider, key)
 	}
+	// READ AND WRITE UNDER ONE LOCK. Separately locking each half would still
+	// lose keys: two writers would each read the same map, each add their own
+	// provider, and the second rename would publish a file missing the first.
+	// Measured before this existed: 1 of 100 concurrent Set calls survived.
+	release, err := s.acquireFileLock(true)
+	if err != nil {
+		return err
+	}
+	// Joined, not chosen between: a release failure annotates the result instead
+	// of masking the write error that actually explains what went wrong.
+	defer func() { err = errors.Join(err, release()) }()
 	data, err := s.read()
 	if err != nil {
 		return err
@@ -142,7 +156,7 @@ func (s *Store) Set(provider, key string) error {
 }
 
 // Get returns the API key for provider and whether one is stored.
-func (s *Store) Get(provider string) (string, bool, error) {
+func (s *Store) Get(provider string) (value string, found bool, err error) {
 	provider = normalizeProvider(provider)
 	if provider == "" {
 		return "", false, nil
@@ -150,6 +164,15 @@ func (s *Store) Get(provider string) (string, bool, error) {
 	if s.backend == "keyring" {
 		return s.kr.Get(keyringService, keyringPrefix+provider)
 	}
+	// A shared lock, so a read serializes against a writer's publish. On unix
+	// the rename is atomic and this only prevents reading an empty file mid-swap;
+	// on Windows an unsynchronized reader holding the file open would block the
+	// writer's rename outright, so readers must coordinate through the same lock.
+	release, err := s.acquireFileLock(false)
+	if err != nil {
+		return "", false, err
+	}
+	defer func() { err = errors.Join(err, release()) }()
 	data, err := s.read()
 	if err != nil {
 		return "", false, err
@@ -159,7 +182,7 @@ func (s *Store) Get(provider string) (string, bool, error) {
 }
 
 // Delete removes the API key for provider, reporting whether one existed.
-func (s *Store) Delete(provider string) (bool, error) {
+func (s *Store) Delete(provider string) (existed bool, err error) {
 	provider = normalizeProvider(provider)
 	if provider == "" {
 		return false, nil
@@ -167,6 +190,13 @@ func (s *Store) Delete(provider string) (bool, error) {
 	if s.backend == "keyring" {
 		return s.kr.Delete(keyringService, keyringPrefix+provider)
 	}
+	// The same lock as Set: a delete is a read-modify-write too, and one racing
+	// a set would otherwise resurrect or erase an unrelated provider.
+	release, err := s.acquireFileLock(true)
+	if err != nil {
+		return false, err
+	}
+	defer func() { err = errors.Join(err, release()) }()
 	data, err := s.read()
 	if err != nil {
 		return false, err
@@ -179,17 +209,22 @@ func (s *Store) Delete(provider string) (bool, error) {
 }
 
 // Providers lists providers with a stored key (sorted), for display/audit.
-func (s *Store) Providers() ([]string, error) {
+func (s *Store) Providers() (names []string, err error) {
 	if s.backend == "keyring" {
 		// The OS keyring has no enumerate-by-prefix in our minimal surface; callers
 		// that need a list pass known provider names to Get. Return empty here.
 		return nil, nil
 	}
+	release, err := s.acquireFileLock(false)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { err = errors.Join(err, release()) }()
 	data, err := s.read()
 	if err != nil {
 		return nil, err
 	}
-	names := make([]string, 0, len(data))
+	names = make([]string, 0, len(data))
 	for name := range data {
 		names = append(names, name)
 	}
@@ -263,6 +298,15 @@ func (s *Store) write(data map[string]string) error {
 	}
 	return nil
 }
+
+// lockPath is the advisory lock guarding a read-modify-write of the credential
+// file. Beside the data file, never the data file itself — write publishes by
+// rename and would carry the lock away with the old inode.
+func (s *Store) lockPath() string { return s.file + ".lock" }
+
+// filepathDir is filepath.Dir, named locally so the two platform lock files can
+// share it without either importing path/filepath for one call.
+func filepathDir(path string) string { return filepath.Dir(path) }
 
 func normalizeProvider(provider string) string {
 	return strings.ToLower(strings.TrimSpace(provider))

@@ -2,12 +2,15 @@ package sandbox
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/execution"
 )
 
 func TestGrantStorePersistsListsRevokesAndClears(t *testing.T) {
@@ -343,7 +346,8 @@ func TestGrantStoreMigratesExactV1GrantAndReportsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read rewritten grant file: %v", err)
 	}
-	if !strings.Contains(string(raw), `"schemaVersion": 3`) || !strings.Contains(string(raw), `"policyVersion": 1`) || !strings.Contains(string(raw), `"write_file": [`) {
+	policyLine := fmt.Sprintf(`"policyVersion": %d`, execution.PolicyVersion)
+	if !strings.Contains(string(raw), `"schemaVersion": 3`) || !strings.Contains(string(raw), policyLine) || !strings.Contains(string(raw), `"write_file": [`) {
 		t.Fatalf("grant file was not rewritten as a versioned grant store:\n%s", raw)
 	}
 	backup, err := os.ReadFile(path + ".v1.backup")
@@ -403,6 +407,62 @@ func TestGrantStorePolicyChangePreservesDeniesAndInvalidatesApprovals(t *testing
 	backup, err := os.ReadFile(path + ".policy-v0.backup")
 	if err != nil || string(backup) != original {
 		t.Fatalf("policy backup = %q err=%v", backup, err)
+	}
+}
+
+// A prefix grant recorded before launcher-name normalization existed (a
+// versioned or .exe-suffixed interpreter) no longer validates. It must reach
+// the user through the policy migration — backup, denies preserved, one notice
+// — and never make the whole grants file unreadable, which would silently drop
+// their persisted deny grants too.
+func TestGrantStoreMigratesPreNormalizationPrefixInsteadOfRejectingTheFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sandbox-grants.json")
+	original := `{"schemaVersion":3,"policyVersion":1,"grants":{"bash":[{"toolName":"bash","decision":"deny","approvedAt":"2026-06-05T14:30:00Z"}]},"commandPrefixes":{"bash":[{"toolName":"bash","prefix":["python3.11","-c"],"approvedAt":"2026-06-05T14:30:00Z"},{"toolName":"bash","prefix":["cargo","build"],"approvedAt":"2026-06-05T14:30:00Z"}]}}`
+	if err := writeText(path, original); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewGrantStore(StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grants, err := store.List()
+	if err != nil || len(grants) != 1 || grants[0].Decision != GrantDeny {
+		t.Fatalf("grants after migration = %#v err=%v, want the deny preserved", grants, err)
+	}
+	prefixes, err := store.ListCommandPrefixes()
+	if err != nil || len(prefixes) != 0 {
+		t.Fatalf("prefixes after migration = %#v err=%v, want all re-approved", prefixes, err)
+	}
+	if notice, err := store.ConsumeMigrationNotice(); err != nil || !strings.Contains(notice, "invalidated 2") {
+		t.Fatalf("notice = %q err=%v", notice, err)
+	}
+	if backup, err := os.ReadFile(path + ".policy-v1.backup"); err != nil || string(backup) != original {
+		t.Fatalf("backup = %q err=%v", backup, err)
+	}
+}
+
+// The legacy-schema path is a separate migration from the policy bump above and
+// prunes per grant rather than wholesale, so a pre-normalization prefix must be
+// dropped there while the valid prefix beside it survives.
+func TestGrantStoreLegacyMigrationDropsOnlyThePreNormalizationPrefix(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sandbox-grants.json")
+	original := `{"schemaVersion":2,"grants":{},"commandPrefixes":{"bash":[{"toolName":"bash","prefix":["python3.11","-c"],"approvedAt":"2026-06-05T14:30:00Z"},{"toolName":"bash","prefix":["git","status"],"approvedAt":"2026-06-05T14:30:00Z"}]}}`
+	if err := writeText(path, original); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewGrantStore(StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefixes, err := store.ListCommandPrefixes()
+	if err != nil {
+		t.Fatalf("ListCommandPrefixes after legacy migration returned error: %v", err)
+	}
+	if len(prefixes) != 1 || !sameStringSlice(prefixes[0].Prefix, []string{"git", "status"}) {
+		t.Fatalf("prefixes = %#v, want only [git status]", prefixes)
+	}
+	if notice, err := store.ConsumeMigrationNotice(); err != nil || !strings.Contains(notice, "migrated 1, invalidated 1") {
+		t.Fatalf("notice = %q err=%v", notice, err)
 	}
 }
 
@@ -481,6 +541,11 @@ func TestGrantStoreRejectsUnsafeCommandPrefixes(t *testing.T) {
 		{"python", "script.py"},
 		{"./script.sh"},
 		{"git"},
+		{"python3.11", "-c"},
+		{"python.exe", "-c"},
+		{"node.exe", "-e"},
+		{"git.exe"},
+		{"cmd", "/c"},
 	} {
 		if _, err := store.GrantCommandPrefix(CommandPrefixInput{ToolName: "bash", Prefix: prefix}); err == nil {
 			t.Fatalf("GrantCommandPrefix(%#v) succeeded, want validation error", prefix)

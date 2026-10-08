@@ -28,7 +28,7 @@ func NewScopedReadMinifiedFileTool(workspaceRoot string, scope PathScope) Tool {
 	return readMinifiedFileTool{
 		baseTool: baseTool{
 			name:        "read_minified_file",
-			description: "Read source code in a token-efficient, language-aware form. Prefer this for initial understanding; use read_file for exact text or line numbers.",
+			description: "Read source code in a token-efficient, language-aware form. Use for exploratory understanding of large or unfamiliar source when no exact edit is planned; use read_file directly for likely edit targets. Do not immediately reread the same file exactly unless a new need for exact text or line numbers appears.",
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
@@ -171,14 +171,9 @@ func selectSourceLines(content []byte, offset, limit int) sourceSelection {
 }
 
 func sourceLineCount(content []byte) int {
-	if len(content) == 0 {
-		return 1
-	}
-	lines := strings.Count(string(content), "\n")
-	if content[len(content)-1] != '\n' {
-		lines++
-	}
-	return lines
+	// One implementation for reader and writer: the tracker contract lives on
+	// trackedLineTotal, and this must never drift from it.
+	return trackedLineTotal(string(content))
 }
 
 // lineCount reports the number of newline-separated lines in s (an empty string
@@ -188,4 +183,21 @@ func lineCount(s string) int {
 		return 0
 	}
 	return strings.Count(s, "\n") + 1
+}
+
+// trackedLineTotal reports a file's line count the way read_file reports it
+// to the FileTracker (newline-terminated lines, plus an unterminated last
+// line; an empty file is one line). Writers must record this same number:
+// RecordSeenRange resets every observation when the total changes, so a
+// writer that recorded lineCount (one higher for a trailing newline) made the
+// next partial read_file wipe whole-file knowledge and refuse the next edit.
+func trackedLineTotal(s string) int {
+	if s == "" {
+		return 1
+	}
+	total := strings.Count(s, "\n")
+	if !strings.HasSuffix(s, "\n") {
+		total++
+	}
+	return total
 }

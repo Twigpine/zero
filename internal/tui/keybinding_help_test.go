@@ -162,22 +162,24 @@ func TestHelpOverlayKeepsTranscriptBodyBehindIt(t *testing.T) {
 }
 
 func TestCtrlBCtrlECursorNavigationBypass(t *testing.T) {
-	// 1. Empty composer: Ctrl+B should toggle sidebarHidden, Ctrl+E should toggle mouseReleased
+	// 1. Empty composer: Ctrl+B should toggle run details, Ctrl+E should toggle mouseReleased.
 	m := newModel(context.Background(), Options{ModelName: "gpt-4o"})
 	m.altScreen = true
 	m.width = 120
 	m.height = 40
 	m.transcript = append(m.transcript, transcriptRow{kind: rowToolCall, tool: "read_file", detail: "main.go"})
-	if !m.sidebarToggleAllowed() {
-		t.Fatal("sidebar toggle should be allowed")
+	if !m.runDetailsAllowed() {
+		t.Fatal("run details should be allowed")
 	}
 
-	initialSidebar := m.sidebarHidden
+	initialDetails := m.runDetailsOpen
 	updated, _ := m.Update(testKeyCtrl('b'))
 	next := updated.(model)
-	if next.sidebarHidden == initialSidebar {
-		t.Fatal("Ctrl+B on empty composer should toggle sidebarHidden")
+	if next.runDetailsOpen == initialDetails {
+		t.Fatal("Ctrl+B on empty composer should toggle run details")
 	}
+	updated, _ = next.Update(testKeyCtrl('b'))
+	next = updated.(model)
 
 	initialMouse := next.mouseReleased
 	updated, _ = next.Update(testKeyCtrl('e'))
@@ -198,11 +200,11 @@ func TestCtrlBCtrlECursorNavigationBypass(t *testing.T) {
 		t.Fatalf("composerValue = %q, want 'hello'", m2.composerValue())
 	}
 
-	initialSidebar2 := m2.sidebarHidden
+	initialDetails2 := m2.runDetailsOpen
 	updated, _ = m2.Update(testKeyCtrl('b'))
 	next2 := updated.(model)
-	if next2.sidebarHidden != initialSidebar2 {
-		t.Fatal("Ctrl+B on non-empty composer should NOT toggle sidebarHidden")
+	if next2.runDetailsOpen != initialDetails2 {
+		t.Fatal("Ctrl+B on non-empty composer should NOT toggle run details")
 	}
 
 	initialMouse2 := next2.mouseReleased
@@ -228,8 +230,8 @@ func TestRemappedToggleBindingsIgnoreComposerGuard(t *testing.T) {
 	// Avoid Ctrl+N: idle Ctrl+N is reserved as an emacs menu no-op and never
 	// reaches configurable global bindings.
 	m.keyBindings.toggleSidebar = parseBinding("ctrl+y")
-	if !m.sidebarToggleAllowed() {
-		t.Fatal("sidebar toggle should be allowed")
+	if !m.runDetailsAllowed() {
+		t.Fatal("run details should be allowed")
 	}
 
 	m = typeRunes(t, m, "hello")
@@ -247,11 +249,11 @@ func TestRemappedToggleBindingsIgnoreComposerGuard(t *testing.T) {
 		t.Fatalf("remapped toggleMouse binding should not fall through to composer input, got %q", next.composerValue())
 	}
 
-	initialSidebar := next.sidebarHidden
+	initialDetails := next.runDetailsOpen
 	updated, _ = next.Update(testKeyCtrl('y'))
 	next = updated.(model)
-	if next.sidebarHidden == initialSidebar {
-		t.Fatal("remapped Ctrl+Y toggleSidebar binding should still fire with a non-empty composer")
+	if next.runDetailsOpen == initialDetails {
+		t.Fatal("remapped Ctrl+Y toggleSidebar binding should still open run details with a non-empty composer")
 	}
 	if next.composerValue() != "hello" {
 		t.Fatalf("remapped toggleSidebar binding should not fall through to composer input, got %q", next.composerValue())
@@ -273,8 +275,8 @@ func TestExplicitDefaultChordConfigStillRequiresEmptyComposer(t *testing.T) {
 	m.transcript = append(m.transcript, transcriptRow{kind: rowToolCall, tool: "read_file", detail: "main.go"})
 	m.keyBindings.toggleMouse = parseBinding("ctrl+e")
 	m.keyBindings.toggleSidebar = parseBinding("ctrl+b")
-	if !m.sidebarToggleAllowed() {
-		t.Fatal("sidebar toggle should be allowed")
+	if !m.runDetailsAllowed() {
+		t.Fatal("run details should be allowed")
 	}
 
 	m = typeRunes(t, m, "hello")
@@ -289,10 +291,10 @@ func TestExplicitDefaultChordConfigStillRequiresEmptyComposer(t *testing.T) {
 		t.Fatal("explicit ctrl+e config should NOT toggle mouseReleased with a non-empty composer")
 	}
 
-	initialSidebar := next.sidebarHidden
+	initialDetails := next.runDetailsOpen
 	updated, _ = next.Update(testKeyCtrl('b'))
 	next = updated.(model)
-	if next.sidebarHidden != initialSidebar {
-		t.Fatal("explicit ctrl+b config should NOT toggle sidebarHidden with a non-empty composer")
+	if next.runDetailsOpen != initialDetails {
+		t.Fatal("explicit ctrl+b config should NOT toggle run details with a non-empty composer")
 	}
 }

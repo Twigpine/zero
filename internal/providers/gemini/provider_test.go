@@ -14,6 +14,7 @@ import (
 )
 
 func TestStreamCompletionPostsGenerateContentRequest(t *testing.T) {
+	t.Parallel()
 	var gotPath string
 	var gotQuery string
 	var gotAPIKey string
@@ -118,6 +119,7 @@ func TestStreamCompletionPostsGenerateContentRequest(t *testing.T) {
 }
 
 func TestStreamCompletionEnablesThinkingWhenEffortRequested(t *testing.T) {
+	t.Parallel()
 	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
@@ -151,6 +153,7 @@ func TestStreamCompletionEnablesThinkingWhenEffortRequested(t *testing.T) {
 }
 
 func TestStreamCompletionOmitsThinkingWithoutEffort(t *testing.T) {
+	t.Parallel()
 	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
@@ -179,6 +182,7 @@ func TestStreamCompletionOmitsThinkingWithoutEffort(t *testing.T) {
 }
 
 func TestStreamCompletionCapturesThoughtSignatureAndSkipsThoughtText(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		// A thought-summary part (must not surface as answer text) followed by a
 		// functionCall part carrying its thoughtSignature.
@@ -201,6 +205,7 @@ func TestStreamCompletionCapturesThoughtSignatureAndSkipsThoughtText(t *testing.
 }
 
 func TestGeminiRequestReplaysThoughtSignature(t *testing.T) {
+	t.Parallel()
 	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
@@ -238,6 +243,7 @@ func TestGeminiRequestReplaysThoughtSignature(t *testing.T) {
 }
 
 func TestStreamCompletionAppliesCustomAuthAndHeaders(t *testing.T) {
+	t.Parallel()
 	var gotDefaultAuth string
 	var gotCustomAuth string
 	var gotTenant string
@@ -280,6 +286,7 @@ func TestStreamCompletionAppliesCustomAuthAndHeaders(t *testing.T) {
 }
 
 func TestStreamCompletionEmitsTextUsageAndReasoningTokens(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"candidates":[{"content":{"parts":[{"text":"Hello"}]}}]}`)
 		writeSSE(w, `{"candidates":[{"content":{"parts":[{"text":" Zero"}]}}],"usageMetadata":{"promptTokenCount":25,"candidatesTokenCount":15,"thoughtsTokenCount":3,"cachedContentTokenCount":7}}`)
@@ -298,6 +305,7 @@ func TestStreamCompletionEmitsTextUsageAndReasoningTokens(t *testing.T) {
 }
 
 func TestStreamCompletionEmitsCandidateFunctionCalls(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call_1","name":"read_file","args":{"path":"src/index.ts"}}},{"functionCall":{"id":"call_2","name":"grep","args":{"pattern":"Zero"}}}]}}]}`)
 	})
@@ -318,6 +326,7 @@ func TestStreamCompletionEmitsCandidateFunctionCalls(t *testing.T) {
 }
 
 func TestStreamCompletionEmitsTopLevelFunctionCalls(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"functionCalls":[{"id":"call_1","name":"read_file","args":{"path":"README.md"}}]}`)
 	})
@@ -335,6 +344,7 @@ func TestStreamCompletionEmitsTopLevelFunctionCalls(t *testing.T) {
 }
 
 func TestStreamCompletionUsesSyntheticToolIDsWhenMissing(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"functionCalls":[{"name":"grep","args":{"pattern":"Zero"}}]}`)
 	})
@@ -346,6 +356,7 @@ func TestStreamCompletionUsesSyntheticToolIDsWhenMissing(t *testing.T) {
 }
 
 func TestStreamCompletionClassifiesHTTPAndPromptBlockErrors(t *testing.T) {
+	t.Parallel()
 	authProvider := newTestProviderWithKey(t, "sk-google", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":{"message":"API key not valid"}}`, http.StatusUnauthorized)
 	})
@@ -373,6 +384,7 @@ func TestStreamCompletionClassifiesHTTPAndPromptBlockErrors(t *testing.T) {
 // A 401 with an OAuth resolver is retried once with a force-refreshed token; the
 // replayed request carries the refreshed bearer and succeeds.
 func TestStreamCompletionRetries401WithRefreshedToken(t *testing.T) {
+	t.Parallel()
 	var attempts int
 	var secondAuth string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -422,6 +434,7 @@ func TestStreamCompletionRetries401WithRefreshedToken(t *testing.T) {
 }
 
 func TestStreamCompletionEmitsStreamErrorObject(t *testing.T) {
+	t.Parallel()
 	provider := newTestProviderWithKey(t, "sk-google", func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"error":{"code":429,"message":"stream failed sk-google","status":"RESOURCE_EXHAUSTED"}}`)
 	})
@@ -439,6 +452,7 @@ func TestStreamCompletionEmitsStreamErrorObject(t *testing.T) {
 }
 
 func TestStreamCompletionStopsOnMalformedStreamToolArgs(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"functionCalls":[{"id":"call_1","name":"grep","args":"raw"}]}`)
 		writeSSE(w, `{"candidates":[{"content":{"parts":[{"text":"should not emit"}]}}]}`)
@@ -457,6 +471,7 @@ func TestStreamCompletionStopsOnMalformedStreamToolArgs(t *testing.T) {
 }
 
 func TestStreamCompletionRejectsMalformedHistoryBeforeDispatch(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("provider should not dispatch malformed history")
 	})
@@ -483,6 +498,7 @@ func TestStreamCompletionRejectsMalformedHistoryBeforeDispatch(t *testing.T) {
 }
 
 func TestNewRequiresModelAndPositiveMaxTokens(t *testing.T) {
+	t.Parallel()
 	if _, err := New(Options{}); err == nil {
 		t.Fatal("New without model returned nil error")
 	}
@@ -562,6 +578,7 @@ func eventsOfType(events []zeroruntime.StreamEvent, eventType zeroruntime.Stream
 // OpenAI-ism (additionalProperties, $schema, patternProperties) survives at any
 // depth while legitimate fields (type/description/enum/required/default) stay.
 func TestSanitizeGeminiSchemaStripsUnsupportedFields(t *testing.T) {
+	t.Parallel()
 	in := map[string]any{
 		"type":                 "object",
 		"additionalProperties": false,
@@ -634,6 +651,7 @@ func assertNoAdditionalProps(t *testing.T, node any, path string) {
 // ("Unknown name additionalProperties"), which broke all tool-using exec calls
 // against Google (issue #373).
 func TestGeminiRequestOmitsAdditionalPropertiesInToolSchema(t *testing.T) {
+	t.Parallel()
 	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {

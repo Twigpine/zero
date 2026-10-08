@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
-  <img alt="Go 1.26.5+" src="https://img.shields.io/badge/Go-1.26.5+-00ADD8?logo=go&logoColor=white">
+  <img alt="Go 1.26.6+" src="https://img.shields.io/badge/Go-1.26.6+-00ADD8?logo=go&logoColor=white">
   <img alt="25+ providers" src="https://img.shields.io/badge/providers-25+-34E2EA">
   <a href="https://discord.gg/CaQDS6wdFn"><img alt="Discord" src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white"></a>
   <br>
@@ -23,7 +23,7 @@ zero exec --output-format stream-json < turns.jsonl
 
 ## 为什么选择 Zero
 
-- **使用你想要的模型。** 支持 OpenAI、Anthropic、Gemini、Groq、OpenRouter、DeepSeek、Mistral、xAI、Qwen、Kimi、GitHub Models、Ollama、LM Studio，或任何 OpenAI/Anthropic 兼容端点。
+- **使用你想要的模型。** 支持 OpenAI、Anthropic、Gemini、Groq、OpenRouter、DeepSeek、Mistral、xAI、Qwen、Kimi、GitHub Models、Ollama、LM Studio、Atomic Chat，或任何 OpenAI/Anthropic 兼容端点。
 - **保持控制权。** 文件写入、Shell 命令、网络访问和工作区外写入都经过 Zero 的权限和沙箱策略。
 - **在终端中工作。** TUI 具有模型/提供商选择器、图片输入、斜杠命令、实时计划/工具渲染、回滚滚动、主题以及恢复/分叉支持。
 - **无 TUI 也能工作。** `zero exec` 可脚本化，支持文本/JSON/stream-JSON I/O、隔离的工作树、规范优先运行，以及用于 CI 的有意义的退出码。
@@ -57,7 +57,7 @@ irm https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.ps1 | ie
 
 ### 从源码构建
 
-源码构建需要 Go 1.26.5+。
+源码构建需要 Go 1.26.6+。
 
 ```bash
 git clone https://github.com/Gitlawb/zero.git
@@ -114,7 +114,11 @@ export LONGCAT_API_KEY=...
 zero providers setup longcat --set-active
 ```
 
-对于本地模型，运行 Ollama 或 LM Studio，然后使用 `zero setup` 或 `zero providers detect`。
+对于本地模型，运行 Ollama、LM Studio 或 [Atomic Chat](https://atomic.chat) 桌面应用，
+然后使用 `zero setup` 或 `zero providers detect`。使用 Atomic Chat 时，请先加载模型并启用
+本地 OpenAI 兼容 API（默认地址为 `http://127.0.0.1:1337/v1`），再选择 `atomic-chat-local`。
+检测生成的添加命令会包含已加载的模型 ID；如果未发现可用的 ID，请加载模型后重试。
+对于需要特定 Shell 转义的模型 ID，请使用交互式设置。
 
 ## 日常使用
 

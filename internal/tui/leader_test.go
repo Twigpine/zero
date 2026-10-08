@@ -240,7 +240,7 @@ func TestLeaderQuestionMarkOpensChordMap(t *testing.T) {
 }
 
 func TestLeaderHelpMatchesKeybindingHelpChrome(t *testing.T) {
-	// Both overlays must use the same frame builder (titled box + panel fill).
+	// Both overlays must use the same transparent, titled frame builder.
 	m := newModel(context.Background(), Options{ModelName: "gpt-4o"})
 	m.width = 100
 	help := m.renderKeybindingHelpOverlay(100)
@@ -264,6 +264,22 @@ func TestLeaderHelpMatchesKeybindingHelpChrome(t *testing.T) {
 	}
 	if !strings.Contains(ansiPattern.ReplaceAllString(leader, ""), "Ctrl+X Shortcuts") {
 		t.Fatal("leader overlay should use Ctrl+X Shortcuts title in the border")
+	}
+}
+
+func TestShortcutOverlaysKeepTerminalCanvasTransparent(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-4o"})
+	panelFill := zeroTheme.panel.Render(" ")
+	for _, overlay := range []struct {
+		name string
+		view string
+	}{
+		{"keyboard help", m.renderKeybindingHelpOverlay(100)},
+		{"leader help", m.renderLeaderHelpOverlay(100)},
+	} {
+		if strings.Contains(overlay.view, panelFill) {
+			t.Fatalf("%s should not paint the panel background behind shortcut rows", overlay.name)
+		}
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 type contextPlannerConfig struct {
 	contextWindow  int
 	promptCacheKey string
+	serviceTier    string
 	promptParts    systemPromptParts
 }
 
@@ -62,6 +63,7 @@ func (planner *contextPlanner) plan(messages []zeroruntime.Message, toolDefs []z
 		Messages:        requestMessages,
 		Tools:           planner.snapshotTools(toolDefs, fingerprint),
 		ReasoningEffort: reasoningEffort,
+		ServiceTier:     planner.config.serviceTier,
 		PromptCacheKey:  planner.config.promptCacheKey,
 	}
 	breakdown := MeasureContext(request.Messages, request.Tools, planner.config.contextWindow)
@@ -100,6 +102,10 @@ func copyToolDefinitions(toolDefs []zeroruntime.ToolDefinition) []zeroruntime.To
 	for index, definition := range toolDefs {
 		copied[index] = definition
 		copied[index].Parameters = copySchemaMap(definition.Parameters)
+		if definition.Format != nil {
+			format := *definition.Format
+			copied[index].Format = &format
+		}
 	}
 	return copied
 }

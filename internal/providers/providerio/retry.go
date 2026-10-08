@@ -49,6 +49,17 @@ const maxBackoff = 30 * time.Second
 // schedule is 2s, 4s, 8s, 16s, then maxBackoff. A var so tests can shrink it.
 var retryBackoffBase = 2 * time.Second
 
+// ShrinkBackoffForTest sets backoff bases to 1ms for test duration.
+func ShrinkBackoffForTest() func() {
+	savedRetry, savedPreSend := retryBackoffBase, preSendBackoffBase
+	retryBackoffBase = time.Millisecond
+	preSendBackoffBase = time.Millisecond
+	return func() {
+		retryBackoffBase = savedRetry
+		preSendBackoffBase = savedPreSend
+	}
+}
+
 // preSendMaxAttempts bounds retries of a provably pre-send transport failure.
 // Unlike a 429 (whose window is measured in seconds), a refused/unreachable dial
 // either recovers within a few hundred ms or is a deterministic misconfiguration

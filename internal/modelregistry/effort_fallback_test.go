@@ -20,6 +20,10 @@ func TestReasoningEffortsFallbackForGPT5AndOSeries(t *testing.T) {
 		{"hy3", []ReasoningEffort{ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh}},
 		{"hunyuan-t1", []ReasoningEffort{ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh}},
 		{"openai/o3-mini", []ReasoningEffort{ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh}}, // github-style vendor/ id
+		{"deepseek-v4-flash", []ReasoningEffort{ReasoningEffortLow, ReasoningEffortHigh, ReasoningEffortMax}},
+		{"deepseek-v4-pro", []ReasoningEffort{ReasoningEffortLow, ReasoningEffortHigh, ReasoningEffortMax}},
+		{"deepseek-reasoner", []ReasoningEffort{ReasoningEffortLow, ReasoningEffortHigh, ReasoningEffortMax}},
+		{"deepseek-chat", []ReasoningEffort{ReasoningEffortLow, ReasoningEffortHigh, ReasoningEffortMax}},
 		{"gpt-4.1", nil}, // non-reasoning, registered: stays empty
 		{"gpt-4o-mini", nil},
 		{"ollama/llama3.1", nil},

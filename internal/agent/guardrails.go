@@ -33,11 +33,11 @@ const (
 	// knows before spending more tool turns.
 	toolOnlyProgressReminderAt = 6
 
-	// planReminderTurn is the turn (1-based) by the end of which a multi-step
-	// task should have called update_plan; if it hasn't, a one-time reminder is
-	// injected. Set to 3 (not 2) so short, legitimate two-step tasks finish
-	// without a spurious planning nag.
-	planReminderTurn = 3
+	// planReminderTurn and planReminderToolThreshold keep bounded implementation
+	// work plan-free while still nudging a genuinely sustained run that has not
+	// established any structured progress. Both thresholds must be met.
+	planReminderTurn          = 7
+	planReminderToolThreshold = 7
 
 	// planToolName is the planning tool the loop watches for by name.
 	planToolName = "update_plan"
@@ -591,13 +591,12 @@ func (state *guardState) planReminder(turn int) string {
 		return planStaleReminder(state.toolCallsSincePlanUpdate)
 	}
 
-	// NOT-CALLED reminder: by the end of planReminderTurn the model should have
-	// called update_plan if it's doing a multi-step task (>=1 other tool call).
-	// One-shot for the whole run.
+	// NOT-CALLED reminder: once both the turn and tool-call thresholds are met,
+	// sustained work should have called update_plan. One-shot for the whole run.
 	if !state.notCalledReminderSent &&
 		!state.planEverCalled &&
 		turn >= planReminderTurn &&
-		state.totalToolCalls >= 1 {
+		state.totalToolCalls >= planReminderToolThreshold {
 		state.notCalledReminderSent = true
 		return planNotCalledReminder()
 	}

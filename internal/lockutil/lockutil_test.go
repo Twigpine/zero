@@ -1,116 +1,220 @@
 package lockutil
 
 import (
+	"bufio"
 	"errors"
+	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
 	"testing"
 )
 
-func TestRestoreLockFile(t *testing.T) {
-	tempDir := t.TempDir()
-	path := filepath.Join(tempDir, "lock")
-	reclaimed := filepath.Join(tempDir, "lock.stale.token")
-
-	// 1. Successful restore when target does not exist
-	if err := os.WriteFile(reclaimed, []byte("token"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := RestoreLockFile(reclaimed, path); err != nil {
-		t.Fatalf("RestoreLockFile failed: %v", err)
-	}
-	if data, err := os.ReadFile(path); err != nil || string(data) != "token" {
-		t.Fatalf("restored lock content = %q, err %v; want %q intact", data, err, "token")
-	}
-	if _, err := os.Stat(reclaimed); !os.IsNotExist(err) {
-		t.Fatalf("expected sidelined lock to be cleaned up/removed: %v", err)
-	}
-
-	// 2. Fail when target already exists (prevent overwrite)
-	if err := os.WriteFile(reclaimed, []byte("token"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("competing"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	err := RestoreLockFile(reclaimed, path)
-	if err == nil {
-		t.Fatal("expected RestoreLockFile to fail when target exists")
-	}
-	if !errors.Is(err, os.ErrExist) {
-		t.Fatalf("expected os.ErrExist, got: %v", err)
-	}
-
-	// The sidelined lock must still exist on failure, and the competing lock
-	// must be untouched.
-	if _, err := os.Stat(reclaimed); err != nil {
-		t.Fatalf("expected sidelined lock to still exist: %v", err)
-	}
-	if data, _ := os.ReadFile(path); string(data) != "competing" {
-		t.Fatalf("competing lock was clobbered: %q", data)
-	}
-}
-
-func TestRestoreByCopy(t *testing.T) {
-	tempDir := t.TempDir()
-	path := filepath.Join(tempDir, "lock")
-	reclaimed := filepath.Join(tempDir, "lock.stale.token")
-
-	// 1. Restores content and cleans up the sidelined file when the target is
-	// free (the fallback taken when the platform's no-replace primitive fails
-	// for a reason other than the destination existing).
-	if err := os.WriteFile(reclaimed, []byte("token"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := restoreByCopy(reclaimed, path, os.Link); err != nil {
-		t.Fatalf("restoreByCopy failed: %v", err)
-	}
-	if data, err := os.ReadFile(path); err != nil || string(data) != "token" {
-		t.Fatalf("restored lock content = %q, err %v; want %q intact", data, err, "token")
-	}
-	if _, err := os.Stat(reclaimed); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("expected sidelined lock to be cleaned up after copy: %v", err)
-	}
-	if _, err := os.Stat(reclaimed + ".copy"); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("expected staged copy to be cleaned up: %v", err)
-	}
-
-	// 2. Keeps the no-overwrite guarantee: a competing lock at the target wins
-	// and the sidelined lock survives for the caller's ErrExist cleanup.
-	if err := os.WriteFile(reclaimed, []byte("token"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("competing"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := restoreByCopy(reclaimed, path, os.Link); !errors.Is(err, os.ErrExist) {
-		t.Fatalf("expected os.ErrExist when target exists, got: %v", err)
-	}
-	if data, _ := os.ReadFile(path); string(data) != "competing" {
-		t.Fatalf("competing lock was clobbered: %q", data)
-	}
-	if _, err := os.Stat(reclaimed); err != nil {
-		t.Fatalf("expected sidelined lock to still exist: %v", err)
-	}
-	if _, err := os.Stat(reclaimed + ".copy"); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("expected staged copy to be cleaned up after a failed publish: %v", err)
-	}
-}
-
-func TestRemoveLockFile(t *testing.T) {
+func TestFileLockSerializesAndKeepsStablePath(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "lock")
-	if err := os.WriteFile(path, []byte("token"), 0o600); err != nil {
+	first, err := TryAcquireFileLock(path)
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	firstInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat first lock path: %v", err)
+	}
+	if _, err := TryAcquireFileLock(path); !errors.Is(err, ErrLockHeld) {
+		t.Fatalf("contended acquire = %v, want ErrLockHeld", err)
+	}
+	if err := first.Release(); err != nil {
+		t.Fatalf("release first: %v", err)
+	}
+	releasedInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("release removed stable lock path: %v", err)
+	}
+	if !os.SameFile(firstInfo, releasedInfo) {
+		t.Fatal("release replaced the stable lock file")
+	}
+
+	second, err := TryAcquireFileLock(path)
+	if err != nil {
+		t.Fatalf("acquire after release: %v", err)
+	}
+	secondInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat second lock path: %v", err)
+	}
+	if !os.SameFile(firstInfo, secondInfo) {
+		t.Fatal("reacquire used a different lock file")
+	}
+	if err := second.Release(); err != nil {
+		t.Fatalf("release second: %v", err)
+	}
+	if err := second.Release(); err != nil {
+		t.Fatalf("idempotent release: %v", err)
+	}
+}
+
+func TestFileLockMetadata(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lock")
+	lock, err := TryAcquireFileLock(path)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := RemoveLockFile(path); err != nil {
-		t.Fatalf("RemoveLockFile failed: %v", err)
+	if err := lock.WriteMetadata([]byte("holder\n")); err != nil {
+		t.Fatalf("write metadata: %v", err)
 	}
-	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("expected lock file to be removed: %v", err)
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "holder\n" {
+		t.Fatalf("metadata = %q, err %v", data, err)
 	}
-	// Removing an already-missing lock file is a no-op on every platform.
-	if err := RemoveLockFile(path); err != nil {
-		t.Fatalf("RemoveLockFile on a missing file = %v, want nil", err)
+	if err := lock.Release(); err != nil {
+		t.Fatal(err)
 	}
+	if err := lock.WriteMetadata(nil); !errors.Is(err, ErrLockReleased) {
+		t.Fatalf("write after release = %v, want ErrLockReleased", err)
+	}
+}
+
+func TestFileLockConcurrentFirstAcquisition(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lock")
+	const contenders = 200
+	start := make(chan struct{})
+	results := make(chan error, contenders)
+	locks := make(chan *FileLock, contenders)
+	var ready sync.WaitGroup
+	ready.Add(contenders)
+	for range contenders {
+		go func() {
+			ready.Done()
+			<-start
+			lock, err := TryAcquireFileLock(path)
+			if lock != nil {
+				locks <- lock
+			}
+			results <- err
+		}()
+	}
+	ready.Wait()
+	close(start)
+	acquired := 0
+	for range contenders {
+		err := <-results
+		switch {
+		case err == nil:
+			acquired++
+		case !errors.Is(err, ErrLockHeld):
+			t.Errorf("concurrent first acquire: %v", err)
+		}
+	}
+	close(locks)
+	for lock := range locks {
+		if err := lock.Release(); err != nil {
+			t.Error(err)
+		}
+	}
+	if acquired != 1 {
+		t.Fatalf("concurrent first acquire: got %d holders, want 1", acquired)
+	}
+}
+
+func TestFileLockRefusesMultiplyLinkedEntry(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	lockPath := filepath.Join(dir, "lock")
+	const sentinel = "do not overwrite"
+	if err := os.WriteFile(target, []byte(sentinel), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(target, lockPath); err != nil {
+		t.Fatalf("create redirected hard link: %v", err)
+	}
+	if lock, err := TryAcquireFileLock(lockPath); err == nil {
+		_ = lock.Release()
+		t.Fatal("TryAcquireFileLock accepted a multiply-linked entry")
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != sentinel {
+		t.Fatalf("redirected target was modified: %q", data)
+	}
+}
+
+func TestFileLockAtRejectsEscapingPath(t *testing.T) {
+	base := t.TempDir()
+	outside := filepath.Join(filepath.Dir(base), "outside.lock")
+	if lock, err := TryAcquireFileLockAt(base, outside); err == nil {
+		_ = lock.Release()
+		t.Fatal("TryAcquireFileLockAt accepted a path outside its root")
+	}
+	if _, err := os.Stat(outside); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("escaping path was created: %v", err)
+	}
+}
+
+// TestFileLockReleasedByProcessExit proves crash recovery is provided by the
+// kernel lock lifetime. The child exits without calling Release; the next
+// process can then lock the same persistent file without moving or deleting it.
+func TestFileLockReleasedByProcessExit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lock")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestFileLockHelperProcess$")
+	cmd.Env = append(os.Environ(), "ZERO_LOCKUTIL_HELPER=1", "ZERO_LOCKUTIL_PATH="+path)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	ready, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil || strings.TrimSpace(ready) != "ready" {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("helper readiness = %q, err %v", ready, err)
+	}
+	if _, err := TryAcquireFileLock(path); !errors.Is(err, ErrLockHeld) {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("acquire while helper holds lock = %v, want ErrLockHeld", err)
+	}
+	if err := stdin.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("helper exit: %v", err)
+	}
+
+	lock, err := TryAcquireFileLock(path)
+	if err != nil {
+		t.Fatalf("acquire after helper exit: %v", err)
+	}
+	if err := lock.Release(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFileLockHelperProcess(t *testing.T) {
+	if os.Getenv("ZERO_LOCKUTIL_HELPER") != "1" {
+		return
+	}
+	lock, err := TryAcquireFileLock(os.Getenv("ZERO_LOCKUTIL_PATH"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if _, err := fmt.Fprintln(os.Stdout, "ready"); err != nil {
+		os.Exit(3)
+	}
+	_, _ = io.Copy(io.Discard, os.Stdin)
+	runtime.KeepAlive(lock) // deliberately exit without Release
 }

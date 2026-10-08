@@ -67,9 +67,14 @@ const (
 
 // ToolCall is a normalized assistant request to run a tool.
 type ToolCall struct {
-	ID        string
-	Name      string
-	Arguments string
+	ID             string
+	ProviderCallID string
+	Name           string
+	Arguments      string
+	// Freeform reports that Arguments is raw tool input rather than a JSON
+	// object. Only providers that advertise a matching freeform definition set
+	// it; ordinary function calls remain unchanged.
+	Freeform bool
 	// Signature carries a provider's opaque reasoning signature bound to this call
 	// (Gemini attaches a thoughtSignature to a functionCall part). It must be
 	// echoed back with the call on later turns or the provider may reject the
@@ -93,21 +98,38 @@ type ReasoningBlock struct {
 
 // Message is a normalized conversation turn passed to providers.
 type Message struct {
-	Role         MessageRole
-	Content      string
-	ToolCalls    []ToolCall
-	ToolCallID   string
-	IsError      bool             // tool-result status; ignored for non-tool messages
-	ChangedFiles []string         // durable tool-result mutation targets; ignored by providers
-	Images       []ImageBlock     // optional; nil for text-only messages
-	Reasoning    []ReasoningBlock // optional; preserved thinking blocks to replay
+	Role               MessageRole
+	Content            string
+	ToolCalls          []ToolCall
+	ToolCallID         string
+	ToolCallProviderID string
+	IsError            bool             // tool-result status; ignored for non-tool messages
+	ChangedFiles       []string         // durable tool-result mutation targets; ignored by providers
+	Images             []ImageBlock     // optional; nil for text-only messages
+	Reasoning          []ReasoningBlock // optional; preserved thinking blocks to replay
 }
 
-// ToolDefinition describes a model-visible tool and its JSON-schema parameters.
+type ToolDefinitionType string
+
+const (
+	ToolDefinitionFunction ToolDefinitionType = "function"
+	ToolDefinitionFreeform ToolDefinitionType = "custom"
+)
+
+type ToolDefinitionFormat struct {
+	Type       string `json:"type"`
+	Syntax     string `json:"syntax"`
+	Definition string `json:"definition"`
+}
+
+// ToolDefinition describes a model-visible function or freeform tool. Type is
+// empty for the legacy function shape; Format is used only by freeform tools.
 type ToolDefinition struct {
 	Name        string
 	Description string
 	Parameters  map[string]any
+	Type        ToolDefinitionType
+	Format      *ToolDefinitionFormat
 }
 
 // TokenUsage accepts provider-specific token aliases before normalization.
@@ -176,14 +198,20 @@ func (usage Usage) VisibleOutputTokens() int {
 
 // StreamEvent is one normalized event emitted by a streaming provider.
 type StreamEvent struct {
-	Type              StreamEventType
-	Content           string
-	ToolCallID        string
-	ToolName          string
-	ToolCallSignature string // opaque reasoning signature bound to this call (Gemini thoughtSignature)
-	ArgumentsFragment string
-	Usage             Usage
-	Error             string
+	Type               StreamEventType
+	Content            string
+	ToolCallID         string
+	ToolCallProviderID string
+	ToolName           string
+	ToolCallSignature  string // opaque reasoning signature bound to this call (Gemini thoughtSignature)
+	ToolCallFreeform   bool
+	ArgumentsFragment  string
+	Usage              Usage
+	Error              string
+	// ResponseID is the provider's completed response identifier when one is
+	// available. Stateful turn sessions use it to chain a later compatible
+	// request; ordinary providers and consumers leave it empty.
+	ResponseID string
 	// StatusCode is the HTTP status code behind Error, when the failure came from
 	// an HTTP response (0 for transport-level/context errors that never received
 	// one). Providers set it alongside Error on a StreamEventError so the status
@@ -230,6 +258,10 @@ type CompletionRequest struct {
 	// Anthropic/Gemini thinking budgets) and ignores it for models that do not
 	// support reasoning. Empty means "let the provider decide".
 	ReasoningEffort string
+	// ServiceTier selects an optional provider-advertised request tier. Empty
+	// means the provider default; "priority" is the wire value used by fast mode.
+	// Callers must only set a tier advertised for the active provider/model.
+	ServiceTier string
 	// PromptCacheKey, when non-empty, is an opaque stable identifier for the
 	// conversation (the session ID). Providers with server-side prefix-cache
 	// routing forward it — OpenAI `prompt_cache_key` — so consecutive requests

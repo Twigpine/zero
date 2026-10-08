@@ -9,6 +9,9 @@ import (
 
 func TestUpdatePlanToolStoresAndFormatsPlan(t *testing.T) {
 	tool := NewUpdatePlanTool()
+	if description := strings.ToLower(tool.Description()); !strings.Contains(description, "skip it for bounded changes in one component") {
+		t.Fatalf("update_plan description must preserve the bounded-task fast path: %q", description)
+	}
 
 	result := tool.Run(context.Background(), map[string]any{
 		"plan": []any{

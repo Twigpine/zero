@@ -29,6 +29,9 @@ func TestBuildSystemPromptAppendsModelAddendum(t *testing.T) {
 	if got := buildSystemPrompt(Options{Model: "gpt-5"}); !strings.Contains(got, openAIPromptAddendum) {
 		t.Fatalf("expected the OpenAI addendum in the gpt-5 prompt")
 	}
+	if got := strings.Join(strings.Fields(strings.ToLower(buildSystemPrompt(Options{Model: "gpt-5"}))), " "); !strings.Contains(got, "never run apply_patch through exec_command") {
+		t.Fatalf("OpenAI prompt must route edits through the native patch tool:\n%s", got)
+	}
 	// Claude is aligned with the core prompt and gets no family addendum now that
 	// comment discipline is universal; it must not pick up another family's block.
 	claude := buildSystemPrompt(Options{Model: "claude-opus-4-6"})

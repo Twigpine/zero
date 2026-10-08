@@ -29,6 +29,9 @@ reviews:
     - path: "tests/**/*.ts"
       instructions: |
         Review tests for Bun test idioms, deterministic behavior, and meaningful coverage of safety decisions, provider/runtime flows, session events, and TUI command behavior.
+    - path: "**/*.go"
+      instructions: |
+        Do not request Plan 9 or other unsupported GOOS/GOARCH shims. The five native prebuilt release targets are linux-x64, linux-arm64, macos-arm64, macos-x64, and windows-x64. Android/Termux is also a supported runtime through the documented android-arm64 source build and Linux artifact fallback. Other GOOS/GOARCH combinations are not a review criterion.
   tools:
     github-checks:
       timeout_ms: 300000

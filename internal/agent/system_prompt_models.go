@@ -60,8 +60,11 @@ const openAIPromptAddendum = `<model_guidance>
   longer answers, fenced code blocks for code, and ` + "`inline code`" + ` for paths,
   commands, and symbols.
 - Strongly prefer the native file tools (read_file, list_directory, grep, glob,
-  write_file, edit_file, apply_patch) over shelling out to cat/sed/awk/python for
-  file work. Make one tool call per file; do not batch file writes into a script.
+  edit_file, apply_patch, write_file) over shelling out to cat/sed/awk/python for
+  file work. Use them directly; never run apply_patch through exec_command.
+  read_file, edit_file and write_file take one file per call, while one coherent
+  apply_patch may span several files. Keep independent native calls in the same
+  turn, and do not batch file writes into a script.
 - Persist until the task is fully handled this turn: gather context, implement,
   run the validators, and report — do not stop at a partial result.
 </model_guidance>`

@@ -62,6 +62,24 @@ type transcriptRow struct {
 	final       bool
 	turnTools   int
 	turnElapsed time.Duration
+
+	// attachments records what accompanied a user turn without retaining the
+	// original bytes in transcript memory or the session log.
+	attachments transcriptAttachmentSummary
+}
+
+type transcriptAttachmentSummary struct {
+	images    int
+	documents int
+}
+
+const (
+	persistedAttachmentCountLimit = 64
+	attachmentSummaryVisibleItems = 4
+)
+
+func (summary transcriptAttachmentSummary) empty() bool {
+	return summary.images <= 0 && summary.documents <= 0
 }
 
 type transcriptActionKind int
@@ -75,8 +93,9 @@ const (
 )
 
 type transcriptAction struct {
-	kind transcriptActionKind
-	text string
+	kind        transcriptActionKind
+	text        string
+	attachments transcriptAttachmentSummary
 }
 
 func initialTranscript() []transcriptRow {
@@ -91,7 +110,7 @@ func reduceTranscript(rows []transcriptRow, action transcriptAction) []transcrip
 	case actionClear:
 		return initialTranscript()
 	case actionAppendUser:
-		return appendRow(rows, rowUser, action.text)
+		return appendTranscriptRow(rows, transcriptRow{kind: rowUser, text: action.text, attachments: action.attachments})
 	case actionAppendAssistant:
 		return appendRow(rows, rowAssistant, action.text)
 	case actionAppendSystem:

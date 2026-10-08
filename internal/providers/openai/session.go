@@ -153,8 +153,8 @@ func (s *turnSession) observePrefix(ctx context.Context, request zeroruntime.Com
 // computeFingerprint digests the wire-affecting request parameters: the
 // session's model and max-tokens (fixed at construction — CompletionRequest
 // carries no model field), the normalized reasoning effort as it would appear
-// on the wire, the prompt-cache key (constant within a session, and part of
-// the request the provider serializes), and an order-preserving digest of the
+// on the wire, the normalized service tier, the prompt-cache key (constant
+// within a session, and part of the request the provider serializes), and an order-preserving digest of the
 // advertised tools (request serialization preserves tool order, so a reorder
 // changes the wire bytes and counts as drift). Messages are excluded — they
 // grow every turn; this fingerprints request parameters, not conversation
@@ -175,6 +175,8 @@ func (s *turnSession) computeFingerprint(request zeroruntime.CompletionRequest) 
 	builder.WriteByte('|')
 	builder.WriteString(openAIReasoningEffort(request.ReasoningEffort))
 	builder.WriteByte('|')
+	builder.WriteString(openAIServiceTier(request.ServiceTier))
+	builder.WriteByte('|')
 	builder.WriteString(request.PromptCacheKey)
 	builder.WriteByte('|')
 	builder.WriteString(wireToolsDigest(request.Tools))
@@ -193,7 +195,12 @@ func (s *turnSession) computeFingerprint(request zeroruntime.CompletionRequest) 
 func wireToolsDigest(tools []zeroruntime.ToolDefinition) string {
 	rendered := make([]string, 0, len(tools))
 	for _, tool := range tools {
-		schema, err := json.Marshal(tool.Parameters)
+		wireShape := struct {
+			Type       zeroruntime.ToolDefinitionType    `json:"type,omitempty"`
+			Parameters map[string]any                    `json:"parameters,omitempty"`
+			Format     *zeroruntime.ToolDefinitionFormat `json:"format,omitempty"`
+		}{Type: tool.Type, Parameters: tool.Parameters, Format: tool.Format}
+		schema, err := json.Marshal(wireShape)
 		if err != nil {
 			rendered = append(rendered, tool.Name+"\n"+tool.Description+"\n__non_json:"+tool.Name)
 			continue

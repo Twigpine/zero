@@ -34,7 +34,7 @@ func TestResolveMCPExcludeProjectDropsProjectServers(t *testing.T) {
 		if _, ok := cfg.Servers["user-srv"]; !ok {
 			t.Fatal("the user server must always be present")
 		}
-		if _, ok := cfg.Servers["firecrawl"]; !ok {
+		if _, ok := cfg.Servers["exa"]; !ok {
 			t.Fatal("the built-in default must always be present")
 		}
 	})
@@ -54,7 +54,7 @@ func TestResolveMCPExcludeProjectDropsProjectServers(t *testing.T) {
 		if _, ok := cfg.Servers["user-srv"]; !ok {
 			t.Fatal("the user server must survive when the project layer is dropped")
 		}
-		if _, ok := cfg.Servers["firecrawl"]; !ok {
+		if _, ok := cfg.Servers["exa"]; !ok {
 			t.Fatal("the built-in default must survive when the project layer is dropped")
 		}
 	})

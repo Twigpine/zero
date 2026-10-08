@@ -58,12 +58,18 @@ func toolSubstrings(exposed []zeroruntime.ToolDefinition) (toolsSubstr, schemaSu
 	for _, def := range exposed {
 		writeLengthPrefixed(&toolsSB, def.Name)
 		writeLengthPrefixed(&toolsSB, def.Description)
+		writeLengthPrefixed(&toolsSB, string(def.Type))
 		// Parameters is rendered to a canonical JSON string per tool. The
 		// schema-render cache in internal/agent (used by partitionToolsCached)
 		// guarantees the same render is byte-identical across turns for the
 		// same tool, so this substring is a stable hash input.
 		writeLengthPrefixed(&schemaSB, def.Name)
 		writeLengthPrefixed(&schemaSB, canonicalSchemaString(def.Parameters))
+		if def.Format != nil {
+			writeLengthPrefixed(&schemaSB, def.Format.Type)
+			writeLengthPrefixed(&schemaSB, def.Format.Syntax)
+			writeLengthPrefixed(&schemaSB, def.Format.Definition)
+		}
 	}
 	return toolsSB.String(), schemaSB.String()
 }

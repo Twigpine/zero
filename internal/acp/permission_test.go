@@ -39,11 +39,14 @@ func TestBuildPermissionOptionsDefault(t *testing.T) {
 }
 
 func TestDecisionFromOutcome(t *testing.T) {
-	offered := []agent.PermissionDecisionAction{
-		agent.PermissionDecisionAllow,
-		agent.PermissionDecisionAlwaysAllow,
-		agent.PermissionDecisionDeny,
-	}
+	offered := buildPermissionOptions(agent.PermissionRequest{
+		ToolName: "bash",
+		AvailableDecisions: []agent.PermissionDecisionAction{
+			agent.PermissionDecisionAllow,
+			agent.PermissionDecisionAlwaysAllow,
+			agent.PermissionDecisionDeny,
+		},
+	})
 	if d := decisionFromOutcome(RequestPermissionOutcome{Outcome: OutcomeCancelled}, offered); d.Action != agent.PermissionDecisionCancel {
 		t.Errorf("cancelled -> %q, want cancel", d.Action)
 	}
@@ -77,5 +80,19 @@ func TestPermissionToolCall(t *testing.T) {
 	}
 	if len(tc.RawInput) == 0 {
 		t.Error("expected rawInput from args")
+	}
+}
+
+func TestPermissionToolCallKeepsTheBrowserDescriptor(t *testing.T) {
+	call := permissionToolCall(agent.PermissionRequest{
+		ToolCallID: "browser-1",
+		ToolName:   "browser_connect",
+		Args:       map[string]any{"target": "127.0.0.1:9222"},
+	})
+	if got := browserDescriptor(t, call); got != (BrowserToolDetails{Version: 1, Command: "connect"}) {
+		t.Fatalf("browser descriptor = %#v", got)
+	}
+	if call.Title != "browser connect" {
+		t.Fatalf("title = %q", call.Title)
 	}
 }

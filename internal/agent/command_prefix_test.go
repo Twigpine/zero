@@ -99,6 +99,43 @@ func TestProposedCommandPrefixRejectsUnsafeRequestedPrefix(t *testing.T) {
 	}
 }
 
+// The launcher denylist is only worth anything if it holds on the path a user
+// actually sees. A model naming its own prefix_rule is that path: before
+// launcher names were normalized, "python3.11" was offered as a one-token
+// grant, and hasStringPrefix then matched every later python3.11 invocation.
+func TestProposedCommandPrefixRejectsLauncherSpellingsInRequestedPrefix(t *testing.T) {
+	for _, testCase := range []struct {
+		command string
+		rule    []any
+	}{
+		{"python3.11 script.py", []any{"python3.11"}},
+		{"python.exe script.py", []any{"python.exe"}},
+		{"node.exe app.js", []any{"node.exe"}},
+		{"cmd /c whoami", []any{"cmd"}},
+		{"busybox sh -c id", []any{"busybox"}},
+		{"uv run main.py", []any{"uv", "run"}},
+		{"python3.11 -c import_os", []any{"python3.11", "-c"}},
+	} {
+		got := proposedCommandPrefix("bash", map[string]any{
+			"command":     testCase.command,
+			"prefix_rule": testCase.rule,
+		})
+		if got != nil {
+			t.Errorf("prefix_rule %v for %q was offered as %#v, want rejected", testCase.rule, testCase.command, got)
+		}
+	}
+}
+
+func TestProposedCommandPrefixStillOffersOrdinaryCommands(t *testing.T) {
+	got := proposedCommandPrefix("bash", map[string]any{
+		"command":     "cargo build --release",
+		"prefix_rule": []any{"cargo", "build"},
+	})
+	if len(got) != 2 || got[0] != "cargo" || got[1] != "build" {
+		t.Fatalf("ordinary prefix rule = %#v, want [cargo build]", got)
+	}
+}
+
 func TestProposedCommandPrefixRejectsUnsafeShellForms(t *testing.T) {
 	cases := []string{
 		"cat < in > out",

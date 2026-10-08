@@ -18,6 +18,8 @@ const (
 	markdownTableRuleBodyRows    = 4
 	markdownBoldStart            = "\x1b[1m"
 	markdownBoldEnd              = "\x1b[22m"
+	markdownCodeStart            = "\x1b[7m"
+	markdownCodeEnd              = "\x1b[27m"
 )
 
 type markdownDisplayStyle int
@@ -25,6 +27,7 @@ type markdownDisplayStyle int
 const (
 	markdownDisplayNormal markdownDisplayStyle = iota
 	markdownDisplayBold
+	markdownDisplayCode
 	markdownDisplayRule
 )
 
@@ -262,6 +265,8 @@ func styleAssistantMarkdownLine(line string, base lipgloss.Style) string {
 		case markdownDisplayBold:
 			// Emphasis is weight-only (no colour) — dark-mode-friendly and calm.
 			builder.WriteString(zeroTheme.ink.Bold(true).Render(text))
+		case markdownDisplayCode:
+			builder.WriteString(inlineCodeStyle().Render(text))
 		case markdownDisplayRule:
 			builder.WriteString(zeroTheme.lineStrong.Render(text))
 		default:
@@ -281,6 +286,16 @@ func styleAssistantMarkdownLine(line string, base lipgloss.Style) string {
 			flush()
 			style = markdownDisplayNormal
 			index += len(markdownBoldEnd)
+			continue
+		case strings.HasPrefix(line[index:], markdownCodeStart):
+			flush()
+			style = markdownDisplayCode
+			index += len(markdownCodeStart)
+			continue
+		case strings.HasPrefix(line[index:], markdownCodeEnd):
+			flush()
+			style = markdownDisplayNormal
+			index += len(markdownCodeEnd)
 			continue
 		case line[index] == '\x1b':
 			// Already-styled input (highlighted code, headings, tables) carries real
@@ -313,6 +328,13 @@ func styleAssistantMarkdownLine(line string, base lipgloss.Style) string {
 	return builder.String()
 }
 
+func hasMarkdownDisplayControls(line string) bool {
+	return strings.Contains(line, markdownBoldStart) ||
+		strings.Contains(line, markdownBoldEnd) ||
+		strings.Contains(line, markdownCodeStart) ||
+		strings.Contains(line, markdownCodeEnd)
+}
+
 func hasExternalANSIStyle(line string) bool {
 	for index := 0; index < len(line); {
 		if line[index] != '\x1b' {
@@ -325,7 +347,7 @@ func hasExternalANSIStyle(line string) bool {
 			continue
 		}
 		seq := line[index:end]
-		if seq != markdownBoldStart && seq != markdownBoldEnd {
+		if seq != markdownBoldStart && seq != markdownBoldEnd && seq != markdownCodeStart && seq != markdownCodeEnd {
 			return true
 		}
 		index = end
@@ -334,6 +356,9 @@ func hasExternalANSIStyle(line string) bool {
 }
 
 func markdownDisplayStyleForRune(r rune, current markdownDisplayStyle) markdownDisplayStyle {
+	if current == markdownDisplayCode {
+		return current
+	}
 	switch r {
 	case '│', '─', '┼', '╭', '╮', '╰', '╯', '├', '┤', '┬', '┴':
 		return markdownDisplayRule
@@ -980,6 +1005,7 @@ func renderMarkdownStandaloneLine(line string) string {
 type markdownInlineSegment struct {
 	text string
 	bold bool
+	code bool
 }
 
 func wrapMarkdownInline(text string, measure int) []string {
@@ -1028,7 +1054,7 @@ func wrapMarkdownInlineWithPrefixes(firstPrefix string, continuationPrefix strin
 				flush()
 			}
 			head, tail := splitAtWidth(word.text, available)
-			lines = append(lines, prefix+renderMarkdownInlineSegment(markdownInlineSegment{text: head, bold: word.bold}))
+			lines = append(lines, prefix+renderMarkdownInlineSegment(markdownInlineSegment{text: head, bold: word.bold, code: word.code}))
 			word.text = tail
 			prefix = continuationPrefix
 			available = maxInt(1, measure-lipgloss.Width(prefix))
@@ -1063,8 +1089,14 @@ func wrapMarkdownInlineWithPrefixes(firstPrefix string, continuationPrefix strin
 func markdownInlineWords(segments []markdownInlineSegment) []markdownInlineSegment {
 	words := []markdownInlineSegment{}
 	for _, segment := range segments {
+		if segment.code {
+			if segment.text != "" {
+				words = append(words, segment)
+			}
+			continue
+		}
 		for _, word := range strings.Fields(segment.text) {
-			words = append(words, markdownInlineSegment{text: word, bold: segment.bold})
+			words = append(words, markdownInlineSegment{text: word, bold: segment.bold, code: segment.code})
 		}
 	}
 	return words
@@ -1077,6 +1109,9 @@ func joinsPreviousMarkdownWord(text string) bool {
 func renderMarkdownInlineSegment(segment markdownInlineSegment) string {
 	if segment.text == "" {
 		return ""
+	}
+	if segment.code {
+		return markdownCodeStart + segment.text + markdownCodeEnd
 	}
 	if segment.bold {
 		return renderMarkdownBoldText(segment.text)
@@ -1107,7 +1142,7 @@ func parseMarkdownInline(text string) []markdownInlineSegment {
 		if builder.Len() == 0 {
 			return
 		}
-		segments = append(segments, markdownInlineSegment{text: builder.String(), bold: bold && !code})
+		segments = append(segments, markdownInlineSegment{text: builder.String(), bold: bold && !code, code: code})
 		builder.Reset()
 	}
 

@@ -34,12 +34,15 @@ jobs:
       - name: Checkout
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.ref == '' }}
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Checkout requested ref
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.ref != '' }}
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ inputs.ref }}
+          persist-credentials: false
 
       - name: Setup Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
@@ -129,6 +132,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       # No registry-url here on purpose: setup-node's registry-url writes an
       # .npmrc line referencing $NODE_AUTH_TOKEN, and npm hard-fails on the

@@ -121,3 +121,59 @@ func TestToolResultRowExposesClickToggle(t *testing.T) {
 		t.Fatalf("tool result visible body/footer must stay selectable, got %#v", selectable)
 	}
 }
+
+func TestAlwaysExpandedToolResultHeaderIsNotToggleable(t *testing.T) {
+	m := transcriptViewTestModel()
+	for _, tool := range []string{"edit_file", "apply_patch", "write_file"} {
+		row := transcriptRow{
+			kind:   rowToolResult,
+			id:     "diff",
+			tool:   tool,
+			status: tools.StatusOK,
+			detail: "--- a/example.go\n+++ b/example.go\n@@ -1 +1 @@\n-old\n+new",
+		}
+		_, selectable := m.renderSelectableToolResultRow(0, row, m.width, buildRowContext(nil), 0)
+		if len(selectable) == 0 {
+			t.Fatalf("%s: expected a visible diff result row", tool)
+		}
+		if selectable[0].toggle {
+			t.Fatalf("%s header must not advertise a collapse toggle: %#v", tool, selectable[0])
+		}
+	}
+}
+
+func TestToolResultOutputCannotCreateToggle(t *testing.T) {
+	m := transcriptViewTestModel()
+	row := transcriptRow{
+		kind:   rowToolResult,
+		id:     "custom",
+		tool:   "custom_tool",
+		status: tools.StatusOK,
+		detail: "the file literally says: click to expand",
+	}
+	_, selectable := m.renderSelectableToolResultRow(0, row, m.width, buildRowContext(nil), 0)
+	if len(selectable) == 0 {
+		t.Fatal("expected a visible tool result row")
+	}
+	if selectable[0].toggle {
+		t.Fatalf("tool-output text must not create a header toggle: %#v", selectable[0])
+	}
+}
+
+func TestCollapsedExploreToolResultHeaderIsToggleable(t *testing.T) {
+	m := transcriptViewTestModel()
+	row := transcriptRow{
+		kind:   rowToolResult,
+		id:     "read",
+		tool:   "read_file",
+		status: tools.StatusOK,
+		detail: numberedLines(cardBodyMaxLines + 5),
+	}
+	_, selectable := m.renderSelectableToolResultRow(0, row, m.width, buildRowContext(nil), 0)
+	if len(selectable) == 0 {
+		t.Fatal("expected a visible explore result row")
+	}
+	if !selectable[0].toggle {
+		t.Fatalf("collapsed explore card header must remain toggleable: %#v", selectable[0])
+	}
+}

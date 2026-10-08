@@ -14,8 +14,9 @@ import (
 // mechanism agent text deltas use (§6). text is the cumulative best transcript
 // so far (not a delta); final marks a settled segment.
 type sttPartialMsg struct {
-	text  string
-	final bool
+	sessionID int64
+	text      string
+	final     bool
 }
 
 // startStreamingDictation begins continuous capture and launches the streaming
@@ -38,6 +39,7 @@ func (m model) startStreamingDictation() (model, tea.Cmd) {
 	}
 	transcriber := m.dictation.transcriber
 	submit := m.dictation.cfg.AutoSubmitEnabled()
+	sessionID := m.dictation.sessionID
 
 	// Tap the audio: compute a mic level per chunk for the live waveform, then
 	// forward the chunk to the transcriber. A small buffer keeps the tap from
@@ -63,11 +65,11 @@ func (m model) startStreamingDictation() (model, tea.Cmd) {
 	streamCmd := func() tea.Msg {
 		onPartial := func(text string, final bool) {
 			if sink != nil {
-				sink(sttPartialMsg{text: text, final: final})
+				sink(sttPartialMsg{sessionID: sessionID, text: text, final: final})
 			}
 		}
 		text, err := transcriber.StreamTranscribe(ctx, tapped, onPartial)
-		return dictationTranscribedMsg{text: text, err: err, submit: submit, streaming: true}
+		return dictationTranscribedMsg{sessionID: sessionID, text: text, err: err, submit: submit, streaming: true}
 	}
 	// Streaming drives the waveform from real levels (no synthetic tick needed).
 	return m, streamCmd
@@ -77,6 +79,9 @@ func (m model) startStreamingDictation() (model, tea.Cmd) {
 // composer, replacing the previously-rendered live region wholesale so the text
 // builds up in place as the user keeps talking.
 func (m model) handleDictationPartial(msg sttPartialMsg) model {
+	if msg.sessionID != m.dictation.sessionID {
+		return m
+	}
 	// Ignore stragglers that arrive after the session ended (cancel/final).
 	if m.dictation.phase != dictRecording && m.dictation.phase != dictTranscribing {
 		return m

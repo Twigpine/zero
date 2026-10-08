@@ -42,7 +42,7 @@ func (d dictationController) canOfferDownload(err error) bool {
 // variant, reporting progress live, then persists and applies the resolved paths.
 func (m model) startVariantDownload(v dictation.ModelVariant) (model, tea.Cmd) {
 	if m.dictation.downloading {
-		return m.appendSystemNotice("A dictation download is already in progress — please wait for it to finish."), nil
+		return m.showTransientNoticeInline("Dictation setup is already in progress.", transientNoticeWarning), nil
 	}
 	m.dictation.downloading = true
 	sink := m.runtimeMessageSink
@@ -53,7 +53,7 @@ func (m model) startVariantDownload(v dictation.ModelVariant) (model, tea.Cmd) {
 		base = context.Background()
 	}
 	m.dictation.downloadStatus = "Starting download…"
-	m = m.appendSystemNotice(fmt.Sprintf("Setting up local dictation — downloading the offline engine and %s (~%d MB). This runs once; progress is shown in the status bar below.", v.Label, (v.Bytes>>20)+(engineDownloadBytes>>20)))
+	m = m.showTransientNoticeInline(fmt.Sprintf("Setting up local dictation (%s) — progress is in the status line.", v.Label), transientNoticeInfo)
 	return m, func() tea.Msg {
 		comp, err := dictation.EnsureLocalEngine(base, dictation.DownloadOptions{
 			DestRoot:          root,
@@ -93,7 +93,7 @@ func (m model) handleDictationDownloaded(msg dictationDownloadedMsg) (model, tea
 	if err != nil {
 		return m.appendSystemNotice("Downloaded the engine, but couldn't save the config: " + err.Error()), nil
 	}
-	return m.appendSystemNotice("Local dictation is ready. Run /voice, then hold Space to dictate."), nil
+	return m.showTransientNoticeInline("Local dictation is ready. Run /voice to start dictating.", transientNoticeSuccess), nil
 }
 
 // applyEngineComponents persists and applies resolved engine/model paths to the

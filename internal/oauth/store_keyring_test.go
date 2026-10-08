@@ -1,34 +1,108 @@
 package oauth
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 )
 
 // fakeKR is an in-memory KeyringClient for exercising the keyring backend
 // without touching a real OS keychain.
-type fakeKR struct{ data map[string]string }
+type fakeKR struct {
+	data map[string]string
+	// budget mimics a backend that caps a single entry, as macOS does by
+	// carrying the secret on the `security -i` command line. 0 leaves the
+	// backend unbounded, which is Linux's secret-tool. The account is charged
+	// against the budget for the same reason the real one charges it: both
+	// share one command line, so a longer account name leaves less for the
+	// secret.
+	budget int
+	// failSet, when non-nil, decides whether a write to account fails, standing
+	// in for a locked or full keychain.
+	failSet func(account string) error
+	// sets counts successful writes per account, so a test can assert the order
+	// a write publishes in.
+	sets map[string]int
+	// deletes counts delete calls per account.
+	deletes map[string]int
+	// failDelete, when non-nil, decides whether removing account fails, standing
+	// in for a keychain that refuses a delete while it is busy or locked.
+	failDelete func(account string) error
+}
 
-func newFakeKR() *fakeKR { return &fakeKR{data: map[string]string{}} }
+func newFakeKR() *fakeKR {
+	return &fakeKR{data: map[string]string{}, sets: map[string]int{}, deletes: map[string]int{}}
+}
+
+// newCappedFakeKR returns a fake whose entries hold at most budget bytes once
+// the account name is charged, mimicking the macOS keychain.
+func newCappedFakeKR(budget int) *fakeKR {
+	f := newFakeKR()
+	f.budget = budget
+	return f
+}
 
 func (f *fakeKR) Get(service, account string) (string, bool, error) {
 	v, ok := f.data[service+"/"+account]
 	return v, ok, nil
 }
 func (f *fakeKR) Set(service, account, secret string) error {
+	if f.failSet != nil {
+		if err := f.failSet(account); err != nil {
+			return err
+		}
+	}
+	if limit, bounded := f.MaxSecretLen(service, account); bounded && len(secret) > limit {
+		return fmt.Errorf("keyring: secret too large (%d > %d)", len(secret), limit)
+	}
 	f.data[service+"/"+account] = secret
+	f.sets[account]++
 	return nil
 }
 func (f *fakeKR) Delete(service, account string) (bool, error) {
+	if f.deletes == nil {
+		f.deletes = map[string]int{}
+	}
+	f.deletes[account]++
+	if f.failDelete != nil {
+		if err := f.failDelete(account); err != nil {
+			return false, err
+		}
+	}
 	key := service + "/" + account
 	_, ok := f.data[key]
 	delete(f.data, key)
 	return ok, nil
 }
+func (f *fakeKR) MaxSecretLen(_, account string) (int, bool) {
+	if f.budget == 0 {
+		return 0, false
+	}
+	limit := f.budget - len(account)
+	if limit < 0 {
+		limit = 0
+	}
+	return limit, true
+}
+
+// chunkAccounts returns the stored chunk accounts for family, in index order.
+func (f *fakeKR) chunkAccounts(family string) []string {
+	var accounts []string
+	for index := 0; index < keyringMaxChunks; index++ {
+		account := keyringAccount + "." + family + "." + strconv.Itoa(index)
+		if _, ok := f.data[keyringService+"/"+account]; ok {
+			accounts = append(accounts, account)
+		}
+	}
+	return accounts
+}
 
 func TestStoreKeyringBackendRoundTrip(t *testing.T) {
-	// Keep the cross-process keyring lock file inside a temp config dir.
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	// Keep the cross-process keyring lock file inside a temp dir.
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
 	kr := newFakeKR()
 	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
 	if err != nil {
@@ -94,7 +168,9 @@ func TestNewStoreStorageSelection(t *testing.T) {
 }
 
 func TestStoreKeyringStatus(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
 	kr := newFakeKR()
 	s, err := NewStore(StoreOptions{Storage: "keyring", Keyring: kr})
 	if err != nil {

@@ -8,6 +8,29 @@ import (
 	"testing"
 )
 
+func TestReadToolsDescribeExploratoryAndExactUseWithoutRedundantRereads(t *testing.T) {
+	root := t.TempDir()
+	minified := strings.ToLower(NewScopedReadMinifiedFileTool(root, nil).Description())
+	for _, want := range []string{
+		"exploratory understanding",
+		"use read_file directly for likely edit targets",
+		"unless a new need for exact text or line numbers appears",
+	} {
+		if !strings.Contains(minified, want) {
+			t.Fatalf("read_minified_file description missing %q: %s", want, minified)
+		}
+	}
+	exact := strings.ToLower(NewScopedReadFileTool(root, nil).Description())
+	for _, want := range []string{
+		"use directly for small files likely to be edited",
+		"prefer read_minified_file only for exploratory understanding",
+	} {
+		if !strings.Contains(exact, want) {
+			t.Fatalf("read_file description missing %q: %s", want, exact)
+		}
+	}
+}
+
 func TestReadMinifiedFileStripsCommentsAndLineNumbers(t *testing.T) {
 	dir := t.TempDir()
 	src := "package demo\n\nimport \"fmt\"\n\n// secret doc comment\nfunc F() { fmt.Println(\"x\") }\n"

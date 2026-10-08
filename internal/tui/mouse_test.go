@@ -9,7 +9,9 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/terminalpet"
 	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 func TestMouseClickSelectsThenAppliesCommandSuggestionRow(t *testing.T) {
@@ -248,6 +250,27 @@ func TestComposerMouseClickMovesCursor(t *testing.T) {
 	}
 	if text := next.selectedComposerText(); text != "" {
 		t.Fatalf("composer click should not select text, got %q", text)
+	}
+}
+
+func TestComposerMouseClickMovesCursorBelowImageThumbnail(t *testing.T) {
+	m := mouseTestModel()
+	m.attachmentRenderers = []*terminalpet.ImageRenderer{terminalpet.NewImageRenderer(terminalpet.ImageSupport{Protocol: terminalpet.ImageProtocolKitty})}
+	m.pendingImages = []zeroruntime.ImageBlock{previewImageBlock(t)}
+	m.refreshPendingImageThumbnail()
+	m.input.SetValue("hello world")
+
+	width := m.chatColumnWidth()
+	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
+	x := frame.composerRect.x + 2 + lipgloss.Width(composerVisualLinePrefix(m.input, true)) + 5
+	y := frame.composerRect.y + 1 + attachmentPreviewRows
+	updated, cmd := m.Update(testMouseClick(tea.MouseLeft, x, y))
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("composer click should not return a command")
+	}
+	if got := next.currentComposerState().cursor; got != 5 {
+		t.Fatalf("composer cursor below thumbnail = %d, want 5", got)
 	}
 }
 
@@ -985,10 +1008,7 @@ func composerMousePoint(t *testing.T, m model, column int) (int, int) {
 	if frame.composerRect.height <= 0 {
 		t.Fatalf("expected visible composer rect, frame=%#v", frame)
 	}
-	contentY := 1
-	if renderAttachmentChips(m.pendingImageLabels, m.pendingDocuments) != "" {
-		contentY++
-	}
+	contentY := 1 + m.attachmentComposerPrefixRows(width)
 	x := frame.composerRect.x + 2 + lipgloss.Width(composerVisualLinePrefix(m.input, true)) + column
 	y := frame.composerRect.y + contentY
 	return x, y

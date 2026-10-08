@@ -416,6 +416,14 @@ func (m *Manager) Logout(name string) (bool, error) {
 	return m.store.Delete(ProviderKey(name))
 }
 
+// Reset clears all persistent state in the underlying store.
+func (m *Manager) Reset() error {
+	if m == nil || m.store == nil {
+		return nil
+	}
+	return m.store.Reset()
+}
+
 // StatusAll returns the status of every provider login.
 func (m *Manager) StatusAll() ([]Status, error) {
 	return m.store.Status(KeyPrefixProvider)

@@ -17,6 +17,7 @@ const (
 	commandPermissions
 	commandPS
 	commandStop
+	commandAttach
 	commandSandboxSetup
 	commandProvider
 	commandModel
@@ -33,6 +34,7 @@ const (
 	commandCompact
 	commandRewind
 	commandEffort
+	commandFast
 	commandStyle
 	commandTheme
 	commandTranscript
@@ -53,6 +55,7 @@ const (
 	commandGoal
 	commandVoice
 	commandSTTModel
+	commandPets
 	commandUnknown
 )
 
@@ -107,7 +110,7 @@ var commandDefinitions = []commandDefinition{
 		name:        "/voice",
 		usage:       "/voice",
 		group:       commandGroupRuntime,
-		description: "Toggle voice mode (hold Space to dictate).",
+		description: "Toggle voice mode (" + voiceCaptureUsage + ").",
 		kind:        commandVoice,
 	},
 	{
@@ -137,6 +140,13 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupRuntime,
 		description: "Stop running background terminal sessions.",
 		kind:        commandStop,
+	},
+	{
+		name:        "/attach",
+		usage:       "/attach [session_id]",
+		group:       commandGroupRuntime,
+		description: "Type directly into a running interactive terminal session.",
+		kind:        commandAttach,
 	},
 	{
 		name:        "/sandbox-setup",
@@ -270,10 +280,17 @@ var commandDefinitions = []commandDefinition{
 	},
 	{
 		name:        "/effort",
-		usage:       "/effort [list|low|medium|high|auto]",
+		usage:       "/effort [list|level|auto]",
 		group:       commandGroupModel,
 		description: "Show or set reasoning effort for supported models.",
 		kind:        commandEffort,
+	},
+	{
+		name:        "/fast",
+		usage:       "/fast",
+		group:       commandGroupModel,
+		description: "Toggle fast mode for supported ChatGPT subscription models.",
+		kind:        commandFast,
 	},
 	{
 		name:        "/style",
@@ -352,6 +369,14 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupMeta,
 		description: "Show available commands.",
 		kind:        commandHelp,
+	},
+	{
+		name:        "/pets",
+		aliases:     []string{"/pet"},
+		usage:       "/pets [name|off]",
+		group:       commandGroupMeta,
+		description: "Choose, preview, or hide a terminal companion.",
+		kind:        commandPets,
 	},
 	{
 		name:        "/doctor",

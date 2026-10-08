@@ -241,6 +241,7 @@ func TestPublicLiveCatalog(t *testing.T) {
 
 func TestModelsDevProviderIDMapsZeroAliases(t *testing.T) {
 	tests := map[string]string{
+		"chatgpt":      "openai",
 		"github":       "github-models",
 		"moonshot":     "moonshotai",
 		"nvidia-nim":   "nvidia",

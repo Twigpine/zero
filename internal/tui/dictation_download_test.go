@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/config"
@@ -79,7 +80,7 @@ func TestDownloadedBatchModelAppliedToConfig(t *testing.T) {
 	if got.dictation.cfg.StreamingEnabled() {
 		t.Error("a batch variant should set streaming off")
 	}
-	if !transcriptHasText(got, "ready") {
+	if !strings.Contains(got.transientNotice.text, "ready") {
 		t.Error("expected a ready notice")
 	}
 }
@@ -158,7 +159,7 @@ func TestSTTDownloadSelectionStartsDownload(t *testing.T) {
 	if cmd == nil {
 		t.Error("expected a download command")
 	}
-	if !transcriptHasText(next, variant.Label) {
+	if !strings.Contains(next.transientNotice.text, variant.Label) {
 		t.Error("expected the download-starting notice to name the variant")
 	}
 }

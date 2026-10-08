@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sandbox"
@@ -12,7 +13,17 @@ import (
 )
 
 type Registry struct {
-	tools map[string]Tool
+	mu         sync.RWMutex
+	tools      map[string]Tool
+	generation uint64
+}
+
+// RegistrySnapshot is one immutable registry generation. Tools is a detached,
+// name-sorted slice: later registrations cannot change the snapshot observed by
+// an in-flight agent turn.
+type RegistrySnapshot struct {
+	Tools      []Tool
+	Generation uint64
 }
 
 type RunOptions struct {
@@ -107,23 +118,69 @@ func IsDeferralEligible(t Tool) bool {
 }
 
 func (registry *Registry) Register(tool Tool) {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
 	registry.tools[tool.Name()] = tool
+	registry.generation++
+}
+
+// RegisterBatch publishes a group of tools as one registry generation. Readers
+// observe either the complete prior generation or the complete new one.
+func (registry *Registry) RegisterBatch(batch []Tool) {
+	if len(batch) == 0 {
+		return
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	for _, tool := range batch {
+		registry.tools[tool.Name()] = tool
+	}
+	registry.generation++
 }
 
 func (registry *Registry) Get(name string) (Tool, bool) {
+	registry.mu.RLock()
+	defer registry.mu.RUnlock()
 	tool, ok := registry.tools[name]
 	return tool, ok
 }
 
 func (registry *Registry) All() []Tool {
+	return registry.Snapshot().Tools
+}
+
+// Snapshot returns a stable, sorted view of the registry at one generation.
+func (registry *Registry) Snapshot() RegistrySnapshot {
+	registry.mu.RLock()
 	tools := make([]Tool, 0, len(registry.tools))
 	for _, tool := range registry.tools {
 		tools = append(tools, tool)
 	}
+	generation := registry.generation
+	registry.mu.RUnlock()
 	sort.Slice(tools, func(left, right int) bool {
 		return tools[left].Name() < tools[right].Name()
 	})
-	return tools
+	return RegistrySnapshot{Tools: tools, Generation: generation}
+}
+
+// Clone returns an independent registry containing exactly one source snapshot.
+func (registry *Registry) Clone() *Registry {
+	clone := NewRegistry()
+	if registry == nil {
+		return clone
+	}
+	snapshot := registry.Snapshot()
+	clonedTools := make([]Tool, 0, len(snapshot.Tools))
+	for _, tool := range snapshot.Tools {
+		if cloner, ok := tool.(interface{ cloneForRegistry(*Registry) Tool }); ok {
+			tool = cloner.cloneForRegistry(clone)
+		}
+		clonedTools = append(clonedTools, tool)
+	}
+	clone.RegisterBatch(clonedTools)
+	clone.generation = snapshot.Generation
+	return clone
 }
 
 func (registry *Registry) Run(ctx context.Context, name string, args map[string]any) Result {
@@ -286,6 +343,33 @@ func scrubResultSecrets(res Result) Result {
 		res.Display.Preview = scrubbed
 		res.Redacted = true
 	}
+	fileDiffs := make([]FileDiff, 0, len(res.FileDiffs))
+	for _, diff := range res.FileDiffs {
+		// Never normalize control bytes in a diff: normalizing after redaction can
+		// reassemble a split credential. Decline unsafe rich content entirely and
+		// leave ChangedFiles as the safe fallback.
+		if unsafeDiffText(diff.OldText) || unsafeDiffText(diff.NewText) {
+			res.Redacted = true
+			continue
+		}
+		if scrubbed := redaction.RedactString(diff.OldText, redaction.Options{}); scrubbed != diff.OldText {
+			diff.OldText = scrubbed
+			res.Redacted = true
+		}
+		if scrubbed := redaction.RedactString(diff.NewText, redaction.Options{}); scrubbed != diff.NewText {
+			diff.NewText = scrubbed
+			res.Redacted = true
+		}
+		// Redaction can collapse two distinct credentials to the same token. At
+		// this final outbound boundary, retain rich evidence only when the
+		// transformed sides still describe a real transition; ChangedFiles
+		// remains the safe path-only fallback.
+		if diff.OldExists == diff.NewExists && diff.OldText == diff.NewText {
+			continue
+		}
+		fileDiffs = append(fileDiffs, diff)
+	}
+	res.FileDiffs = fileDiffs
 	// Meta values carry model-controlled strings (e.g. glob pattern, bash cwd) and
 	// are forwarded into the transcript, so they are part of the boundary too.
 	for key, value := range res.Meta {
@@ -295,6 +379,13 @@ func scrubResultSecrets(res Result) Result {
 		}
 	}
 	return res
+}
+
+// ScrubResultSecrets applies the registry's transcript boundary to a result
+// that was produced before Registry.RunWithOptions could own it, such as a
+// local pre-permission rejection in the agent loop.
+func ScrubResultSecrets(res Result) Result {
+	return scrubResultSecrets(res)
 }
 
 func CoreReadOnlyToolsScoped(workspaceRoot string, scope PathScope) []Tool {

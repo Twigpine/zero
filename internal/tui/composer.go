@@ -269,10 +269,7 @@ func (m model) composerPositionAtMouse(msg tea.MouseMsg) (int, bool) {
 	if width < 8 {
 		return m.composerPositionAtVisualCell(localX, localY, width)
 	}
-	contentY := localY - 1
-	if renderAttachmentChips(m.pendingImageLabels, m.pendingDocuments) != "" {
-		contentY--
-	}
+	contentY := localY - 1 - m.attachmentComposerPrefixRows(width)
 	if contentY < 0 {
 		return 0, false
 	}

@@ -68,7 +68,7 @@ func (m model) handleSTTKeyPromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.finalizeSTTModelFromKey(p, "Kept your saved "+p.label+" API key. ")
 		}
 		m.sttKeyPrompt = nil
-		return m.appendSystemNotice("Cancelled — no " + p.label + " API key saved."), nil
+		return m.showTransientNoticeInline("Cancelled — no "+p.label+" API key saved.", transientNoticeInfo), nil
 	case keyIs(msg, tea.KeyEnter):
 		return m.submitSTTKey()
 	case keyBackspace(msg):
@@ -97,7 +97,7 @@ func (m model) submitSTTKey() (tea.Model, tea.Cmd) {
 			return m.finalizeSTTModelFromKey(p, "Kept your saved "+p.label+" API key. ")
 		}
 		m.sttKeyPrompt = nil
-		return m.appendSystemNotice("No key entered — nothing saved."), nil
+		return m.showTransientNoticeInline("No key entered — nothing saved.", transientNoticeInfo), nil
 	}
 	if m.dictation.saveKey != nil {
 		if err := m.dictation.saveKey(p.provider, key); err != nil {
@@ -123,7 +123,7 @@ func (m model) finalizeSTTModelFromKey(p *sttKeyPromptState, prefix string) (tea
 	if modelID != "" {
 		label += " " + modelID
 	}
-	return m.appendSystemNotice(prefix + "Dictation model set to " + label + ". Run /voice, then hold Space to dictate."), nil
+	return m.showTransientNoticeInline(prefix+"Dictation model: "+label+". Run /voice; "+voiceCaptureUsage+".", transientNoticeSuccess), nil
 }
 
 // sttKeyPromptOverlay renders the API-key prompt as a centered modal, matching

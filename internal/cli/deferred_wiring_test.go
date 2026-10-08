@@ -18,14 +18,20 @@ import (
 // cliFakeDeferredTool is deferred-eligible (implements Deferred() bool), mirroring
 // an MCP registry tool, so it counts toward the deferral threshold.
 type cliFakeDeferredTool struct {
-	name string
+	name            string
+	permission      tools.Permission
+	advertiseInAuto bool
 }
 
 func (t cliFakeDeferredTool) Name() string             { return t.name }
 func (t cliFakeDeferredTool) Description() string      { return "fake deferred tool" }
 func (t cliFakeDeferredTool) Parameters() tools.Schema { return tools.Schema{Type: "object"} }
 func (t cliFakeDeferredTool) Safety() tools.Safety {
-	return tools.Safety{SideEffect: tools.SideEffectNetwork, Permission: tools.PermissionAllow}
+	permission := t.permission
+	if permission == "" {
+		permission = tools.PermissionAllow
+	}
+	return tools.Safety{SideEffect: tools.SideEffectNetwork, Permission: permission, AdvertiseInAuto: t.advertiseInAuto}
 }
 func (t cliFakeDeferredTool) Run(context.Context, map[string]any) tools.Result {
 	return tools.Result{Status: tools.StatusOK, Output: "ok"}

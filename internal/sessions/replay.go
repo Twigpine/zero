@@ -226,11 +226,20 @@ func CompactionPayloadFromPlan(summary string, plan CompactionPlan) (CompactionP
 }
 
 func (store *Store) ReadRehydratedEvents(sessionID string) ([]Event, error) {
-	events, err := store.ReadEvents(sessionID)
+	events, _, err := store.ReadRehydratedEventsWithPresence(sessionID)
+	return events, err
+}
+
+// ReadRehydratedEventsWithPresence carries the underlying event-log presence
+// through compaction projection without changing ReadRehydratedEvents' existing
+// empty-on-missing contract.
+func (store *Store) ReadRehydratedEventsWithPresence(sessionID string) ([]Event, bool, error) {
+	events, present, err := store.ReadEventsWithPresence(sessionID)
 	if err != nil {
-		return nil, err
+		return nil, present, err
 	}
-	return RehydrateEvents(events)
+	rehydrated, err := RehydrateEvents(events)
+	return rehydrated, present, err
 }
 
 func (store *Store) ReadReplayEvents(sessionID string) ([]Event, error) {

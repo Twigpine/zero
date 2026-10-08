@@ -70,6 +70,62 @@ func TestRegisterToolsAddsPromptGatedMCPTools(t *testing.T) {
 	}
 }
 
+func TestRegisterToolsPublishesServerToolsInOneGeneration(t *testing.T) {
+	registry := tools.NewRegistry()
+	before := registry.Snapshot().Generation
+	client := &fakeToolClient{listed: []RemoteTool{
+		{Name: "lookup", Description: "Lookup documentation"},
+		{Name: "search", Description: "Search documentation"},
+	}}
+	runtime, err := RegisterTools(context.Background(), registry, config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"docs": {Type: "stdio", Command: "docs-mcp"},
+	}}, RegisterOptions{ClientFactory: func(context.Context, Server) (ToolClient, error) {
+		return client, nil
+	}})
+	if err != nil {
+		t.Fatalf("RegisterTools() error = %v", err)
+	}
+	defer runtime.Close()
+
+	after := registry.Snapshot()
+	if after.Generation != before+1 {
+		t.Fatalf("registry generation = %d, want %d", after.Generation, before+1)
+	}
+	for _, name := range []string{"mcp_docs_lookup", "mcp_docs_search"} {
+		if _, ok := registry.Get(name); !ok {
+			t.Fatalf("expected %s to be published in the batch", name)
+		}
+	}
+}
+
+func TestRegisterToolsPublishesNoneWhenServerToolValidationFails(t *testing.T) {
+	registry := tools.NewRegistry()
+	before := registry.Snapshot().Generation
+	client := &fakeToolClient{listed: []RemoteTool{
+		{Name: "lookup", Description: "Lookup documentation"},
+		{Name: "", Description: "Invalid nameless tool"},
+	}}
+	runtime, err := RegisterTools(context.Background(), registry, config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"docs": {Type: "stdio", Command: "docs-mcp"},
+	}}, RegisterOptions{ClientFactory: func(context.Context, Server) (ToolClient, error) {
+		return client, nil
+	}})
+	if err != nil {
+		t.Fatalf("RegisterTools() error = %v", err)
+	}
+	defer runtime.Close()
+
+	if got := registry.Snapshot().Generation; got != before {
+		t.Fatalf("registry generation = %d, want unchanged %d", got, before)
+	}
+	if _, ok := registry.Get("mcp_docs_lookup"); ok {
+		t.Fatal("valid prefix of rejected server batch was published")
+	}
+	if skipped := runtime.Skipped(); len(skipped) != 1 || skipped[0].Name != "docs" || skipped[0].Err == nil {
+		t.Fatalf("Skipped() = %#v, want one validation failure for docs", skipped)
+	}
+}
+
 func TestRegisterToolsMarksPersistentlyApprovedToolsAllow(t *testing.T) {
 	store, err := NewPermissionStore(StoreOptions{
 		FilePath: filepath.Join(t.TempDir(), "permissions.json"),
@@ -153,16 +209,16 @@ func TestRegisterToolsSkipsUnreachableServerAndKeepsOthers(t *testing.T) {
 }
 
 func TestRegisterToolsFlagsUnconfiguredDefaultOnSkip(t *testing.T) {
-	// firecrawl is seeded by config.DefaultMCPServers with no credentials; when a
-	// user never configures it, a connect failure (e.g. the real HTTP 401 from
-	// issue #552) must be recorded as UnconfiguredDefault so callers can avoid
+	// Exa is seeded by config.DefaultMCPServers with no credentials; when a
+	// user never configures it, a connect failure must be recorded as
+	// UnconfiguredDefault so callers can avoid
 	// warning about a server the user never asked for. "custom" is configured by
 	// the user and must NOT be flagged even though it also fails to connect.
 	registry := tools.NewRegistry()
 
 	runtime, err := RegisterTools(context.Background(), registry, config.MCPConfig{Servers: map[string]config.MCPServerConfig{
-		"firecrawl": config.DefaultMCPServers()["firecrawl"],
-		"custom":    {Type: "stdio", Command: "custom-mcp"},
+		"exa":    config.DefaultMCPServers()["exa"],
+		"custom": {Type: "stdio", Command: "custom-mcp"},
 	}}, RegisterOptions{
 		ClientFactory: func(_ context.Context, server Server) (ToolClient, error) {
 			return nil, errors.New(server.Name + " connect failed")
@@ -177,12 +233,12 @@ func TestRegisterToolsFlagsUnconfiguredDefaultOnSkip(t *testing.T) {
 	for _, skipped := range runtime.Skipped() {
 		byName[skipped.Name] = skipped
 	}
-	firecrawl, ok := byName["firecrawl"]
+	exa, ok := byName["exa"]
 	if !ok {
-		t.Fatalf("Skipped() = %#v, want an entry for firecrawl", runtime.Skipped())
+		t.Fatalf("Skipped() = %#v, want an entry for exa", runtime.Skipped())
 	}
-	if !firecrawl.UnconfiguredDefault {
-		t.Fatalf("Skipped()[firecrawl] = %#v, want UnconfiguredDefault", firecrawl)
+	if !exa.UnconfiguredDefault {
+		t.Fatalf("Skipped()[exa] = %#v, want UnconfiguredDefault", exa)
 	}
 	custom, ok := byName["custom"]
 	if !ok {
@@ -283,6 +339,19 @@ func TestRegistryToolIsDeferredEligible(t *testing.T) {
 	// interface, since the agent loop partitions tools through tools.IsDeferred.
 	if !tools.IsDeferred(tool) {
 		t.Fatal("tools.IsDeferred(registryTool) = false, want true")
+	}
+}
+
+func TestRegistryToolCanAdvertiseInAutoWithoutPreapproval(t *testing.T) {
+	tool := newRegistryTool(
+		Server{Name: "docs", Type: "stdio"},
+		RemoteTool{Name: "search"},
+		&fakeToolClient{},
+		RegisterOptions{Autonomy: AutonomyLow, AdvertiseInAuto: true},
+	)
+	safety := tool.Safety()
+	if safety.Permission != tools.PermissionPrompt || !safety.AdvertiseInAuto {
+		t.Fatalf("MCP safety = %#v", safety)
 	}
 }
 

@@ -15,7 +15,7 @@ import (
 
 const WindowsSandboxSetupName = "zero-windows-sandbox-setup.exe"
 
-const windowsSandboxSetupMarkerSchemaVersion = 4
+const windowsSandboxSetupMarkerSchemaVersion = 5
 
 type WindowsSandboxSetupArgsOptions struct {
 	SandboxHome       string
@@ -144,6 +144,10 @@ func RunWindowsSandboxSetup(args []string, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
 		return 2
+	}
+	if err := windowsDenyReadRestrictedTokenUnsupportedProfile(config.PermissionProfile); err != nil {
+		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
+		return 1
 	}
 	return runWindowsSandboxSetup(config, stderr)
 }

@@ -231,6 +231,25 @@ func TestApplyPatchResourceKeysFromDiffAndCwd(t *testing.T) {
 	}
 }
 
+func TestApplyPatchResourceKeysFromStructuredPatchAndCwd(t *testing.T) {
+	patch := "*** Begin Patch\n*** Update File: old.go\n*** Move to: new.go\n@@\n-old\n+new\n*** End Patch\n"
+	keys := applyPatchResourceKeys(map[string]any{"patch": patch, "cwd": "pkg"})
+	want := map[string]bool{
+		ResourceKeyDirectory + "pkg":   true,
+		ResourceKeyFile + "pkg/old.go": true,
+		ResourceKeyFile + "pkg/new.go": true,
+	}
+	for _, key := range keys {
+		if !want[key] {
+			t.Fatalf("unexpected key %q in %v", key, keys)
+		}
+		delete(want, key)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing keys %v from %v", want, keys)
+	}
+}
+
 func TestDeclaredMutatorThreadSafeIsReportedByCatalogValidation(t *testing.T) {
 	// Runtime CapabilitiesOf clears ThreadSafe on mutators; catalog validation
 	// must still see the raw declaration so miswired constructors fail the gate.

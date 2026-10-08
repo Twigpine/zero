@@ -1246,6 +1246,13 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 		preserveExistingCredentialReference = strings.TrimSpace(profile.APIKeyEnv) != "" || profile.APIKeyStored
 	}
 
+	// This wizard saves directly, bypassing the CLI add/setup validation.
+	// Refuse Atomic Chat's fallback before constructing or persisting a provider.
+	if isAtomicLocalPlaceholderModel(provider.ID, profile.Model, provider.DefaultModel) {
+		wizard.err = "Atomic Chat serves a locally loaded model. Load a model in Atomic Chat, then pick it here; the 'local-model' placeholder will not work."
+		return m, nil
+	}
+
 	// Build and persist into LOCALS first, committing live state only once BOTH
 	// succeed. A persist failure (read-only config, disk full) must not leave the
 	// chat running on the new provider while the status line, m.providerProfile,
@@ -2071,6 +2078,15 @@ func maskedProviderWizardKey(value string) string {
 		count = 24
 	}
 	return strings.Repeat("*", count)
+}
+
+// isAtomicLocalPlaceholderModel rejects Atomic Chat's nonfunctional fallback.
+func isAtomicLocalPlaceholderModel(providerID string, model string, defaultModel string) bool {
+	if providerID != "atomic-chat-local" {
+		return false
+	}
+	resolved := strings.TrimSpace(model)
+	return resolved == "" || resolved == strings.TrimSpace(defaultModel)
 }
 
 func providerWizardProfile(provider providercatalog.Descriptor, model string, apiKey string, baseURL string, profileName string) config.ProviderProfile {

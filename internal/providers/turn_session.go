@@ -15,9 +15,27 @@ import (
 // value (e.g. "1") to enable — the same boolean idiom as ZERO_FORMAT_ON_WRITE.
 const openaiTurnSessionEnv = "ZERO_OPENAI_TURN_SESSION"
 
+// ChatGPT Responses sessions are enabled by default for their native provider.
+// Setting this to 0/false/off restores the stateless HTTP/SSE transport.
+const chatGPTTurnSessionEnv = "ZERO_CHATGPT_TURN_SESSION"
+
 func openaiTurnSessionEnabled() bool {
 	value := strings.TrimSpace(os.Getenv(openaiTurnSessionEnv))
-	return value != "" && value != "0" && !strings.EqualFold(value, "false")
+	return value != "" && !explicitEnvFalse(value)
+}
+
+func chatGPTTurnSessionEnabled() bool {
+	value := strings.TrimSpace(os.Getenv(chatGPTTurnSessionEnv))
+	return value == "" || !explicitEnvFalse(value)
+}
+
+func explicitEnvFalse(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "0", "false", "off":
+		return true
+	default:
+		return false
+	}
 }
 
 // OptimizedTurnSessions returns the gated optimized TurnSessionProvider for an
@@ -25,20 +43,33 @@ func openaiTurnSessionEnabled() bool {
 // is ineligible. Callers leave agent Options.TurnSessionProvider nil on false,
 // so the loop's default wrap keeps today's behavior byte-identical.
 //
-// Eligibility is deliberately narrow: the resolved provider kind must be
-// official OpenAI (NOT openai-compatible gateways — the constructor merges the
-// two, so this branches on the resolved kind explicitly), not the ChatGPT
-// Codex catalog, and the provider value must be the concrete *openai.Provider
-// (a fake, a Codex provider, or nil falls back to the default path safely).
-// No base-URL check on top of the kind: prewarm and fingerprint telemetry are
-// harmless against any host, and kind==openai mirrors the existing
-// official-OpenAI precedent used for prompt_cache_key.
+// Eligibility is deliberately narrow: native ChatGPT Responses uses its
+// concrete Codex provider and defaults on with a kill switch; official OpenAI
+// chat-completions keeps its existing opt-in prewarm session. Compatible
+// gateways and foreign provider values always retain the default adapter.
 func OptimizedTurnSessions(profile config.ProviderProfile, provider zeroruntime.Provider, options Options) (zeroruntime.TurnSessionProvider, bool) {
-	if !openaiTurnSessionEnabled() {
+	resolved, err := resolveProfile(profile, options)
+	if err != nil {
 		return nil, false
 	}
-	resolved, err := resolveProfile(profile, options)
-	if err != nil || resolved.providerKind != config.ProviderKindOpenAI || isCodexCatalog(profile, resolved) {
+	if isCodexCatalog(profile, resolved) {
+		if !chatGPTTurnSessionEnabled() {
+			return nil, false
+		}
+		concrete, ok := provider.(*openai.CodexProvider)
+		if !ok {
+			return nil, false
+		}
+		caps, err := resolveCapabilities(profile, options)
+		if err != nil {
+			return nil, false
+		}
+		return openai.NewCodexTurnSessionProvider(concrete, caps), true
+	}
+	if resolved.providerKind != config.ProviderKindOpenAI {
+		return nil, false
+	}
+	if !openaiTurnSessionEnabled() {
 		return nil, false
 	}
 	concrete, ok := provider.(*openai.Provider)

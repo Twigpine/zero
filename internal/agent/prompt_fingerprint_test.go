@@ -73,6 +73,38 @@ func TestComputePrefixFingerprintSchemaChangeChangesSchemaHash(t *testing.T) {
 	}
 }
 
+func TestComputePrefixFingerprintIncludesToolTypeAndFormat(t *testing.T) {
+	opts := Options{Cwd: t.TempDir(), SystemPrompt: "core"}
+	base := zeroruntime.ToolDefinition{Name: "apply_patch", Description: "Patch files"}
+	baseFingerprint := ComputePrefixFingerprint(opts, []zeroruntime.ToolDefinition{base})
+
+	typed := base
+	typed.Type = zeroruntime.ToolDefinitionFreeform
+	if got := ComputePrefixFingerprint(opts, []zeroruntime.ToolDefinition{typed}); got.ToolsHash == baseFingerprint.ToolsHash {
+		t.Fatal("ToolsHash must change when tool Type changes")
+	}
+
+	formatCases := []struct {
+		name   string
+		format zeroruntime.ToolDefinitionFormat
+	}{
+		{name: "type", format: zeroruntime.ToolDefinitionFormat{Type: "grammar"}},
+		{name: "syntax", format: zeroruntime.ToolDefinitionFormat{Syntax: "lark"}},
+		{name: "definition", format: zeroruntime.ToolDefinitionFormat{Definition: "start: PATCH"}},
+		{name: "empty", format: zeroruntime.ToolDefinitionFormat{}},
+	}
+	for _, test := range formatCases {
+		t.Run(test.name, func(t *testing.T) {
+			withFormat := base
+			withFormat.Format = &test.format
+			got := ComputePrefixFingerprint(opts, []zeroruntime.ToolDefinition{withFormat})
+			if got.SchemaHash == baseFingerprint.SchemaHash {
+				t.Fatalf("SchemaHash must change for %s format input", test.name)
+			}
+		})
+	}
+}
+
 // TestComputePrefixFingerprintSystemPromptChangeChangesBaseHash asserts the
 // most common drift path: a system-prompt edit (e.g. an agent.md update, a
 // model addendum change) must move the base-instructions hash, which moves

@@ -178,7 +178,7 @@ func applyPatchResourceKeys(args map[string]any) []string {
 	keys = append(keys, multiFileResourceKeys(args)...)
 	cwd := firstStringArg(args, "cwd", "workdir")
 	patch := firstStringArg(args, "patch", "diff")
-	for _, p := range pathsFromUnifiedDiff(patch) {
+	for _, p := range pathsFromApplyPatch(patch) {
 		joined := joinUnderResourceCwd(cwd, p)
 		if n := NormalizeResourcePath(joined); n != "" {
 			keys = append(keys, ResourceKeyFile+n)
@@ -189,6 +189,17 @@ func applyPatchResourceKeys(args map[string]any) []string {
 		return workspaceResourceKeys(args)
 	}
 	return keys
+}
+
+func pathsFromApplyPatch(patch string) []string {
+	if !isStructuredPatch(patch) {
+		return pathsFromUnifiedDiff(patch)
+	}
+	operations, err := parseStructuredPatch(patch)
+	if err != nil {
+		return nil
+	}
+	return structuredPatchOperationPaths(operations)
 }
 
 // joinUnderResourceCwd joins a relative path under cwd for resource keys only.

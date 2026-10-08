@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -71,6 +72,24 @@ func TestWindowsRestrictedTokenRealSandboxSmoke(t *testing.T) {
 	}, 0)
 	if bytes, err := os.ReadFile(writeMarker); err != nil || strings.TrimSpace(string(bytes)) != "ok" {
 		t.Fatalf("sandboxed write marker = %q, %v; want ok", bytes, err)
+	}
+
+	// SID broadening is disabled, so the restricted-SID list never includes
+	// Users/Authenticated Users. The write grant those groups hold on
+	// C:\Users\Public must not be reachable through the restricted-SID check.
+	// Pin that a write there fails: an independent shared-writable directory
+	// outside every workspace write root.
+	publicDir := os.Getenv("PUBLIC")
+	if publicDir == "" {
+		t.Log("PUBLIC is not set; skipping C:\\Users\\Public write-jail probe")
+	} else {
+		publicProbe := allocateSharedDirectoryProbe(t, publicDir, "elevated-public")
+		runWindowsRealSmokeCommand(t, runnerExe, config, publicProbe.DeniedWriteCommand(), deniedWriteExitCode)
+		if _, err := os.Stat(publicProbe.Path()); err == nil {
+			t.Fatalf("Windows sandbox allowed a write to the shared C:\\Users\\Public directory")
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat public marker: %v", err)
+		}
 	}
 
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -156,12 +175,14 @@ func TestWindowsUnelevatedRealSandboxSmoke(t *testing.T) {
 	}
 
 	sandboxHome := filepath.Join(root, ".zero-sandbox")
+	// Success path: restricted FS write-jail with no DenyRead. Non-empty DenyRead
+	// is unsupported on both restricted-token tiers under the narrow SID set
+	// (PR #640); the rejection probe below covers that separately.
 	profile := PermissionProfile{
 		FileSystem: FileSystemPolicy{
 			Kind:                 FileSystemRestricted,
 			ReadRoots:            []string{root},
 			WriteRoots:           []WritableRoot{{Root: root, ProtectedMetadataNames: []string{".git", ".zero", ".agents"}}},
-			DenyRead:             []string{privateDir},
 			IncludePlatformRoots: true,
 			AllowTemp:            true,
 		},
@@ -190,10 +211,18 @@ func TestWindowsUnelevatedRealSandboxSmoke(t *testing.T) {
 		t.Fatalf("expected the unelevated setup marker to be recorded: %v", err)
 	}
 
-	// DenyRead check: reading from the privateDir must be blocked (exit code 1)
-	runWindowsRealSmokeCommand(t, runnerExe, config, []string{
+	// DenyRead is unsupported on both restricted-token tiers under the narrow
+	// SID set (PR #640): the runner must reject before launch rather than
+	// attempting a fully restricted token that cannot load system tools.
+	denyReadConfig := config
+	denyReadConfig.PermissionProfile.FileSystem.DenyRead = []string{privateDir}
+	runWindowsRealSmokeCommandExpectError(t, runnerExe, denyReadConfig, []string{
 		"cmd.exe", "/d", "/s", "/c", "type " + secretFile,
-	}, 1)
+	}, "DenyRead", "not supported")
+	// The secret must remain readable from the host; the sandbox never ran.
+	if data, err := os.ReadFile(secretFile); err != nil || string(data) != "super-secret" {
+		t.Fatalf("host secret file after rejected DenyRead launch: %q, %v", data, err)
+	}
 
 	outsideMarker := filepath.Join(outside, "unelevated-write-denied.txt")
 	runWindowsRealSmokeCommand(t, runnerExe, config, []string{
@@ -203,6 +232,18 @@ func TestWindowsUnelevatedRealSandboxSmoke(t *testing.T) {
 		t.Fatalf("unelevated sandbox allowed a write outside every granted root")
 	} else if !os.IsNotExist(err) {
 		t.Fatalf("stat outside marker: %v", err)
+	}
+
+	// Verify write to C:\ProgramData is blocked
+	programData := os.Getenv("ProgramData")
+	if programData != "" {
+		programDataProbe := allocateSharedDirectoryProbe(t, programData, "unelevated-programdata")
+		runWindowsRealSmokeCommand(t, runnerExe, config, programDataProbe.DeniedWriteCommand(), deniedWriteExitCode)
+		if _, err := os.Stat(programDataProbe.Path()); err == nil {
+			t.Fatalf("unelevated sandbox allowed a write to ProgramData shared directory")
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat ProgramData marker: %v", err)
+		}
 	}
 }
 
@@ -387,6 +428,34 @@ func runWindowsRealSmokeCommand(t *testing.T, runnerExe string, base WindowsSand
 	}
 }
 
+// runWindowsRealSmokeCommandExpectError runs the command runner and requires a
+// non-zero exit whose combined output contains each want substring (used for
+// explicit unsupported-mode rejections rather than sandboxed command failures).
+func runWindowsRealSmokeCommandExpectError(t *testing.T, runnerExe string, base WindowsSandboxCommandArgsOptions, command []string, wantSubstr ...string) {
+	t.Helper()
+	base.Command = command
+	args, err := BuildWindowsSandboxCommandArgs(base)
+	if err != nil {
+		t.Fatalf("BuildWindowsSandboxCommandArgs: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, runnerExe, args...)
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("Windows sandbox command timed out: %v\n%s", ctx.Err(), output)
+	}
+	if err == nil {
+		t.Fatalf("Windows sandbox command exit code = 0, want error containing %v\n%s", wantSubstr, output)
+	}
+	text := string(output)
+	for _, want := range wantSubstr {
+		if !strings.Contains(text, want) {
+			t.Fatalf("Windows sandbox command error missing %q: %v\n%s", want, err, output)
+		}
+	}
+}
+
 // The write jail must hold on a path whose DACL grants Everyone write access.
 //
 // A WRITE_RESTRICTED token runs TWO checks for a write and needs both to pass:
@@ -505,7 +574,68 @@ const deniedWriteExitCode = 77
 // deniedWriteCommand attempts a write and reports deniedWriteExitCode when the
 // redirect is refused, so the exit code also proves cmd.exe actually ran.
 func deniedWriteCommand(marker string) []string {
-	return []string{"cmd.exe", "/d", "/s", "/c", "echo leaked>" + marker + " || exit " + strconv.Itoa(deniedWriteExitCode)}
+	return []string{"cmd.exe", "/d", "/c", "echo leaked>" + cmdQuote(marker) + " || exit " + strconv.Itoa(deniedWriteExitCode)}
+}
+
+func cmdQuote(path string) string {
+	return `"` + strings.ReplaceAll(path, `"`, `\"`) + `"`
+}
+
+type sharedDirectoryProbe struct {
+	path   string
+	marker string
+}
+
+func allocateSharedDirectoryProbe(t testing.TB, dir, prefix string) *sharedDirectoryProbe {
+	t.Helper()
+	if dir == "" {
+		t.Skip("shared directory path is not set")
+	}
+	var probePath string
+	for attempt := 0; attempt < 50; attempt++ {
+		candidate := filepath.Join(dir, fmt.Sprintf("zero-smoke-%s-%d-%d-%d.txt", prefix, os.Getpid(), time.Now().UnixNano(), attempt))
+		if _, err := os.Lstat(candidate); os.IsNotExist(err) {
+			probePath = candidate
+			break
+		}
+	}
+	if probePath == "" {
+		t.Fatalf("allocate shared directory probe in %s: failed to find unused filename", dir)
+	}
+	marker := fmt.Sprintf("leaked-%s-%d-%d", prefix, os.Getpid(), time.Now().UnixNano())
+	p := &sharedDirectoryProbe{path: probePath, marker: marker}
+	t.Cleanup(func() {
+		p.cleanup(t)
+	})
+	return p
+}
+
+func (p *sharedDirectoryProbe) Path() string {
+	return p.path
+}
+
+func (p *sharedDirectoryProbe) Marker() string {
+	return p.marker
+}
+
+func (p *sharedDirectoryProbe) DeniedWriteCommand() []string {
+	return []string{"cmd.exe", "/d", "/c", "echo " + p.marker + ">" + cmdQuote(p.path) + " || exit " + strconv.Itoa(deniedWriteExitCode)}
+}
+
+func (p *sharedDirectoryProbe) cleanup(t testing.TB) {
+	t.Helper()
+	data, err := os.ReadFile(p.path)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("cleanup probe read %s: %v", p.path, err)
+		}
+		return
+	}
+	if strings.TrimSpace(string(data)) == p.marker {
+		if err := os.Remove(p.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("cleanup probe remove %s: %v", p.path, err)
+		}
+	}
 }
 
 func powershellSingleQuote(value string) string {
@@ -518,4 +648,54 @@ func powershellSingleQuote(value string) string {
 		}
 	}
 	return out + "'"
+}
+
+func TestSharedDirectoryProbeLifecycle(t *testing.T) {
+	dir := t.TempDir()
+
+	// 1. Two simultaneous allocations produce distinct non-colliding paths and markers.
+	probe1 := allocateSharedDirectoryProbe(t, dir, "p1")
+	probe2 := allocateSharedDirectoryProbe(t, dir, "p2")
+	if probe1.Path() == probe2.Path() {
+		t.Fatalf("expected distinct probe paths, got %q and %q", probe1.Path(), probe2.Path())
+	}
+	if probe1.Marker() == probe2.Marker() {
+		t.Fatalf("expected distinct probe markers, got %q and %q", probe1.Marker(), probe2.Marker())
+	}
+
+	// 2. Pre-existing unrelated file is never selected or deleted.
+	unrelatedFile := filepath.Join(dir, "unrelated.txt")
+	if err := os.WriteFile(unrelatedFile, []byte("preserve me"), 0o600); err != nil {
+		t.Fatalf("write unrelated file: %v", err)
+	}
+	probe3 := allocateSharedDirectoryProbe(t, dir, "p3")
+	probe3.cleanup(t)
+	if data, err := os.ReadFile(unrelatedFile); err != nil || string(data) != "preserve me" {
+		t.Fatalf("unrelated file was modified or deleted: data=%q, err=%v", data, err)
+	}
+
+	// 3. Interrupted / no-create path: cleanup on absent file succeeds quietly.
+	probe4 := allocateSharedDirectoryProbe(t, dir, "p4")
+	probe4.cleanup(t)
+
+	// 4. Unexpected write created during test with matching marker is cleaned up.
+	probe5 := allocateSharedDirectoryProbe(t, dir, "p5")
+	if err := os.WriteFile(probe5.Path(), []byte(probe5.Marker()), 0o600); err != nil {
+		t.Fatalf("write probe5 file: %v", err)
+	}
+	probe5.cleanup(t)
+	if _, err := os.Lstat(probe5.Path()); !os.IsNotExist(err) {
+		t.Fatalf("expected probe5 to be cleaned up after creation, stat err=%v", err)
+	}
+
+	// 5. File at probe path with foreign/unmatched content is NOT removed.
+	probe6 := allocateSharedDirectoryProbe(t, dir, "p6")
+	if err := os.WriteFile(probe6.Path(), []byte("unrelated-foreign-content"), 0o600); err != nil {
+		t.Fatalf("write probe6 file: %v", err)
+	}
+	probe6.cleanup(t)
+	if _, err := os.Lstat(probe6.Path()); err != nil {
+		t.Fatalf("expected probe6 with foreign content to be preserved, stat err=%v", err)
+	}
+	_ = os.Remove(probe6.Path())
 }

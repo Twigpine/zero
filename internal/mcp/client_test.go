@@ -1,15 +1,19 @@
 package mcp
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -840,5 +844,839 @@ func TestBoundedBufferCapsRetainedBytes(t *testing.T) {
 	// Only the first cap bytes are retained; the overflow is discarded.
 	if got := b.String(); got != "hellowor" {
 		t.Fatalf("retained %q, want %q (capped at 8 bytes, head kept)", got, "hellowor")
+	}
+}
+
+func TestStdioClientIgnoresServerInitiatedRequestsInPendingResponses(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	outReader, outWriter := io.Pipe()
+
+	client := &Client{
+		reader:  newMessageReader(inReader),
+		writer:  newMessageWriter(outWriter),
+		pending: make(map[int]chan dispatchResult),
+	}
+	defer func() {
+		_ = inWriter.Close()
+		_ = outReader.Close()
+	}()
+
+	client.ensureReader()
+
+	// Register a pending response for ID 1
+	responses := make(chan dispatchResult, 1)
+	client.dispatchMu.Lock()
+	client.pending[1] = responses
+	client.dispatchMu.Unlock()
+
+	// Simulate server sending a request with ID 1 ("roots/list")
+	serverReq := `{"jsonrpc":"2.0","id":1,"method":"roots/list","params":{}}` + "\n"
+	if _, err := inWriter.Write([]byte(serverReq)); err != nil {
+		t.Fatalf("write server request: %v", err)
+	}
+
+	// The server request must take the separate request path: it receives a
+	// method-not-found response and cannot resolve the pending client call.
+	courtesyResult := make(chan dispatchResult, 1)
+	go func() {
+		message, err := newMessageReader(outReader).read()
+		courtesyResult <- dispatchResult{message: message, err: err}
+	}()
+	select {
+	case result := <-courtesyResult:
+		if result.err != nil {
+			t.Fatalf("read courtesy response: %v", result.err)
+		}
+		if !rpcIDMatches(result.message.ID, 1) || result.message.Error == nil || result.message.Error.Code != -32601 {
+			t.Fatalf("courtesy response = %#v, want id 1 and error -32601", result.message)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for method-not-found response")
+	}
+	select {
+	case res := <-responses:
+		t.Fatalf("pending request 1 received server request: %#v", res.message)
+	default:
+	}
+
+	// Now send the actual response for ID 1
+	serverResp := `{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}` + "\n"
+	if _, err := inWriter.Write([]byte(serverResp)); err != nil {
+		t.Fatalf("write server response: %v", err)
+	}
+
+	select {
+	case res := <-responses:
+		if res.message.Method != "" || len(res.message.Result) == 0 {
+			t.Fatalf("expected valid response, got %#v", res.message)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for actual response")
+	}
+}
+
+// TestStdioClientUndrainedServerDoesNotStallReadLoop proves that when a server
+// stops draining its stdin, an asynchronous courtesy -32601 reply does not stall
+// the read loop from servicing legitimate responses.
+func TestStdioClientUndrainedServerDoesNotStallReadLoop(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	outReader, outWriter := io.Pipe()
+
+	client := &Client{
+		reader:  newMessageReader(inReader),
+		writer:  newMessageWriter(outWriter),
+		pending: make(map[int]chan dispatchResult),
+	}
+	defer func() {
+		_ = inWriter.Close()
+		_ = outReader.Close()
+	}()
+
+	client.ensureReader()
+
+	// 1. Register a pending response for call ID 1
+	responses := make(chan dispatchResult, 1)
+	client.dispatchMu.Lock()
+	client.pending[1] = responses
+	client.dispatchMu.Unlock()
+
+	// 2. Server sends request ID 2 (we DO NOT drain outReader so server stdin pipe is blocked)
+	serverReq := `{"jsonrpc":"2.0","id":2,"method":"roots/list","params":{}}` + "\n"
+	go func() {
+		_, _ = inWriter.Write([]byte(serverReq))
+		// 3. Immediately send response for ID 1
+		serverResp := `{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}` + "\n"
+		_, _ = inWriter.Write([]byte(serverResp))
+	}()
+
+	// 4. Verify the response for ID 1 is delivered without being stalled by the undrained pipe
+	select {
+	case res := <-responses:
+		if res.message.Method != "" || len(res.message.Result) == 0 {
+			t.Fatalf("expected valid response for ID 1, got %#v", res.message)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("readLoop stalled on undrained error write; pending response was not delivered")
+	}
+}
+
+func TestStdioClientDropsInvalidServerRequestIDs(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	outReader, outWriter := io.Pipe()
+
+	client := &Client{
+		reader:  newMessageReader(inReader),
+		writer:  newMessageWriter(outWriter),
+		pending: make(map[int]chan dispatchResult),
+	}
+	defer func() {
+		_ = inWriter.Close()
+		_ = outReader.Close()
+	}()
+
+	client.ensureReader()
+
+	// Server sends request with boolean ID (invalid JSON-RPC id)
+	serverReq := `{"jsonrpc":"2.0","id":true,"method":"roots/list","params":{}}` + "\n"
+	if _, err := inWriter.Write([]byte(serverReq)); err != nil {
+		t.Fatalf("write invalid server request: %v", err)
+	}
+
+	// A following valid request acts as an ordering barrier: receiving its
+	// response proves readLoop already processed the invalid request. Because the
+	// writer is serial, any incorrect reply to the boolean ID would arrive first.
+	validReq := `{"jsonrpc":"2.0","id":7,"method":"roots/list","params":{}}` + "\n"
+	if _, err := inWriter.Write([]byte(validReq)); err != nil {
+		t.Fatalf("write valid server request: %v", err)
+	}
+	readResult := make(chan dispatchResult, 1)
+	go func() {
+		message, err := newMessageReader(outReader).read()
+		readResult <- dispatchResult{message: message, err: err}
+	}()
+
+	select {
+	case result := <-readResult:
+		if result.err != nil {
+			t.Fatalf("read valid request response: %v", result.err)
+		}
+		if !rpcIDMatches(result.message.ID, 7) || result.message.Error == nil || result.message.Error.Code != -32601 {
+			t.Fatalf("response = %#v, want only valid id 7 and error -32601", result.message)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for valid request response")
+	}
+}
+
+func TestStdioClientRepliesToValidNonIntegerServerRequestIDs(t *testing.T) {
+	requests := []struct {
+		name string
+		wire string
+		want string
+	}{
+		{name: "fractional", wire: `{"jsonrpc":"2.0","id":1.5,"method":"roots/list","params":{}}` + "\n", want: "1.5"},
+		{name: "exponent", wire: `{"jsonrpc":"2.0","id":2e2,"method":"roots/list","params":{}}` + "\n", want: "2e2"},
+	}
+	for _, request := range requests {
+		t.Run(request.name, func(t *testing.T) {
+			inReader, inWriter := io.Pipe()
+			outReader, outWriter := io.Pipe()
+			client := &Client{
+				reader:  newMessageReader(inReader),
+				writer:  newMessageWriter(outWriter),
+				pending: make(map[int]chan dispatchResult),
+			}
+			t.Cleanup(func() {
+				_ = inWriter.Close()
+				_ = outReader.Close()
+			})
+			client.ensureReader()
+			if _, err := inWriter.Write([]byte(request.wire)); err != nil {
+				t.Fatalf("write server request: %v", err)
+			}
+			result := make(chan dispatchResult, 1)
+			go func() {
+				response, err := newMessageReader(outReader).read()
+				result <- dispatchResult{message: response, err: err}
+			}()
+			select {
+			case response := <-result:
+				if response.err != nil {
+					t.Fatalf("read method-not-found response: %v", response.err)
+				}
+				got, err := json.Marshal(response.message.ID)
+				if err != nil {
+					t.Fatalf("marshal id: %v", err)
+				}
+				if string(got) != request.want || response.message.Error == nil || response.message.Error.Code != -32601 {
+					t.Fatalf("response = %#v, want id %s and error -32601", response.message, request.want)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for method-not-found response")
+			}
+		})
+	}
+}
+
+func TestJSONRPCIDEchoableAcceptsFiniteJSONNumbers(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		id   any
+		want bool
+	}{
+		{name: "fractional float", id: 1.5, want: true},
+		{name: "exponent json number", id: json.Number("2e2"), want: true},
+		{name: "not a number", id: math.NaN(), want: false},
+		{name: "positive infinity", id: math.Inf(1), want: false},
+		{name: "invalid json number", id: json.Number("not-a-number"), want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := jsonRPCIDEchoable(test.id); got != test.want {
+				t.Fatalf("jsonRPCIDEchoable(%v) = %v, want %v", test.id, got, test.want)
+			}
+		})
+	}
+}
+
+type gatedCaptureWriter struct {
+	started     chan struct{}
+	release     chan struct{}
+	startedOnce sync.Once
+	releaseOnce sync.Once
+	mu          sync.Mutex
+	buffer      bytes.Buffer
+}
+
+func newGatedCaptureWriter() *gatedCaptureWriter {
+	return &gatedCaptureWriter{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (writer *gatedCaptureWriter) Write(p []byte) (int, error) {
+	writer.startedOnce.Do(func() { close(writer.started) })
+	<-writer.release
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	return writer.buffer.Write(p)
+}
+
+func (writer *gatedCaptureWriter) Release() {
+	writer.releaseOnce.Do(func() { close(writer.release) })
+}
+
+func (writer *gatedCaptureWriter) Bytes() []byte {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	return append([]byte(nil), writer.buffer.Bytes()...)
+}
+
+func TestStdioClientDoesNotWriteCanceledQueuedRequest(t *testing.T) {
+	reader := newBlockingReader()
+	defer reader.Close()
+
+	output := newGatedCaptureWriter()
+	defer output.Release()
+	client := &Client{
+		reader:  newMessageReader(reader),
+		writer:  newMessageWriter(output),
+		pending: make(map[int]chan dispatchResult),
+	}
+
+	blockerDone := make(chan error, 1)
+	go func() {
+		blockerDone <- client.writeMessage(context.Background(), rpcMessage{Method: "notifications/blocker"})
+	}()
+	select {
+	case <-output.started:
+	case <-time.After(time.Second):
+		t.Fatal("initial write did not reach the blocked transport")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := client.request(ctx, "tools/call", map[string]any{"name": "side_effect"}, nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("request() error = %v, want context deadline exceeded", err)
+	}
+
+	output.Release()
+	if err := <-blockerDone; err != nil {
+		t.Fatalf("release initial write: %v", err)
+	}
+	if err := client.writeMessage(context.Background(), rpcMessage{Method: "notifications/sentinel"}); err != nil {
+		t.Fatalf("write sentinel: %v", err)
+	}
+
+	messages := newMessageReader(bytes.NewReader(output.Bytes()))
+	first, err := messages.read()
+	if err != nil {
+		t.Fatalf("read initial message: %v", err)
+	}
+	if first.Method != "notifications/blocker" {
+		t.Fatalf("first method = %q, want notifications/blocker", first.Method)
+	}
+	second, err := messages.read()
+	if err != nil {
+		t.Fatalf("read sentinel message: %v", err)
+	}
+	if second.Method != "notifications/sentinel" {
+		t.Fatalf("second method = %q, want notifications/sentinel", second.Method)
+	}
+	if extra, err := messages.read(); !errors.Is(err, io.EOF) {
+		t.Fatalf("unexpected queued message %#v, read error = %v", extra, err)
+	}
+}
+
+// TestStdioClientUndrainedServerDoesNotBlockCallerWithDeadline verifies that
+// when the server's input pipe is completely blocked and courtesy replies are
+// queued/dropped, a caller invoking request() with a deadline aborts cleanly
+// when the context expires rather than hanging indefinitely on a write or mutex.
+func TestStdioClientUndrainedServerDoesNotBlockCallerWithDeadline(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	outReader, outWriter := io.Pipe()
+
+	client := &Client{
+		reader:  newMessageReader(inReader),
+		writer:  newMessageWriter(outWriter),
+		pending: make(map[int]chan dispatchResult),
+	}
+	defer func() {
+		_ = inWriter.Close()
+		_ = outReader.Close()
+	}()
+
+	client.ensureReader()
+
+	// Flood server requests to saturate write queue while outReader is NOT drained.
+	for i := 1; i <= 50; i++ {
+		serverReq := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"roots/list","params":{}}`+"\n", i+100)
+		_, err := inWriter.Write([]byte(serverReq))
+		if err != nil {
+			t.Fatalf("failed to write server request: %v", err)
+		}
+	}
+
+	// Caller with short deadline invokes request()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := client.request(ctx, "tools/list", map[string]any{}, nil)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected deadline exceeded, got: %v", err)
+	}
+	if elapsed > 1*time.Second {
+		t.Fatalf("request took too long to abort on deadline: %v", elapsed)
+	}
+}
+
+func TestStdioClientEmptyMethodDoesNotCompletePending(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	outReader, outWriter := io.Pipe()
+	client := &Client{
+		reader:  newMessageReader(inReader),
+		writer:  newMessageWriter(outWriter),
+		pending: make(map[int]chan dispatchResult),
+	}
+	defer func() {
+		_ = inWriter.Close()
+		_ = outReader.Close()
+	}()
+	client.ensureReader()
+
+	responses := make(chan dispatchResult, 1)
+	client.dispatchMu.Lock()
+	client.pending[1] = responses
+	client.dispatchMu.Unlock()
+
+	if _, err := inWriter.Write([]byte(`{"jsonrpc":"2.0","id":1,"method":""}` + "\n")); err != nil {
+		t.Fatalf("write empty-method frame: %v", err)
+	}
+
+	courtesyResult := make(chan dispatchResult, 1)
+	go func() {
+		message, err := newMessageReader(outReader).read()
+		courtesyResult <- dispatchResult{message: message, err: err}
+	}()
+	select {
+	case result := <-courtesyResult:
+		if result.err != nil {
+			t.Fatalf("read courtesy response: %v", result.err)
+		}
+		if !rpcIDMatches(result.message.ID, 1) || result.message.Error == nil || result.message.Error.Code != -32601 {
+			t.Fatalf("courtesy response = %#v, want id 1 and error -32601", result.message)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for method-not-found response")
+	}
+	select {
+	case res := <-responses:
+		t.Fatalf("pending request 1 completed by empty-method frame: %#v", res.message)
+	default:
+	}
+
+	if _, err := inWriter.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}` + "\n")); err != nil {
+		t.Fatalf("write server response: %v", err)
+	}
+	select {
+	case res := <-responses:
+		if res.message.Method != "" || len(res.message.Result) == 0 {
+			t.Fatalf("expected valid response, got %#v", res.message)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for actual response")
+	}
+}
+
+func TestStdioClientNullMethodDoesNotCompletePending(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	outReader, outWriter := io.Pipe()
+	client := &Client{
+		reader:  newMessageReader(inReader),
+		writer:  newMessageWriter(outWriter),
+		pending: make(map[int]chan dispatchResult),
+	}
+	defer func() {
+		_ = inWriter.Close()
+		_ = outReader.Close()
+	}()
+	client.ensureReader()
+
+	responses := make(chan dispatchResult, 1)
+	client.dispatchMu.Lock()
+	client.pending[1] = responses
+	client.dispatchMu.Unlock()
+
+	if _, err := inWriter.Write([]byte(`{"jsonrpc":"2.0","id":1,"method":null}` + "\n")); err != nil {
+		t.Fatalf("write null-method frame: %v", err)
+	}
+
+	courtesyResult := make(chan dispatchResult, 1)
+	go func() {
+		message, err := newMessageReader(outReader).read()
+		courtesyResult <- dispatchResult{message: message, err: err}
+	}()
+	select {
+	case result := <-courtesyResult:
+		if result.err != nil {
+			t.Fatalf("read courtesy response: %v", result.err)
+		}
+		if !rpcIDMatches(result.message.ID, 1) || result.message.Error == nil || result.message.Error.Code != -32601 {
+			t.Fatalf("courtesy response = %#v, want id 1 and error -32601", result.message)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for method-not-found response")
+	}
+	select {
+	case res := <-responses:
+		t.Fatalf("pending request 1 completed by null-method frame: %#v", res.message)
+	default:
+	}
+
+	if _, err := inWriter.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}` + "\n")); err != nil {
+		t.Fatalf("write server response: %v", err)
+	}
+	select {
+	case res := <-responses:
+		if res.message.Method != "" || len(res.message.Result) == 0 {
+			t.Fatalf("expected valid response, got %#v", res.message)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for actual response")
+	}
+}
+
+func TestStdioClientCourtesyReplySurvivesFullWriteQueue(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	outReader, outWriter := io.Pipe()
+	client := &Client{
+		reader:  newMessageReader(inReader),
+		writer:  newMessageWriter(outWriter),
+		pending: make(map[int]chan dispatchResult),
+	}
+	defer func() {
+		_ = inWriter.Close()
+		_ = outReader.Close()
+	}()
+	client.ensureReader()
+
+	responses := make(chan dispatchResult, 1)
+	client.dispatchMu.Lock()
+	client.pending[1] = responses
+	client.dispatchMu.Unlock()
+
+	const extra = 8
+	n := writeQueueCapacity + extra
+	for i := 0; i < n; i++ {
+		frame := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"roots/list","params":{}}`+"\n", i+100)
+		if _, err := inWriter.Write([]byte(frame)); err != nil {
+			t.Fatalf("write server request %d: %v", i, err)
+		}
+	}
+	if _, err := inWriter.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"ok":true}}` + "\n")); err != nil {
+		t.Fatalf("write pending response: %v", err)
+	}
+	select {
+	case res := <-responses:
+		if res.err != nil || len(res.message.Result) == 0 {
+			t.Fatalf("pending response = %#v err=%v", res.message, res.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("readLoop stalled while the write queue was full")
+	}
+
+	drainDone := make(chan []rpcMessage, 1)
+	go func() {
+		reader := newMessageReader(outReader)
+		var got []rpcMessage
+		for len(got) < n {
+			message, err := reader.read()
+			if err != nil {
+				drainDone <- got
+				return
+			}
+			got = append(got, message)
+		}
+		drainDone <- got
+	}()
+	select {
+	case got := <-drainDone:
+		if len(got) != n {
+			t.Fatalf("courtesy replies = %d, want %d (queue-full requests dropped)", len(got), n)
+		}
+		seen := make(map[int]bool, n)
+		for _, message := range got {
+			id, ok := rpcMessageID(message.ID)
+			if !ok || message.Error == nil || message.Error.Code != -32601 {
+				t.Fatalf("courtesy reply = %#v, want -32601", message)
+			}
+			seen[id] = true
+		}
+		for i := 0; i < n; i++ {
+			if !seen[i+100] {
+				t.Fatalf("missing courtesy reply for id %d after output resumed", i+100)
+			}
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out draining courtesy replies after output resumed")
+	}
+}
+
+func TestWriterLoopExitsOnRepeatedClose(t *testing.T) {
+	before := runtime.NumGoroutine()
+	for i := 0; i < 25; i++ {
+		inReader, inWriter := io.Pipe()
+		outReader, outWriter := io.Pipe()
+		copied := make(chan struct{})
+		go func() {
+			_, _ = io.Copy(io.Discard, outReader)
+			close(copied)
+		}()
+		client := &Client{
+			stdin:  outWriter,
+			reader: newMessageReader(inReader),
+			writer: newMessageWriter(outWriter),
+		}
+		client.ensureWriter()
+		if err := client.writeMessage(context.Background(), rpcMessage{Method: "notifications/ping"}); err != nil {
+			t.Fatalf("writeMessage: %v", err)
+		}
+		if err := client.Close(); err != nil && !errors.Is(err, io.ErrClosedPipe) {
+			t.Fatalf("Close: %v", err)
+		}
+		_ = inWriter.Close()
+		<-copied
+	}
+	runtime.GC()
+	time.Sleep(20 * time.Millisecond)
+	after := runtime.NumGoroutine()
+	if after > before+8 {
+		t.Fatalf("goroutines leaked: before=%d after=%d", before, after)
+	}
+}
+
+func TestWriteMessageReleasedOnClose(t *testing.T) {
+	reader := newBlockingReader()
+	defer reader.Close()
+	output := newGatedCaptureWriter()
+	client := &Client{
+		reader: newMessageReader(reader),
+		writer: newMessageWriter(output),
+	}
+
+	blockerDone := make(chan error, 1)
+	go func() {
+		blockerDone <- client.writeMessage(context.Background(), rpcMessage{Method: "notifications/blocker"})
+	}()
+	select {
+	case <-output.started:
+	case <-time.After(time.Second):
+		t.Fatal("initial write did not reach the transport")
+	}
+
+	queuedDone := make(chan error, 1)
+	go func() {
+		queuedDone <- client.writeMessage(context.Background(), rpcMessage{Method: "notifications/queued"})
+	}()
+	deadline := time.Now().Add(time.Second)
+	for len(client.writeQueue) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("queued write did not enqueue")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- client.Close()
+	}()
+	select {
+	case <-client.writerStop:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not begin writer shutdown")
+	}
+	output.Release()
+	select {
+	case err := <-closeDone:
+		if err != nil && !errors.Is(err, io.ErrClosedPipe) {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close hung waiting for the writer worker")
+	}
+
+	select {
+	case err := <-queuedDone:
+		if err == nil {
+			t.Fatal("queued write succeeded after Close")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("queued write was not released on Close")
+	}
+	select {
+	case <-blockerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocked write was not released on Close")
+	}
+
+	messages := newMessageReader(bytes.NewReader(output.Bytes()))
+	for {
+		message, err := messages.read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read captured output: %v", err)
+		}
+		if message.Method == "notifications/queued" {
+			t.Fatal("queued request was written after Close")
+		}
+	}
+}
+
+func TestStdioClientPreservesLargeNumericRequestID(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	outReader, outWriter := io.Pipe()
+	client := &Client{
+		reader:  newMessageReader(inReader),
+		writer:  newMessageWriter(outWriter),
+		pending: make(map[int]chan dispatchResult),
+	}
+	defer func() {
+		_ = inWriter.Close()
+		_ = outReader.Close()
+	}()
+	client.ensureReader()
+
+	const rawID = "9007199254740993"
+	if _, err := inWriter.Write([]byte(`{"jsonrpc":"2.0","id":` + rawID + `,"method":"roots/list","params":{}}` + "\n")); err != nil {
+		t.Fatalf("write server request: %v", err)
+	}
+
+	lineDone := make(chan struct {
+		line string
+		err  error
+	}, 1)
+	go func() {
+		line, err := bufio.NewReader(outReader).ReadString('\n')
+		lineDone <- struct {
+			line string
+			err  error
+		}{line: line, err: err}
+	}()
+	select {
+	case got := <-lineDone:
+		if got.err != nil {
+			t.Fatalf("read courtesy response: %v", got.err)
+		}
+		if !strings.Contains(got.line, rawID) {
+			t.Fatalf("serialized courtesy response %q does not preserve id %s", got.line, rawID)
+		}
+		if !strings.Contains(got.line, `"-32601"`) && !strings.Contains(got.line, `-32601`) {
+			t.Fatalf("serialized courtesy response %q missing -32601", got.line)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for courtesy response")
+	}
+}
+
+func TestRPCMessageIDAcceptsExponentForm(t *testing.T) {
+	got, ok := rpcMessageID(json.Number("1e0"))
+	if !ok || got != 1 {
+		t.Fatalf("rpcMessageID(1e0) = %d, %v, want 1, true", got, ok)
+	}
+	got, ok = rpcMessageID(json.Number("2e2"))
+	if !ok || got != 200 {
+		t.Fatalf("rpcMessageID(2e2) = %d, %v, want 200, true", got, ok)
+	}
+	if _, ok := rpcMessageID(json.Number("1.5")); ok {
+		t.Fatal("fractional json.Number should not match")
+	}
+	if rpcIDMatches(json.Number("1e0"), 1) != true {
+		t.Fatal("rpcIDMatches(1e0, 1) = false")
+	}
+}
+
+func TestStdioClientMatchesExponentFormResponseID(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	outReader, outWriter := io.Pipe()
+	client := &Client{
+		reader:  newMessageReader(inReader),
+		writer:  newMessageWriter(outWriter),
+		pending: make(map[int]chan dispatchResult),
+	}
+	defer func() {
+		_ = inWriter.Close()
+		_ = outReader.Close()
+	}()
+	client.ensureReader()
+
+	responses := make(chan dispatchResult, 1)
+	client.dispatchMu.Lock()
+	client.pending[1] = responses
+	client.dispatchMu.Unlock()
+
+	if _, err := inWriter.Write([]byte(`{"jsonrpc":"2.0","id":1e0,"result":{"ok":true}}` + "\n")); err != nil {
+		t.Fatalf("write exponent-id response: %v", err)
+	}
+	select {
+	case res := <-responses:
+		if res.err != nil || len(res.message.Result) == 0 {
+			t.Fatalf("pending 1 not completed by id 1e0: %#v err=%v", res.message, res.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("response id 1e0 did not resolve pending request 1")
+	}
+}
+
+func TestStdioClientCourtesyOverflowIsBounded(t *testing.T) {
+	inReader, inWriter := io.Pipe()
+	outReader, outWriter := io.Pipe()
+	client := &Client{
+		reader:  newMessageReader(inReader),
+		writer:  newMessageWriter(outWriter),
+		pending: make(map[int]chan dispatchResult),
+	}
+	defer func() {
+		_ = inWriter.Close()
+		_ = outReader.Close()
+	}()
+	client.ensureReader()
+
+	responses := make(chan dispatchResult, 1)
+	client.dispatchMu.Lock()
+	client.pending[1] = responses
+	client.dispatchMu.Unlock()
+
+	flood := writeQueueCapacity + courtesyOverflowCap + 64
+	for i := 0; i < flood; i++ {
+		frame := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"roots/list","params":{}}`+"\n", i+100)
+		if _, err := inWriter.Write([]byte(frame)); err != nil {
+			t.Fatalf("write server request %d: %v", i, err)
+		}
+	}
+	if _, err := inWriter.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"ok":true}}` + "\n")); err != nil {
+		t.Fatalf("write pending response: %v", err)
+	}
+	select {
+	case res := <-responses:
+		if res.err != nil {
+			t.Fatalf("pending stalled: %v", res.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("readLoop stalled during courtesy flood")
+	}
+
+	client.writeMu.Lock()
+	n := len(client.courtesyOverflow)
+	client.writeMu.Unlock()
+	if n > courtesyOverflowCap {
+		t.Fatalf("courtesyOverflow = %d, want <= %d", n, courtesyOverflowCap)
+	}
+}
+
+func TestWriterLoopCloseBeforeScheduleDoesNotHang(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		client := &Client{
+			writer: newMessageWriter(io.Discard),
+		}
+		if err := client.startWriter(); err != nil {
+			t.Fatalf("startWriter: %v", err)
+		}
+		done := make(chan error, 1)
+		go func() {
+			done <- client.Close()
+		}()
+		select {
+		case err := <-done:
+			if err != nil && !errors.Is(err, io.ErrClosedPipe) {
+				t.Fatalf("Close: %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("Close hung: writeLoop ranged over a nil queue")
+		}
 	}
 }

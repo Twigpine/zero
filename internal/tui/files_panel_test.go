@@ -161,38 +161,16 @@ func TestSidebarFileSelectablesMatchRenderedRows(t *testing.T) {
 	}
 }
 
-// TestFileRowClickSelectsThenOpens: the first sidebar click on a file selects
-// it (tint + scroll state, no view swap); the second click on the same file
-// opens the drill-in; clicking another file while the view is open switches it.
-func TestFileRowClickSelectsThenOpens(t *testing.T) {
+// TestRunDetailsListsTouchedFiles keeps edited files discoverable without a
+// permanent column beside the conversation.
+func TestRunDetailsListsTouchedFiles(t *testing.T) {
 	m := filesPanelTestModel()
-	width := sidebarWidth(m.width)
-	hits := m.sidebarFileSelectables(width)
-	if len(hits) < 2 {
-		t.Fatal("expected two clickable FILES rows")
-	}
-	x := m.chatColumnWidth() + 3
-	click := func(hit fileHit) tea.MouseMsg { return testMouseClick(tea.MouseLeft, x, hit.lineOffset) }
-
-	m1, _, handled := m.handleTranscriptSelectionMouse(click(hits[0]))
-	if !handled {
-		t.Fatal("FILES row click should be handled")
-	}
-	if m1.selectedFile != hits[0].path || m1.fileView.active {
-		t.Fatalf("first click should select (not open): selected=%q active=%v", m1.selectedFile, m1.fileView.active)
-	}
-
-	m2, _, _ := m1.handleTranscriptSelectionMouse(click(hits[0]))
-	if !m2.fileView.active || m2.fileView.path != hits[0].path {
-		t.Fatalf("second click should open the file view: %+v", m2.fileView)
-	}
-
-	m3, _, _ := m2.handleTranscriptSelectionMouse(click(hits[1]))
-	if !m3.fileView.active || m3.fileView.path != hits[1].path {
-		t.Fatalf("clicking another file with the view open should switch it: %+v", m3.fileView)
-	}
-	if m3.selectedFile != hits[1].path {
-		t.Errorf("switching the view should move the selection too, got %q", m3.selectedFile)
+	m.runDetailsOpen = true
+	plain := plainRender(t, m.runDetailsOverlay(m.width))
+	for _, file := range m.touchedFiles() {
+		if !strings.Contains(plain, file.path) {
+			t.Errorf("run details missing touched file %q:\n%s", file.path, plain)
+		}
 	}
 }
 

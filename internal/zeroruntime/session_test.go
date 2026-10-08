@@ -40,6 +40,7 @@ func TestDefaultTurnSessionStreamForwardsVerbatim(t *testing.T) {
 	request := CompletionRequest{
 		Messages:        []Message{{Role: MessageRoleUser, Content: "hi"}},
 		ReasoningEffort: "high",
+		ServiceTier:     "priority",
 		PromptCacheKey:  "session-123",
 	}
 	stream, err := session.Stream(context.Background(), request)
@@ -60,6 +61,7 @@ func TestDefaultTurnSessionStreamForwardsVerbatim(t *testing.T) {
 	recorded := provider.requests[0]
 	if recorded.PromptCacheKey != request.PromptCacheKey ||
 		recorded.ReasoningEffort != request.ReasoningEffort ||
+		recorded.ServiceTier != request.ServiceTier ||
 		len(recorded.Messages) != 1 || recorded.Messages[0].Content != "hi" {
 		t.Fatalf("request not forwarded verbatim: %#v", recorded)
 	}

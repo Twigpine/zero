@@ -65,6 +65,7 @@ type Options struct {
 	// enabled; the ZERO_DISABLE_PROMPT_CACHE_KEY env kill switch still applies
 	// on top for any endpoint.
 	DisablePromptCacheKey bool
+	SessionHeader         string
 }
 
 // Provider streams completions from an OpenAI-compatible chat completions API.
@@ -85,6 +86,7 @@ type Provider struct {
 	parseThinkTags        bool
 	setRequestExtra       func(*http.Request)
 	disablePromptCacheKey bool
+	sessionHeader         providerio.SessionHeader
 }
 
 // New creates an OpenAI-compatible provider.
@@ -140,6 +142,7 @@ func New(options Options) (*Provider, error) {
 		parseThinkTags:        options.ParseThinkTags,
 		setRequestExtra:       options.SetRequestExtra,
 		disablePromptCacheKey: options.DisablePromptCacheKey,
+		sessionHeader:         providerio.NewSessionHeader(options.SessionHeader),
 	}, nil
 }
 
@@ -156,13 +159,13 @@ func (provider *Provider) StreamCompletion(
 	events := make(chan zeroruntime.StreamEvent, 16)
 	go func() {
 		defer close(events)
-		provider.stream(ctx, body, events)
+		provider.stream(ctx, body, request.PromptCacheKey, events)
 	}()
 
 	return events, nil
 }
 
-func (provider *Provider) stream(ctx context.Context, body []byte, events chan<- zeroruntime.StreamEvent) {
+func (provider *Provider) stream(ctx context.Context, body []byte, sessionID string, events chan<- zeroruntime.StreamEvent) {
 	endpoint := provider.endpoint
 
 	// streamCtx lets the idle watchdog abort an in-flight body read by cancelling
@@ -186,6 +189,7 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 		},
 		provider.oauthResolver,
 		func(request *http.Request) {
+			provider.sessionHeader.Apply(request, sessionID)
 			request.Header.Set("Content-Type", "application/json")
 			if provider.userAgent != "" {
 				request.Header.Set("User-Agent", provider.userAgent)
@@ -359,6 +363,7 @@ func (provider *Provider) emitChunk(
 				PromptTokens:      chunk.Usage.PromptTokens,
 				CompletionTokens:  chunk.Usage.CompletionTokens,
 				CachedInputTokens: chunk.Usage.PromptTokensDetails.CachedTokens,
+				CacheWriteTokens:  chunk.Usage.PromptTokensDetails.CacheWriteTokens,
 				ReasoningTokens:   chunk.Usage.CompletionTokensDetails.ReasoningTokens,
 			},
 		})
@@ -476,6 +481,9 @@ func (provider *Provider) openAIRequest(request zeroruntime.CompletionRequest) c
 	if effort := openAIReasoningEffort(request.ReasoningEffort); effort != "" {
 		mapped.ReasoningEffort = effort
 	}
+	if tier := openAIServiceTier(request.ServiceTier); tier != "" {
+		mapped.ServiceTier = tier
+	}
 	// prompt_cache_key is a documented OpenAI parameter for server-side prefix
 	// cache routing. Official OpenAI accepts it; many openai-compatible
 	// gateways (NVIDIA NIM, strict local proxies) reject unknown fields with a
@@ -492,12 +500,27 @@ func (provider *Provider) openAIRequest(request zeroruntime.CompletionRequest) c
 				Function: toolFunction{
 					Name:        tool.Name,
 					Description: tool.Description,
-					Parameters:  tool.Parameters,
+					Parameters:  normalizeToolParameters(tool.Parameters),
 				},
 			})
 		}
 	}
 	return mapped
+}
+
+// normalizeToolParameters keeps schemas accepted by strict OpenAI-compatible
+// servers such as LM Studio. No-argument tools still need an object-valued
+// parameters.properties field instead of an omitted field.
+func normalizeToolParameters(parameters map[string]any) map[string]any {
+	normalized := make(map[string]any, len(parameters)+1)
+	for key, value := range parameters {
+		normalized[key] = value
+	}
+	properties, ok := normalized["properties"].(map[string]any)
+	if !ok || properties == nil {
+		normalized["properties"] = map[string]any{}
+	}
+	return normalized
 }
 
 // promptCacheKeyDisabled reports whether the ZERO_DISABLE_PROMPT_CACHE_KEY
@@ -514,7 +537,16 @@ func promptCacheKeyDisabled() bool {
 // is dropped rather than risking a 400 on an unrecognized enum.
 func openAIReasoningEffort(requested string) string {
 	switch strings.ToLower(strings.TrimSpace(requested)) {
-	case "minimal", "low", "medium", "high":
+	case "minimal", "low", "medium", "high", "xhigh", "max", "ultra":
+		return strings.ToLower(strings.TrimSpace(requested))
+	default:
+		return ""
+	}
+}
+
+func openAIServiceTier(requested string) string {
+	switch strings.ToLower(strings.TrimSpace(requested)) {
+	case "priority", "flex":
 		return strings.ToLower(strings.TrimSpace(requested))
 	default:
 		return ""

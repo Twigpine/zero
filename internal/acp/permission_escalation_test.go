@@ -56,10 +56,11 @@ func TestACPPrefixOptionsStaySilentWithoutEscalation(t *testing.T) {
 // what was offered, so decorating it would fail every prefix approval closed.
 func TestACPDisclosureDoesNotDisturbTheOptionIDRoundTrip(t *testing.T) {
 	request := escalationRequest(true)
-	for _, option := range buildPermissionOptions(request) {
+	options := buildPermissionOptions(request)
+	for _, option := range options {
 		decision := decisionFromOutcome(
 			RequestPermissionOutcome{Outcome: OutcomeSelected, OptionID: option.OptionID},
-			request.AvailableDecisions,
+			options,
 		)
 		if string(decision.Action) != option.OptionID {
 			t.Errorf("option id %q round-tripped to %q (%s)", option.OptionID, decision.Action, decision.Reason)

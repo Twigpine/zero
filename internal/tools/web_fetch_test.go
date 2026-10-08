@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Gitlawb/zero/internal/proxydial"
 	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
 )
 
@@ -325,15 +326,26 @@ func TestWebFetchToolConfiguresDialTimeSafetyForDefaultTransport(t *testing.T) {
 	}
 
 	client := tool.clientForRun()
-	transport, ok := client.Transport.(*http.Transport)
+	// The round tripper is the route-recording wrapper, not the bare transport:
+	// it is what tells the dialer which dial is the one to the proxy the
+	// transport picked for a given request. The guarded transport it wraps
+	// stays reachable, and is what the rest of this test inspects.
+	transport, ok := client.Transport.(*proxydial.Transport)
 	if !ok {
-		t.Fatalf("client transport = %T, want *http.Transport", client.Transport)
+		t.Fatalf("client transport = %T, want *proxydial.Transport", client.Transport)
 	}
 	if transport.DialContext == nil {
 		t.Fatal("expected web_fetch transport to install a safe DialContext")
 	}
-	if transport.Proxy != nil {
-		t.Fatal("expected web_fetch transport to disable proxy resolution")
+	// REVERSED ON PURPOSE. The guarded fetch used to pin Proxy to nil as part of
+	// the SSRF hardening, and this assertion held it there. #569 is what that
+	// cost: on a machine that reaches the network only through a configured
+	// forward proxy, every fetch failed outright. The proxy is honoured now, and
+	// the wrapper hands the dialer the route chosen for each request so the one
+	// dial it lets past the guard is the one to that proxy. The target is still
+	// validated before the request, which the tests below pin.
+	if transport.Proxy == nil {
+		t.Fatal("expected web_fetch transport to honour the environment proxy; a machine behind a forward proxy cannot fetch at all without it (#569)")
 	}
 }
 

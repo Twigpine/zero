@@ -29,6 +29,8 @@ type mcpWritableConfig struct {
 	serverRaw map[string]json.RawMessage
 }
 
+var lockMCPConfigFile = config.LockFile
+
 // projectMCPConfigExists reports whether the workspace's project ./.zero/config.json
 // declares any MCP servers, so the trust notice fires only when project MCP config was
 // actually skipped (mirroring projectHooksFileExists / projectPluginsDirExists). A
@@ -50,7 +52,7 @@ func projectMCPConfigExists(workspaceRoot string) bool {
 	return len(fc.MCP.Servers) > 0
 }
 
-func runMCPAdd(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+func runMCPAdd(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) (exitCode int) {
 	options, help, err := parseMCPAddArgs(args)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
@@ -66,6 +68,26 @@ func runMCPAdd(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) 
 	if err != nil {
 		return writeAppError(stderr, "failed to resolve user config: "+err.Error(), exitCrash)
 	}
+	// This edits the same user config document the config package mutates, with
+	// the same read-modify-write + rename shape, so it takes the same
+	// cross-process lock. Without it, an MCP config edit racing a provider or
+	// preference write would silently drop whichever landed first (issue #832).
+	unlock, err := lockMCPConfigFile(configPath)
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	released := false
+	defer func() {
+		if released {
+			return
+		}
+		// A failed release leaves the lock held for the rest of the process, so
+		// exiting success here would claim a state the next config write cannot
+		// reproduce. It must not mask a failure this command already reported.
+		if releaseErr := unlock(); releaseErr != nil && exitCode == exitSuccess {
+			exitCode = writeAppError(stderr, redaction.ErrorMessage(releaseErr, redaction.Options{}), exitCrash)
+		}
+	}()
 	cfg, err := readMCPWritableConfig(configPath)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
@@ -80,6 +102,10 @@ func runMCPAdd(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) 
 	if err := writeMCPWritableConfig(configPath, cfg); err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
+	if err := unlock(); err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	released = true
 
 	if options.json {
 		payload := struct {
@@ -109,7 +135,7 @@ func runMCPAdd(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) 
 	return exitSuccess
 }
 
-func runMCPRemove(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+func runMCPRemove(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) (exitCode int) {
 	options, positional, help, err := parseMCPConfigPositionalCommand(args, "remove")
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
@@ -132,6 +158,26 @@ func runMCPRemove(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	if err != nil {
 		return writeAppError(stderr, "failed to resolve user config: "+err.Error(), exitCrash)
 	}
+	// This edits the same user config document the config package mutates, with
+	// the same read-modify-write + rename shape, so it takes the same
+	// cross-process lock. Without it, an MCP config edit racing a provider or
+	// preference write would silently drop whichever landed first (issue #832).
+	unlock, err := lockMCPConfigFile(configPath)
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	released := false
+	defer func() {
+		if released {
+			return
+		}
+		// A failed release leaves the lock held for the rest of the process, so
+		// exiting success here would claim a state the next config write cannot
+		// reproduce. It must not mask a failure this command already reported.
+		if releaseErr := unlock(); releaseErr != nil && exitCode == exitSuccess {
+			exitCode = writeAppError(stderr, redaction.ErrorMessage(releaseErr, redaction.Options{}), exitCrash)
+		}
+	}()
 	cfg, err := readMCPWritableConfig(configPath)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
@@ -145,6 +191,10 @@ func runMCPRemove(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 		}
 	}
+	if err := unlock(); err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	released = true
 
 	if options.json {
 		payload := struct {
@@ -167,7 +217,7 @@ func runMCPRemove(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	return exitSuccess
 }
 
-func runMCPToggle(args []string, stdout io.Writer, stderr io.Writer, deps appDeps, disabled bool) int {
+func runMCPToggle(args []string, stdout io.Writer, stderr io.Writer, deps appDeps, disabled bool) (exitCode int) {
 	commandName := "enable"
 	if disabled {
 		commandName = "disable"
@@ -194,6 +244,26 @@ func runMCPToggle(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	if err != nil {
 		return writeAppError(stderr, "failed to resolve user config: "+err.Error(), exitCrash)
 	}
+	// This edits the same user config document the config package mutates, with
+	// the same read-modify-write + rename shape, so it takes the same
+	// cross-process lock. Without it, an MCP config edit racing a provider or
+	// preference write would silently drop whichever landed first (issue #832).
+	unlock, err := lockMCPConfigFile(configPath)
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	released := false
+	defer func() {
+		if released {
+			return
+		}
+		// A failed release leaves the lock held for the rest of the process, so
+		// exiting success here would claim a state the next config write cannot
+		// reproduce. It must not mask a failure this command already reported.
+		if releaseErr := unlock(); releaseErr != nil && exitCode == exitSuccess {
+			exitCode = writeAppError(stderr, redaction.ErrorMessage(releaseErr, redaction.Options{}), exitCrash)
+		}
+	}()
 	cfg, err := readMCPWritableConfig(configPath)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
@@ -210,6 +280,10 @@ func runMCPToggle(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 		}
 	}
+	if err := unlock(); err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	released = true
 
 	if options.json {
 		payload := struct {

@@ -2,6 +2,7 @@ package update
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,15 @@ import (
 
 	"github.com/Gitlawb/zero/internal/release"
 )
+
+// ErrTargetPossiblyTampered reports that an executable path may hold content
+// this updater could not verify, because a promotion failed and the original
+// could not be restored over it. Only the Windows promotion path produces it
+// today (see replace_windows.go for why that platform has the gap and the POSIX
+// descriptor-bound path does not), but it is declared here so callers on every
+// platform can test for it without build tags — the helper-refresh loop below
+// must fail the apply on it rather than downgrade it to a warning.
+var ErrTargetPossiblyTampered = errors.New("target executable path may hold unverified content after a failed update")
 
 // DefaultDownloadTimeout bounds the archive/checksum download phase of a
 // standalone Apply, separately from Options.Timeout (which only covers the
@@ -36,6 +46,7 @@ type ApplyResult struct {
 var (
 	windowsOptionalBinaries = []string{"zero-windows-command-runner.exe", "zero-windows-sandbox-setup.exe"}
 	linuxOptionalBinaries   = []string{"zero-linux-sandbox", "zero-seccomp"}
+	currentExecutable       = os.Executable
 )
 
 // Apply checks for an update and, if one is available, installs it: via
@@ -47,26 +58,36 @@ func Apply(ctx context.Context, options Options) (ApplyResult, error) {
 		return ApplyResult{}, err
 	}
 
-	executablePath, err := os.Executable()
+	executablePath, err := currentExecutable()
 	if err != nil {
 		return ApplyResult{}, fmt.Errorf("resolve current executable: %w", err)
 	}
 	if resolved, err := filepath.EvalSymlinks(executablePath); err == nil {
 		executablePath = resolved
 	}
-	// Best-effort: remove a "<binary>.old" left behind by a previous Windows
-	// replaceBinary call now that enough time (a whole separate invocation)
-	// has passed for the old process to have released the file. Runs
-	// regardless of whether an update is available, so it isn't stuck waiting
-	// on a future upgrade that may never come.
-	CleanupStaleBinary(executablePath)
-
+	method := DetectInstallMethod(executablePath)
+	// Only the standalone path rewrites the binary in place, so only it needs the
+	// recovery state. npm and Homebrew hand the work to the package manager.
+	if method == InstallMethodStandalone {
+		if err := preflightRecoveryState(executablePath); err != nil {
+			return ApplyResult{}, err
+		}
+	}
 	if !checkResult.UpdateAvailable {
 		return ApplyResult{Result: checkResult, Message: "already up to date"}, nil
 	}
 
-	method := DetectInstallMethod(executablePath)
 	switch method {
+	case InstallMethodHomebrew:
+		// Refused rather than performed. Running `brew upgrade` for the user would
+		// touch a package manager they own, and writing the binary directly is
+		// worse: the keg is what Homebrew's own records describe, so a self-update
+		// leaves brew reporting a version that is no longer installed, and the next
+		// `brew upgrade` or `brew reinstall` silently reverts it.
+		return ApplyResult{}, fmt.Errorf(
+			"this zero was installed with Homebrew (%s); run `brew upgrade zero` instead, so Homebrew's records match the binary on disk",
+			executablePath,
+		)
 	case InstallMethodNpm:
 		if err := applyNpmUpdate(ctx); err != nil {
 			return ApplyResult{}, err
@@ -179,10 +200,6 @@ func applyStandaloneUpdate(ctx context.Context, result Result, executablePath st
 	}
 
 	targetDir := filepath.Dir(executablePath)
-	if err := installBinary(newBinaryPath, executablePath); err != nil {
-		return nil, err
-	}
-
 	var warnings []string
 	for _, name := range optionalBinaries {
 		source, err := findByBasename(extractDir, name)
@@ -194,8 +211,28 @@ func applyStandaloneUpdate(ctx context.Context, result Result, executablePath st
 			continue // only refresh helpers this install already has
 		}
 		if err := installBinary(source, destPath); err != nil {
+			// An optional helper that simply fails to refresh is a warning: the
+			// sandbox degrades gracefully without a newer one, and aborting the
+			// whole update over it would be worse than the stale helper.
+			//
+			// Possible tampering is not that. It means this helper's path may now
+			// hold content the updater could not verify, and helpers are resolved
+			// from the install directory and EXECUTED by the sandbox runner — so
+			// reporting Applied: true and exiting 0 would hand the operator a
+			// success while a sibling executable is suspect. Fail the apply and
+			// keep errors.Is intact, exactly as the main binary does.
+			if errors.Is(err, ErrTargetPossiblyTampered) {
+				return nil, fmt.Errorf("update helper %s: %w", name, err)
+			}
 			warnings = append(warnings, fmt.Sprintf("failed to update helper %s: %v", name, err))
 		}
+	}
+	// Refresh helpers before the main executable. If a helper path may have
+	// been tampered with, the running main binary must remain on the old version
+	// so the next invocation still sees this release as available and retries
+	// the helper instead of returning "already up to date".
+	if err := installBinary(newBinaryPath, executablePath); err != nil {
+		return nil, err
 	}
 
 	return warnings, nil
@@ -218,23 +255,79 @@ func verifyArchiveChecksum(checksumPath string, expectedArchiveName string) erro
 	return nil
 }
 
-// installBinary stages sourcePath next to targetPath (same directory, so the
-// final rename is atomic/same-filesystem) and then swaps it into place.
+// installBinary stages sourcePath next to targetPath (same filesystem, so the
+// final rename is atomic) and then swaps it into place.
 func installBinary(sourcePath string, targetPath string) error {
-	stagedPath := targetPath + ".new"
-	if err := copyFile(sourcePath, stagedPath); err != nil {
+	staged, err := stageBinary(sourcePath, targetPath)
+	if err != nil {
 		return fmt.Errorf("stage %s: %w", filepath.Base(targetPath), err)
 	}
-	defer func() {
-		_ = os.Remove(stagedPath)
-	}()
-	if err := replaceBinary(targetPath, stagedPath); err != nil {
+	// Registered before the promotion attempt and reached on every failure path,
+	// including a mid-write copy error: each attempt now stages under a fresh
+	// random name, so a leaked partial file is never reused by the next attempt
+	// and would otherwise accumulate release-sized garbage in the install
+	// directory. Unverifiable leftovers from a hard crash are preserved rather
+	// than removed based only on their public filename shape.
+	defer staged.discard()
+	if err := staged.promote(targetPath); err != nil {
 		return fmt.Errorf("install %s: %w", filepath.Base(targetPath), err)
 	}
 	return nil
 }
 
-func copyFile(sourcePath string, destPath string) (retErr error) {
+// stagedBinary is a freshly created staging object holding the verified release
+// bytes, together with the handle it was created through. Promotion is bound to
+// that object rather than to the staging PATHNAME: under the threat model of
+// #742 a lower-privileged principal that can write in the installation
+// directory may replace a sibling entry, so re-resolving the staging path at
+// swap time would let it substitute its own file into the executable path after
+// the verified bytes were written. Each platform closes that handoff with its
+// own primitive — see the promote implementations.
+type stagedBinary struct {
+	file *os.File
+	path string
+	// dir is a private staging directory that must be removed with the file
+	// (POSIX). Empty on Windows, which binds the swap to the handle instead.
+	dir string
+	// dirHandle is an open descriptor on dir (POSIX only), bound to that
+	// directory's inode rather than its current pathname. promote renames the
+	// staged file through it (see stage_other.go) so a principal who can write
+	// in the installation directory cannot redirect the final rename by
+	// renaming dir aside and recreating a look-alike directory at the same
+	// path between the identity check and the rename — a pathname lookup at
+	// that point would resolve through the impostor instead. nil on Windows.
+	dirHandle *os.File
+	// parentHandle is the descriptor-bound parent of dir (POSIX only).
+	parentHandle *os.File
+	// promoted records that path now IS the installed binary, so discard must
+	// not delete it.
+	promoted bool
+}
+
+// stageBinary creates the staging object for targetPath and writes sourcePath's
+// bytes into it through the handle it was created with, leaving that handle open
+// for promote.
+//
+// It is a package var so a test can force a staging failure on every platform:
+// the staging location is created exclusively under a name that cannot be known
+// in advance, which is exactly what stops a test (like an attacker) from
+// occupying it from outside.
+var stageBinary = func(sourcePath string, targetPath string) (*stagedBinary, error) {
+	staged, err := createStagedBinary(targetPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := staged.copyFrom(sourcePath); err != nil {
+		staged.discard()
+		return nil, err
+	}
+	return staged, nil
+}
+
+// copyFrom writes sourcePath into the staged file through the handle
+// createStagedBinary opened. It never reopens by pathname, so the bytes cannot
+// land anywhere other than the object that was exclusively created.
+func (staged *stagedBinary) copyFrom(sourcePath string) error {
 	source, err := os.Open(sourcePath)
 	if err != nil {
 		return err
@@ -242,17 +335,28 @@ func copyFile(sourcePath string, destPath string) (retErr error) {
 	defer func() {
 		_ = source.Close()
 	}()
-	dest, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
-	if err != nil {
+	if _, err := io.Copy(staged.file, source); err != nil {
 		return err
 	}
-	defer func() {
-		if closeErr := dest.Close(); closeErr != nil && retErr == nil {
-			retErr = closeErr
-		}
-	}()
-	_, retErr = io.Copy(dest, source)
-	return retErr
+	return staged.file.Sync()
+}
+
+// discard closes the handle(s) and removes what it created, unless the object
+// was already promoted into the executable path.
+func (staged *stagedBinary) discard() {
+	if staged == nil {
+		return
+	}
+	// Removal is bound to the staged object before the handle is released
+	// wherever the platform allows it (Windows, via delete-on-close). Once the
+	// handle is gone the staging pathname can be re-resolved, and under the
+	// writable-install-directory threat model that entry may by then name a file
+	// this updater never created.
+	staged.discardOpenObject()
+	if staged.file != nil {
+		_ = staged.file.Close()
+	}
+	staged.discardPaths()
 }
 
 func downloadFile(ctx context.Context, url string, destPath string) error {

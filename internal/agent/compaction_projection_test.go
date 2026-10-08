@@ -73,6 +73,7 @@ func TestProjectCompactionInputRetainsAskUserExchangeAndSemanticArguments(t *tes
 		{Role: zeroruntime.MessageRoleTool, ToolCallID: "ask", Content: "Which database should remain?: Postgres only; do not touch MySQL."},
 		{Role: zeroruntime.MessageRoleAssistant, ToolCalls: []zeroruntime.ToolCall{
 			{ID: "patch", Name: "apply_patch", Arguments: `{"patch":"*** Begin Patch\n*** Update File: internal/db.go\n*** End Patch"}`},
+			{ID: "raw-patch", Name: "apply_patch", Freeform: true, Arguments: "*** Begin Patch\n*** Update File: internal/api.go\n*** Add File: internal/config.go\n*** End Patch\n"},
 			{ID: "fetch", Name: "web_fetch", Arguments: `{"url":"https://example.com/spec"}`},
 			{ID: "task", Name: "task", Arguments: `{"prompt":"Inspect the Windows implementation"}`},
 		}},
@@ -80,7 +81,7 @@ func TestProjectCompactionInputRetainsAskUserExchangeAndSemanticArguments(t *tes
 	}
 
 	content := projectCompactionInput(messages).messages[0].Content
-	for _, want := range []string{"Which database should remain?", "Postgres only; do not touch MySQL", "internal/db.go", "https://example.com/spec", "Inspect the Windows implementation"} {
+	for _, want := range []string{"Which database should remain?", "Postgres only; do not touch MySQL", "internal/db.go", "internal/api.go", "internal/config.go", "https://example.com/spec", "Inspect the Windows implementation"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("projection missing %q: %q", want, content)
 		}

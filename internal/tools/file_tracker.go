@@ -1,11 +1,13 @@
 package tools
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -165,6 +167,241 @@ func (tracker *FileTracker) RecordSeenBytes(absPath string, start, end, total in
 	tracker.seen[absPath] = observation
 }
 
+// RecordEdit re-baselines absPath after an edit THIS SESSION made, keeping the
+// reads the edit did not disturb.
+//
+// WHY THIS EXISTS RATHER THAN Record. RecordHash drops every recorded range when
+// the content hash moves, which is right for a change we did not make: we cannot
+// say which lines still hold what was read. After our own edit we can say
+// exactly. The content before the first changed line is byte-identical and sits
+// at the same line numbers; the content after the last changed line is
+// byte-identical and has moved by a known delta. Only the lines the edit
+// actually spans stop describing the file.
+//
+// Dropping the lot instead cost a real run. A 371-line file was read in three
+// pieces (40-45, 85-260, 260-371) and one two-line edit at line 92 erased the
+// credit for all three: the next six edits — into regions that had been read,
+// that the edit did not touch, in a file whose line count had not changed — were
+// each refused as content "not read in this session", and the repeated-failure
+// guard halted the run. The error even told the model to re-read, which would
+// have been undone by its next successful edit. The guard is right that a model
+// must not edit what it has not seen; it was wrong about what it had seen.
+func (tracker *FileTracker) RecordEdit(absPath string, before, after []byte, info os.FileInfo) {
+	if tracker == nil {
+		return
+	}
+	firstLine, lastLineBefore, lineDelta := changedLineSpan(string(before), string(after))
+	firstByte, lastByteBefore, byteDelta := changedByteSpan(before, after)
+
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+
+	version := FileVersion{Hash: HashContent(after)}
+	if info != nil {
+		version.Size = info.Size()
+		version.MTime = info.ModTime()
+	}
+	tracker.versions[absPath] = version
+
+	observation, tracked := tracker.seen[absPath]
+	if !tracked {
+		return
+	}
+	// The DERIVED answer, not the raw flag. Branching on observation.whole here
+	// sent a file read whole in two chunks — seenWhole true, flag false — into
+	// the split path below, where it stopped being seen whole after one edit.
+	if seenWhole(observation) {
+		// Still whole: every line was read, and an edit of ours does not make
+		// that untrue. Re-baseline as a single covering observation so the
+		// answer survives regardless of how the ranges shifted.
+		observation.whole = true
+		observation.ranges = nil
+		observation.byteRanges = nil
+		observation.total = countLines(after)
+		observation.totalBytes = len(after)
+		tracker.seen[absPath] = observation
+		return
+	}
+
+	// SPLIT AROUND THE EDIT, never drop the whole range. A read almost always
+	// SPANS the line it is about to edit — that is why it was read — so dropping
+	// on overlap would have thrown away 85-260 to change line 92 and left the
+	// original defect in place under a longer implementation.
+	kept := make([]lineRange, 0, len(observation.ranges)+1)
+	for _, seen := range observation.ranges {
+		if end := min(seen.end, firstLine-1); seen.start <= end {
+			kept = append(kept, lineRange{start: seen.start, end: end})
+		}
+		if start := max(seen.start, lastLineBefore+1); start <= seen.end {
+			kept = append(kept, lineRange{start: start + lineDelta, end: seen.end + lineDelta})
+		}
+	}
+	observation.ranges = kept
+	if observation.total != 0 {
+		observation.total = countLines(after)
+	}
+
+	// Same split, on half-open byte intervals.
+	keptBytes := make([]lineRange, 0, len(observation.byteRanges)+1)
+	for _, seen := range observation.byteRanges {
+		if end := min(seen.end, firstByte); seen.start < end {
+			keptBytes = append(keptBytes, lineRange{start: seen.start, end: end})
+		}
+		if start := max(seen.start, lastByteBefore); start < seen.end {
+			keptBytes = append(keptBytes, lineRange{start: start + byteDelta, end: seen.end + byteDelta})
+		}
+	}
+	observation.byteRanges = keptBytes
+	if observation.totalBytes != 0 {
+		observation.totalBytes = len(after)
+	}
+	tracker.seen[absPath] = observation
+}
+
+// changedLineSpan reports the 1-based first line that differs between before and
+// after, the 1-based last line of BEFORE that differs, and the line-count delta.
+//
+// Computed from a common prefix and suffix rather than from the caller's
+// replacement spans: one edit_file call with replace_all can rewrite many
+// scattered occurrences, and the span between the outermost two is the only
+// region that is honestly unknown afterwards.
+// The span is derived by scanning BYTES, not by materialising lines.
+//
+// The first version split both versions into []string. That allocates one string
+// header per line for each version — work that scales with the SIZE OF THE FILE
+// rather than the size of the edit, and it ran before RecordEdit had even checked
+// whether there was a tracked observation to update. @jatmn measured 32,036,640
+// bytes for two 2 MB versions of a million short lines, and extrapolated roughly
+// 1.6 GB of headers for a 100 MB file before counting the content and hashes
+// already live alongside them.
+//
+// That mattered beyond memory pressure: edit_file writes the updated bytes BEFORE
+// calling RecordEdit, so an out-of-memory kill lands after the user's file has
+// changed and before the tracker baseline catches up — the file and the record of
+// it disagree, and nothing says so.
+//
+// Bytes give the same answer in bounded memory. Two identical byte prefixes share
+// every line that ends inside them, so counting newlines in the common prefix
+// counts the unchanged leading lines directly.
+func changedLineSpan(before, after string) (firstChanged, lastChangedBefore, delta int) {
+	beforeCount := countTrackedLines(before)
+	afterCount := countTrackedLines(after)
+
+	prefix := commonLinePrefix(before, after)
+	// Never more leading lines than the shorter version has. The byte scan can
+	// otherwise claim a line that only one side possesses — two empty versions
+	// share a whole "line" that neither actually contains.
+	prefix = min(prefix, min(beforeCount, afterCount))
+	// The suffix may not reach back past the lines the prefix already claimed,
+	// exactly as the line-array loop bounded itself.
+	suffix := commonLineSuffix(before, after, min(beforeCount-prefix, afterCount-prefix))
+	return prefix + 1, beforeCount - suffix, afterCount - beforeCount
+}
+
+// commonLinePrefix counts the leading lines that are byte-identical in both.
+func commonLinePrefix(before, after string) int {
+	limit := min(len(before), len(after))
+	at := 0
+	for at < limit && before[at] == after[at] {
+		at++
+	}
+	lines := strings.Count(before[:at], "\n")
+	// A LINE THAT ENDS EXACTLY WHERE THE SCAN STOPPED IS STILL SHARED. Scanning
+	// halts where the bytes diverge OR where the shorter version runs out, and in
+	// the second case the line containing that point can be complete and equal on
+	// both sides — "a\nb" against "a\nb\nc" diverges only because the first ended,
+	// and "b" is a whole matching line in each.
+	if lineBoundary(before, at) && lineBoundary(after, at) {
+		lines++
+	}
+	return lines
+}
+
+// commonLineSuffix counts the trailing lines that are byte-identical in both, up
+// to the ceiling the prefix leaves.
+func commonLineSuffix(before, after string, ceiling int) int {
+	if ceiling <= 0 {
+		return 0
+	}
+	limit := min(len(before), len(after))
+	back := 0
+	for back < limit && before[len(before)-1-back] == after[len(after)-1-back] {
+		back++
+	}
+	beforeAt, afterAt := len(before)-back, len(after)-back
+	// Each newline inside the shared tail closes a line that lies wholly within
+	// it. The line the tail STARTS in is shared only when the tail begins on a
+	// line boundary in both versions — otherwise its opening bytes differ and it
+	// is a changed line that merely ends the same way.
+	lines := strings.Count(before[beforeAt:], "\n")
+	if lineStart(before, beforeAt) && lineStart(after, afterAt) {
+		lines++
+	}
+	return min(lines, ceiling)
+}
+
+// lineBoundary reports whether at is the end of a line: the end of the text, or
+// the position of the newline that closes it.
+func lineBoundary(text string, at int) bool { return at == len(text) || text[at] == '\n' }
+
+// lineStart reports whether at begins a line.
+func lineStart(text string, at int) bool { return at == 0 || text[at-1] == '\n' }
+
+// changedByteSpan is changedLineSpan in bytes: the first differing offset, the
+// end offset of the changed region in BEFORE, and the size delta.
+func changedByteSpan(before, after []byte) (firstChanged, lastChangedBefore, delta int) {
+	prefix := 0
+	for prefix < len(before) && prefix < len(after) && before[prefix] == after[prefix] {
+		prefix++
+	}
+	suffix := 0
+	for suffix < len(before)-prefix && suffix < len(after)-prefix &&
+		before[len(before)-1-suffix] == after[len(after)-1-suffix] {
+		suffix++
+	}
+	return prefix, len(before) - suffix, len(after) - len(before)
+}
+
+// countLines reports the line count a READER would give the content, which is
+// what observation.total is compared against.
+//
+// The trailing newline does not open a line. strings.Split leaves an empty final
+// element for "a\nb\nc\n" and so counted 4 where a read reports 3 — and because
+// SeenWhole asks whether the ranges cover 1..total, an inflated total made full
+// coverage unreachable for the very file that had just been read in full. Almost
+// every text file ends in a newline, so this was the common case rather than an
+// edge one.
+//
+// countTrackedLines keeps the OTHER rule deliberately: the span arithmetic has to
+// match the indices strings.Split produced, so it counts the empty element after
+// a trailing newline where this one does not. Two rules, two names, both stated —
+// they were one function with an if, and that is how they were confused.
+func countLines(content []byte) int {
+	// Counted, not split. This only ever needed a number, and building a slice of
+	// every line to take its length was the third full per-line allocation in the
+	// same call path.
+	if len(content) == 0 {
+		return 0
+	}
+	lines := bytes.Count(content, []byte{'\n'})
+	if content[len(content)-1] != '\n' {
+		lines++
+	}
+	return lines
+}
+
+// countTrackedLines is countLines' rule for the string form: the number of
+// elements strings.Split would produce, which counts the empty element after a
+// trailing newline. The two differ deliberately — observation.total compares
+// against what a READER reports, while the span arithmetic has to match the
+// indices the split produced.
+func countTrackedLines(text string) int {
+	if text == "" {
+		return 0
+	}
+	return strings.Count(text, "\n") + 1
+}
+
 // coversFully reports whether ranges together cover every line in [start, end].
 //
 // Ranges are merged rather than scanned line by line: a caller asking about a
@@ -274,14 +511,27 @@ func (tracker *FileTracker) SeenWhole(absPath string) bool {
 	if !ok {
 		return false
 	}
+	return seenWhole(observation)
+}
+
+// seenWhole is the DERIVED answer to "has every line been seen", and the single
+// place that decides it. Callers must hold the lock.
+//
+// Derived from the ranges rather than read off the flag, because the flag is
+// only ever set by a SINGLE read covering the file: a file read in two halves
+// stayed "not seen whole" forever even though SeenRange agreed every line had
+// been seen, and write_file, which gates on this, refused the overwrite with
+// advice to read the file that could not change the answer.
+//
+// IT HAS TO BE ONE FUNCTION. RecordEdit branched on the raw flag while this
+// derived the answer, so the very case the derivation exists to rescue fell into
+// the wrong arm and lost: a file read whole in two chunks reported SeenWhole
+// true, then reported false after a single edit, putting the write_file refusal
+// back within one edit of where it was fixed.
+func seenWhole(observation fileObservation) bool {
 	if observation.whole {
 		return true
 	}
-	// Derived from the ranges rather than tracked as its own flag. The flag was
-	// only ever set by a SINGLE read covering the file, so a file read in two
-	// halves stayed "not seen whole" forever even though SeenRange agreed every
-	// line had been seen — and write_file, which gates on this, then refused the
-	// overwrite with advice to read the file that could not change the answer.
 	if observation.total > 0 && coversFully(observation.ranges, 1, observation.total) {
 		return true
 	}

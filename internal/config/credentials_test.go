@@ -258,6 +258,21 @@ func TestProviderProfileMissingCredentialEnv(t *testing.T) {
 			want:    false,
 		},
 		{
+			// A profile saved against the hosted atomic-chat preset keeps its
+			// remote base URL and key, so it must still be reported as missing a
+			// credential. The keyless local runtime is a separate catalog ID
+			// (atomic-chat-local) precisely so this identity is never repurposed.
+			name:    "hosted atomic-chat profile still requires its key",
+			profile: ProviderProfile{Name: "atomic-chat", CatalogID: "atomic-chat", BaseURL: "https://api.atomic.chat/v1"},
+			wantEnv: "ATOMIC_CHAT_API_KEY",
+			want:    true,
+		},
+		{
+			name:    "local atomic chat runtime needs no credential",
+			profile: ProviderProfile{Name: "atomic-local", CatalogID: "atomic-chat-local"},
+			want:    false,
+		},
+		{
 			name:    "credential resolved via inline key",
 			profile: ProviderProfile{Name: "openai", ProviderKind: ProviderKindOpenAI, APIKey: "sk-test"},
 			want:    false,

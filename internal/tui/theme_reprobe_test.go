@@ -2,35 +2,25 @@ package tui
 
 import (
 	"context"
-	"reflect"
 	"testing"
-
-	tea "charm.land/bubbletea/v2"
 )
 
-// TestThemeAutoReProbesBackground guards the M17 fix at the command-dispatch level
-// (not just the handleThemeCommand helper): selecting `/theme auto` must return
-// tea.RequestBackgroundColor so the terminal background is re-detected live, while
-// a fixed theme must NOT re-probe. A regression that reverts the dispatch to
-// `return m, nil` would otherwise pass the whole suite.
-func TestThemeAutoReProbesBackground(t *testing.T) {
-	// applyTheme mutates global palette state; restore it afterward.
+// System no longer guesses a light or dark canvas from the terminal. The legacy
+// auto argument is accepted for old configs and scripts, but resolves to the
+// terminal-native system preference without issuing a background-color query.
+func TestThemeAutoAliasUsesSystemWithoutBackgroundProbe(t *testing.T) {
 	defer applyTheme(themeDark, true)
-
 	m := newModel(context.Background(), Options{ModelName: "gpt-4"})
 	m.input.SetValue("/theme auto")
-	_, cmd := m.handleSubmit()
+	updated, cmd := m.handleSubmit()
+	next := updated.(model)
 	if cmd == nil {
-		t.Fatal("/theme auto must return a non-nil cmd (background re-probe)")
+		t.Fatal("/theme auto should schedule a transient confirmation expiry")
 	}
-	want := reflect.ValueOf(tea.RequestBackgroundColor).Pointer()
-	if reflect.ValueOf(cmd).Pointer() != want {
-		t.Error("/theme auto cmd must be tea.RequestBackgroundColor")
+	if next.themeMode != themeSystem {
+		t.Fatalf("/theme auto mode = %q, want system", next.themeMode)
 	}
-
-	m2 := newModel(context.Background(), Options{ModelName: "gpt-4"})
-	m2.input.SetValue("/theme dark")
-	if _, cmd2 := m2.handleSubmit(); cmd2 != nil {
-		t.Error("/theme dark must not return a background-color request")
+	if next.transientNotice.text != "Theme: System" {
+		t.Fatalf("/theme auto notice = %q", next.transientNotice.text)
 	}
 }

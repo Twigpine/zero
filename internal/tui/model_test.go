@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"reflect"
@@ -19,6 +20,7 @@ import (
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/notify"
+	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
@@ -104,6 +106,81 @@ func TestPromptSubmitInjectsLiveSessionModelContext(t *testing.T) {
 		if !strings.Contains(systemPrompt, want) {
 			t.Fatalf("expected system prompt to contain %q, got:\n%s", want, systemPrompt)
 		}
+	}
+}
+
+func TestPromptWaitsForToolReadinessBeforeSnapshot(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	registry := tools.NewRegistry()
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventText, Content: "done"},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+	awaited := false
+	m := newModel(context.Background(), Options{
+		Cwd:          t.TempDir(),
+		ProviderName: "test",
+		ModelName:    "test-model",
+		Provider:     provider,
+		Registry:     registry,
+		AwaitToolReadiness: func(context.Context) {
+			awaited = true
+			registry.Register(tools.NewScopedReadFileTool(t.TempDir(), nil))
+		},
+	})
+	m.input.SetValue("inspect the workspace")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected prompt submit to start an agent run")
+	}
+	next.Update(execCmd(cmd))
+
+	if !awaited {
+		t.Fatal("agent run did not await tool readiness")
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("provider requests = %d, want 1", len(provider.requests))
+	}
+	for _, definition := range provider.requests[0].Tools {
+		if definition.Name == "read_file" {
+			return
+		}
+	}
+	t.Fatal("provider request omitted tool published by readiness callback")
+}
+
+func TestPromptBuildsTurnSessionForCurrentProvider(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventText, Content: "done"},
+		{Type: zeroruntime.StreamEventDone},
+	}}
+	profile := config.ProviderProfile{Name: "chatgpt", Model: "gpt-test"}
+	called := false
+	m := newModel(context.Background(), Options{
+		Cwd:             t.TempDir(),
+		ProviderName:    profile.Name,
+		ModelName:       profile.Model,
+		ProviderProfile: profile,
+		Provider:        provider,
+		Registry:        tools.NewRegistry(),
+		NewTurnSessionProvider: func(gotProfile config.ProviderProfile, gotProvider zeroruntime.Provider) zeroruntime.TurnSessionProvider {
+			called = true
+			if gotProfile.Name != profile.Name || gotProfile.Model != profile.Model || gotProvider != provider {
+				t.Fatalf("turn session factory inputs = %#v/%#v", gotProfile, gotProvider)
+			}
+			return zeroruntime.NewProviderTurnSessionProvider(gotProvider, zeroruntime.ProviderCapabilities{})
+		},
+	})
+	m.input.SetValue("inspect the workspace")
+
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	next.Update(execCmd(cmd))
+	if !called {
+		t.Fatal("agent run did not build a turn session for the current provider")
 	}
 }
 
@@ -198,6 +275,7 @@ func TestParseCommand(t *testing.T) {
 		{input: "/plan off", kind: commandPlan, text: "off"},
 		{input: "/compact", kind: commandCompact},
 		{input: "/effort high", kind: commandEffort, text: "high"},
+		{input: "/fast", kind: commandFast},
 		{input: "/style concise", kind: commandStyle, text: "concise"},
 		{input: "/debug-mode", kind: commandDebug},
 		{input: "hello zero", kind: commandPrompt, text: "hello zero"},
@@ -545,10 +623,10 @@ func TestModelCommandSwitchesSessionModel(t *testing.T) {
 	})
 	m.input.SetValue("/model gpt-4.1-mini")
 
-	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
-	if cmd != nil {
+	if next.pending {
 		t.Fatal("expected /model to be handled without starting an agent run")
 	}
 	if next.modelName != "gpt-4.1-mini" || next.provider != nextProvider {
@@ -557,10 +635,76 @@ func TestModelCommandSwitchesSessionModel(t *testing.T) {
 	if rebuilt.Model != "gpt-4.1-mini" {
 		t.Fatalf("expected provider rebuild with selected model, got %#v", rebuilt)
 	}
-	for _, want := range []string{"Model", "gpt-4.1-mini · openai"} {
-		if !transcriptContains(next.transcript, want) {
-			t.Fatalf("expected model transcript to contain %q, got %#v", want, next.transcript)
+	for _, want := range []string{"Model:", "gpt-4.1-mini · openai"} {
+		if !strings.Contains(next.transientNotice.text, want) {
+			t.Fatalf("expected model notice to contain %q, got %q", want, next.transientNotice.text)
 		}
+	}
+}
+
+func TestModelCommandAcceptsChatGPTCatalogModelID(t *testing.T) {
+	var rebuilt config.ProviderProfile
+	nextProvider := &fakeProvider{}
+	m := newModel(context.Background(), Options{
+		ProviderName: "chatgpt",
+		ModelName:    "gpt-5.6-terra",
+		ProviderProfile: config.ProviderProfile{
+			Name:         "chatgpt",
+			CatalogID:    "chatgpt",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      "https://chatgpt.com/backend-api/codex",
+			Model:        "gpt-5.6-terra",
+		},
+		Provider: &fakeProvider{},
+		NewProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			rebuilt = profile
+			return nextProvider, nil
+		},
+	})
+	m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{
+		"chatgpt": {{ID: "gpt-5.6-sol"}},
+	}
+	m.input.SetValue("/model openai/gpt-5.6-sol")
+
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+
+	if next.pending {
+		t.Fatal("expected /model to be handled without starting an agent run")
+	}
+	if next.modelName != "gpt-5.6-sol" || next.provider != nextProvider {
+		t.Fatalf("expected ChatGPT model switch to use bare catalog ID, got model=%q provider=%#v", next.modelName, next.provider)
+	}
+	if rebuilt.Model != "gpt-5.6-sol" {
+		t.Fatalf("expected provider rebuild with bare ChatGPT model ID, got %#v", rebuilt)
+	}
+}
+
+func TestProviderModelSwitchCandidatesPreserveGatewayModelIDs(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		provider string
+		input    string
+		want     []string
+	}{
+		{
+			name:     "ChatGPT accepts the models.dev OpenAI namespace",
+			provider: "chatgpt",
+			input:    "openai/gpt-5.6-sol",
+			want:     []string{"openai/gpt-5.6-sol", "gpt-5.6-sol"},
+		},
+		{
+			name:     "gateway keeps qualified model ID",
+			provider: "openrouter",
+			input:    "openai/gpt-5.6-sol",
+			want:     []string{"openai/gpt-5.6-sol"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := providerModelSwitchCandidates(test.provider, test.input); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("providerModelSwitchCandidates(%q, %q) = %#v, want %#v", test.provider, test.input, got, test.want)
+			}
+		})
 	}
 }
 
@@ -594,10 +738,10 @@ func TestModelCommandPersistsSelectedModelToUserConfig(t *testing.T) {
 	})
 	m.input.SetValue("/model gpt-4.1-mini")
 
-	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
-	if cmd != nil {
+	if next.pending {
 		t.Fatal("expected /model to be handled without starting an agent run")
 	}
 	if next.modelName != "gpt-4.1-mini" {
@@ -610,8 +754,8 @@ func TestModelCommandPersistsSelectedModelToUserConfig(t *testing.T) {
 	if got := persisted.Provider.Model; got != "gpt-4.1-mini" {
 		t.Fatalf("persisted provider model = %q, want gpt-4.1-mini", got)
 	}
-	if !transcriptContains(next.transcript, "· saved") {
-		t.Fatalf("expected model transcript to mention saved user config, got %#v", next.transcript)
+	if !strings.Contains(next.transientNotice.text, "gpt-4.1-mini") {
+		t.Fatalf("expected model notice to name selected model, got %q", next.transientNotice.text)
 	}
 }
 
@@ -943,16 +1087,16 @@ func TestResumeCommandListsRecentSessions(t *testing.T) {
 }
 
 func TestSessionPickerLabelAlignsTitles(t *testing.T) {
-	today := sessionPickerLabel("20:47:50", "Today title")
-	older := sessionPickerLabel("Jul 24 10:47", "Older title")
+	recent := sessionPickerLabel("2h ago", "Recent title")
+	older := sessionPickerLabel("2006-01-02", "Older title")
 
-	todayColumn := strings.Index(today, "Today title")
+	recentColumn := strings.Index(recent, "Recent title")
 	olderColumn := strings.Index(older, "Older title")
-	if todayColumn < 0 || olderColumn < 0 {
-		t.Fatalf("sessionPickerLabel omitted a title: today=%q older=%q", today, older)
+	if recentColumn < 0 || olderColumn < 0 {
+		t.Fatalf("sessionPickerLabel omitted a title: recent=%q older=%q", recent, older)
 	}
-	if todayColumn != olderColumn {
-		t.Fatalf("title columns differ: today=%d (%q), older=%d (%q)", todayColumn, today, olderColumn, older)
+	if recentColumn != olderColumn {
+		t.Fatalf("title columns differ: recent=%d (%q), older=%d (%q)", recentColumn, recent, olderColumn, older)
 	}
 }
 
@@ -1467,6 +1611,28 @@ func TestToolResultDetailPrefersPreview(t *testing.T) {
 	}
 }
 
+func TestToolResultSessionPayloadKeepsPreviewForResume(t *testing.T) {
+	preview := "--- a/calculator.go\n+++ b/calculator.go\n@@ -4,1 +4,1 @@\n-oldValue := 1\n+newValue := 2"
+	payload := toolResultSessionPayload(agent.ToolResult{
+		ToolCallID: "edit-1",
+		Name:       "edit_file",
+		Status:     tools.StatusOK,
+		Output:     "Successfully edited calculator.go (replaced 1 occurrence).",
+		Display:    tools.Display{Preview: preview},
+	})
+	if got, want := payload["displayPreview"], preview; got != want {
+		t.Fatalf("persisted display preview = %#v, want %q", got, want)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal session payload: %v", err)
+	}
+	rows := transcriptRowsFromSessionEvents([]sessions.Event{{Type: sessions.EventToolResult, Payload: encoded}})
+	if len(rows) != 1 || rows[0].detail != preview {
+		t.Fatalf("resumed row lost the display preview: %#v", rows)
+	}
+}
+
 // TestReasoningRefreshesActivityClock: a reasoning delta is live provider output,
 // so it must bump lastStreamActivity (else the quiet hint mis-fires mid-think).
 func TestReasoningRefreshesActivityClock(t *testing.T) {
@@ -1501,16 +1667,15 @@ func TestStaleExplanationDropped(t *testing.T) {
 	}
 }
 
-// TestBeginRunResetsSidebarHidden: a new run clears the sidebar's content, so the
-// stale Ctrl+B hide preference is reset (the new run's sidebar isn't suppressed)
-// and the explanation generation advances.
-func TestBeginRunResetsSidebarHidden(t *testing.T) {
+// TestBeginRunKeepsRunDetailsClosed verifies a new run starts on the focused
+// conversation surface and advances the explanation generation.
+func TestBeginRunKeepsRunDetailsClosed(t *testing.T) {
 	m := newModel(context.Background(), Options{})
-	m.sidebarHidden = true
+	m.runDetailsOpen = true
 	gen := m.planDetailGen
 	m = m.beginRun(nil)
-	if m.sidebarHidden {
-		t.Error("beginRun should reset the Ctrl+B hide preference for the new run")
+	if m.runDetailsOpen {
+		t.Error("beginRun should close run details for the new turn")
 	}
 	if m.planDetailGen <= gen {
 		t.Errorf("beginRun should bump planDetailGen, was %d now %d", gen, m.planDetailGen)
@@ -2349,7 +2514,7 @@ func TestAssistantNarrationBeforeToolCardGetsBlankSeparator(t *testing.T) {
 	m.transcript = append(m.transcript,
 		transcriptRow{kind: rowUser, text: "run it"},
 		transcriptRow{kind: rowAssistant, text: "I'll inspect the existing file, then run it."},
-		transcriptRow{kind: rowToolResult, id: "t1", tool: "read_file", status: tools.StatusOK, detail: "File: time_test.py\n\n  1 | print('x')"},
+		transcriptRow{kind: rowToolResult, id: "t1", tool: "read_file", status: tools.StatusOK, detail: "File: time_test.py\n\n1→print('x')"},
 	)
 	items := m.transcriptBodyItems(m.chatColumnWidth(), "", false)
 	toolIdx := -1
@@ -2560,14 +2725,10 @@ func TestComposerIdleHintAndJumpCue(t *testing.T) {
 				t.Fatalf("empty sidebar should not be advertised, got %q", hint)
 			}
 
-			withSidebar := idle
-			withSidebar.plan.steps = []planStep{{content: "inspect footer", status: "in_progress"}}
-			if hint := plainRender(t, withSidebar.composerIdleHint()); !strings.Contains(hint, "Ctrl+B sidebar") {
-				t.Fatalf("available sidebar should be advertised, got %q", hint)
-			}
-			withSidebar.sidebarHidden = true
-			if hint := plainRender(t, withSidebar.composerIdleHint()); !strings.Contains(hint, "Ctrl+B sidebar") {
-				t.Fatalf("collapsed sidebar should keep its restore shortcut, got %q", hint)
+			withDetails := idle
+			withDetails.plan.steps = []planStep{{content: "inspect footer", status: "in_progress"}}
+			if hint := plainRender(t, withDetails.composerIdleHint()); !strings.Contains(hint, "Ctrl+B details") {
+				t.Fatalf("available run details should be advertised, got %q", hint)
 			}
 		})
 	}
@@ -2782,6 +2943,8 @@ func TestComposerBlinkStaysSolidWhileTyping(t *testing.T) {
 		terminalFocused:       true,
 		lastCharTime:          base,
 		composerCursorVisible: true,
+		composerBlinkSeq:      1,
+		composerBlinkTicking:  true,
 	}
 
 	// Each iteration simulates a keystroke (refreshing lastCharTime) followed by
@@ -2790,11 +2953,18 @@ func TestComposerBlinkStaysSolidWhileTyping(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		now = now.Add(200 * time.Millisecond)
 		m.lastCharTime = now
-		updated, _ := m.Update(composerBlinkMsg{})
+		updated, _ := m.Update(composerBlinkMsg{seq: m.composerBlinkSeq})
 		m = updated.(model)
 		if !m.composerCursorVisible {
 			t.Fatalf("tick %d: expected cursor to stay visible while typing, got hidden", i)
 		}
+	}
+}
+
+func TestMainComposerDisablesEmbeddedCursorBlink(t *testing.T) {
+	m := newModel(t.Context(), Options{})
+	if m.input.Styles().Cursor.Blink {
+		t.Fatal("embedded composer cursor blink must stay disabled")
 	}
 }
 
@@ -2834,14 +3004,42 @@ func TestComposerBlinkResumesAfterRefocusAndIdle(t *testing.T) {
 		t.Fatal("expected terminalFocused to be true after FocusMsg")
 	}
 
-	updated, _ = m.Update(composerBlinkMsg{})
+	updated, _ = m.Update(composerBlinkMsg{seq: m.composerBlinkSeq})
 	m = updated.(model)
 	first := m.composerCursorVisible
-	updated, _ = m.Update(composerBlinkMsg{})
+	updated, _ = m.Update(composerBlinkMsg{seq: m.composerBlinkSeq})
 	m = updated.(model)
 	second := m.composerCursorVisible
 	if first == second {
 		t.Fatalf("expected blink to toggle once idle+focused, got %v then %v", first, second)
+	}
+}
+
+func TestComposerBlinkRejectsTickFromBeforeRefocus(t *testing.T) {
+	base := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	m := model{
+		now:                   func() time.Time { return base },
+		terminalFocused:       true,
+		lastCharTime:          base.Add(-time.Hour),
+		composerCursorVisible: true,
+		composerBlinkSeq:      5,
+		composerBlinkTicking:  true,
+	}
+	staleSeq := m.composerBlinkSeq
+
+	updated, _ := m.Update(tea.BlurMsg{})
+	m = updated.(model)
+	updated, refocusCmd := m.Update(tea.FocusMsg{})
+	m = updated.(model)
+	if refocusCmd == nil || m.composerBlinkSeq == staleSeq {
+		t.Fatal("refocus did not re-arm composer blinking with a new sequence")
+	}
+	visible := m.composerCursorVisible
+
+	updated, staleCmd := m.Update(composerBlinkMsg{seq: staleSeq})
+	m = updated.(model)
+	if staleCmd != nil || m.composerCursorVisible != visible {
+		t.Fatalf("stale tick changed composer state: cmd=%v visible=%v want=%v", staleCmd != nil, m.composerCursorVisible, visible)
 	}
 }
 
@@ -2852,17 +3050,50 @@ func TestComposerBlinkTogglesWhenIdleAndFocused(t *testing.T) {
 		terminalFocused:       true,
 		lastCharTime:          base.Add(-time.Hour),
 		composerCursorVisible: true,
+		composerBlinkSeq:      1,
+		composerBlinkTicking:  true,
 	}
 
-	updated, _ := m.Update(composerBlinkMsg{})
+	updated, _ := m.Update(composerBlinkMsg{seq: m.composerBlinkSeq})
 	m = updated.(model)
 	if m.composerCursorVisible {
 		t.Fatal("expected cursor to toggle off on first idle+focused tick")
 	}
-	updated, _ = m.Update(composerBlinkMsg{})
+	updated, _ = m.Update(composerBlinkMsg{seq: m.composerBlinkSeq})
 	m = updated.(model)
 	if !m.composerCursorVisible {
 		t.Fatal("expected cursor to toggle back on on second idle+focused tick")
+	}
+}
+
+func TestComposerBlinkSettlesVisibleWithoutRescheduling(t *testing.T) {
+	m := model{
+		now:                   func() time.Time { return time.Unix(100, 0) },
+		terminalFocused:       true,
+		lastCharTime:          time.Unix(0, 0),
+		composerCursorVisible: true,
+		composerBlinkSeq:      1,
+		composerBlinkTicking:  true,
+	}
+	var cmd tea.Cmd
+	for range composerBlinkIdleTicksBeforeSettle {
+		var updated tea.Model
+		updated, cmd = m.Update(composerBlinkMsg{seq: m.composerBlinkSeq})
+		m = updated.(model)
+	}
+	if m.composerBlinkTicking || cmd != nil || !m.composerCursorVisible {
+		t.Fatalf("settled cursor = ticking:%v cmd:%v visible:%v", m.composerBlinkTicking, cmd != nil, m.composerCursorVisible)
+	}
+}
+
+func TestComposerInputRestartsSettledBlink(t *testing.T) {
+	m := newModel(t.Context(), Options{})
+	m.composerBlinkTicking = false
+	m.composerCursorVisible = true
+	updated, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: 'a', Text: "a"}))
+	m = updated.(model)
+	if !m.composerBlinkTicking || cmd == nil || !m.composerCursorVisible {
+		t.Fatalf("restarted cursor = ticking:%v cmd:%v visible:%v", m.composerBlinkTicking, cmd != nil, m.composerCursorVisible)
 	}
 }
 
@@ -2945,21 +3176,27 @@ func TestScrimViewportLine(t *testing.T) {
 	if got := scrimViewportLine("   ", 10); got != "   " {
 		t.Fatalf("blank line should be untouched, got %q", got)
 	}
-	// Non-blank lines keep their text (only the styling is dimmed), so the backdrop
-	// stays readable behind the overlay.
+	// Non-blank plain lines keep their text and become faint, so the backdrop stays
+	// readable behind the overlay without competing with its focus surface.
 	got := scrimViewportLine("transcript content", 40)
 	if ansi.Strip(got) != "transcript content" {
 		t.Fatalf("scrim must preserve text, got %q", ansi.Strip(got))
 	}
-	// A pre-styled line must have its OWN styling stripped (so the dim wins), while
-	// the text content survives. This fails if scrim stops re-styling the backdrop.
-	styled := "\x1b[31mred backdrop\x1b[0m text"
+	// Styled transcript content must retain its semantic foreground and background
+	// colors. The scrim adds faintness around resets rather than flattening a diff
+	// or syntax-highlighted line to a single grey style.
+	styled := "\x1b[38;2;235;80;110mremoved\x1b[0m \x1b[48;2;35;80;58madded\x1b[0m"
 	scrimmed := scrimViewportLine(styled, 40)
-	if ansi.Strip(scrimmed) != "red backdrop text" {
+	if ansi.Strip(scrimmed) != "removed added" {
 		t.Fatalf("scrim must preserve styled line's text, got %q", ansi.Strip(scrimmed))
 	}
-	if strings.Contains(scrimmed, "\x1b[31m") {
-		t.Fatalf("scrim must strip the line's original styling, got %q", scrimmed)
+	for _, sequence := range []string{"\x1b[38;2;235;80;110m", "\x1b[48;2;35;80;58m"} {
+		if !strings.Contains(scrimmed, sequence) {
+			t.Fatalf("scrim must preserve semantic ANSI sequence %q, got %q", sequence, scrimmed)
+		}
+	}
+	if !strings.Contains(scrimmed, "\x1b[2m") {
+		t.Fatalf("scrim must apply faint styling around semantic colors, got %q", scrimmed)
 	}
 }
 

@@ -63,8 +63,9 @@ func tokenToStored(t oauth.Token) StoredToken {
 }
 
 // OAuthConfig describes how to authenticate to a remote MCP server using OAuth.
-// Endpoints may be discovered from the server's metadata document; explicit
-// values here override or fill in anything discovery cannot provide.
+// Endpoints may be discovered through RFC 9728 protected-resource metadata and
+// RFC 8414 authorization-server metadata; explicit values override or fill in
+// anything discovery cannot provide.
 type OAuthConfig struct {
 	ClientID              string
 	ClientSecret          string
@@ -85,6 +86,11 @@ type authServerMetadata struct {
 	TokenEndpoint         string   `json:"token_endpoint"`
 	RegistrationEndpoint  string   `json:"registration_endpoint"`
 	ScopesSupported       []string `json:"scopes_supported"`
+
+	protectedResourceURL         string
+	protectAuthorizationEndpoint bool
+	protectTokenEndpoint         bool
+	protectRegistrationEndpoint  bool
 }
 
 // pkceParams holds a PKCE verifier/challenge pair.
@@ -120,7 +126,7 @@ type authorizationFlow struct {
 // discoverAuthorizationServer fetches the RFC 8414 authorization server metadata
 // at the well-known path under baseURL, via the shared engine.
 func discoverAuthorizationServer(ctx context.Context, client *http.Client, baseURL string) (authServerMetadata, error) {
-	meta, err := oauth.DiscoverAuthorizationServer(ctx, client, baseURL)
+	meta, err := oauth.DiscoverAuthorizationServer(ctx, withoutDiscoveryRedirects(client), baseURL)
 	if err != nil {
 		return authServerMetadata{}, err
 	}
@@ -133,10 +139,9 @@ func discoverAuthorizationServer(ctx context.Context, client *http.Client, baseU
 	}, nil
 }
 
-// validateResolvedEndpoints applies the shared https/loopback endpoint rule to
-// every non-empty endpoint in the resolved metadata — configured or discovered
-// alike — so discovery metadata can never downgrade an MCP login to an insecure
-// or attacker-controlled authorization, token, or registration endpoint.
+// validateResolvedEndpoints applies the shared https/loopback scheme rule to
+// every non-empty endpoint in the resolved metadata. Protected-resource
+// discovery adds its stricter provenance-aware network rule below.
 func validateResolvedEndpoints(metadata authServerMetadata) error {
 	for _, ep := range []struct{ kind, url string }{
 		{"authorization", metadata.AuthorizationEndpoint},
@@ -153,9 +158,43 @@ func validateResolvedEndpoints(metadata authServerMetadata) error {
 	return nil
 }
 
-// resolveAuthorizationServer discovers metadata and applies explicit config
-// overrides. Configured endpoints take precedence over discovered ones, and act
-// as a fallback when discovery fails or omits a value.
+func validateProtectedDiscoveredEndpoints(ctx context.Context, metadata authServerMetadata) error {
+	if metadata.protectedResourceURL == "" {
+		return nil
+	}
+	policy, err := newOAuthDiscoveryNetworkPolicy(metadata.protectedResourceURL)
+	if err != nil {
+		return err
+	}
+	for _, endpoint := range []struct {
+		kind      string
+		url       string
+		protected bool
+	}{
+		{kind: "authorization", url: metadata.AuthorizationEndpoint, protected: metadata.protectAuthorizationEndpoint},
+		{kind: "token", url: metadata.TokenEndpoint, protected: metadata.protectTokenEndpoint},
+		{kind: "registration", url: metadata.RegistrationEndpoint, protected: metadata.protectRegistrationEndpoint},
+	} {
+		if !endpoint.protected || strings.TrimSpace(endpoint.url) == "" {
+			continue
+		}
+		parsed, parseErr := url.Parse(endpoint.url)
+		if parseErr != nil || parsed.Hostname() == "" {
+			return fmt.Errorf("mcp oauth: %s endpoint: %w", endpoint.kind, errUnsafeOAuthDiscoveryTarget)
+		}
+		if err := policy.validateLiteralHost(parsed.Hostname()); err != nil {
+			return fmt.Errorf("mcp oauth: %s endpoint: %w", endpoint.kind, err)
+		}
+		if _, err := policy.resolve(ctx, parsed.Hostname()); err != nil {
+			return fmt.Errorf("mcp oauth: %s endpoint: %w", endpoint.kind, err)
+		}
+	}
+	return nil
+}
+
+// resolveAuthorizationServer follows protected-resource metadata when the MCP
+// endpoint advertises it, falls back to direct authorization-server discovery
+// for legacy providers, then applies explicit config overrides.
 func resolveAuthorizationServer(ctx context.Context, client *http.Client, baseURL string, cfg OAuthConfig) (authServerMetadata, error) {
 	// When the config supplies both the authorization and token endpoints
 	// directly, skip network discovery entirely: there is nothing to discover,
@@ -174,16 +213,39 @@ func resolveAuthorizationServer(ctx context.Context, client *http.Client, baseUR
 		return metadata, nil
 	}
 
+	discoveryClient := withoutDiscoveryRedirects(client)
 	discoveryBase := strings.TrimSpace(cfg.IssuerURL)
+	protectedResourceDiscovery := false
 	if discoveryBase == "" {
-		discoveryBase = baseURL
+		issuer, found, protectedErr := discoverProtectedResourceAuthorizationServer(ctx, discoveryClient, baseURL)
+		if protectedErr != nil {
+			return authServerMetadata{}, protectedErr
+		}
+		if found {
+			discoveryBase = issuer
+			protectedResourceDiscovery = true
+			discoveryClient, protectedErr = newAdvertisedOAuthDiscoveryClient(discoveryClient, baseURL)
+			if protectedErr != nil {
+				return authServerMetadata{}, protectedErr
+			}
+		} else {
+			discoveryBase = baseURL
+		}
 	}
 
-	metadata, err := discoverAuthorizationServer(ctx, client, discoveryBase)
+	metadata, err := discoverAuthorizationServer(ctx, discoveryClient, discoveryBase)
 	if err != nil {
 		// Discovery failures are non-fatal when the config supplies the endpoints
 		// directly; otherwise surface the discovery error.
 		metadata = authServerMetadata{}
+	}
+	if protectedResourceDiscovery {
+		if strings.TrimSpace(metadata.Issuer) == "" {
+			return authServerMetadata{}, errors.New("mcp oauth: authorization server metadata is missing its required issuer")
+		}
+		if metadata.Issuer != discoveryBase {
+			return authServerMetadata{}, errors.New("mcp oauth: authorization server metadata issuer does not match protected resource metadata")
+		}
 	}
 
 	if endpoint := strings.TrimSpace(cfg.AuthorizationEndpoint); endpoint != "" {
@@ -195,6 +257,12 @@ func resolveAuthorizationServer(ctx context.Context, client *http.Client, baseUR
 	if endpoint := strings.TrimSpace(cfg.RegistrationEndpoint); endpoint != "" {
 		metadata.RegistrationEndpoint = endpoint
 	}
+	if protectedResourceDiscovery {
+		metadata.protectedResourceURL = strings.TrimSpace(baseURL)
+		metadata.protectAuthorizationEndpoint = strings.TrimSpace(cfg.AuthorizationEndpoint) == ""
+		metadata.protectTokenEndpoint = strings.TrimSpace(cfg.TokenEndpoint) == ""
+		metadata.protectRegistrationEndpoint = strings.TrimSpace(cfg.RegistrationEndpoint) == ""
+	}
 
 	if strings.TrimSpace(metadata.AuthorizationEndpoint) == "" {
 		return authServerMetadata{}, errors.New("no authorization endpoint discovered or configured")
@@ -203,6 +271,9 @@ func resolveAuthorizationServer(ctx context.Context, client *http.Client, baseUR
 		return authServerMetadata{}, errors.New("no token endpoint discovered or configured")
 	}
 	if err := validateResolvedEndpoints(metadata); err != nil {
+		return authServerMetadata{}, err
+	}
+	if err := validateProtectedDiscoveredEndpoints(ctx, metadata); err != nil {
 		return authServerMetadata{}, err
 	}
 	return metadata, nil
@@ -363,10 +434,25 @@ func Login(ctx context.Context, options LoginOptions) (StoredToken, error) {
 	}
 	defer listener.Close()
 	redirectURI := fmt.Sprintf("http://%s/callback", listener.Addr().String())
+	protectedEndpointClient := httpClient
+	if metadata.protectRegistrationEndpoint || metadata.protectTokenEndpoint {
+		protectedEndpointClient, err = newAdvertisedOAuthDiscoveryClient(httpClient, metadata.protectedResourceURL)
+		if err != nil {
+			return StoredToken{}, err
+		}
+	}
+	tokenClient := httpClient
+	if metadata.protectTokenEndpoint {
+		tokenClient = protectedEndpointClient
+	}
 
 	if strings.TrimSpace(cfg.ClientID) == "" {
 		if registration := strings.TrimSpace(metadata.RegistrationEndpoint); registration != "" {
-			clientID, clientSecret, regErr := registerClient(loginCtx, httpClient, registration, redirectURI, cfg.Scopes)
+			registrationClient := httpClient
+			if metadata.protectRegistrationEndpoint {
+				registrationClient = protectedEndpointClient
+			}
+			clientID, clientSecret, regErr := registerClient(loginCtx, registrationClient, registration, redirectURI, cfg.Scopes)
 			if regErr != nil {
 				return StoredToken{}, regErr
 			}
@@ -390,7 +476,7 @@ func Login(ctx context.Context, options LoginOptions) (StoredToken, error) {
 	}
 
 	flow := &authorizationFlow{
-		httpClient: httpClient,
+		httpClient: tokenClient,
 		metadata:   metadata,
 		config:     cfg,
 		pkce:       pkce,

@@ -136,6 +136,7 @@ func (m model) handleBTWCommand(question string) (model, tea.Cmd) {
 	if question == "" {
 		side.pendingImages = nil
 		side.pendingImageLabels = nil
+		side.pendingImageThumbnails = nil
 		side.pendingDocuments = nil
 	}
 	side.loops = nil
@@ -304,6 +305,10 @@ func btwMessageRunID(msg tea.Msg) (int, bool) {
 	case agentRowMsg:
 		return typed.runID, true
 	case toolCallStreamStartMsg:
+		return typed.runID, true
+	case interactiveExecStartMsg:
+		return typed.runID, true
+	case terminalAutoAttachTickMsg:
 		return typed.runID, true
 	case toolCallStreamDeltaMsg:
 		return typed.runID, true

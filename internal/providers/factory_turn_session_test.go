@@ -14,6 +14,7 @@ import (
 // wraps into the default TurnSessionProvider: construction succeeds, a session
 // opens, and Compact reports unsupported (the default adapter contract).
 func TestNewTurnSessionProviderForEveryKind(t *testing.T) {
+	t.Parallel()
 	kinds := []config.ProviderKind{
 		config.ProviderKindOpenAI,
 		config.ProviderKindOpenAICompatible,
@@ -65,6 +66,7 @@ func TestNewTurnSessionProviderForEveryKind(t *testing.T) {
 // projects the model-registry entry (context limits, capability flags,
 // reasoning efforts) into the flat ProviderCapabilities.
 func TestNewTurnSessionProviderProjectsRegistryCapabilities(t *testing.T) {
+	t.Parallel()
 	registry, err := modelregistry.NewRegistry([]modelregistry.ModelEntry{{
 		ID:          "pr7-caps-model",
 		DisplayName: "PR7 Capability Probe",
@@ -137,6 +139,7 @@ func TestNewTurnSessionProviderProjectsRegistryCapabilities(t *testing.T) {
 // entry that enumerates no efforts of its own still reports the name-inferred
 // effective tiers the /effort picker and run-time resolver advertise.
 func TestNewTurnSessionProviderUsesEffectiveReasoningEfforts(t *testing.T) {
+	t.Parallel()
 	registry, err := modelregistry.NewRegistry([]modelregistry.ModelEntry{{
 		// A gpt-5-family id with NO ReasoningEfforts listed: the effective
 		// efforts come from name inference, differing from the raw entry.

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -11,6 +13,7 @@ import (
 	"github.com/charmbracelet/x/term"
 
 	"github.com/Gitlawb/zero/internal/peermsg"
+	"github.com/Gitlawb/zero/internal/terminalpet"
 )
 
 // Run starts the Zero Bubble Tea shell and returns a process-style exit code.
@@ -41,11 +44,22 @@ func Run(ctx context.Context, options Options) int {
 	// text first, keeping order intact.
 	options.RuntimeMessageSink = newTextCoalescer(forward).send
 	options.AltScreen = useAltScreen(options)
+	imageSupport := terminalpet.DetectImageSupport(os.Getenv)
+	imageCache := terminalPetFrameCache(options)
+	petRenderer := terminalpet.NewImageRendererWithCache(imageSupport, imageCache)
+	attachmentRenderers := make([]*terminalpet.ImageRenderer, attachmentPreviewMaxImages)
+	outputRenderers := make([]*terminalpet.ImageRenderer, 0, 1+len(attachmentRenderers))
+	outputRenderers = append(outputRenderers, petRenderer)
+	for index := range attachmentRenderers {
+		attachmentRenderers[index] = terminalpet.NewImageRendererWithCache(imageSupport, imageCache)
+		outputRenderers = append(outputRenderers, attachmentRenderers[index])
+	}
+	petOutput := newPetImageOutput(os.Stdout, outputRenderers...)
 
 	programOpts := []tea.ProgramOption{
 		tea.WithContext(ctx),
 		tea.WithInput(os.Stdin),
-		tea.WithOutput(os.Stdout),
+		tea.WithOutput(petOutput),
 		tea.WithFilter(mouseEventFilter()),
 	}
 	// Honor the no-color.org spec ourselves: NO_COLOR set to ANY non-empty value
@@ -56,6 +70,12 @@ func Run(ctx context.Context, options Options) int {
 		programOpts = append(programOpts, tea.WithColorProfile(colorprofile.Ascii))
 	}
 	initialModel := newModel(ctx, options)
+	// Apply the terminal-native system default at the real interactive entry point.
+	// Constructing a model alone is also useful to tests and non-TUI helpers, and
+	// should not mutate the package-level render palette for those callers.
+	applyTheme(initialModel.themeMode, initialModel.hasDarkBg)
+	initialModel.petRenderer = petRenderer
+	initialModel.attachmentRenderers = attachmentRenderers
 	if initialModel.wantsMouseCapture() {
 		initialModel.mouseCapture = true
 	}
@@ -88,6 +108,7 @@ func Run(ctx context.Context, options Options) int {
 	}
 
 	_, runErr := program.Run()
+	clearErr := petOutput.clearImage()
 	var closeErr error
 	if peerStarted {
 		closeErr = options.PeerService.Close()
@@ -102,7 +123,38 @@ func Run(ctx context.Context, options Options) int {
 		fmt.Fprintln(os.Stderr, "zero: peer messaging cleanup error:", closeErr)
 		return 1
 	}
+	if clearErr != nil {
+		fmt.Fprintln(os.Stderr, "zero: terminal companion cleanup error:", clearErr)
+		return 1
+	}
 	return 0
+}
+
+func terminalPetFrameCache(options Options) string {
+	return terminalPetFrameCacheWith(options, os.UserConfigDir, os.UserCacheDir)
+}
+
+func terminalPetFrameCacheWith(options Options, userConfigDir, userCacheDir func() (string, error)) string {
+	root := ""
+	if configPath := strings.TrimSpace(options.UserConfigPath); filepath.IsAbs(configPath) {
+		root = filepath.Dir(filepath.Clean(configPath))
+	}
+	if root == "" {
+		configDir, err := userConfigDir()
+		if err == nil && strings.TrimSpace(configDir) != "" {
+			root = filepath.Join(configDir, "zero")
+		}
+	}
+	if root == "" {
+		cacheDir, err := userCacheDir()
+		if err == nil && strings.TrimSpace(cacheDir) != "" {
+			root = filepath.Join(cacheDir, "zero")
+		}
+	}
+	if root == "" {
+		return ""
+	}
+	return filepath.Join(root, "pets", "frame-cache")
 }
 
 func useAltScreen(_ Options) bool {

@@ -967,3 +967,10 @@ func TestProvidersListMarksOAuthLoginProviders(t *testing.T) {
 		t.Fatalf("list should render the oauth login state, got:\n%s", rendered)
 	}
 }
+
+func TestAtomicCatalogSetupRequiresLoadedModel(t *testing.T) {
+	out := formatProviderCatalogLine(providerCatalogSummary{ID: "atomic-chat-local", RuntimeSupported: true})
+	if strings.Contains(out, "zero providers setup atomic-chat-local --set-active") || !strings.Contains(out, "zero setup") {
+		t.Fatalf("catalog advertises a failing setup command: %s", out)
+	}
+}

@@ -78,33 +78,18 @@ func TestEditFuzzyWhitespaceNormalizedSingleLine(t *testing.T) {
 	}
 }
 
-func TestEditFuzzyBlockAnchorToleratesMiddleDrift(t *testing.T) {
-	// First and last lines anchor the block; one interior line differs slightly
-	// (comment text drifted). Levenshtein similarity keeps it above 0.65.
-	initial := strings.Join([]string{
-		"func handler(w http.ResponseWriter, r *http.Request) {",
-		"\t// write the response body to the client",
-		"\tw.WriteHeader(http.StatusOK)",
-		"\tfmt.Fprint(w, \"done\")",
-		"}",
-		"",
-	}, "\n")
-	find := strings.Join([]string{
-		"func handler(w http.ResponseWriter, r *http.Request) {",
-		"\t// write the response body to client",
-		"\tw.WriteHeader(http.StatusOK)",
-		"\tfmt.Fprint(w, \"done\")",
-		"}",
-	}, "\n")
+func TestEditFuzzyRejectsInteriorDrift(t *testing.T) {
+	initial := "func a() {\n\tx := 1\n\ty := 2\n\tz := 3\n\treturn\n}\n"
+	find := "func a() {\n\tx := 1\n\ty := 99\n\tz := 3\n\treturn\n}"
 	result, after := runEdit(t, t.TempDir(), initial, map[string]any{
 		"old_string": find,
-		"new_string": "func handler(w http.ResponseWriter, r *http.Request) {\n\tw.WriteHeader(http.StatusNoContent)\n}",
+		"new_string": "func a() {}",
 	})
-	if result.Status != StatusOK {
-		t.Fatalf("expected ok, got %q", result.Output)
+	if result.Status != StatusError || !strings.Contains(result.Output, "Could not find the exact string") {
+		t.Fatalf("expected exact-match error, got %q", result.Output)
 	}
-	if !strings.Contains(after, "StatusNoContent") || strings.Contains(after, "StatusOK") {
-		t.Fatalf("unexpected content: %q", after)
+	if after != initial {
+		t.Fatalf("file must be unchanged, got %q", after)
 	}
 }
 
@@ -168,8 +153,8 @@ func TestUniformIndentDelta(t *testing.T) {
 }
 
 func TestAdaptReplacementLeavesNonUniformSpansAlone(t *testing.T) {
-	// Block-anchor style match with a drifted interior: no uniform delta, so
-	// the replacement must pass through untouched.
+	// A non-uniform span has no safe indentation delta, so the replacement must
+	// pass through untouched.
 	span := "\tfunc h() {\n\t\t// drifted comment\n\t}"
 	find := "func h() {\n// different comment\n}"
 	if got := adaptReplacementToSpan(span, find, "replacement()"); got != "replacement()" {
@@ -283,8 +268,7 @@ func TestEditFuzzyCRLFFile(t *testing.T) {
 }
 
 func TestIsDisproportionateEditMatch(t *testing.T) {
-	// A candidate span that dwarfs old_string must be refused: anchors bridging
-	// unrelated code would otherwise delete it all.
+	// A candidate span that dwarfs old_string must be refused.
 	big := strings.Repeat("line\n", 10)
 	if !isDisproportionateEditMatch(big, "a\nb\nc") {
 		t.Fatal("10-line span for 3-line find must be disproportionate")
@@ -297,24 +281,6 @@ func TestIsDisproportionateEditMatch(t *testing.T) {
 	}
 	if !isDisproportionateEditMatch("xx\n"+strings.Repeat("y", 900)+"\nzz", "xx\nab\nzz") {
 		t.Fatal("byte-length blowup must be disproportionate")
-	}
-}
-
-func TestLevenshtein(t *testing.T) {
-	cases := []struct {
-		a, b string
-		want int
-	}{
-		{"", "", 0},
-		{"abc", "", 3},
-		{"", "abc", 3},
-		{"kitten", "sitting", 3},
-		{"same", "same", 0},
-	}
-	for _, c := range cases {
-		if got := levenshtein(c.a, c.b); got != c.want {
-			t.Fatalf("levenshtein(%q,%q) = %d, want %d", c.a, c.b, got, c.want)
-		}
 	}
 }
 
@@ -336,11 +302,9 @@ func TestEditFuzzyDistinctCandidatesAreAmbiguous(t *testing.T) {
 	}
 }
 
-func TestEditFuzzyBlockAnchorTwoPlausibleBlocksAmbiguous(t *testing.T) {
-	// Two blocks share the same first/last anchor lines and BOTH interiors sit
-	// above the similarity threshold. Picking the "best" one would silently
-	// edit a block the model may not have meant; both must surface so the
-	// cascade reports ambiguity and the file stays untouched.
+func TestEditFuzzyDoesNotChooseBetweenDriftedBlocks(t *testing.T) {
+	// Shared first and last lines do not make either drifted interior safe to
+	// replace. Neither block may be selected.
 	initial := strings.Join([]string{
 		"func setup(cfg Config) {",
 		"\tvalue := compute(alpha, beta, gamma)",
@@ -360,8 +324,8 @@ func TestEditFuzzyBlockAnchorTwoPlausibleBlocksAmbiguous(t *testing.T) {
 		"old_string": find,
 		"new_string": "func setup(cfg Config) {}",
 	})
-	if result.Status != StatusError || !strings.Contains(result.Output, "multiple locations") {
-		t.Fatalf("two plausible anchor blocks must be ambiguous, got %q", result.Output)
+	if result.Status != StatusError || !strings.Contains(result.Output, "Could not find the exact string") {
+		t.Fatalf("expected exact-match error, got %q", result.Output)
 	}
 	if after != initial {
 		t.Fatalf("file must be unchanged, got %q", after)

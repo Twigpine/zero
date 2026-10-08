@@ -1,5 +1,5 @@
 // keybinding_help.go renders the `?` keyboard-shortcut overlay. Zero has a
-// rich set of chord bindings (Ctrl+T effort, Ctrl+P plan, drill-in subchat,
+// rich set of chord bindings (Ctrl+T effort, drill-in subchat,
 // Shift+Tab permission mode, …) that are otherwise invisible — only learnable
 // by reading the source. A single-key `?` overlay (opened on an empty composer)
 // lists them grouped, so the keymap is discoverable the way the reference TUIs
@@ -7,11 +7,15 @@
 // model.go's Update switch; keep them in sync when a binding changes.
 //
 // Configurable bindings (toggleDetailed, toggleMouse, cycleReasoning,
-// togglePlan, toggleSidebar) pull their key label from m.keyBindings so a user
+// toggleSidebar) pull their key label from m.keyBindings so a user
 // who remaps them in config.json sees the actual chords, not the defaults.
 package tui
 
-import "strings"
+import (
+	"strings"
+
+	"charm.land/lipgloss/v2"
+)
 
 // keybinding is one row in the help overlay: the key chord and what it does.
 type keybinding struct {
@@ -53,7 +57,6 @@ func (m model) buildKeybindingGroups() []keybindingGroup {
 			bindings: []keybinding{
 				{labelOr(m.keyBindings.cycleReasoning, "Ctrl+T"), "cycle reasoning effort (auto \u2192 low \u2192 medium \u2192 high)"},
 				{"Shift+Tab", "cycle permission mode (auto \u2194 ask)"},
-				{labelOr(m.keyBindings.togglePlan, "Ctrl+P"), "expand / collapse the plan panel (when no menu is open)"},
 			},
 		},
 		{
@@ -63,7 +66,7 @@ func (m model) buildKeybindingGroups() []keybindingGroup {
 				{"\u2191 / \u2193", "scroll, or move within a popup / multi-line input"},
 				{"Ctrl+P / Ctrl+N", "previous / next item in menus (emacs-style)"},
 				{labelOr(m.keyBindings.toggleDetailed, "Ctrl+O"), "toggle the detailed (full-screen) transcript"},
-				{labelOr(m.keyBindings.toggleSidebar, "Ctrl+B"), "hide / show the right context sidebar"},
+				{labelOr(m.keyBindings.toggleSidebar, "Ctrl+B"), "show / hide run details"},
 				{labelOr(m.keyBindings.toggleMouse, "Ctrl+E"), "release the mouse to drag-select & copy text"},
 				{"Tab", "accept the autocomplete / picker selection"},
 			},
@@ -144,7 +147,7 @@ func formatKeybindingLine(binding keybinding, keyColumn int, innerWidth int) str
 func (m model) renderKeybindingHelpOverlay(width int) string {
 	overlayWidth := keybindingHelpOverlayWidth(width)
 	lines := m.renderKeybindingHelpLines(overlayWidth - 4)
-	block := styledBlockFillTitle(overlayWidth, "Keyboard Shortcuts", lines, zeroTheme.line, zeroTheme.panel)
+	block := styledBlockFillTitle(overlayWidth, "Keyboard Shortcuts", lines, zeroTheme.line, lipgloss.NewStyle())
 	return centerRenderedBlock(block, width)
 }
 

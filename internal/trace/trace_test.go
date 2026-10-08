@@ -614,11 +614,21 @@ func TestCounterPrecisionRoundTrip(t *testing.T) {
 	}
 }
 
-func TestOptionalEventKeysIncludePostureEscalations(t *testing.T) {
+func TestOptionalEventKeysIncludeRuntimeCounters(t *testing.T) {
+	keys := make(map[string]bool)
 	for _, key := range OptionalEventKeys() {
-		if key == "counter:"+CounterPostureEscalations {
-			return
+		keys[key] = true
+	}
+	for _, counter := range []string{
+		CounterCacheWriteTokens,
+		CounterResponseChainReused,
+		CounterResponseChainReset,
+		CounterResponsesHTTPFallback,
+		CounterPostureEscalations,
+	} {
+		key := "counter:" + counter
+		if !keys[key] {
+			t.Errorf("%s missing from OptionalEventKeys: %v", key, OptionalEventKeys())
 		}
 	}
-	t.Fatalf("posture_escalations missing from OptionalEventKeys: %v", OptionalEventKeys())
 }

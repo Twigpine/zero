@@ -281,3 +281,90 @@ func TestRedactValue_CompoundKeys(t *testing.T) {
 		t.Errorf("nested session_secret not redacted: %v", inner["session_secret"])
 	}
 }
+
+func TestNormalizeKey_CamelCaseBoundaries(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"accessToken", "access_token"},
+		{"refreshToken", "refresh_token"},
+		{"apiKey", "api_key"},
+		{"access_token", "access_token"},
+		{"APIKey", "apikey"},
+		{"promptTokens", "prompt_tokens"},
+		{"maxTokens", "max_tokens"},
+		{"Authorization", "authorization"},
+		{"x-api-key", "x_api_key"},
+	}
+	for _, tc := range tests {
+		if got := normalizeKey(tc.in); got != tc.want {
+			t.Errorf("normalizeKey(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestIsSensitiveKey_CamelCaseCredentials(t *testing.T) {
+	o := Options{}
+	sensitive := []string{
+		"accessToken", "refreshToken", "apiKey",
+		"clientSecret", "idToken", "sessionToken",
+		"AccessToken", "refresh_token", "access_token",
+	}
+	for _, k := range sensitive {
+		if !IsSensitiveKey(k, o) {
+			t.Errorf("expected %q to be sensitive", k)
+		}
+	}
+	notSensitive := []string{
+		"promptTokens", "maxTokens", "completionTokens",
+		"tokenCount", "prompt_tokens", "max_tokens",
+		"authConfigured",
+	}
+	for _, k := range notSensitive {
+		if IsSensitiveKey(k, o) {
+			t.Errorf("expected %q to NOT be sensitive (false positive)", k)
+		}
+	}
+}
+
+func TestRedactValue_CamelCaseTokenLeak(t *testing.T) {
+	const access = "leak-access-token-value"
+	const refresh = "leak-refresh-token-value"
+	const api = "leak-api-key-value"
+	const snake = "leak-snake-access-token"
+	in := map[string]any{
+		"accessToken":  access,
+		"refreshToken": refresh,
+		"apiKey":       api,
+		"access_token": snake,
+		"promptTokens": 12,
+	}
+	out, ok := RedactValue(in, Options{}).(map[string]any)
+	if !ok {
+		t.Fatalf("expected map result, got %T", RedactValue(in, Options{}))
+	}
+	for _, key := range []string{"accessToken", "refreshToken", "apiKey", "access_token"} {
+		if out[key] != RedactedSecret {
+			t.Errorf("%s = %#v, want %s", key, out[key], RedactedSecret)
+		}
+	}
+	if out["promptTokens"] != int64(12) {
+		t.Errorf("promptTokens should stay numeric, got %#v", out["promptTokens"])
+	}
+}
+
+func TestRedactString_CamelCaseJSONKeys(t *testing.T) {
+	o := Options{}
+	cases := []struct{ in, secret string }{
+		{`{"accessToken":"leak-access-token-value"}`, "leak-access-token-value"},
+		{`{"refreshToken":"leak-refresh-token-value"}`, "leak-refresh-token-value"},
+		{`{"apiKey":"leak-api-key-value"}`, "leak-api-key-value"},
+	}
+	for _, c := range cases {
+		out := RedactString(c.in, o)
+		if strings.Contains(out, c.secret) {
+			t.Errorf("RedactString(%q) leaked %q: got %q", c.in, c.secret, out)
+		}
+	}
+	if out := RedactString(`{"promptTokens":12}`, o); out != `{"promptTokens":12}` {
+		t.Errorf("promptTokens JSON should be unchanged, got %q", out)
+	}
+}

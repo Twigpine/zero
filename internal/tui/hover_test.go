@@ -1,12 +1,12 @@
 package tui
 
 import (
-	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Gitlawb/zero/internal/tools"
 )
 
 func TestMouseHoverPredicate(t *testing.T) {
@@ -78,70 +78,71 @@ func TestUpdateHoverTargetOnPlainTextIsNone(t *testing.T) {
 	}
 }
 
-func TestUpdateHoverTargetOnSidebarAgentRow(t *testing.T) {
-	// Only a SWARM member row (a session mapped via swarmSessionMap) is clickable
-	// in the sidebar — a Task-delegation specialist row is not (sidebarAgentRows
-	// only records hits from the swarm loop). swarmSidebarTestModel builds exactly
-	// that: real conversation + a mapped swarm member session.
-	m := swarmSidebarTestModel(t, map[string]string{"subagent-1": "sess-1"})
-	if !m.sidebarActive() {
-		t.Fatal("sanity check failed: sidebar should be active with a swarm member present on a 100-col terminal")
+func TestDiffHeaderDoesNotHoverOrToggle(t *testing.T) {
+	m := mouseTestModel()
+	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
+		kind:   rowToolResult,
+		id:     "diff",
+		tool:   "write_file",
+		status: tools.StatusOK,
+		detail: "--- go.mod\n+++ go.mod\n@@ -0,0 +1,3 @@\n+module greeting\n+\n+go 1.25",
+	})
+	rowIndex := len(m.transcript) - 1
+	width := m.chatColumnWidth()
+	body, selectable := m.transcriptBody(width, "")
+	start, _, top := m.transcriptViewportStart(body, width)
+	var target transcriptSelectableLine
+	for _, line := range selectable {
+		if line.rowIndex == rowIndex {
+			target = line
+			break
+		}
 	}
-	hits := m.sidebarAgentSelectables(sidebarWidth(m.width))
-	if len(hits) == 0 {
-		t.Fatal("expected at least one clickable sidebar agent row")
+	if target.text == "" {
+		t.Fatalf("expected a selectable diff header, got %#v", selectable)
 	}
-	x0 := m.chatColumnWidth() + 3
 
-	updated, _ := m.Update(testMouseMotion(tea.MouseNone, x0+1, hits[0].lineOffset))
+	updated, _ := m.Update(testMouseMotion(tea.MouseNone, target.textStart, top+target.bodyY-start))
 	m = updated.(model)
-	if m.hover.kind != hoverSidebarAgent {
-		t.Fatalf("hover.kind = %v, want hoverSidebarAgent", m.hover.kind)
+	if m.hover.kind != hoverNone {
+		t.Fatalf("diff header must not hover as a control, got %#v", m.hover)
 	}
-	if m.hover.sessionID != hits[0].sessionID {
-		t.Fatalf("hover.sessionID = %q, want %q", m.hover.sessionID, hits[0].sessionID)
-	}
-	// The bug this guards: hoverTarget must store the STABLE identity (sessionID),
-	// not a raw line offset — resolve it back to a line offset the same way the
-	// render path does (hoveredSidebarLineOffset) and confirm it lands on the
-	// SAME row that was actually hovered, not some other row at that raw index.
-	resolved, ok := m.hoveredSidebarLineOffset(sidebarWidth(m.width))
-	if !ok || resolved != hits[0].lineOffset {
-		t.Fatalf("hoveredSidebarLineOffset() = (%d, %v), want (%d, true)", resolved, ok, hits[0].lineOffset)
+
+	updated, _ = m.Update(testMouseClick(tea.MouseLeft, target.textStart, top+target.bodyY-start))
+	m = updated.(model)
+	if m.transcript[rowIndex].expanded {
+		t.Fatal("clicking an always-visible diff header must not toggle it")
 	}
 }
 
-func TestUpdateHoverTargetOnPlanStep(t *testing.T) {
+func TestUpdateHoverTargetIgnoresFormerSidebarAgentRail(t *testing.T) {
+	m := swarmSidebarTestModel(t, map[string]string{"subagent-1": "sess-1"})
+	hits := m.sidebarAgentSelectables(sidebarWidth(m.width))
+	if len(hits) == 0 {
+		t.Fatal("expected a legacy sidebar row for the rail-coordinate regression")
+	}
+
+	updated, _ := m.Update(testMouseMotion(tea.MouseNone, m.width-sidebarWidth(m.width)+2, hits[0].lineOffset))
+	m = updated.(model)
+	if m.hover.kind != hoverNone {
+		t.Fatalf("former sidebar rail must not create a hover target, got %#v", m.hover)
+	}
+}
+
+func TestUpdateHoverTargetIgnoresFormerSidebarPlanRail(t *testing.T) {
 	m := runningPlanModel(t, 3)
 	m.altScreen = true
 	m.height = 40
-	// sidebarActive requires real conversation; runningPlanModel only sets m.plan,
-	// leaving the transcript at its default (welcome-only, i.e. "empty").
 	m.transcript = appendRow(m.transcript, rowUser, "do something")
-	if !m.sidebarActive() {
-		t.Fatal("sanity check failed: sidebar should be active with a plan present on a 100-col terminal")
-	}
 	hits := m.sidebarPlanSelectables(sidebarWidth(m.width))
 	if len(hits) == 0 {
-		t.Fatal("expected at least one clickable plan step row")
+		t.Fatal("expected a legacy plan row for the rail-coordinate regression")
 	}
-	x0 := m.chatColumnWidth() + 3
 
-	updated, _ := m.Update(testMouseMotion(tea.MouseNone, x0+1, hits[0].lineOffset))
+	updated, _ := m.Update(testMouseMotion(tea.MouseNone, m.width-sidebarWidth(m.width)+2, hits[0].lineOffset))
 	m = updated.(model)
-	if m.hover.kind != hoverPlanStep {
-		t.Fatalf("hover.kind = %v, want hoverPlanStep", m.hover.kind)
-	}
-	if m.hover.stepIndex != hits[0].stepIndex {
-		t.Fatalf("hover.stepIndex = %d, want %d", m.hover.stepIndex, hits[0].stepIndex)
-	}
-	// The bug this guards: the render path must resolve stepIndex back to the
-	// CORRECT current lineOffset (hits[0].lineOffset, which is >= base=4, never a
-	// raw small index like 0/1/2) — not treat stepIndex itself as a line offset
-	// into the rendered sidebar (which would land on the AGENTS header/body).
-	resolved, ok := m.hoveredSidebarLineOffset(sidebarWidth(m.width))
-	if !ok || resolved != hits[0].lineOffset {
-		t.Fatalf("hoveredSidebarLineOffset() = (%d, %v), want (%d, true)", resolved, ok, hits[0].lineOffset)
+	if m.hover.kind != hoverNone {
+		t.Fatalf("former sidebar rail must not create a hover target, got %#v", m.hover)
 	}
 }
 
@@ -204,28 +205,6 @@ func TestHoverChangesTranscriptRenderOutput(t *testing.T) {
 
 	if without == with {
 		t.Fatal("rendering with a hover target set should differ from without (the highlight should show)")
-	}
-}
-
-func TestHoverChangesSidebarRenderOutput(t *testing.T) {
-	m := swarmSidebarTestModel(t, map[string]string{"subagent-1": "sess-1"})
-	width := m.chatColumnWidth()
-	height := m.height
-	without := strings.Join(m.renderContextSidebar(sidebarWidth(m.width), height), "\n")
-
-	hits := m.sidebarAgentSelectables(sidebarWidth(m.width))
-	if len(hits) == 0 {
-		t.Fatal("expected at least one clickable sidebar agent row")
-	}
-	updated, _ := m.Update(testMouseMotion(tea.MouseNone, width+3+1, hits[0].lineOffset))
-	m = updated.(model)
-	if m.hover.kind != hoverSidebarAgent {
-		t.Fatal("sanity check failed: hover should be set over the sidebar agent row")
-	}
-	with := strings.Join(m.renderContextSidebar(sidebarWidth(m.width), height), "\n")
-
-	if without == with {
-		t.Fatal("sidebar rendering with a hover target set should differ from without (the highlight should show)")
 	}
 }
 

@@ -1,12 +1,5 @@
-// sidebar.go renders the right-hand context sidebar for the two-column chat
-// layout (alt-screen managed mode only). The sidebar surfaces three sections —
-// the spawned AGENTS and their live working detail, the live PLAN (the same data
-// the pinned plan panel reads), and a token/context readout at the bottom — so
-// the chat column stays focused on the conversation. It is a set of pure
-// helpers: the layout in
-// transcriptView renders the chat at a reduced width via the existing scroll
-// engine, builds a sidebar block of the same height here, and joins the two
-// columns row-by-row through joinColumns.
+// sidebar.go retains compact data-formatting helpers used by the run-details
+// surface. Conversation rendering is single-column.
 package tui
 
 import (
@@ -41,38 +34,11 @@ func sidebarWidth(total int) int {
 	return clamp(total*30/100, sidebarMinWidth, sidebarMaxWidth)
 }
 
-// sidebarActive reports whether the two-column layout should render right now:
-// the sidebar is available AND the user hasn't collapsed it with Ctrl+B.
+// sidebarActive is retained for the compact data helpers and legacy file-detail
+// interactions. The persistent two-column layout is intentionally no longer
+// rendered by transcriptView.
 func (m model) sidebarActive() bool {
 	return !m.sidebarHidden && m.sidebarAvailable()
-}
-
-// sidebarToggleAllowed reports whether the toggle-sidebar keybinding should
-// respond. Unlike sidebarAvailable it OMITS the content check
-// (sidebarHasContent) so the user can toggle their show/hide preference even
-// when the sidebar auto-hid due to having nothing to show. The content gate
-// is still applied at render time (sidebarActive chains sidebarAvailable), so
-// toggling on when there's no content just records the preference for when
-// content arrives — the sidebar stays hidden until then.
-func (m model) sidebarToggleAllowed() bool {
-	if !m.altScreen || m.height <= 0 || m.subchat.active {
-		return false
-	}
-	if sidebarWidth(m.width) <= 0 {
-		return false
-	}
-	if widthTier(m.width) < tierMedium {
-		return false
-	}
-	if m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil ||
-		m.mcpManager != nil || m.picker != nil || m.renamePrompt != nil || m.suggestionsActive() {
-		return false
-	}
-	// Home/welcome screen: stay single-column until there's real conversation.
-	if m.transcriptEmpty() {
-		return false
-	}
-	return true
 }
 
 // sidebarAvailable reports whether the two-column layout CAN render: only in
@@ -147,17 +113,10 @@ func (m model) sidebarHasContent() bool {
 	return !m.plan.isEmpty()
 }
 
-// chatColumnWidth is the chat's render width: the full chat width normally, and
-// the reduced left-column width when the two-column layout is active (total
-// minus the sidebar and the 1-cell divider). All frame/geometry callers route
-// through this so the rendered chat, the scroll engine, and mouse hit-testing
-// agree on where the chat column ends.
+// chatColumnWidth is the full conversation width. All frame and geometry
+// callers route through this so transcript, composer, and mouse hit-testing
+// share one layout.
 func (m model) chatColumnWidth() int {
-	if sw := m.sidebarWidthForLayout(); sw > 0 {
-		// Reserve 3 cells for the padded " │ " divider (a cell of air on each side
-		// of the rule) — see joinColumns.
-		return chatWidth(m.width - sw - 3)
-	}
 	return chatWidth(m.width)
 }
 
@@ -175,15 +134,6 @@ func transcriptContentWidth(columnWidth int) int {
 		return columnWidth
 	}
 	return cw
-}
-
-// sidebarWidthForLayout returns the active sidebar column width, or 0 when the
-// two-column layout is not active.
-func (m model) sidebarWidthForLayout() int {
-	if !m.sidebarActive() {
-		return 0
-	}
-	return sidebarWidth(m.width)
 }
 
 // sidebarSpecialists returns the specialist delegations worth surfacing in the
@@ -210,15 +160,9 @@ func (m model) sidebarSpecialists() []specialistInfo {
 	return out
 }
 
-// sidebarHasAgents reports whether the two-column sidebar is active AND has at
-// least one agent line to animate (a specialist delegation or a swarm member).
-// The spinner tick keeps firing while this holds so the cool swarm ripple on
-// member names stays alive even when no run is in flight; gating it on the
-// sidebar+agent presence means a plain idle session schedules no timer.
+// sidebarHasAgents reports whether the session has agent activity worth keeping
+// alive for the compact run-details surface.
 func (m model) sidebarHasAgents() bool {
-	if !m.sidebarActive() {
-		return false
-	}
 	return len(m.sidebarSpecialists())+len(m.swarmSpawnedAgents()) > 0
 }
 
@@ -808,11 +752,12 @@ const maxSidebarActivityLines = 5
 // feed inspects per render, so a sparse-work transcript stays O(window).
 const maxSidebarActivityScan = 200
 
-// sidebarActivityLines builds the ACTIVITY feed: a live "generating…" pulse (when
-// the run has gone quiet) atop the most recent completed work (files written,
-// commands run). It scans the transcript BACKWARD and stops after the cap, so the
-// cost is bounded by the cap — never a full-transcript walk per frame. budget is
-// the rows available before the token floor; the feed clips itself to it.
+// sidebarActivityLines builds the ACTIVITY feed: a live, phase-aware pulse atop
+// the most recent completed work (files written, commands run). The quiet-run
+// warning still replaces the phase label when needed. It scans the transcript
+// BACKWARD and stops after the cap, so the cost is bounded by the cap — never a
+// full-transcript walk per frame. budget is the rows available before the token
+// floor; the feed clips itself to it.
 func (m model) sidebarActivityLines(width, budget int) []string {
 	if budget <= 0 {
 		return nil
@@ -838,9 +783,11 @@ func (m model) sidebarActivityLines(width, budget int) []string {
 	}
 	live := ""
 	if m.activeRunID != 0 {
+		label := m.workingActivity()
 		if hint := m.quietGenerationHint(); hint != "" {
-			live = " " + zeroTheme.accent.Render("•") + " " + zeroTheme.faint.Render(truncateStep(hint, room))
+			label = hint
 		}
+		live = " " + zeroTheme.accent.Render("›") + " " + zeroTheme.faint.Render(truncateStep(label, room))
 	}
 	lines := make([]string, 0, len(work)+1)
 	if live != "" {

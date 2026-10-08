@@ -19,6 +19,7 @@ import (
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/providers/providerio"
+	"github.com/Gitlawb/zero/internal/proxydial"
 	"github.com/Gitlawb/zero/internal/redaction"
 )
 
@@ -518,9 +519,15 @@ func newConnectivityClient(timeout time.Duration, resolver Resolver, sensitiveHe
 		transport = &http.Transport{}
 	}
 	transport.DialContext = safeDialContext(resolver, allowLoopbackOrPrivate)
+	// WRAPPED, SO THE DIALER LEARNS THE ROUTE THIS TRANSPORT CHOSE. The wrapper
+	// records the proxy selected for each request on that request, and the
+	// dialer reads it back on the dial that request causes; installing the bare
+	// transport instead would leave a proxied dial looking like a loopback
+	// target and fail the probe (#569). The cloned default transport already
+	// reads HTTPS_PROXY and friends; nothing new is enabled.
 	return &http.Client{
 		Timeout:   timeout,
-		Transport: transport,
+		Transport: proxydial.Wrap(transport),
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= maxConnectivityRedirects {
 				return fmt.Errorf("provider connectivity exceeded %d redirects", maxConnectivityRedirects)
@@ -583,6 +590,17 @@ func sensitiveAuthHeaderNames(profile config.ProviderProfile, kind config.Provid
 func safeDialContext(resolver Resolver, allowLoopbackOrPrivate bool) func(context.Context, string, string) (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		// THE PROXY IS NOT THE TARGET. With HTTPS_PROXY set to a local forward
+		// proxy, the transport dials the proxy first and tunnels the request
+		// through it, and this dialer used to refuse that dial as a loopback
+		// address: "proxyconnect tcp: ... loopback hosts are blocked" for a
+		// request whose real target had already been validated (#569). The
+		// target validation is unchanged; only the dial the transport opens to
+		// the proxy it picked for this very request is let past the guard, and a
+		// direct dial is checked as it always was.
+		if proxydial.IsProxyDial(ctx) {
+			return dialer.DialContext(ctx, network, address)
+		}
 		host, port, err := net.SplitHostPort(address)
 		if err != nil {
 			return nil, err

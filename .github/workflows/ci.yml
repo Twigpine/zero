@@ -6,10 +6,109 @@ on:
     branches:
       - main
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
 jobs:
+  quality:
+    name: Code Quality & Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.3.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check formatting
+        run: make fmt-check
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: deadcode (advisory)
+        continue-on-error: true
+        run: make deadcode
+
+      - name: golangci-lint (advisory)
+        continue-on-error: true
+        run: make lint-static
+
+  test:
+    name: Unit Tests & Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.3.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test with coverage
+        run: |
+          go test -count=1 -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Publish coverage summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f coverage.out ]; then
+            go tool cover -func=coverage.out | awk '
+            BEGIN {
+              total = "unknown"
+              rows = ""
+            }
+            $1 == "total:" {
+              total = $3
+              next
+            }
+            {
+              rows = rows sprintf("| `%s` | `%s` | **%s** |\n", $1, $2, $3)
+            }
+            END {
+              print "### 📊 Test Coverage Summary: **" total "**"
+              print "<details><summary>Coverage per function</summary>\n"
+              print "| File | Function | Coverage |"
+              print "| :--- | :--- | :--- |"
+              printf "%s", rows
+              print "</details>"
+            }' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: zero-coverage-report
+          path: coverage.out
+          if-no-files-found: warn
+
   smoke:
     name: Smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -18,64 +117,22 @@ jobs:
           - macos-latest
           - windows-latest
 
+    permissions:
+      contents: read
+
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.2.2
         with:
           persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.3.0
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: Install Make on Windows
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: choco install make --no-progress -y
-
-      - name: Validate quality targets with stock macOS Make
-        if: matrix.os == 'macos-latest'
-        env:
-          GIT_CONFIG_COUNT: 1
-          GIT_CONFIG_KEY_0: grep.patternType
-          GIT_CONFIG_VALUE_0: fixed
-        run: make -n vulncheck
-
-      - name: Check vulnerabilities through native Windows Make
-        if: matrix.os == 'windows-latest'
-        shell: cmd
-        run: make vulncheck
-
-      - name: Check dead code through native Windows Make
-        if: matrix.os == 'windows-latest'
-        continue-on-error: true
-        shell: cmd
-        run: make deadcode
-
-      - name: Run static lint through native Windows Make
-        if: matrix.os == 'windows-latest'
-        continue-on-error: true
-        shell: cmd
-        run: make lint-static
-
-      - name: Check formatting
-        if: matrix.os == 'ubuntu-latest'
-        shell: bash
-        run: |
-          unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
-            echo "gofmt needed on:" >&2
-            echo "$unformatted" >&2
-            exit 1
-          fi
-
-      - name: Vet
-        if: matrix.os == 'ubuntu-latest'
-        run: go vet ./...
-
-      - name: Test
+      - name: Test (Fast Non-Race)
         run: go test ./...
 
       - name: Build binary
@@ -84,9 +141,15 @@ jobs:
       - name: Smoke binary
         run: go run ./cmd/zero-release smoke
 
-  performance:
-    name: Performance Smoke
+  race:
+    name: Race Detector
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # A race the detector newly reports can present as a deadlock rather than a
+    # failure, and the default job timeout is six hours. This job is expected to
+    # be the longest in the workflow, so the ceiling is generous but finite.
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -96,6 +159,33 @@ jobs:
 
       - name: Setup Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Invoke the Makefile target rather than repeating its flags. `make test`
+      # is already `go test ./... -race -count=1`, so running it here is what
+      # stops the project's declared test command and what CI actually runs
+      # from drifting apart again. The race detector needs cgo, which the
+      # hosted ubuntu runner supplies without an extra setup step.
+      - name: Test with the race detector
+        run: make test
+
+  performance:
+    name: Performance Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.3.0
         with:
           go-version-file: go.mod
           cache: true
@@ -104,51 +194,39 @@ jobs:
         run: go run ./cmd/zero-release build
 
       - name: Performance smoke
-        run: go run ./cmd/zero-perf-bench --output dist/perf/perf-bench.json --ci
+        run: |
+          mkdir -p dist/perf
+          go run ./cmd/zero-perf-bench --output dist/perf/perf-bench.json --ci
 
       - name: Upload performance report
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: zero-performance-smoke
           path: dist/perf/perf-bench.json
           if-no-files-found: warn
 
   security:
-    name: Security & code health
+    name: Security & Code Health
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.2.2
         with:
           persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.3.0
         with:
           go-version-file: go.mod
           cache: true
 
-      # Hard gate: fails the build when code reaches a known vulnerability. A stdlib
-      # CVE is cleared by a toolchain bump (see go.mod). May also flag a newly
-      # published advisory on an unrelated PR — intentional: do not ship known vulns.
-      - name: govulncheck
+      - name: govulncheck (linux)
         run: make vulncheck
 
-      # Advisory: reports functions unreachable from any cmd/* main so dormant
-      # code is visible in CI. Non-blocking while the dormant subsystems are
-      # still being wired or removed.
-      - name: deadcode (advisory)
-        continue-on-error: true
-        run: make deadcode
-
-      # Advisory: catches what deadcode's whole-program reachability analysis
-      # doesn't, unused private functions/assignments reachable within a
-      # package but never actually called, plus staticcheck-style correctness
-      # and readability issues. Scoped to a few linters rather than the full
-      # default battery, and non-blocking, while the existing findings across
-      # the repo are cleaned up incrementally (see #527).
-      - name: golangci-lint (advisory)
-        continue-on-error: true
-        run: make lint-static
+      - name: govulncheck (windows)
+        run: make vulncheck-windows

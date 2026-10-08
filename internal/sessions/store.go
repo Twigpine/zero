@@ -813,15 +813,24 @@ func (store *Store) UpdateModel(sessionID string, modelID string) (Metadata, err
 }
 
 func (store *Store) ReadEvents(sessionID string) ([]Event, error) {
+	events, _, err := store.ReadEventsWithPresence(sessionID)
+	return events, err
+}
+
+// ReadEventsWithPresence preserves the distinction between an intentionally
+// empty event log and a missing one. Most readers accept both as empty history,
+// but activation protocols that promise to restore previously populated
+// context need the stronger signal.
+func (store *Store) ReadEventsWithPresence(sessionID string) ([]Event, bool, error) {
 	if !ValidSessionID(sessionID) {
-		return nil, fmt.Errorf("invalid zero session id %q", sessionID)
+		return nil, false, fmt.Errorf("invalid zero session id %q", sessionID)
 	}
 	data, err := os.ReadFile(store.eventsPath(sessionID))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return []Event{}, nil
+			return []Event{}, false, nil
 		}
-		return nil, fmt.Errorf("read zero session events: %w", err)
+		return nil, false, fmt.Errorf("read zero session events: %w", err)
 	}
 	// A genuine torn tail is an INCOMPLETE final write — a crash mid-append leaves
 	// the last line without its terminating newline. If the file ends with a
@@ -851,11 +860,11 @@ func (store *Store) ReadEvents(sessionID string) ([]Event, error) {
 			if index == lastNonEmpty && tornTailPossible {
 				break
 			}
-			return nil, fmt.Errorf("invalid json in zero session %s %s at line %d: %w", sessionID, EventsFile, index+1, err)
+			return nil, true, fmt.Errorf("invalid json in zero session %s %s at line %d: %w", sessionID, EventsFile, index+1, err)
 		}
 		events = append(events, event)
 	}
-	return events, nil
+	return events, true, nil
 }
 
 func (store *Store) timestamp() string {

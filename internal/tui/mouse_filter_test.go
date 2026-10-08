@@ -51,3 +51,22 @@ func TestMouseEventFilterDoesNotThrottleKeyboard(t *testing.T) {
 		t.Fatal("keyboard events should not touch the mouse throttle clock")
 	}
 }
+
+func TestMouseEventFilterDoesNotThrottlePetDrag(t *testing.T) {
+	clockReads := 0
+	filter := newMouseEventFilter(func() time.Time {
+		clockReads++
+		return time.Unix(0, 0)
+	}, mouseEventThrottleInterval)
+	m := model{petDragActive: true}
+
+	if got := filter(m, tea.MouseMotionMsg(tea.Mouse{Button: tea.MouseLeft, X: 1, Y: 1})); got == nil {
+		t.Fatal("first drag event should pass through")
+	}
+	if got := filter(m, tea.MouseMotionMsg(tea.Mouse{Button: tea.MouseLeft, X: 2, Y: 1})); got == nil {
+		t.Fatal("every pet-drag event should pass through for zero-gap tracking")
+	}
+	if clockReads != 0 {
+		t.Fatalf("pet drag should bypass the throttle clock, read it %d times", clockReads)
+	}
+}

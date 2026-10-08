@@ -34,3 +34,39 @@ func TestHydrationKeepsFailedTaskWithoutSpecialist(t *testing.T) {
 		t.Fatalf("a Task with a specialist card must NOT also show raw Task rows, got %#v", withSpecialist)
 	}
 }
+
+func TestHydrationPreservesSentAttachmentSummary(t *testing.T) {
+	rows := transcriptRowsFromSessionEvents([]sessions.Event{{
+		Type:    sessions.EventMessage,
+		Payload: json.RawMessage(`{"role":"user","content":"describe this","attachments":{"images":1,"documents":2}}`),
+	}})
+	if len(rows) != 1 || rows[0].kind != rowUser {
+		t.Fatalf("hydrated rows = %#v, want one user row", rows)
+	}
+	if got := renderUserAttachmentSummary(rows[0].attachments); got != "[Image #1] [Document #1] [Document #2]" {
+		t.Fatalf("hydrated attachment summary = %q", got)
+	}
+}
+
+func TestHydrationCapsMalformedAttachmentCounts(t *testing.T) {
+	rows := transcriptRowsFromSessionEvents([]sessions.Event{{
+		Type:    sessions.EventMessage,
+		Payload: json.RawMessage(`{"role":"user","content":"describe this","attachments":{"images":1000000000,"documents":1000000000}}`),
+	}})
+	if len(rows) != 1 || rows[0].attachments.images != persistedAttachmentCountLimit || rows[0].attachments.documents != persistedAttachmentCountLimit {
+		t.Fatalf("hydrated attachment counts = %#v, want each capped at %d", rows[0].attachments, persistedAttachmentCountLimit)
+	}
+	if got := renderUserAttachmentSummary(rows[0].attachments); got != "[Image #1] [Image #2] [Image #3] [Image #4] [Document #1] [Document #2] [Document #3] [Document #4] [+120 attachments]" {
+		t.Fatalf("capped attachment summary = %q", got)
+	}
+}
+
+func TestHydrationRejectsFractionalAttachmentCounts(t *testing.T) {
+	rows := transcriptRowsFromSessionEvents([]sessions.Event{{
+		Type:    sessions.EventMessage,
+		Payload: json.RawMessage(`{"role":"user","content":"describe this","attachments":{"images":1.5,"documents":2.25}}`),
+	}})
+	if len(rows) != 1 || !rows[0].attachments.empty() {
+		t.Fatalf("fractional attachment counts must be ignored, got %#v", rows)
+	}
+}

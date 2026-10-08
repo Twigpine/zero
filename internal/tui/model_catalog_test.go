@@ -46,6 +46,23 @@ func TestModelSupportsVisionTUIChecksDiscoveredBeforeHeuristic(t *testing.T) {
 	}
 }
 
+func TestModelSupportsVisionTUIFallsBackWhenLiveMetadataOmitsModalities(t *testing.T) {
+	registry := mustTestModelRegistry(t, testModelEntry("custom-known", 12345, []modelregistry.ModelCapability{
+		modelregistry.ModelCapabilityChat,
+	}))
+	m := model{
+		modelName:    "gpt-5.6-sol",
+		modelCatalog: registry,
+		modelPickerLiveByProvider: map[string][]providermodeldiscovery.Model{
+			"chatgpt": {{ID: "gpt-5.6-sol"}},
+		},
+	}
+
+	if !m.modelSupportsVisionTUI() {
+		t.Fatal("live discovery without modality metadata must fall back to the model capability heuristic")
+	}
+}
+
 func BenchmarkModelContextWindowLookup(b *testing.B) {
 	cachedRegistry, err := modelregistry.DefaultRegistry()
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"strconv"
@@ -49,19 +50,38 @@ type Client struct {
 	stdin   io.WriteCloser
 	reader  *messageReader
 	writer  *messageWriter
-	mu      sync.Mutex
 	closeMu sync.Mutex
+	idMu    sync.Mutex
 	nextID  int
 	cleanup func()
 
+	writeMu          sync.Mutex
+	writeQueue       chan writeOp
+	writeClosed      bool
+	writeSenders     sync.WaitGroup
+	writerStop       chan struct{}
+	writerDone       chan struct{}
+	courtesyOverflow []writeOp
+
 	// dispatchMu guards the response-dispatch state shared with the single
-	// reader goroutine. It is never held across a blocking read.
+	// reader goroutine. It is never held across a blocking read or write.
 	dispatchMu sync.Mutex
 	readerOnce sync.Once
 	pending    map[int]chan dispatchResult
 	readErr    error
 	readDone   bool
 }
+
+type writeOp struct {
+	ctx     context.Context
+	message rpcMessage
+	done    chan error
+}
+
+const writeQueueCapacity = 32
+const courtesyOverflowCap = writeQueueCapacity
+
+var errMCPClientClosed = errors.New("MCP client closed")
 
 // dispatchResult carries one matched JSON-RPC response (or a terminal reader
 // error) to a waiting caller.
@@ -252,7 +272,8 @@ func (client *Client) Close() error {
 	// Fail any callers still waiting on a response. The blocking read in the
 	// reader goroutine is released below when stdin closes and the process
 	// exits (or is killed), EOFing stdout.
-	client.failAll(errors.New("MCP client closed"))
+	client.failAll(errMCPClientClosed)
+	client.beginWriterShutdown()
 
 	var err error
 	stdin := client.stdin
@@ -292,6 +313,7 @@ func (client *Client) Close() error {
 		client.cleanup()
 		client.cleanup = nil
 	}
+	client.finishWriterShutdown()
 	return err
 }
 
@@ -307,20 +329,20 @@ func (client *Client) request(ctx context.Context, method string, params any, ta
 		return err
 	}
 
-	// Allocate an id, register a response channel, and write the request while
-	// holding client.mu. The mutex serializes writes and id allocation but is
-	// released before the (potentially unbounded) wait for the response, so a
-	// hung server never holds the lock and blocks other callers/Close.
-	client.mu.Lock()
+	// Allocate an id and register a response channel. ID allocation and dispatch
+	// registrations are fast non-blocking operations. Message transmission is
+	// handled via writeMessage so a caller with a canceled context can stop
+	// waiting even when the peer is not draining its input.
+	client.idMu.Lock()
 	id := client.nextID
 	client.nextID++
+	client.idMu.Unlock()
 
 	responses := make(chan dispatchResult, 1)
 	client.dispatchMu.Lock()
 	if client.readDone {
 		readErr := client.readErr
 		client.dispatchMu.Unlock()
-		client.mu.Unlock()
 		if readErr != nil {
 			return readErr
 		}
@@ -329,16 +351,14 @@ func (client *Client) request(ctx context.Context, method string, params any, ta
 	client.pending[id] = responses
 	client.dispatchMu.Unlock()
 
-	if err := client.writer.write(rpcMessage{
+	if err := client.writeMessage(ctx, rpcMessage{
 		ID:     id,
 		Method: method,
 		Params: rawParams,
 	}); err != nil {
 		client.removePending(id)
-		client.mu.Unlock()
 		return err
 	}
-	client.mu.Unlock()
 
 	select {
 	case <-ctx.Done():
@@ -358,6 +378,189 @@ func (client *Client) request(ctx context.Context, method string, params any, ta
 			}
 		}
 		return nil
+	}
+}
+
+func (client *Client) ensureWriter() {
+	_ = client.startWriter()
+}
+
+func (client *Client) startWriter() error {
+	client.writeMu.Lock()
+	defer client.writeMu.Unlock()
+	if client.writeClosed {
+		return errMCPClientClosed
+	}
+	if client.writeQueue != nil {
+		return nil
+	}
+	queue := make(chan writeOp, writeQueueCapacity)
+	client.writeQueue = queue
+	client.writerStop = make(chan struct{})
+	client.writerDone = make(chan struct{})
+	go client.writeLoop(queue)
+	return nil
+}
+
+func (client *Client) writerStopped() bool {
+	if client.writerStop == nil {
+		return false
+	}
+	select {
+	case <-client.writerStop:
+		return true
+	default:
+		return false
+	}
+}
+
+func (client *Client) beginWriterShutdown() {
+	client.writeMu.Lock()
+	defer client.writeMu.Unlock()
+	if client.writeClosed {
+		return
+	}
+	client.writeClosed = true
+	if client.writerStop != nil {
+		close(client.writerStop)
+	}
+	for _, op := range client.courtesyOverflow {
+		if op.done != nil {
+			op.done <- errMCPClientClosed
+		}
+	}
+	client.courtesyOverflow = nil
+}
+
+func (client *Client) finishWriterShutdown() {
+	client.writeMu.Lock()
+	queue := client.writeQueue
+	done := client.writerDone
+	client.writeQueue = nil
+	client.writeMu.Unlock()
+	if queue == nil {
+		return
+	}
+	client.writeSenders.Wait()
+	close(queue)
+	if done != nil {
+		<-done
+	}
+}
+
+func (client *Client) writeLoop(queue <-chan writeOp) {
+	defer close(client.writerDone)
+	if queue == nil {
+		return
+	}
+	for op := range queue {
+		if client.writerStopped() {
+			if op.done != nil {
+				op.done <- errMCPClientClosed
+			}
+			continue
+		}
+		if op.ctx != nil {
+			select {
+			case <-op.ctx.Done():
+				if op.done != nil {
+					op.done <- op.ctx.Err()
+				}
+				continue
+			default:
+			}
+		}
+		err := client.writer.write(op.message)
+		if op.done != nil {
+			op.done <- err
+		}
+		client.drainCourtesyOverflow()
+	}
+}
+
+func (client *Client) drainCourtesyOverflow() {
+	client.writeMu.Lock()
+	defer client.writeMu.Unlock()
+	if client.writeClosed || client.writeQueue == nil {
+		client.courtesyOverflow = nil
+		return
+	}
+	for len(client.courtesyOverflow) > 0 {
+		select {
+		case client.writeQueue <- client.courtesyOverflow[0]:
+			client.courtesyOverflow = client.courtesyOverflow[1:]
+		default:
+			return
+		}
+	}
+}
+
+func (client *Client) enqueueCourtesy(message rpcMessage) {
+	if err := client.startWriter(); err != nil {
+		return
+	}
+	op := writeOp{message: message}
+	client.writeMu.Lock()
+	defer client.writeMu.Unlock()
+	if client.writeClosed || client.writeQueue == nil {
+		return
+	}
+	select {
+	case client.writeQueue <- op:
+	default:
+		if len(client.courtesyOverflow) >= courtesyOverflowCap {
+			return
+		}
+		client.courtesyOverflow = append(client.courtesyOverflow, op)
+	}
+}
+
+func (client *Client) writeMessage(ctx context.Context, message rpcMessage) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := client.startWriter(); err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	op := writeOp{ctx: ctx, message: message, done: done}
+
+	client.writeMu.Lock()
+	if client.writeClosed {
+		client.writeMu.Unlock()
+		return errMCPClientClosed
+	}
+	stop := client.writerStop
+	queue := client.writeQueue
+	client.writeSenders.Add(1)
+	client.writeMu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		client.writeSenders.Done()
+		return ctx.Err()
+	case <-stop:
+		client.writeSenders.Done()
+		return errMCPClientClosed
+	case queue <- op:
+		client.writeSenders.Done()
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-stop:
+		select {
+		case err := <-done:
+			if err != nil {
+				return err
+			}
+			return errMCPClientClosed
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	case err := <-done:
+		return err
 	}
 }
 
@@ -384,6 +587,20 @@ func (client *Client) readLoop() {
 		if err != nil {
 			client.failAll(err)
 			return
+		}
+		// A message with a Method is a server-initiated request or notification.
+		// It must never be routed as a response to a pending client request.
+		if message.isRequestOrNotification() {
+			if message.ID != nil && jsonRPCIDEchoable(message.ID) {
+				client.enqueueCourtesy(rpcMessage{
+					ID: message.ID,
+					Error: &rpcError{
+						Code:    -32601,
+						Message: fmt.Sprintf("Method %q not supported", message.Method),
+					},
+				})
+			}
+			continue
 		}
 		if message.ID == nil {
 			continue
@@ -428,6 +645,20 @@ func (client *Client) failAll(err error) {
 
 // rpcMessageID extracts the integer id from a JSON-RPC id value across the
 // numeric/string encodings a server may use.
+func jsonNumberAsInt(n json.Number) (int64, bool) {
+	if parsed, err := n.Int64(); err == nil {
+		return parsed, true
+	}
+	f, err := n.Float64()
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f != math.Trunc(f) {
+		return 0, false
+	}
+	if f > float64(math.MaxInt64) || f < float64(math.MinInt64) {
+		return 0, false
+	}
+	return int64(f), true
+}
+
 func rpcMessageID(value any) (int, bool) {
 	switch typed := value.(type) {
 	case int:
@@ -435,10 +666,13 @@ func rpcMessageID(value any) (int, bool) {
 	case int64:
 		return int(typed), true
 	case float64:
+		if math.IsNaN(typed) || math.IsInf(typed, 0) || typed != math.Trunc(typed) {
+			return 0, false
+		}
 		return int(typed), true
 	case json.Number:
-		parsed, err := typed.Int64()
-		if err != nil {
+		parsed, ok := jsonNumberAsInt(typed)
+		if !ok {
 			return 0, false
 		}
 		return int(parsed), true
@@ -454,18 +688,30 @@ func rpcMessageID(value any) (int, bool) {
 }
 
 func rpcIDMatches(value any, id int) bool {
-	switch typed := value.(type) {
-	case int:
-		return typed == id
-	case int64:
-		return typed == int64(id)
-	case float64:
-		return typed == float64(id)
-	case json.Number:
-		parsed, err := typed.Int64()
-		return err == nil && parsed == int64(id)
+	got, ok := rpcMessageID(value)
+	return ok && got == id
+}
+
+// jsonRPCIDEchoable reports whether id is a valid JSON-RPC 2.0 identifier type
+// (string or finite number) that is safe to echo back.
+func jsonRPCIDEchoable(id any) bool {
+	if id == nil {
+		return false
+	}
+	switch v := id.(type) {
 	case string:
-		return typed == strconv.Itoa(id)
+		return true
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return true
+	case float64:
+		return !math.IsNaN(v) && !math.IsInf(v, 0)
+	case json.Number:
+		parsed, err := v.Float64()
+		if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+			return false
+		}
+		_, err = json.Marshal(v)
+		return err == nil
 	default:
 		return false
 	}
@@ -476,7 +722,7 @@ func (client *Client) notify(method string, params any) error {
 	if err != nil {
 		return err
 	}
-	return client.writer.write(rpcMessage{
+	return client.writeMessage(context.Background(), rpcMessage{
 		Method: method,
 		Params: rawParams,
 	})

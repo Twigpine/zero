@@ -3,6 +3,7 @@ package swarm
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // Spawn registers a task and launches a member of agentType to run it under the
@@ -28,6 +29,7 @@ func (s *Swarm) Spawn(pol Policy, teamName, agentType, task, cwd string) (string
 		return "", err
 	}
 	s.rememberCwd(id, cwd)
+	s.startTaskRun(id)
 	spec := s.buildSpec(pol, id, id, team, def, task, cwd)
 	s.dispatchAdmitted(spec)
 	return id, nil
@@ -76,9 +78,11 @@ func (s *Swarm) dispatchAdmitted(spec MemberSpec) {
 // failure fails the task and frees the slot.
 // The caller must hold an admission ticket from beginLifecycleAdmission.
 func (s *Swarm) launchAdmitted(t *Team, spec MemberSpec) {
-	handle, err := s.launchMemberAdmitted(spec)
+	run := s.ensureTaskRun(spec.TaskID)
+	handle, err := s.launchMemberAdmitted(spec, run)
 	if err != nil {
 		_ = s.coord.Fail(spec.TaskID, "launch: "+err.Error())
+		run.finish()
 		if err == ErrSwarmClosed {
 			t.releaseSlot()
 			return
@@ -87,19 +91,27 @@ func (s *Swarm) launchAdmitted(t *Team, spec MemberSpec) {
 		return
 	}
 
-	committed := s.commitLaunch(handle, func() {
+	committed := s.commitLaunch(handle, run, func() {
 		m := &Member{ID: spec.ID, AgentType: spec.AgentType, TaskID: spec.TaskID, handle: handle}
 		t.addMember(m)
 		_ = s.coord.SetStatus(spec.TaskID, StatusRunning)
 		s.watchers.Add(1)
 		go func() {
 			defer s.watchers.Done()
-			s.watch(t, m, spec)
+			s.watch(t, m, spec, run)
 		}()
 	})
 	if !committed {
 		_ = s.coord.Fail(spec.TaskID, "launch: "+ErrSwarmClosed.Error())
-		t.releaseSlot()
+		run.finish()
+		s.lifecycleMu.RLock()
+		closed := s.closed
+		s.lifecycleMu.RUnlock()
+		if closed {
+			t.releaseSlot()
+		} else {
+			s.afterExitAdmitted(t)
+		}
 	}
 }
 
@@ -111,15 +123,15 @@ func (s *Swarm) launchAdmitted(t *Team, spec MemberSpec) {
 // ownership (registration, status transition, watcher Add, handle swap) are
 // atomic with respect to Close setting closed and beginning its waits.
 //
-// It reports whether the handle was adopted. When shutdown won, the handle is
-// reaped before returning false: its launch context was already cancelled by
-// Close, and MemberHandle has no separate cancellation operation — Launch's
-// context is its cancellation contract — so waiting is how a
-// successfully-created process/goroutine avoids being abandoned. The caller
-// records the terminal outcome for the task it was launching.
-func (s *Swarm) commitLaunch(handle MemberHandle, adopt func()) bool {
+// It reports whether the handle was adopted. When shutdown or task cancellation
+// won, the handle is reaped before returning false: MemberHandle has no separate
+// cancellation operation — Launch's context is its cancellation contract — so
+// waiting is how a successfully-created process/goroutine avoids being
+// abandoned. The caller records the terminal outcome for the task it was
+// launching.
+func (s *Swarm) commitLaunch(handle MemberHandle, run *taskRun, adopt func()) bool {
 	s.lifecycleMu.RLock()
-	if s.closed {
+	if s.closed || run.stopped() {
 		s.lifecycleMu.RUnlock()
 		_, _ = handle.Wait()
 		return false
@@ -133,14 +145,17 @@ func (s *Swarm) commitLaunch(handle MemberHandle, adopt func()) bool {
 // invoking the external launcher. A lifecycle ticket proves the operation won
 // admission before Close, but the caller may not reach its launch until after
 // Close has set closed; in that case no new member should be started.
-func (s *Swarm) launchMemberAdmitted(spec MemberSpec) (MemberHandle, error) {
+func (s *Swarm) launchMemberAdmitted(spec MemberSpec, run *taskRun) (MemberHandle, error) {
 	s.lifecycleMu.RLock()
 	closed := s.closed
 	s.lifecycleMu.RUnlock()
 	if closed {
 		return nil, ErrSwarmClosed
 	}
-	return s.launcher.Launch(s.baseCtx, spec)
+	if run.stopped() {
+		return nil, context.Canceled
+	}
+	return s.launcher.Launch(run.ctx, spec)
 }
 
 // watch awaits a member, applies bounded relaunch on temporary failures, records
@@ -150,11 +165,11 @@ func (s *Swarm) launchMemberAdmitted(spec MemberSpec) (MemberHandle, error) {
 // retry. This is sound because a Member is bound 1:1 to its spec for its whole
 // life (Member.ID == MemberSpec.ID); a retry never reuses the struct for a
 // different spec.
-func (s *Swarm) watch(t *Team, m *Member, spec MemberSpec) {
+func (s *Swarm) watch(t *Team, m *Member, spec MemberSpec, run *taskRun) {
 	for {
 		res, err := m.handle.Wait()
 		if err != nil {
-			if isRetryable(err) && m.restarts < maxMemberRestarts && s.relaunchAdmitted(m, spec) {
+			if isRetryable(err) && m.restarts < maxMemberRestarts && s.relaunchAdmitted(m, spec, run) {
 				continue
 			}
 			// Fall through if shutdown started or the relaunch failed.
@@ -167,6 +182,10 @@ func (s *Swarm) watch(t *Team, m *Member, spec MemberSpec) {
 		break
 	}
 	t.removeMember(m.ID)
+	// Publish the execution barrier before draining the team queue. Queue drain
+	// invokes the external launcher synchronously and may block; the completed
+	// source must not keep a handoff waiting on unrelated successor work.
+	run.finish()
 	s.afterExit(t)
 }
 
@@ -179,17 +198,17 @@ func (s *Swarm) watch(t *Team, m *Member, spec MemberSpec) {
 // consulting its context, so a Close landing between the pre-check and the return
 // would otherwise resume supervising a member started after shutdown. When any
 // gate refuses, the caller records the member's terminal failure instead.
-func (s *Swarm) relaunchAdmitted(m *Member, spec MemberSpec) bool {
+func (s *Swarm) relaunchAdmitted(m *Member, spec MemberSpec, run *taskRun) bool {
 	release, err := s.beginLifecycleAdmission()
 	if err != nil {
 		return false
 	}
 	defer release()
-	handle, err := s.launchMemberAdmitted(spec)
+	handle, err := s.launchMemberAdmitted(spec, run)
 	if err != nil {
 		return false
 	}
-	return s.commitLaunch(handle, func() {
+	return s.commitLaunch(handle, run, func() {
 		m.restarts++
 		m.handle = handle
 	})
@@ -228,14 +247,17 @@ func (s *Swarm) afterExitAdmitted(t *Team) {
 	if closed {
 		t.releaseSlot()
 		_ = s.coord.Fail(next.TaskID, ErrSwarmClosed.Error())
+		s.finishTaskRun(next.TaskID)
 		return
 	}
 	s.launchAdmitted(t, next)
 }
 
 // Handoff transfers a task to a fresh member of toAgentType, delivering a note to
-// the new member's inbox and marking the original task handed-off. It returns the
-// new task id. A handoff of an already-terminal task is rejected (fail closed).
+// the new member's inbox and marking the original task handed-off. It cancels and
+// joins the source task before dispatching the successor, so only one member can
+// execute the objective at a time. It returns the new task id. A handoff of an
+// already-terminal task is rejected (fail closed).
 func (s *Swarm) Handoff(pol Policy, teamName, taskID, toAgentType, note string) (string, error) {
 	release, err := s.beginLifecycleAdmission()
 	if err != nil {
@@ -255,7 +277,23 @@ func (s *Swarm) Handoff(pol Policy, teamName, taskID, toAgentType, note string) 
 		return "", err
 	}
 	team := sanitizeName(teamName)
+	if task.Team != team {
+		return "", fmt.Errorf("swarm: task %s belongs to team %s, not %s", taskID, task.Team, team)
+	}
+	task, err = s.coord.BeginHandoff(taskID)
+	if err != nil {
+		return "", err
+	}
+	run := s.taskRun(taskID)
+	if run == nil {
+		s.coord.AbortHandoff(taskID)
+		return "", fmt.Errorf("swarm: task %s has no local execution boundary; refusing handoff", taskID)
+	}
 	newID := s.nextID(toAgentType)
+	if err := s.coord.ReserveHandoffSuccessor(taskID, newID); err != nil {
+		s.coord.AbortHandoff(taskID)
+		return "", fmt.Errorf("swarm: reserve handoff successor: %w", err)
+	}
 	handoffTask := task.Description
 	if note != "" {
 		handoffTask += "\n\nHandoff note: " + note
@@ -267,19 +305,70 @@ func (s *Swarm) Handoff(pol Policy, teamName, taskID, toAgentType, note string) 
 		if mbErr := s.mailbox.Send(team, newID, Message{
 			From: task.AgentID, Subject: "handoff", Body: note, Type: "handoff", Time: nowRFC3339(),
 		}); mbErr != nil {
+			s.coord.AbortHandoff(taskID)
 			return "", fmt.Errorf("swarm: deliver handoff note: %w", mbErr)
 		}
 	}
-	if _, err := s.coord.Register(newID, newID, team, handoffTask); err != nil {
+	cwd := s.cwdFor(taskID)
+	// Stop a running member, remove a queued one, or cancel a launch currently
+	// between slot reservation and handle adoption. The completion barrier closes
+	// only after no source member can execute further side effects.
+	run.stop()
+	if s.team(team).removeQueuedTask(taskID) {
+		run.finish()
+	}
+	if err := s.waitForHandoffSource(taskID, run); err != nil {
+		s.coord.AbortHandoff(taskID)
+		// If the execution barrier raced the cancellation/timeout, its watcher may
+		// have tried to finish while the claim was still held. Fail the stopped
+		// source rather than leave a permanently-running coordinator record.
+		if run.finished() {
+			_ = s.coord.Fail(taskID, "handoff aborted after source stopped: "+err.Error())
+		}
 		return "", err
 	}
-	cwd := s.cwdFor(taskID)
+	if _, err := s.coord.CommitHandoff(taskID, newID, newID, team, handoffTask); err != nil {
+		s.coord.AbortHandoff(taskID)
+		failErr := s.coord.Fail(taskID, "handoff successor registration failed after source stopped: "+err.Error())
+		if failErr != nil {
+			return "", fmt.Errorf("swarm: register handoff successor: %w (source recovery failed: %v)", err, failErr)
+		}
+		return "", fmt.Errorf("swarm: register handoff successor: %w", err)
+	}
 	s.rememberCwd(newID, cwd)
-	// Retire the original task (it has been re-delegated).
-	_ = s.coord.SetStatus(taskID, StatusHandedOff)
+	s.startTaskRun(newID)
 	spec := s.buildSpec(pol, newID, newID, team, def, handoffTask, cwd)
 	s.dispatchAdmitted(spec)
 	return newID, nil
+}
+
+// waitForHandoffSource waits for the task-specific execution barrier without
+// letting a cancellation-insensitive member wedge a model tool forever. Close
+// cancels baseCtx before waiting for lifecycle admissions, so that path also
+// releases Handoff's admission ticket and avoids a shutdown wait cycle.
+func (s *Swarm) waitForHandoffSource(taskID string, run *taskRun) error {
+	timeout := s.handoffStopTimeout
+	if timeout <= 0 {
+		timeout = defaultHandoffStopTimeout
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-run.done:
+		return nil
+	case <-s.baseCtx.Done():
+		// Prefer a completed barrier if cancellation and member exit became ready
+		// together; a stopped source can still commit safely.
+		if run.finished() {
+			return nil
+		}
+		return fmt.Errorf("swarm: stop handoff source %s: %w", taskID, s.baseCtx.Err())
+	case <-timer.C:
+		if run.finished() {
+			return nil
+		}
+		return fmt.Errorf("%w: task %s after %s", ErrHandoffStopTimeout, taskID, timeout)
+	}
 }
 
 // AdoptOrphans re-parents tasks in a team whose owning member is no longer live
@@ -313,6 +402,7 @@ func (s *Swarm) AdoptOrphans(pol Policy, teamName, toAgentType string) ([]string
 		}
 		cwd := s.cwdFor(task.ID)
 		s.rememberCwd(task.ID, cwd)
+		s.startTaskRun(task.ID)
 		spec := s.buildSpec(pol, newAgent, task.ID, team, def, task.Description, cwd)
 		s.dispatchAdmitted(spec)
 		adopted = append(adopted, task.ID)

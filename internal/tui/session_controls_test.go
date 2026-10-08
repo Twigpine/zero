@@ -46,17 +46,17 @@ func TestEffortCommandListsAndSetsSupportedEffort(t *testing.T) {
 	}
 
 	next.input.SetValue("/effort high")
-	updated, cmd = next.Update(testKey(tea.KeyEnter))
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 
-	if cmd != nil {
+	if next.pending {
 		t.Fatal("expected /effort high to be handled without starting an agent run")
 	}
 	if next.reasoningEffort != modelregistry.ReasoningEffortHigh {
 		t.Fatalf("expected effort high, got %q", next.reasoningEffort)
 	}
-	if !transcriptContains(next.transcript, "active effort: high") {
-		t.Fatalf("expected effort switch transcript, got %#v", next.transcript)
+	if next.transientNotice.text != "Reasoning effort: high" {
+		t.Fatalf("effort switch notice = %q", next.transientNotice.text)
 	}
 }
 
@@ -153,17 +153,17 @@ func TestStyleCommandListsAndSetsSessionPreference(t *testing.T) {
 	}
 
 	next.input.SetValue("/style explanatory")
-	updated, cmd = next.Update(testKey(tea.KeyEnter))
+	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 
-	if cmd != nil {
+	if next.pending {
 		t.Fatal("expected /style explanatory to be handled without starting an agent run")
 	}
 	if next.responseStyle != "explanatory" {
 		t.Fatalf("expected explanatory style, got %q", next.responseStyle)
 	}
-	if !transcriptContains(next.transcript, "active style: explanatory") {
-		t.Fatalf("expected style switch transcript, got %#v", next.transcript)
+	if next.transientNotice.text != "Style: explanatory" {
+		t.Fatalf("style switch notice = %q", next.transientNotice.text)
 	}
 }
 
@@ -839,31 +839,17 @@ func TestUnpricedUsageStatusUsesLatestEventNotCumulative(t *testing.T) {
 	}
 }
 
-func TestStatusLineDropsTokenFigureWhenSidebarShowsIt(t *testing.T) {
+func TestStatusLineShowsTokenFigureWithoutPersistentRail(t *testing.T) {
 	m := sidebarTestModel()
 	m, _ = m.recordUsageEvent("test-model", zeroruntime.Usage{InputTokens: 100, OutputTokens: 20})
-	if !m.sidebarActive() {
-		t.Fatal("expected the sidebar to be active for this model")
-	}
-
-	// The sidebar owns the token readout at its floor.
+	// Run details retains the full token count on demand.
 	if got := m.sidebarTokenText(); !strings.Contains(got, "120 tokens") {
 		t.Fatalf("sidebar token text = %q, want it to carry the 120-token figure", got)
 	}
-	// With the sidebar open, the status line must not repeat the token figure.
+	// The status line is the always-visible token readout.
 	status := plainRender(t, m.statusLine(m.width))
-	if strings.Contains(status, "tok") {
-		t.Fatalf("status line = %q, should not duplicate the token figure while the sidebar shows it", status)
-	}
-
-	// Sidebar hidden → the status line is the only home for the figure again.
-	m.sidebarHidden = true
-	if m.sidebarActive() {
-		t.Fatal("sidebar should be inactive once hidden")
-	}
-	hidden := plainRender(t, m.statusLine(m.width))
-	if !strings.Contains(hidden, "120 tok") {
-		t.Fatalf("status line with sidebar hidden = %q, want the token figure back", hidden)
+	if !strings.Contains(status, "120 tok") {
+		t.Fatalf("status line = %q, want the token figure", status)
 	}
 }
 
@@ -929,17 +915,17 @@ func TestModelSwitchClearsUnsupportedEffortPreference(t *testing.T) {
 	})
 	m.input.SetValue("/model gpt-4.1")
 
-	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
 
-	if cmd != nil {
+	if next.pending {
 		t.Fatal("expected /model to be handled without starting an agent run")
 	}
 	if next.reasoningEffort != "" {
 		t.Fatalf("expected unsupported effort preference to reset, got %q", next.reasoningEffort)
 	}
-	if !transcriptContains(next.transcript, "effort auto (reset)") {
-		t.Fatalf("expected model switch transcript to mention effort reset, got %#v", next.transcript)
+	if !strings.Contains(next.transientNotice.text, "effort auto") {
+		t.Fatalf("expected model switch notice to mention effort reset, got %q", next.transientNotice.text)
 	}
 }
 

@@ -9,7 +9,16 @@ import (
 	"strings"
 )
 
-const PolicyVersion = 1
+// PolicyVersion is the version of the approval policy that recorded grants were
+// evaluated under. Bump it whenever a change narrows what may be approved: the
+// grant store then backs the file up, keeps deny grants, invalidates prior
+// approvals, and tells the user once, instead of silently honoring approvals
+// that the current rules would have refused.
+//
+// v2 tightened command-prefix validation so a launcher spelled with a version
+// or an executable extension ("python3.11", "python.exe") can no longer be
+// approved as an ordinary command.
+const PolicyVersion = 2
 
 type Origin string
 

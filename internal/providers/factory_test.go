@@ -3,13 +3,17 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/oauth"
+	"github.com/Gitlawb/zero/internal/providers/providerio"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -793,4 +797,567 @@ func TestResolveRuntimeMetadataRejectsModelOutsideProviderAllowlist(t *testing.T
 	if !strings.Contains(err.Error(), "claude-sonnet-4.5") {
 		t.Fatalf("error = %q, want it to name the rejected model", err.Error())
 	}
+}
+
+func TestOpenCodeSessionHeader(t *testing.T) {
+	const sessionHeader = "x-opencode-session"
+	tests := []struct {
+		name       string
+		profile    config.ProviderProfile
+		response   string
+		wantHeader bool
+		wantAuth   map[string]string
+	}{
+		{
+			name: "catalog opencode-go default URL",
+			profile: config.ProviderProfile{
+				Name:         "opencode-go",
+				CatalogID:    "opencode-go",
+				ProviderKind: config.ProviderKindOpenAICompatible,
+				APIKey:       "sk-oc-go",
+				Model:        "deepseek-v4-pro",
+			},
+			response:   "data: [DONE]\n\n",
+			wantHeader: true,
+			wantAuth:   map[string]string{"Authorization": "Bearer sk-oc-go"},
+		},
+		{
+			name: "catalog opencode-go-anthropic-compatible",
+			profile: config.ProviderProfile{
+				Name:         "opencode-go-anthropic",
+				CatalogID:    "opencode-go-anthropic-compatible",
+				ProviderKind: config.ProviderKindAnthropicCompat,
+				APIKey:       "sk-oc-ant",
+				Model:        "minimax-m3",
+			},
+			response:   "data: {\"type\":\"message_stop\"}\n\n",
+			wantHeader: true,
+			wantAuth:   map[string]string{"x-api-key": "sk-oc-ant"},
+		},
+		{
+			name: "catalog opencode Zen",
+			profile: config.ProviderProfile{
+				Name:         "opencode-zen",
+				CatalogID:    "opencode",
+				ProviderKind: config.ProviderKindOpenAICompatible,
+				APIKey:       "sk-zen",
+				Model:        "test-model",
+			},
+			response:   "data: [DONE]\n\n",
+			wantHeader: true,
+			wantAuth:   map[string]string{"Authorization": "Bearer sk-zen"},
+		},
+		{
+			name: "renamed catalog profile with custom proxy URL",
+			profile: config.ProviderProfile{
+				Name:         "my-opencode",
+				CatalogID:    "opencode-go",
+				ProviderKind: config.ProviderKindOpenAICompatible,
+				BaseURL:      "https://proxy.example/v1",
+				APIKey:       "sk-proxy",
+				Model:        "test-model",
+			},
+			response:   "data: [DONE]\n\n",
+			wantHeader: true,
+			wantAuth:   map[string]string{"Authorization": "Bearer sk-proxy"},
+		},
+		{
+			name: "catalog-less OpenAI-compatible OpenCode Go URL",
+			profile: config.ProviderProfile{
+				Name:         "manual-go",
+				ProviderKind: config.ProviderKindOpenAICompatible,
+				BaseURL:      "https://opencode.ai/zen/go/v1",
+				APIKey:       "sk-manual",
+				Model:        "test-model",
+			},
+			response:   "data: [DONE]\n\n",
+			wantHeader: true,
+			wantAuth:   map[string]string{"Authorization": "Bearer sk-manual"},
+		},
+		{
+			name: "catalog-less Anthropic-compatible OpenCode Go URL",
+			profile: config.ProviderProfile{
+				Name:         "manual-go-anthropic",
+				ProviderKind: config.ProviderKindAnthropicCompat,
+				BaseURL:      "https://opencode.ai/zen/go",
+				APIKey:       "sk-manual-ant",
+				Model:        "test-model",
+			},
+			response:   "data: {\"type\":\"message_stop\"}\n\n",
+			wantHeader: true,
+			wantAuth:   map[string]string{"x-api-key": "sk-manual-ant"},
+		},
+		{
+			name: "official OpenAI",
+			profile: config.ProviderProfile{
+				Name:         "openai",
+				ProviderKind: config.ProviderKindOpenAI,
+				APIKey:       "sk-openai",
+				Model:        "test-model",
+			},
+			response:   "data: [DONE]\n\n",
+			wantHeader: false,
+			wantAuth:   map[string]string{"Authorization": "Bearer sk-openai"},
+		},
+		{
+			name: "generic OpenAI-compatible",
+			profile: config.ProviderProfile{
+				Name:         "generic",
+				ProviderKind: config.ProviderKindOpenAICompatible,
+				BaseURL:      "https://provider.example/v1",
+				APIKey:       "sk-generic",
+				Model:        "test-model",
+			},
+			response:   "data: [DONE]\n\n",
+			wantHeader: false,
+			wantAuth:   map[string]string{"Authorization": "Bearer sk-generic"},
+		},
+		{
+			name: "official Anthropic",
+			profile: config.ProviderProfile{
+				Name:         "anthropic",
+				ProviderKind: config.ProviderKindAnthropic,
+				APIKey:       "sk-ant",
+				Model:        "test-model",
+			},
+			response:   "data: {\"type\":\"message_stop\"}\n\n",
+			wantHeader: false,
+			wantAuth:   map[string]string{"x-api-key": "sk-ant"},
+		},
+		{
+			name: "lookalike subdomain is not OpenCode",
+			profile: config.ProviderProfile{
+				Name:         "deceptive-host",
+				ProviderKind: config.ProviderKindOpenAICompatible,
+				BaseURL:      "https://opencode.ai.example/zen/go/v1",
+				APIKey:       "sk-fake",
+				Model:        "test-model",
+			},
+			response:   "data: [DONE]\n\n",
+			wantHeader: false,
+			wantAuth:   map[string]string{"Authorization": "Bearer sk-fake"},
+		},
+		{
+			name: "lookalike path is not OpenCode",
+			profile: config.ProviderProfile{
+				Name:         "deceptive-path",
+				ProviderKind: config.ProviderKindOpenAICompatible,
+				BaseURL:      "https://example.com/opencode.ai/zen/go",
+				APIKey:       "sk-fake",
+				Model:        "test-model",
+			},
+			response:   "data: [DONE]\n\n",
+			wantHeader: false,
+			wantAuth:   map[string]string{"Authorization": "Bearer sk-fake"},
+		},
+		{
+			name: "zenith path is not Zen",
+			profile: config.ProviderProfile{
+				Name:         "zenith",
+				ProviderKind: config.ProviderKindOpenAICompatible,
+				BaseURL:      "https://opencode.ai/zenith",
+				APIKey:       "sk-zenith",
+				Model:        "test-model",
+			},
+			response:   "data: [DONE]\n\n",
+			wantHeader: false,
+			wantAuth:   map[string]string{"Authorization": "Bearer sk-zenith"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			transport := &captureTransport{responseBody: test.response}
+			provider, err := New(test.profile, Options{
+				HTTPClient: &http.Client{Transport: transport},
+				UserAgent:  "zero-test",
+			})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+				Messages:       []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hello"}},
+				PromptCacheKey: "conversation-a",
+			})
+			if err != nil {
+				t.Fatalf("StreamCompletion() error = %v", err)
+			}
+			drainStream(t, stream)
+			if transport.request == nil {
+				t.Fatal("HTTP client was not used")
+			}
+			got := transport.request.Header.Get(sessionHeader)
+			if test.wantHeader && got != "conversation-a" {
+				t.Fatalf("%s = %q, want %q", sessionHeader, got, "conversation-a")
+			}
+			if !test.wantHeader && got != "" {
+				t.Fatalf("%s = %q, want no session header", sessionHeader, got)
+			}
+			for header, want := range test.wantAuth {
+				if got := transport.request.Header.Get(header); got != want {
+					t.Fatalf("%s = %q, want %q", header, got, want)
+				}
+			}
+			if got := transport.request.Header.Get("User-Agent"); got != "zero-test" {
+				t.Fatalf("User-Agent = %q, want zero-test", got)
+			}
+			if test.profile.ProviderKind == config.ProviderKindOpenAICompatible {
+				var body map[string]any
+				if err := json.NewDecoder(transport.body()).Decode(&body); err != nil {
+					t.Fatalf("decode request body: %v", err)
+				}
+				if _, ok := body["prompt_cache_key"]; ok {
+					t.Fatalf("openai-compatible body carried prompt_cache_key: %#v", body["prompt_cache_key"])
+				}
+			}
+		})
+	}
+}
+
+func TestOpenCodeSessionHeaderFollowsConversationKey(t *testing.T) {
+	transport := &recordingTransport{status: http.StatusOK, body: "data: [DONE]\n\n"}
+	profile := config.ProviderProfile{
+		Name:         "opencode-go",
+		CatalogID:    "opencode-go",
+		ProviderKind: config.ProviderKindOpenAICompatible,
+		APIKey:       "sk-oc",
+		Model:        "test-model",
+	}
+	options := Options{HTTPClient: &http.Client{Transport: transport}, UserAgent: "zero-test"}
+	provider, err := New(profile, options)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	for _, key := range []string{"conversation-a", "conversation-a", "conversation-b"} {
+		stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+			Messages:       []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hello"}},
+			PromptCacheKey: key,
+		})
+		if err != nil {
+			t.Fatalf("StreamCompletion() error = %v", err)
+		}
+		drainStream(t, stream)
+	}
+	got := transport.sessionHeaders()
+	want := []string{"conversation-a", "conversation-a", "conversation-b"}
+	if len(got) != len(want) {
+		t.Fatalf("captured %d requests, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("request %d x-opencode-session = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	reconstructed, err := New(profile, options)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	stream, err := reconstructed.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages:       []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hello"}},
+		PromptCacheKey: "conversation-a",
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion() error = %v", err)
+	}
+	drainStream(t, stream)
+	got = transport.sessionHeaders()
+	if last := got[len(got)-1]; last != "conversation-a" {
+		t.Fatalf("reconstructed provider sent %s = %q, want conversation-a", "x-opencode-session", last)
+	}
+}
+
+func TestOpenCodeSessionHeaderCustomOverride(t *testing.T) {
+	custom := map[string]string{"X-Opencode-Session": "explicit-session"}
+	profile := config.ProviderProfile{
+		Name:          "opencode-go",
+		CatalogID:     "opencode-go",
+		ProviderKind:  config.ProviderKindOpenAICompatible,
+		APIKey:        "sk-oc",
+		Model:         "test-model",
+		CustomHeaders: custom,
+	}
+	transport := &captureTransport{responseBody: "data: [DONE]\n\n"}
+	provider, err := New(profile, Options{HTTPClient: &http.Client{Transport: transport}, UserAgent: "zero-test"})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages:       []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hello"}},
+		PromptCacheKey: "conversation-a",
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion() error = %v", err)
+	}
+	drainStream(t, stream)
+	if got := transport.request.Header.Get("x-opencode-session"); got != "explicit-session" {
+		t.Fatalf("x-opencode-session = %q, want explicit custom value", got)
+	}
+	if len(custom) != 1 || custom["X-Opencode-Session"] != "explicit-session" {
+		t.Fatalf("profile CustomHeaders mutated: %#v", custom)
+	}
+}
+
+func TestOpenCodeSessionHeaderFallback(t *testing.T) {
+	transport := &recordingTransport{status: http.StatusOK, body: "data: [DONE]\n\n"}
+	profile := config.ProviderProfile{
+		Name:         "opencode-go",
+		CatalogID:    "opencode-go",
+		ProviderKind: config.ProviderKindOpenAICompatible,
+		APIKey:       "sk-oc",
+		Model:        "test-model",
+	}
+	options := Options{HTTPClient: &http.Client{Transport: transport}}
+	first, err := New(profile, options)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	second, err := New(profile, options)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	request := zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hello"}},
+	}
+	for _, provider := range []zeroruntime.Provider{first, first, second} {
+		stream, err := provider.StreamCompletion(context.Background(), request)
+		if err != nil {
+			t.Fatalf("StreamCompletion() error = %v", err)
+		}
+		drainStream(t, stream)
+	}
+	headers := transport.sessionHeaders()
+	if len(headers) != 3 {
+		t.Fatalf("captured %d requests, want 3", len(headers))
+	}
+	if headers[0] == "" || headers[1] != headers[0] {
+		t.Fatalf("fallback headers = %q, %q — want one stable nonempty value per provider", headers[0], headers[1])
+	}
+	if headers[2] == headers[0] {
+		t.Fatalf("distinct provider instances shared fallback %q", headers[0])
+	}
+}
+
+func TestOpenCodeSessionHeaderDefaultsUserAgent(t *testing.T) {
+	transport := &captureTransport{responseBody: "data: [DONE]\n\n"}
+	provider, err := New(config.ProviderProfile{
+		Name:         "opencode-go",
+		CatalogID:    "opencode-go",
+		ProviderKind: config.ProviderKindOpenAICompatible,
+		APIKey:       "sk-oc",
+		Model:        "test-model",
+	}, Options{HTTPClient: &http.Client{Transport: transport}})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion() error = %v", err)
+	}
+	drainStream(t, stream)
+	if got := transport.request.Header.Get("User-Agent"); got != "zero" {
+		t.Fatalf("User-Agent = %q, want zero", got)
+	}
+}
+
+func TestOpenCodeSessionHeaderConcurrent(t *testing.T) {
+	transport := &recordingTransport{status: http.StatusOK, body: "data: [DONE]\n\n"}
+	provider, err := New(config.ProviderProfile{
+		Name:         "opencode-go",
+		CatalogID:    "opencode-go",
+		ProviderKind: config.ProviderKindOpenAICompatible,
+		APIKey:       "sk-oc",
+		Model:        "test-model",
+	}, Options{HTTPClient: &http.Client{Transport: transport}})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var wg sync.WaitGroup
+	var errsMu sync.Mutex
+	var errs []string
+	for _, session := range []string{"session-a", "session-b"} {
+		wg.Add(1)
+		go func(session string) {
+			defer wg.Done()
+			for i := 0; i < 5; i++ {
+				stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+					Messages:       []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: fmt.Sprintf("req-%s-%d", session, i)}},
+					PromptCacheKey: session,
+				})
+				if err != nil {
+					errsMu.Lock()
+					errs = append(errs, err.Error())
+					errsMu.Unlock()
+					return
+				}
+				for event := range stream {
+					if event.Type == zeroruntime.StreamEventError {
+						errsMu.Lock()
+						errs = append(errs, event.Error)
+						errsMu.Unlock()
+					}
+				}
+			}
+		}(session)
+	}
+	wg.Wait()
+	for _, errText := range errs {
+		t.Errorf("concurrent stream error: %s", errText)
+	}
+
+	requests := transport.recorded()
+	if len(requests) != 10 {
+		t.Fatalf("captured %d requests, want 10", len(requests))
+	}
+	for _, request := range requests {
+		var payload struct {
+			Messages []struct {
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.Unmarshal([]byte(request.body), &payload); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		if len(payload.Messages) == 0 {
+			t.Fatal("request carried no user message")
+		}
+		content := payload.Messages[0].Content
+		want := "session-a"
+		if strings.Contains(content, "session-b") {
+			want = "session-b"
+		}
+		if got := request.header.Get("x-opencode-session"); got != want {
+			t.Fatalf("request for %q carried x-opencode-session %q, want %q", content, got, want)
+		}
+	}
+}
+
+func TestOpenCodeSessionHeaderAuthRetry(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		profile  config.ProviderProfile
+		response string
+	}{
+		{
+			name: "openai-compatible",
+			profile: config.ProviderProfile{
+				Name:         "opencode-go",
+				CatalogID:    "opencode-go",
+				ProviderKind: config.ProviderKindOpenAICompatible,
+				APIKey:       "sk-oc",
+				Model:        "test-model",
+			},
+			response: "data: [DONE]\n\n",
+		},
+		{
+			name: "anthropic-compatible",
+			profile: config.ProviderProfile{
+				Name:         "opencode-go-anthropic",
+				CatalogID:    "opencode-go-anthropic-compatible",
+				ProviderKind: config.ProviderKindAnthropicCompat,
+				APIKey:       "sk-oc-ant",
+				Model:        "minimax-m3",
+			},
+			response: "data: {\"type\":\"message_stop\"}\n\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			transport := &recordingTransport{status: http.StatusOK, body: test.response, unauthorized: 1}
+			var calls atomic.Int32
+			resolver := providerio.TokenResolver(func(context.Context, bool) (string, string, bool, error) {
+				n := calls.Add(1)
+				return "Authorization", fmt.Sprintf("Bearer tok-%d", n), true, nil
+			})
+			provider, err := New(test.profile, Options{
+				HTTPClient:    &http.Client{Transport: transport},
+				OAuthResolver: resolver,
+			})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+				Messages:       []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hello"}},
+				PromptCacheKey: "conversation-a",
+			})
+			if err != nil {
+				t.Fatalf("StreamCompletion() error = %v", err)
+			}
+			drainStream(t, stream)
+			requests := transport.recorded()
+			if len(requests) != 2 {
+				t.Fatalf("captured %d requests, want 2 (401 + retry)", len(requests))
+			}
+			for i, request := range requests {
+				if got := request.header.Get("x-opencode-session"); got != "conversation-a" {
+					t.Fatalf("attempt %d x-opencode-session = %q, want conversation-a", i, got)
+				}
+			}
+			if first, second := requests[0].header.Get("Authorization"), requests[1].header.Get("Authorization"); first == second {
+				t.Fatalf("Authorization not refreshed across retry: %q", first)
+			}
+		})
+	}
+}
+
+func drainStream(t *testing.T, stream <-chan zeroruntime.StreamEvent) {
+	t.Helper()
+	for event := range stream {
+		if event.Type == zeroruntime.StreamEventError {
+			t.Fatalf("stream error: %s", event.Error)
+		}
+	}
+}
+
+type recordedRequest struct {
+	header http.Header
+	body   string
+}
+
+type recordingTransport struct {
+	mu           sync.Mutex
+	requests     []recordedRequest
+	status       int
+	body         string
+	unauthorized int
+}
+
+func (transport *recordingTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	var body string
+	if request.Body != nil {
+		data, _ := io.ReadAll(request.Body)
+		body = string(data)
+	}
+	transport.mu.Lock()
+	transport.requests = append(transport.requests, recordedRequest{header: request.Header.Clone(), body: body})
+	attempt := len(transport.requests)
+	transport.mu.Unlock()
+
+	status := transport.status
+	if attempt <= transport.unauthorized {
+		status = http.StatusUnauthorized
+	}
+	return &http.Response{
+		StatusCode: status,
+		Status:     fmt.Sprintf("%d", status),
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(transport.body)),
+		Request:    request,
+	}, nil
+}
+
+func (transport *recordingTransport) recorded() []recordedRequest {
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	return append([]recordedRequest(nil), transport.requests...)
+}
+
+func (transport *recordingTransport) sessionHeaders() []string {
+	requests := transport.recorded()
+	headers := make([]string, 0, len(requests))
+	for _, request := range requests {
+		headers = append(headers, request.header.Get("x-opencode-session"))
+	}
+	return headers
 }

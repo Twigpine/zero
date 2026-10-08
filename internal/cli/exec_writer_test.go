@@ -52,3 +52,39 @@ func TestExecWriterPropagatesToolResultTruncation(t *testing.T) {
 		})
 	}
 }
+
+func TestExecWriterPropagatesCacheUsage(t *testing.T) {
+	for _, format := range []execOutputFormat{execOutputJSON, execOutputStreamJSON} {
+		t.Run(string(format), func(t *testing.T) {
+			var stdout bytes.Buffer
+			writer := execEventWriter{
+				stdout:       &stdout,
+				format:       format,
+				runID:        "run_usage",
+				streamedText: &strings.Builder{},
+			}
+			writer.usage(agent.Usage{
+				InputTokens:       100,
+				OutputTokens:      20,
+				PromptTokens:      100,
+				CompletionTokens:  20,
+				CachedInputTokens: 60,
+				CacheWriteTokens:  10,
+			})
+			if writer.err != nil {
+				t.Fatalf("usage: %v", writer.err)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &payload); err != nil {
+				t.Fatalf("decode output %q: %v", stdout.String(), err)
+			}
+			cachedKey, writeKey := "cached_input_tokens", "cache_write_tokens"
+			if format == execOutputStreamJSON {
+				cachedKey, writeKey = "cachedInputTokens", "cacheWriteTokens"
+			}
+			if payload[cachedKey] != float64(60) || payload[writeKey] != float64(10) {
+				t.Fatalf("cache usage missing from payload: %#v", payload)
+			}
+		})
+	}
+}

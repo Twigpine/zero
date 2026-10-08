@@ -32,27 +32,48 @@ func TestLockSingleInstance(t *testing.T) {
 	_ = l2.release()
 }
 
-func TestLockStaleRecovery(t *testing.T) {
+// A PID liveness probe is diagnostic only. Even if it reports the recorded PID
+// dead, a contended kernel lock proves that the holder is active and must win.
+// The old rename-aside protocol trusted this stale observation and admitted a
+// second daemon while the first one was still inside its critical section.
+func TestLockDoesNotOverrideKernelHolderWithStalePIDProbe(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "daemon.lock")
-	// Simulate a stale lock from a crashed daemon: a PID file whose process is
-	// dead.
+	first, err := acquireLock(path, func(int) bool { return true })
+	if err != nil {
+		t.Fatalf("first acquireLock: %v", err)
+	}
+	defer first.release()
+
+	second, err := acquireLock(path, func(int) bool { return false })
+	if second != nil {
+		_ = second.release()
+	}
+	if !errors.Is(err, ErrAlreadyRunning) {
+		t.Fatalf("contended acquire with stale PID probe = %v, want ErrAlreadyRunning", err)
+	}
+}
+
+func TestLockIgnoresStaleMetadataWhenKernelLockIsFree(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "daemon.lock")
+	// A crashed daemon may leave PID metadata behind, but its kernel lock is
+	// released automatically, so the next daemon can acquire without moving it.
 	if err := os.WriteFile(path, []byte("4242\n"), 0o600); err != nil {
 		t.Fatalf("write stale lock: %v", err)
 	}
 	dead := func(int) bool { return false }
 	l, err := acquireLock(path, dead)
 	if err != nil {
-		t.Fatalf("stale-lock recovery failed: %v", err)
+		t.Fatalf("acquire over stale metadata: %v", err)
 	}
 	// The lock now records OUR pid, not the stale one.
 	data, _ := os.ReadFile(path)
 	if strings.TrimSpace(string(data)) != strconv.Itoa(os.Getpid()) {
-		t.Fatalf("reclaimed lock pid = %q, want %d", strings.TrimSpace(string(data)), os.Getpid())
+		t.Fatalf("lock pid = %q, want %d", strings.TrimSpace(string(data)), os.Getpid())
 	}
 	_ = l.release()
 }
 
-func TestLockReleaseRemovesFile(t *testing.T) {
+func TestLockReleaseKeepsStableFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "daemon.lock")
 	l, err := acquireLock(path, func(int) bool { return true })
 	if err != nil {
@@ -61,46 +82,37 @@ func TestLockReleaseRemovesFile(t *testing.T) {
 	if err := l.release(); err != nil {
 		t.Fatalf("release: %v", err)
 	}
-	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("lock file still present after release: %v", err)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("release removed stable lock file: %v", err)
 	}
 }
 
-func TestReclaimStaleLockRemovesDeadHolder(t *testing.T) {
+func TestReadPidFileMetadataFormats(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "daemon.lock")
-	if err := os.WriteFile(path, []byte("4242\n"), 0o600); err != nil {
-		t.Fatalf("write stale lock: %v", err)
-	}
-	if ok, err := reclaimStaleLock(path, func(int) bool { return false }); err != nil || !ok {
-		t.Fatalf("reclaimStaleLock must report a genuinely stale (dead-PID) lock reclaimed (ok=%v err=%v)", ok, err)
-	}
-	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("a reclaimed stale lock must be removed, stat = %v", err)
-	}
-}
-
-func TestReclaimStaleLockRestoresLiveHolder(t *testing.T) {
-	// If a holder reacquires the lock in the gap between the stale check and the
-	// rename, the moved file carries a LIVE pid; reclaim must restore it untouched
-	// rather than steal it — otherwise two daemons both "hold" the lock (D6).
-	path := filepath.Join(t.TempDir(), "daemon.lock")
-	if err := os.WriteFile(path, []byte("4242\n"), 0o600); err != nil {
-		t.Fatalf("write lock: %v", err)
-	}
-	if ok, err := reclaimStaleLock(path, func(int) bool { return true }); err != nil || ok {
-		t.Fatalf("reclaimStaleLock must NOT report a live-PID lock reclaimed (ok=%v err=%v)", ok, err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("live lock must be restored in place, read = %v", err)
-	}
-	if strings.TrimSpace(string(data)) != "4242" {
-		t.Fatalf("restored lock content = %q, want %q (unchanged)", strings.TrimSpace(string(data)), "4242")
-	}
-	// No sidelined ".stale" leftovers.
-	matches, _ := filepath.Glob(path + ".stale.*")
-	if len(matches) != 0 {
-		t.Fatalf("reclaim left sidelined files: %v", matches)
+	for _, test := range []struct {
+		name     string
+		metadata string
+		wantPID  int
+		wantErr  bool
+	}{
+		{name: "legacy PID", metadata: "4242\n", wantPID: 4242},
+		{name: "PID and holder sequence", metadata: "4242-7\n", wantPID: 4242},
+		{name: "missing sequence", metadata: "4242-", wantErr: true},
+		{name: "non-numeric sequence", metadata: "4242-next", wantErr: true},
+		{name: "extra component", metadata: "4242-7-8", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(test.metadata), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := readPidFile(path)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("readPidFile() error = %v, wantErr %v", err, test.wantErr)
+			}
+			if !test.wantErr && got != test.wantPID {
+				t.Fatalf("readPidFile() = %d, want %d", got, test.wantPID)
+			}
+		})
 	}
 }
 

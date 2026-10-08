@@ -40,8 +40,8 @@ func (m model) moveModalSelection(delta int) (model, tea.Cmd, bool) {
 		if m.modelPickerIsLoading() {
 			return m, nil, true
 		}
-		m.pickerMoved(delta)
-		return m, nil, true
+		m, cmd := m.pickerMoved(delta)
+		return m, cmd, true
 	}
 	if m.suggestionsActive() {
 		m.moveSuggestion(delta)

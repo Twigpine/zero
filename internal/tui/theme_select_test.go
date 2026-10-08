@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"image/color"
 	"math"
 	"strconv"
 	"strings"
@@ -124,19 +125,20 @@ func TestAllThemesContrastAndHierarchy(t *testing.T) {
 	}
 }
 
-// resolveThemeMode precedence: explicit flag > ZERO_THEME env > auto.
+// resolveThemeMode precedence: explicit flag > ZERO_THEME env > system.
 func TestResolveThemeModePrecedence(t *testing.T) {
 	cases := []struct {
 		flag, env string
 		want      themeMode
 	}{
-		{"light", "dark", themeLight}, // flag wins
-		{"dark", "light", themeDark},  // flag wins
-		{"", "light", themeLight},     // env
-		{"", "dark", themeDark},       // env
-		{"", "", themeAuto},           // default
-		{"garbage", "also-bad", themeAuto},
-		{"AUTO", "", themeAuto},
+		{"light", "dark", themeSystem}, // retired preference migrates
+		{"dark", "light", themeSystem}, // retired preference migrates
+		{"", "light", themeSystem},     // retired env value migrates
+		{"", "dark", themeSystem},      // retired env value migrates
+		{"dracula", "dune", themeMode("dracula")},
+		{"", "", themeSystem}, // default
+		{"garbage", "also-bad", themeSystem},
+		{"AUTO", "", themeSystem},
 	}
 	for _, c := range cases {
 		if got := resolveThemeMode(c.flag, c.env); got != c.want {
@@ -145,7 +147,19 @@ func TestResolveThemeModePrecedence(t *testing.T) {
 	}
 }
 
-// applyTheme: auto resolves from background; explicit dark/light ignore it.
+func TestLegacyThemeArgumentsRemainAcceptedOutsidePicker(t *testing.T) {
+	for _, value := range []string{"dark", "light"} {
+		if !ValidThemeArg(value) {
+			t.Errorf("ValidThemeArg(%q) = false, want true for migration compatibility", value)
+		}
+		if validThemeMode(value) {
+			t.Errorf("validThemeMode(%q) = true, retired values must stay out of the picker", value)
+		}
+	}
+}
+
+// applyTheme keeps system canvas-native and mirrors named palettes when their
+// intended surface polarity differs from the terminal.
 func TestApplyThemeResolution(t *testing.T) {
 	defer applyTheme(themeDark, true) // restore the global default
 	cases := []struct {
@@ -154,20 +168,49 @@ func TestApplyThemeResolution(t *testing.T) {
 		want    themeMode
 		wantInk string
 	}{
-		{themeAuto, true, themeDark, darkPalette.ink},
-		{themeAuto, false, themeLight, lightPalette.ink},
-		{themeDark, false, themeDark, darkPalette.ink},   // explicit ignores bg
-		{themeLight, true, themeLight, lightPalette.ink}, // explicit ignores bg
+		{themeSystem, true, themeSystem, ""},
+		{themeAuto, false, themeSystem, ""},
+		{themeDark, true, themeDark, darkPalette.ink},
+		{themeDark, false, themeDark, invertPaletteColor(darkPalette.ink)},
+		{themeLight, false, themeLight, lightPalette.ink},
+		{themeLight, true, themeLight, invertPaletteColor(lightPalette.ink)},
 	}
 	for _, c := range cases {
 		got := applyTheme(c.mode, c.darkBg)
 		if got != c.want {
 			t.Errorf("applyTheme(%q, darkBg=%v) = %q, want %q", c.mode, c.darkBg, got, c.want)
 		}
+		if c.wantInk == "" {
+			if _, ok := zeroTheme.bgPanel.(lipgloss.NoColor); !ok {
+				t.Errorf("applyTheme(%q,%v): system mode painted canvas with %T", c.mode, c.darkBg, zeroTheme.bgPanel)
+			}
+			continue
+		}
 		wantR, wantG, wantB, _ := lipgloss.Color(c.wantInk).RGBA()
 		gotR, gotG, gotB, _ := zeroTheme.inkColor.RGBA()
 		if gotR != wantR || gotG != wantG || gotB != wantB {
 			t.Errorf("applyTheme(%q,%v): zeroTheme.inkColor not the %q ink", c.mode, c.darkBg, c.want)
+		}
+	}
+}
+
+func TestInvertedPalettePreservesSemanticHues(t *testing.T) {
+	inverted := invertedPalette(nordPalette)
+	for _, test := range []struct {
+		name     string
+		value    string
+		dominant int
+	}{
+		{"success", inverted.green, 1},
+		{"error", inverted.red, 0},
+	} {
+		r, g, b, _ := lipgloss.Color(test.value).RGBA()
+		channels := []uint32{r, g, b}
+		for index, channel := range channels {
+			if index != test.dominant && channels[test.dominant] <= channel {
+				t.Errorf("inverted %s color %s lost its semantic hue", test.name, test.value)
+				break
+			}
 		}
 	}
 }
@@ -235,22 +278,23 @@ func TestLightPaletteContrastAndHierarchy(t *testing.T) {
 // /theme switches the active theme live and shows state with no arg.
 func TestHandleThemeCommand(t *testing.T) {
 	defer applyTheme(themeDark, true)
-	m := model{themeMode: themeAuto, hasDarkBg: true}
+	m := model{themeMode: themeSystem, hasDarkBg: true}
 
-	m, out := m.handleThemeCommand("light")
-	if m.themeMode != themeLight {
-		t.Fatalf("after /theme light, mode = %q", m.themeMode)
+	m, out := m.handleThemeCommand("dracula")
+	if m.themeMode != themeMode("dracula") {
+		t.Fatalf("after /theme dracula, mode = %q", m.themeMode)
 	}
-	if r, _, _, _ := zeroTheme.inkColor.RGBA(); r != mustR(t, lightPalette.ink) {
-		t.Error("/theme light did not swap the active palette")
+	if got, want := colorHex(t, zeroTheme.inkColor), draculaPalette.ink; got != want {
+		t.Errorf("/theme dracula ink = %s, want %s", got, want)
 	}
-	if !strings.Contains(out, "light") {
-		t.Errorf("output should confirm light: %q", out)
+	if !strings.Contains(out, "dracula") {
+		t.Errorf("output should confirm dracula: %q", out)
 	}
 
-	m, _ = m.handleThemeCommand("dark")
-	if m.themeMode != themeDark {
-		t.Fatalf("after /theme dark, mode = %q", m.themeMode)
+	before := m.themeMode
+	m, removed := m.handleThemeCommand("dark")
+	if m.themeMode != before || !strings.Contains(removed, "Unknown theme") {
+		t.Fatalf("retired dark theme should not be selectable: mode=%q output=%q", m.themeMode, removed)
 	}
 
 	_, state := m.handleThemeCommand("")
@@ -291,8 +335,8 @@ func TestNewThemePresetsWired(t *testing.T) {
 }
 
 // The --theme flag and ZERO_THEME both resolve through resolveThemeMode, and
-// applyTheme must actually swap zeroTheme to the resolved preset's own palette,
-// not silently fall back to a built-in.
+// applyTheme must actually swap zeroTheme to the resolved preset, adapting only
+// its contrast direction when the terminal has the opposite polarity.
 func TestNewThemePresetsResolveThroughCLIAndEnvPath(t *testing.T) {
 	defer applyTheme(themeDark, true)
 
@@ -304,13 +348,13 @@ func TestNewThemePresetsResolveThroughCLIAndEnvPath(t *testing.T) {
 	}
 
 	applyTheme(themeMode("dune"), true)
-	if r, _, _, _ := zeroTheme.inkColor.RGBA(); r != mustR(t, dunePalette.ink) {
-		t.Error("applying \"dune\" did not swap zeroTheme to the dune palette")
+	if got, want := colorHex(t, zeroTheme.inkColor), invertPaletteColor(dunePalette.ink); got != want {
+		t.Errorf("applying dune ink = %s, want %s", got, want)
 	}
 
 	applyTheme(themeMode("neon"), true)
-	if r, _, _, _ := zeroTheme.inkColor.RGBA(); r != mustR(t, neonPalette.ink) {
-		t.Error("applying \"neon\" did not swap zeroTheme to the neon palette")
+	if got, want := colorHex(t, zeroTheme.inkColor), neonPalette.ink; got != want {
+		t.Errorf("applying neon ink = %s, want %s", got, want)
 	}
 }
 
@@ -481,8 +525,8 @@ func TestExtendedThemeANSI256Contrast(t *testing.T) {
 	}
 }
 
-func mustR(t *testing.T, hex string) uint32 {
+func colorHex(t *testing.T, value color.Color) string {
 	t.Helper()
-	r, _, _, _ := lipgloss.Color(hex).RGBA()
-	return r
+	r, g, b, _ := value.RGBA()
+	return fmt.Sprintf("#%02x%02x%02x", r>>8, g>>8, b>>8)
 }

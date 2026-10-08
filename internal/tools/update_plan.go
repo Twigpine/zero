@@ -26,7 +26,7 @@ func NewUpdatePlanTool() *updatePlanTool {
 	return &updatePlanTool{
 		baseTool: baseTool{
 			name: "update_plan",
-			description: "Create or update the in-memory plan for implementation or investigation with at least three meaningful dependent steps. Do not use it for simple lookups, explanations, or code navigation. " +
+			description: "Create or update the in-memory plan for work spanning multiple components or workstreams, sequencing uncertainty, or sustained tracking across many tool calls. Skip it for bounded changes in one component, simple lookups, explanations, and code navigation. " +
 				"Pass the full ordered list of steps each call; it replaces the previous plan. " +
 				"Each item needs a `content` string; `status` defaults to \"pending\" and `id` is " +
 				"auto-numbered, so you only need to supply `content` (and `status` as the task progresses). " +

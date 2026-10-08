@@ -1,13 +1,8 @@
 package cli
 
 import (
-	"context"
-	"errors"
-	"net/http"
-	"time"
-
 	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/oauth"
+	"github.com/Gitlawb/zero/internal/providers"
 	"github.com/Gitlawb/zero/internal/providers/providerio"
 )
 
@@ -28,46 +23,5 @@ import (
 // ProviderProfile.OAuthLoginCandidates so the runtime resolver, the Codex account
 // resolver, and the onboarding presence check never diverge.
 func oauthLoginForProfile(profile config.ProviderProfile) (providerio.TokenResolver, string) {
-	candidates := profile.OAuthLoginCandidates()
-	if len(candidates) == 0 {
-		return nil, ""
-	}
-	store, err := oauth.NewStore(oauth.StoreOptions{})
-	if err != nil {
-		return nil, ""
-	}
-	_, key, ok := oauth.FirstStored(store, candidates)
-	if !ok {
-		// No login under any candidate (or unreadable/invalid keys) → API-key
-		// auth, no resolver.
-		return nil, ""
-	}
-	manager, err := oauth.NewManager(oauth.ManagerOptions{
-		Store:      store,
-		HTTPClient: &http.Client{Timeout: 30 * time.Second},
-		// Refreshing a token the user logged into (possibly a preset provider like
-		// xAI) re-resolves that provider's OAuth config, which needs the preset.
-		AllowPresets: true,
-	})
-	if err != nil {
-		return nil, ""
-	}
-	resolver := func(ctx context.Context, forceRefresh bool) (string, string, bool, error) {
-		var token string
-		var rerr error
-		if forceRefresh {
-			token, rerr = manager.Handle401(ctx, key)
-		} else {
-			token, rerr = manager.GetFresh(ctx, key)
-		}
-		if errors.Is(rerr, oauth.ErrNoToken) {
-			// The login was removed since construction → fall back to the API key.
-			return "", "", false, nil
-		}
-		if rerr != nil {
-			return "", "", false, rerr
-		}
-		return "Authorization", "Bearer " + token, true, nil
-	}
-	return resolver, key
+	return providers.OAuthLoginForProfile(profile)
 }

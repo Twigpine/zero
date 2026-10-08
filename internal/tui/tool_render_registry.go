@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"fmt"
 	"strings"
 )
 
@@ -70,57 +69,7 @@ func newDefaultToolBodyRegistry() *toolBodyRegistry {
 	} {
 		registry.register(name, localControlRenderer)
 	}
-	// update_plan's full plan is already shown live by the sticky plan panel
-	// (renderPlanPanel); collapse its transcript card to a one-line summary so the
-	// plan isn't re-dumped into the transcript on every call.
-	registry.register("update_plan", toolBodyRendererFunc(planSummaryCardBody))
-
 	return registry
-}
-
-// planSummaryCardBody collapses an update_plan card to a single status line
-// (step counts) instead of the full "Current Plan:" body, which the plan panel
-// already renders. Falls back to the generic body if the text isn't a plan.
-func planSummaryCardBody(req toolBodyRequest) cardBody {
-	total, done, active, failed := 0, 0, 0, 0
-	for _, line := range strings.Split(req.detail, "\n") {
-		line = strings.TrimSpace(line)
-		if !isNumberedPlanLine(line) {
-			continue
-		}
-		total++
-		switch {
-		case strings.Contains(line, "[completed]"):
-			done++
-		case strings.Contains(line, "[in_progress]"):
-			active++
-		case strings.Contains(line, "[failed]"):
-			failed++
-		}
-	}
-	if total == 0 {
-		return genericCardBody(req.detail, req.opts)
-	}
-	parts := []string{fmt.Sprintf("%d steps", total)}
-	if done > 0 {
-		parts = append(parts, fmt.Sprintf("%d done", done))
-	}
-	if active > 0 {
-		parts = append(parts, fmt.Sprintf("%d in progress", active))
-	}
-	if failed > 0 {
-		parts = append(parts, fmt.Sprintf("%d failed", failed))
-	}
-	return cardBody{lines: []string{zeroTheme.faint.Render(strings.Join(parts, " · "))}}
-}
-
-// isNumberedPlanLine reports whether a line begins with "<n>." (a plan item).
-func isNumberedPlanLine(line string) bool {
-	i := 0
-	for i < len(line) && line[i] >= '0' && line[i] <= '9' {
-		i++
-	}
-	return i > 0 && i < len(line) && line[i] == '.'
 }
 
 func newToolBodyRegistry(fallback toolBodyRenderer) *toolBodyRegistry {

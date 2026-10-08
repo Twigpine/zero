@@ -1,6 +1,8 @@
 package mcp
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -90,7 +92,7 @@ func TestNormalizeConfigValidatesTransportBoundaries(t *testing.T) {
 
 func TestNormalizeConfigFlagsUnconfiguredDefault(t *testing.T) {
 	cfg := config.MCPConfig{Servers: map[string]config.MCPServerConfig{
-		"firecrawl": config.DefaultMCPServers()["firecrawl"],
+		"exa": config.DefaultMCPServers()["exa"],
 		"web": {
 			Type: "http",
 			URL:  "https://example.com/mcp",
@@ -107,8 +109,8 @@ func TestNormalizeConfigFlagsUnconfiguredDefault(t *testing.T) {
 		byName[server.Name] = server
 	}
 
-	if !byName["firecrawl"].UnconfiguredDefault {
-		t.Fatal("an untouched firecrawl default should be flagged UnconfiguredDefault")
+	if !byName["exa"].UnconfiguredDefault {
+		t.Fatal("an untouched exa default should be flagged UnconfiguredDefault")
 	}
 	if byName["web"].UnconfiguredDefault {
 		t.Fatal("a server the user configured must not be flagged UnconfiguredDefault")
@@ -239,4 +241,117 @@ func TestCopyStringMapTrimsKeysAndPreservesValues(t *testing.T) {
 	if copied["TOKEN"] != "  keep surrounding spaces  " {
 		t.Fatalf("copied[TOKEN] = %q, want value preserved verbatim", copied["TOKEN"])
 	}
+}
+
+// Startup behavior for the firecrawl -> exa default migration: a user who
+// disabled the retired default must end up with no Exa server to connect to,
+// not merely a disabled entry in the resolved config.
+func TestNormalizeConfigSkipsExaAfterLegacyFirecrawlDisable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"mcp":{"servers":{"firecrawl":{"disabled":true}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.ResolveMCP(config.ResolveOptions{UserConfigPath: path})
+	if err != nil {
+		t.Fatalf("ResolveMCP: %v", err)
+	}
+	servers, err := NormalizeConfig(cfg)
+	if err != nil {
+		t.Fatalf("NormalizeConfig: %v", err)
+	}
+	for _, server := range servers {
+		if server.Name == "exa" {
+			t.Fatalf("exa must not be started after the user disabled the default it replaced: %#v", server)
+		}
+	}
+}
+
+// The same path with no legacy disable still starts Exa, so the migration
+// cannot quietly switch off the default for everyone else.
+func TestNormalizeConfigStartsExaWithoutLegacyDisable(t *testing.T) {
+	cfg, err := config.ResolveMCP(config.ResolveOptions{})
+	if err != nil {
+		t.Fatalf("ResolveMCP: %v", err)
+	}
+	servers, err := NormalizeConfig(cfg)
+	if err != nil {
+		t.Fatalf("NormalizeConfig: %v", err)
+	}
+	for _, server := range servers {
+		if server.Name == "exa" {
+			if !server.UnconfiguredDefault {
+				t.Fatalf("an untouched exa default should be flagged unconfigured: %#v", server)
+			}
+			return
+		}
+	}
+	t.Fatal("expected the exa default to be started out of the box")
+}
+
+// The failure path CodeRabbit flagged: a firecrawl entry that named only a
+// header relied on the retired default for its transport. Resolving it must
+// still produce a complete server — an incomplete one fails NormalizeConfig,
+// which takes down every other server's startup with it, not just this one.
+func TestNormalizeConfigResolvesPartialRetiredDefaultEntry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"mcp":{"servers":{"firecrawl":{"headers":{"Authorization":"Bearer k"}}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.ResolveMCP(config.ResolveOptions{UserConfigPath: path})
+	if err != nil {
+		t.Fatalf("ResolveMCP: %v", err)
+	}
+	servers, err := NormalizeConfig(cfg)
+	if err != nil {
+		t.Fatalf("a header-only legacy entry must not break startup: %v", err)
+	}
+	var firecrawl *Server
+	var sawExa bool
+	for i := range servers {
+		switch servers[i].Name {
+		case "firecrawl":
+			firecrawl = &servers[i]
+		case "exa":
+			sawExa = true
+		}
+	}
+	if firecrawl == nil {
+		t.Fatalf("expected the customized firecrawl server to survive: %#v", servers)
+	}
+	if firecrawl.Type != ServerTypeHTTP || firecrawl.URL != "https://mcp.firecrawl.dev/v2/mcp" {
+		t.Fatalf("firecrawl lost the transport its entry relied on: %#v", *firecrawl)
+	}
+	if firecrawl.Headers["Authorization"] != "Bearer k" {
+		t.Fatalf("firecrawl lost the user's header: %#v", *firecrawl)
+	}
+	if !sawExa {
+		t.Fatal("the new exa default should still start alongside it")
+	}
+}
+
+// The mirror case: an entry that names its own stdio transport must not have
+// the retired http default grafted onto it, which would be rejected outright.
+func TestNormalizeConfigLeavesRetiredEntryWithOwnTransportAlone(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"mcp":{"servers":{"firecrawl":{"command":"firecrawl-mcp"}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.ResolveMCP(config.ResolveOptions{UserConfigPath: path})
+	if err != nil {
+		t.Fatalf("ResolveMCP: %v", err)
+	}
+	servers, err := NormalizeConfig(cfg)
+	if err != nil {
+		t.Fatalf("a self-hosted stdio entry must keep working: %v", err)
+	}
+	for _, server := range servers {
+		if server.Name != "firecrawl" {
+			continue
+		}
+		if server.Type != ServerTypeStdio || server.Command != "firecrawl-mcp" {
+			t.Fatalf("the user's own stdio transport was corrupted: %#v", server)
+		}
+		return
+	}
+	t.Fatalf("expected the self-hosted firecrawl server to survive: %#v", servers)
 }

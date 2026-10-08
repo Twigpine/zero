@@ -60,6 +60,7 @@ func firstUserContentBlocks(t *testing.T, body map[string]any) []any {
 // TestUserTextOnlyTurnUnchanged pins the text-only wire shape: a single
 // user message whose content is a one-element text-block array.
 func TestUserTextOnlyTurnUnchanged(t *testing.T) {
+	t.Parallel()
 	body := captureRequestBody(t, zeroruntime.CompletionRequest{
 		Messages: []zeroruntime.Message{
 			{Role: zeroruntime.MessageRoleUser, Content: "Describe this."},
@@ -78,6 +79,7 @@ func TestUserTextOnlyTurnUnchanged(t *testing.T) {
 // TestUserImagePlusTextTurn asserts a text block followed by one image
 // source block carrying base64 of the RAW bytes.
 func TestUserImagePlusTextTurn(t *testing.T) {
+	t.Parallel()
 	raw := []byte{0x89, 0x50, 0x4e, 0x47, 0x01, 0x02}
 	body := captureRequestBody(t, zeroruntime.CompletionRequest{
 		Messages: []zeroruntime.Message{
@@ -112,6 +114,7 @@ func TestUserImagePlusTextTurn(t *testing.T) {
 // TestUserImageOnlyTurnEmits asserts an image-only user turn (empty Content)
 // still produces a user message with a single image block.
 func TestUserImageOnlyTurnEmits(t *testing.T) {
+	t.Parallel()
 	raw := []byte{0xff, 0xd8, 0xff, 0xe0}
 	body := captureRequestBody(t, zeroruntime.CompletionRequest{
 		Messages: []zeroruntime.Message{

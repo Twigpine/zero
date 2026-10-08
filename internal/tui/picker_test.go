@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -49,6 +51,40 @@ func TestModelPickerDetectsOllamaCloudFromBaseURL(t *testing.T) {
 	}
 	if contains(got, "custom-model") {
 		t.Fatalf("picker should not show custom-openai-compatible fallback when URL is Ollama Cloud: %#v", got)
+	}
+}
+
+func TestModelPickerChatGPTDiscoveryUsesMatchingOAuthAccount(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oauth-tokens.json")
+	t.Setenv("ZERO_OAUTH_STORAGE", "file")
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", path)
+	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatalf("oauth store: %v", err)
+	}
+	if err := store.Save(oauth.ProviderKey("chatgpt"), oauth.Token{
+		AccessToken: "live-token",
+		Account:     "workspace-77",
+		ExpiresAt:   time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("save OAuth token: %v", err)
+	}
+
+	m := model{userAgent: "zero/test"}
+	options := m.modelPickerDiscoveryOptions(config.ProviderProfile{Name: "codex", CatalogID: "chatgpt"})
+	if options.OAuthResolver == nil || options.CodexAccountResolver == nil {
+		t.Fatal("ChatGPT model discovery must carry both bearer and account resolvers")
+	}
+	header, bearer, ok, err := options.OAuthResolver(context.Background(), false)
+	if err != nil || !ok || header != "Authorization" || bearer != "Bearer live-token" {
+		t.Fatalf("discovery bearer = (%q, %q, %v, %v)", header, bearer, ok, err)
+	}
+	account, ok, err := options.CodexAccountResolver(context.Background())
+	if err != nil || !ok || account != "workspace-77" {
+		t.Fatalf("discovery account = (%q, %v, %v)", account, ok, err)
+	}
+	if options.UserAgent != "zero/test" {
+		t.Fatalf("discovery user agent = %q", options.UserAgent)
 	}
 }
 
@@ -486,9 +522,9 @@ func TestModelPickerAppliesActiveProviderCatalogModelID(t *testing.T) {
 	})
 	m.input.SetValue("/model openai/gpt-4.1")
 
-	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
-	if cmd != nil {
+	if next.pending {
 		t.Fatal("expected /model to be handled without starting a run")
 	}
 	if captured.Model != "openai/gpt-4.1" {
@@ -497,8 +533,8 @@ func TestModelPickerAppliesActiveProviderCatalogModelID(t *testing.T) {
 	if next.modelName != "openai/gpt-4.1" {
 		t.Fatalf("active model = %q, want raw OpenRouter model ID", next.modelName)
 	}
-	if !transcriptContains(next.transcript, "openai/gpt-4.1 ·") {
-		t.Fatalf("expected model switch status, got %#v", next.transcript)
+	if !strings.Contains(next.transientNotice.text, "openai/gpt-4.1") {
+		t.Fatalf("model switch notice = %q", next.transientNotice.text)
 	}
 }
 
@@ -532,6 +568,30 @@ func TestRecentModelPairsForPickerPinsActiveDedupesAndCaps(t *testing.T) {
 	}
 	if len(got) != config.MaxRecentModels {
 		t.Fatalf("len = %d, want config.MaxRecentModels (%d)", len(got), config.MaxRecentModels)
+	}
+}
+
+func TestRecentModelPairsForPickerCanonicalizesChatGPTOpenAIModelAliases(t *testing.T) {
+	m := newModel(context.Background(), Options{
+		ProviderName: "chatgpt",
+		ModelName:    "gpt-5.6-sol",
+		ProviderProfile: config.ProviderProfile{
+			Name:      "chatgpt",
+			CatalogID: "chatgpt",
+		},
+		RecentModels: []config.RecentModelEntry{
+			{Provider: "chatgpt", Model: "openai/gpt-5.6-sol"},
+			{Provider: "chatgpt", Model: "gpt-5.6-terra"},
+		},
+	})
+
+	got := m.recentModelPairsForPicker()
+	want := []config.RecentModelEntry{
+		{Provider: "chatgpt", Model: "gpt-5.6-sol"},
+		{Provider: "chatgpt", Model: "gpt-5.6-terra"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("recentModelPairsForPicker() = %#v, want %#v", got, want)
 	}
 }
 
@@ -753,6 +813,12 @@ func TestModelCommandRecordsAndPersistsRecentHistory(t *testing.T) {
 // history, tagged with the provider actually switched to.
 func TestSwitchProviderModelRecordsRecentHistory(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	if _, err := config.UpsertProvider(configPath, config.ProviderProfile{Name: "openai", CatalogID: "openai", Model: "gpt-5.1"}, true); err != nil {
+		t.Fatalf("seed openai provider: %v", err)
+	}
+	if _, err := config.UpsertProvider(configPath, config.ProviderProfile{Name: "ollama", CatalogID: "ollama", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "http://localhost:11434/v1", Model: "kimi-k2.7-code:cloud"}, false); err != nil {
+		t.Fatalf("seed ollama provider: %v", err)
+	}
 	m := newModel(context.Background(), Options{
 		UserConfigPath:  configPath,
 		ProviderName:    "openai",
@@ -768,8 +834,8 @@ func TestSwitchProviderModelRecordsRecentHistory(t *testing.T) {
 		},
 	})
 
-	next, status, _, _ := m.switchProviderModel("ollama", "kimi-k2.7-code:cloud")
-	wantStatus := "Model\nSwitched to ollama · kimi-k2.7-code:cloud"
+	next, status, _, _, _ := m.switchProviderModel("ollama", "kimi-k2.7-code:cloud")
+	wantStatus := "Model\nSwitched to ollama · kimi-k2.7-code:cloud · saved"
 	if status != wantStatus {
 		t.Fatalf("switchProviderModel() status = %q, want %q (a mismatch here means the switch itself failed, not the recentModels assertion below)", status, wantStatus)
 	}
@@ -784,6 +850,238 @@ func TestSwitchProviderModelRecordsRecentHistory(t *testing.T) {
 	persisted := readTUIConfigFixture(t, configPath)
 	if !reflect.DeepEqual(persisted.Preferences.RecentModels, want) {
 		t.Fatalf("persisted RecentModels = %#v, want %#v", persisted.Preferences.RecentModels, want)
+	}
+}
+
+func TestSwitchProviderModelReportsLockedConfigAsNotSavedWithoutPartialSelection(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	if _, err := config.UpsertProvider(configPath, config.ProviderProfile{Name: "openai", CatalogID: "openai", Model: "gpt-5.1"}, true); err != nil {
+		t.Fatalf("seed openai provider: %v", err)
+	}
+	if _, err := config.UpsertProvider(configPath, config.ProviderProfile{
+		Name: "ollama", CatalogID: "ollama", ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL: "http://localhost:11434/v1", Model: "old-model",
+	}, false); err != nil {
+		t.Fatalf("seed ollama provider: %v", err)
+	}
+	before, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read seeded config: %v", err)
+	}
+	unlock, err := config.LockFile(configPath)
+	if err != nil {
+		t.Fatalf("hold config lock: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := unlock(); err != nil {
+			t.Errorf("release config lock: %v", err)
+		}
+	})
+
+	t.Setenv("ZERO_PROVIDER", "openai")
+	m := newModel(context.Background(), Options{
+		UserConfigPath:  configPath,
+		ProviderName:    "openai",
+		ModelName:       "gpt-5.1",
+		Provider:        &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{Name: "openai", CatalogID: "openai", Model: "gpt-5.1"},
+		SavedProviders: []config.ProviderProfile{
+			{Name: "openai", CatalogID: "openai", Model: "gpt-5.1"},
+			{Name: "ollama", CatalogID: "ollama", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "http://localhost:11434/v1", Model: "old-model"},
+		},
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+
+	started := time.Now()
+	next, status, switched, _, persistErr := m.switchProviderModel("ollama", "new-model")
+	if elapsed := time.Since(started); elapsed > 12*time.Second {
+		t.Fatalf("cross-provider switch blocked for %s; want one bounded persistence attempt", elapsed)
+	}
+	if !switched || next.providerName != "ollama" || next.modelName != "new-model" {
+		t.Fatalf("in-session switch was lost: switched=%v provider=%q model=%q", switched, next.providerName, next.modelName)
+	}
+	if persistErr == nil || !strings.Contains(persistErr.Error(), "timed out acquiring config lock") {
+		t.Fatalf("persistence error = %v, want config lock timeout", persistErr)
+	}
+	if !strings.Contains(status, "not saved (") || !strings.Contains(status, "timed out acquiring config lock") {
+		t.Fatalf("switch status = %q, want concrete not-saved lock failure", status)
+	}
+	after, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config after failed switch: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("failed switch partially changed config\nbefore: %s\nafter: %s", before, after)
+	}
+}
+
+func TestCrossProviderPickerShowsPersistenceFailure(t *testing.T) {
+	root := t.TempDir()
+	blockedParent := filepath.Join(root, "not-a-directory")
+	if err := os.WriteFile(blockedParent, []byte("block config directory creation"), 0o600); err != nil {
+		t.Fatalf("write blocking parent: %v", err)
+	}
+	m := newModel(context.Background(), Options{
+		UserConfigPath:  filepath.Join(blockedParent, "config.json"),
+		ProviderName:    "openai",
+		ModelName:       "gpt-5.1",
+		Provider:        &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{Name: "openai", CatalogID: "openai", Model: "gpt-5.1"},
+		SavedProviders: []config.ProviderProfile{
+			{Name: "openai", CatalogID: "openai", Model: "gpt-5.1"},
+			{Name: "ollama", CatalogID: "ollama", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "http://localhost:11434/v1", Model: "old-model"},
+		},
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+	m.picker = &commandPicker{
+		kind:  pickerModel,
+		items: []pickerItem{{Value: "new-model", OwnerProvider: "ollama"}},
+	}
+
+	updated, _ := m.choosePicker()
+	next := updated.(model)
+	if next.providerName != "ollama" || next.modelName != "new-model" {
+		t.Fatalf("in-session picker switch was lost: provider=%q model=%q", next.providerName, next.modelName)
+	}
+	if !strings.Contains(next.transientNotice.text, "not saved (") {
+		t.Fatalf("picker notice = %q, want persistence failure", next.transientNotice.text)
+	}
+	if next.transientNotice.tone != transientNoticeWarning {
+		t.Fatalf("picker notice tone = %v, want warning", next.transientNotice.tone)
+	}
+}
+
+// TestActiveProviderPickerShowsPersistenceFailure is the same-provider half of
+// TestCrossProviderPickerShowsPersistenceFailure. A picker row owned by the
+// ACTIVE provider goes through handleModelCommand, which reports a failed
+// persistence attempt inside its status text — and choosePicker discards that
+// text in favour of its own applied-notice. Without the outcome plumbed through
+// as a value, the user saw an unqualified success for a selection the config
+// never received, and only found out when the old model came back on restart.
+//
+// The elapsed-time bound is the second assertion, not decoration: the recent
+// model history is written under the same lock, so a version that still tried
+// to persist it after the selection write failed would pay TWO full lock
+// timeouts for one keystroke.
+func TestActiveProviderPickerShowsPersistenceFailure(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	if _, err := config.UpsertProvider(configPath, config.ProviderProfile{
+		Name: "openrouter", CatalogID: "openrouter", Model: "google/gemini-2.5-pro",
+	}, true); err != nil {
+		t.Fatalf("seed openrouter provider: %v", err)
+	}
+	before, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read seeded config: %v", err)
+	}
+	unlock, err := config.LockFile(configPath)
+	if err != nil {
+		t.Fatalf("hold config lock: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := unlock(); err != nil {
+			t.Errorf("release config lock: %v", err)
+		}
+	})
+
+	m := newModel(context.Background(), Options{
+		UserConfigPath: configPath,
+		ProviderName:   "openrouter",
+		ModelName:      "google/gemini-2.5-pro",
+		Provider:       &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{
+			Name:      "openrouter",
+			CatalogID: "openrouter",
+			Model:     "google/gemini-2.5-pro",
+			APIKeyEnv: "OPENROUTER_API_KEY",
+			Provider:  string(config.ProviderKindOpenAICompatible),
+			BaseURL:   "https://openrouter.ai/api/v1",
+			APIFormat: "chat-completions",
+		},
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+	// OwnerProvider left blank: the row resolves against the active provider,
+	// which is the branch that reaches handleModelCommand.
+	m.picker = &commandPicker{
+		kind:  pickerModel,
+		items: []pickerItem{{Value: "anthropic/claude-sonnet-4.5"}},
+	}
+
+	started := time.Now()
+	updated, _ := m.choosePicker()
+	elapsed := time.Since(started)
+	next := updated.(model)
+
+	if next.modelName != "anthropic/claude-sonnet-4.5" {
+		t.Fatalf("in-session picker selection was lost: model=%q", next.modelName)
+	}
+	if !strings.Contains(next.transientNotice.text, "not saved (") ||
+		!strings.Contains(next.transientNotice.text, "timed out acquiring config lock") {
+		t.Fatalf("picker notice = %q, want a concrete not-saved lock failure", next.transientNotice.text)
+	}
+	if next.transientNotice.tone != transientNoticeWarning {
+		t.Fatalf("picker notice tone = %v, want warning", next.transientNotice.tone)
+	}
+	if elapsed > 15*time.Second {
+		t.Fatalf("selection blocked for %s; want a single bounded persistence attempt", elapsed)
+	}
+	after, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config after failed selection: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("failed selection changed config\nbefore: %s\nafter: %s", before, after)
+	}
+}
+
+// TestTypedModelCommandShowsPersistenceFailure is the typed half of the same
+// gap: on a committed switch, dispatchCommand also replaces handleModelCommand's
+// status text with the applied-notice, so "· not saved (…)" was dropped there
+// too. An unwritable config path fails the persistence attempt immediately,
+// which keeps this case off the ten-second lock timeout the picker test needs.
+func TestTypedModelCommandShowsPersistenceFailure(t *testing.T) {
+	root := t.TempDir()
+	blockedParent := filepath.Join(root, "not-a-directory")
+	if err := os.WriteFile(blockedParent, []byte("block config directory creation"), 0o600); err != nil {
+		t.Fatalf("write blocking parent: %v", err)
+	}
+	m := newModel(context.Background(), Options{
+		UserConfigPath: filepath.Join(blockedParent, "config.json"),
+		ProviderName:   "openrouter",
+		ModelName:      "google/gemini-2.5-pro",
+		Provider:       &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{
+			Name:      "openrouter",
+			CatalogID: "openrouter",
+			Model:     "google/gemini-2.5-pro",
+			APIKeyEnv: "OPENROUTER_API_KEY",
+			Provider:  string(config.ProviderKindOpenAICompatible),
+			BaseURL:   "https://openrouter.ai/api/v1",
+			APIFormat: "chat-completions",
+		},
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+	m.input.SetValue("/model anthropic/claude-sonnet-4.5")
+
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+
+	if next.modelName != "anthropic/claude-sonnet-4.5" {
+		t.Fatalf("in-session switch was lost: model=%q", next.modelName)
+	}
+	if !strings.Contains(next.transientNotice.text, "not saved (") {
+		t.Fatalf("notice = %q, want persistence failure", next.transientNotice.text)
+	}
+	if next.transientNotice.tone != transientNoticeWarning {
+		t.Fatalf("notice tone = %v, want warning", next.transientNotice.tone)
 	}
 }
 
@@ -808,9 +1106,9 @@ func TestModelCommandAcceptsManualModelForCustomProvider(t *testing.T) {
 	})
 	m.input.SetValue("/model qwen-custom-latest")
 
-	updated, cmd := m.Update(testKey(tea.KeyEnter))
+	updated, _ := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
-	if cmd != nil {
+	if next.pending {
 		t.Fatal("expected /model to be handled without starting a run")
 	}
 	if captured.Model != "qwen-custom-latest" {
@@ -895,8 +1193,8 @@ func TestModelPickerNavigatesAndChoosesAppliesHandler(t *testing.T) {
 	if m.modelName != "claude-haiku-4.5" {
 		t.Fatalf("expected model switched to claude-haiku-4.5 via handler, got %q", m.modelName)
 	}
-	if !transcriptContains(m.transcript, "Model") {
-		t.Fatal("choosing should append the model handler's status text")
+	if !strings.Contains(m.transientNotice.text, "Model:") {
+		t.Fatalf("model picker notice = %q", m.transientNotice.text)
 	}
 }
 
@@ -928,7 +1226,7 @@ func TestEffortPickerOpensForSupportedModel(t *testing.T) {
 }
 
 func TestThemeCommandOpensPicker(t *testing.T) {
-	// Bare /theme opens the theme popup (live preview on move, apply on Enter),
+	// Bare /theme opens the theme popup (contained preview on move, apply on Enter),
 	// like /model and /effort. Full preview/commit/cancel behavior is covered in
 	// theme_picker_test.go; here we just pin that the no-arg command opens it.
 	defer applyTheme(themeDark, true)
@@ -1109,6 +1407,42 @@ func TestEffortPickerOpensForModelWithoutEffortControls(t *testing.T) {
 	}
 }
 
+func TestEffortPickerPrefersLiveProviderReasoningLevels(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "future-reasoner"})
+	m.providerProfile = config.ProviderProfile{CatalogID: "test-provider"}
+	m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{
+		"test-provider": {{
+			ID:               "future-reasoner",
+			Reasoning:        true,
+			ReasoningEfforts: []string{"low", "high", "xhigh", "max", "ultra", "unknown", "high"},
+		}},
+	}
+
+	got := m.availableReasoningEfforts()
+	want := []modelregistry.ReasoningEffort{
+		modelregistry.ReasoningEffortLow,
+		modelregistry.ReasoningEffortHigh,
+		modelregistry.ReasoningEffortXHigh,
+		modelregistry.ReasoningEffortMax,
+		modelregistry.ReasoningEffortUltra,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("reasoning efforts = %#v, want %#v", got, want)
+	}
+}
+
+func TestEffortPickerDoesNotFallbackWhenLiveModelAdvertisesNoSelectableEfforts(t *testing.T) {
+	m := newModel(context.Background(), Options{ModelName: "gpt-5.5"})
+	m.providerProfile = config.ProviderProfile{CatalogID: "test-provider"}
+	m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{
+		"test-provider": {{ID: "gpt-5.5", ReasoningEfforts: []string{"none"}}},
+	}
+
+	if got := m.availableReasoningEfforts(); len(got) != 0 {
+		t.Fatalf("live model with only none exposed efforts %#v, want none", got)
+	}
+}
+
 func TestEffortPickerAutoSelectionKeepsEffortUnset(t *testing.T) {
 	// Picking "auto" on a model without effort controls clears any stale
 	// preference and emits the success status text (handleEffortCommand("auto")).
@@ -1252,7 +1586,7 @@ func TestSwitchProviderModelWarmsDiscoveryForTheNewProvider(t *testing.T) {
 		},
 	})
 
-	next, text, ok, cmd := m.switchProviderModel("ollama", "kimi-k2.7-code:cloud")
+	next, text, ok, cmd, _ := m.switchProviderModel("ollama", "kimi-k2.7-code:cloud")
 	if !ok || !strings.Contains(text, "Switched to ollama") {
 		t.Fatalf("switch notice = %q (ok=%v), want a committed switch", text, ok)
 	}
@@ -1344,7 +1678,7 @@ func TestSwitchProviderModelUsesOAuthLoginWithoutInliningBearer(t *testing.T) {
 		},
 	})
 
-	next, text, ok, _ := m.switchProviderModel("chatgpt", "gpt-5.5")
+	next, text, ok, _, _ := m.switchProviderModel("chatgpt", "gpt-5.5")
 	if !ok || !strings.Contains(text, "Switched to chatgpt") {
 		t.Fatalf("switch should succeed on the stored OAuth login, got %q (ok=%v)", text, ok)
 	}
@@ -1377,7 +1711,7 @@ func TestSwitchProviderModelStillRejectsProviderWithNoCredential(t *testing.T) {
 		},
 	})
 
-	_, text, ok, _ := m.switchProviderModel("chatgpt", "gpt-5.5")
+	_, text, ok, _, _ := m.switchProviderModel("chatgpt", "gpt-5.5")
 	if ok || !strings.Contains(text, "no usable credential") {
 		t.Fatalf("expected the credential gate to refuse, got %q (ok=%v)", text, ok)
 	}

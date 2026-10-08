@@ -457,16 +457,24 @@ func normalizeKey(key string) string {
 	key = strings.TrimSpace(key)
 	var builder strings.Builder
 	var lastUnderscore bool
+	var prev rune
+	var hasPrev bool
 	for _, r := range key {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			if hasPrev && !lastUnderscore && unicode.IsLower(prev) && unicode.IsUpper(r) {
+				builder.WriteByte('_')
+			}
 			builder.WriteRune(unicode.ToLower(r))
 			lastUnderscore = false
+			prev = r
+			hasPrev = true
 			continue
 		}
 		if !lastUnderscore {
 			builder.WriteByte('_')
 			lastUnderscore = true
 		}
+		hasPrev = false
 	}
 	return strings.Trim(builder.String(), "_")
 }

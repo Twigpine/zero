@@ -16,6 +16,7 @@ var expectedCatalogIDs = []string{
 	"ollama-cloud",
 	"ollama",
 	"lmstudio",
+	"atomic-chat-local",
 	"openrouter",
 	"huggingface",
 	"chatgpt",
@@ -259,7 +260,7 @@ func TestRemoteProvidersDeclareAuthOrExplicitPublicAccess(t *testing.T) {
 }
 
 func TestLocalProvidersDoNotRequireAuth(t *testing.T) {
-	for _, id := range []string{"ollama", "lmstudio"} {
+	for _, id := range []string{"ollama", "lmstudio", "atomic-chat-local"} {
 		descriptor, err := Require(id)
 		if err != nil {
 			t.Fatalf("Require(%q) error = %v", id, err)
@@ -316,6 +317,7 @@ func TestLookupNormalizesIDsAndAliases(t *testing.T) {
 		"ollama cloud":                 "ollama-cloud",
 		"ollama local":                 "ollama",
 		"lm-studio":                    "lmstudio",
+		"atomic chat local":            "atomic-chat-local",
 		"mini_max":                     "minimax",
 		"Moonshot":                     "moonshot",
 		"Atlas Cloud":                  "atlascloud",
@@ -369,7 +371,7 @@ func TestListByTransportPreservesCatalogOrder(t *testing.T) {
 		TransportBedrock:         {"bedrock"},
 		TransportVertex:          {"vertex"},
 		TransportAnthropicCompat: {"minimax", "minimaxi-cn", "opencode-go-anthropic-compatible", "custom-anthropic-compatible"},
-		TransportOpenAICompat:    {"gitlawb-opengateway", "aimlapi", "ollama-cloud", "ollama", "lmstudio", "openrouter", "huggingface", "chatgpt", "groq", "deepseek", "together", "fireworks", "dashscope", "moonshot", "atlascloud", "longcat", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "zai-cn", "kilocode", "opencode", "opencode-go", "atomic-chat", "chatgpt-proxy", "custom-openai-compatible"},
+		TransportOpenAICompat:    {"gitlawb-opengateway", "aimlapi", "ollama-cloud", "ollama", "lmstudio", "atomic-chat-local", "openrouter", "huggingface", "chatgpt", "groq", "deepseek", "together", "fireworks", "dashscope", "moonshot", "atlascloud", "longcat", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "zai-cn", "kilocode", "opencode", "opencode-go", "atomic-chat", "chatgpt-proxy", "custom-openai-compatible"},
 	}
 
 	for transport, wantIDs := range cases {

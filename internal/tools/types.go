@@ -120,6 +120,10 @@ type Result struct {
 	// entries under a granted extra write root are absolute, since
 	// workspace-relative would be ambiguous there.
 	ChangedFiles []string
+	// FileDiffs carries exact, bounded before/after text for built-in file
+	// mutations. A missing entry means the client must fall back to ChangedFiles
+	// rather than inventing a partial diff.
+	FileDiffs []FileDiff
 	// ChangeSummaries contains bounded generated-tree changes. These are shown
 	// in session evidence and the Files panel but are never treated as files to
 	// open or diagnose individually.
@@ -209,6 +213,14 @@ type Tool interface {
 	Parameters() Schema
 	Safety() Safety
 	Run(ctx context.Context, args map[string]any) Result
+}
+
+// IsBuiltInApplyPatch reports whether tool is Zero's scoped patch tool. The
+// marker method is package-private so external and MCP tools cannot claim this
+// identity merely by sharing the public name "apply_patch".
+func IsBuiltInApplyPatch(tool Tool) bool {
+	_, ok := tool.(interface{ isBuiltInApplyPatch() })
+	return ok
 }
 
 // ArgsPermissioner is an optional interface a Tool can implement to refine its

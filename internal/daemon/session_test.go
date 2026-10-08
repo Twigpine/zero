@@ -6,6 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/testutil"
 )
 
 func drain(t *testing.T, buffered []string, live <-chan string) []string {
@@ -111,7 +113,7 @@ func TestSessionLeaseQueuesWhenPoolFull(t *testing.T) {
 	mgr, _ := NewSessionManager(SessionManagerOptions{Pool: pool})
 
 	sa, _ := mgr.Start(context.Background(), WorkerSpec{Session: "a"})
-	waitFor(t, func() bool { return sa.State() == SessionRunning })
+	testutil.WaitFor(t, "session running", func() bool { return sa.State() == SessionRunning })
 
 	sb, _ := mgr.Start(context.Background(), WorkerSpec{Session: "b"})
 	// b must stay queued (its worker not yet launched) while a holds the slot.
@@ -197,7 +199,7 @@ func TestSessionManagerKeepsRunningOverCap(t *testing.T) {
 
 	s1, _ := mgr.Start(context.Background(), WorkerSpec{Session: "r1"})
 	s2, _ := mgr.Start(context.Background(), WorkerSpec{Session: "r2"})
-	waitFor(t, func() bool { return s1.State() == SessionRunning && s2.State() == SessionRunning })
+	testutil.WaitFor(t, "both sessions running", func() bool { return s1.State() == SessionRunning && s2.State() == SessionRunning })
 	if _, ok := mgr.Get("r1"); !ok {
 		t.Fatal("a running session must never be evicted, even past the cap")
 	}

@@ -8,17 +8,21 @@ import (
 )
 
 type Model struct {
-	ID               string
-	Description      string
-	ContextWindow    int
-	ToolCall         bool
-	Reasoning        bool
-	InputModalities  []string
-	OutputModalities []string
-	InputCost        float64
-	OutputCost       float64
-	Tags             []string
-	Source           string
+	ID                     string
+	Description            string
+	ContextWindow          int
+	ToolCall               bool
+	Reasoning              bool
+	ReasoningEfforts       []string
+	DefaultReasoningEffort string
+	ServiceTiers           []string
+	DefaultServiceTier     string
+	InputModalities        []string
+	OutputModalities       []string
+	InputCost              float64
+	OutputCost             float64
+	Tags                   []string
+	Source                 string
 }
 
 const minimaxModelSource = "https://platform.minimax.io/docs/api-reference/api-overview"
@@ -210,6 +214,8 @@ var curatedModels = map[string][]Model{
 		{ID: "gpt-4.1", Description: "catalog default"},
 		{ID: "gpt-4o-mini", Description: "fast model"},
 	},
+	// atomic-chat-local has no curated list: discover the user-loaded model
+	// from the runtime's /v1/models endpoint.
 	"opencode-go-anthropic-compatible": {
 		{ID: "minimax-m3", Description: "MiniMax M3: default"},
 		{ID: "minimax-m2.7", Description: "MiniMax M2.7: coding model"},
@@ -270,6 +276,8 @@ func dedupeModels(defaultModel string, models []Model) []Model {
 		}
 		model.InputModalities = append([]string{}, model.InputModalities...)
 		model.OutputModalities = append([]string{}, model.OutputModalities...)
+		model.ReasoningEfforts = append([]string{}, model.ReasoningEfforts...)
+		model.ServiceTiers = append([]string{}, model.ServiceTiers...)
 		model.Tags = append([]string{}, model.Tags...)
 		seen[model.ID] = true
 		result = append(result, model)

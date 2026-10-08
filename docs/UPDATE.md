@@ -70,3 +70,53 @@ Endpoint resolution order:
 Installer scripts download the matching release asset for the local platform and
 verify its `.sha256` file. If Zero is already installed, run `zero upgrade`
 instead of reinstalling.
+
+## Windows recovery state (standalone installs)
+
+This section describes Windows only. On Linux and macOS a standalone update
+renames the staged file directly over the executable path through the
+installation directory's file descriptor, so the replacement is atomic and no
+aside copy, marker, or recovery record is ever created — a failed update leaves
+the previous binary in place and nothing to resolve.
+
+On Windows, a running executable cannot be replaced in place, so the previous
+binary is moved aside to `<binary>.zero-update-<random>.old` first. The updater
+records that exact file — bound to its filesystem identity, in per-user state
+outside the installation directory — and deletes only that recorded copy after
+the next update is verified in place. Backups it did not create are never
+removed, so a file such as `zero.exe.before-manual-patch.old` is left alone. A
+recorded copy that something else holds open (an on-access scanner, an editor)
+stays recorded and is removed by a later update instead.
+
+An update **refuses to run** while unresolved recovery state exists beside the
+binary:
+
+| State on disk | Meaning |
+|---|---|
+| `<binary>.old` (or `<binary>.<suffix>.old`) plus a `.keep` marker, or a per-user update-recovery record naming that copy | A previous update could not restore the original binary. The `.old` file may be the last binary the updater verified; the installed one may be unverified. The `.keep` marker is in the installation directory and can be deleted; the identity-bound record is not, so deleting the marker alone does not end the refusal. |
+| `<binary>.…old.<suffix>.recovery` | A previous update could not even write the marker, so it moved the last verified binary to that name. |
+| The binary is missing and one or more `*.old` files exist | The previous attempt was interrupted between moves. |
+
+The refusal names the paths involved and the two moves that end the state:
+either move the recovery binary back over the executable path, or — if the
+installed binary is the one you want — delete the recovery copy itself (not
+only the `.keep` marker) after verifying the installed binary, then update
+again. Deleting the marker alone is not enough: a failed restore also records
+that copy in per-user state outside the installation directory, and the next
+update consults that record even if the marker is gone.
+
+That trusted record lives under `%AppData%\zero\update-recovery` (per-user).
+The recovery copy and its `.keep` marker sit in the installation directory
+(per-machine). A second Windows account on the same machine does not see the
+first account's unresolved record; the sibling marker is the machine-visible
+signal for every account. There is no separate machine-wide store: writing one
+would need a shared writable location and ACL rules the updater does not own.
+
+This is deliberately fail-closed and differs from older releases, which deleted
+`<binary>.old` and proceeded. The trade-off is that anyone who can write in the
+installation directory can plant `<binary>.old` and `<binary>.old.keep` there
+and make every subsequent update refuse until an operator clears them. That is
+the safe direction: the alternative is an update that overwrites the only
+verified copy of the previous binary. If updates start refusing, inspect those
+files before removing them — an installation directory that a lower-privileged
+account can write to is itself worth fixing.

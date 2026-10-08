@@ -31,6 +31,19 @@ func (t countingSchemaTool) Run(_ context.Context, _ map[string]any) tools.Resul
 	return tools.Result{Status: tools.StatusOK}
 }
 
+func TestRuntimeToolDefinitionMarksOnlyBuiltInApplyPatchFreeform(t *testing.T) {
+	builtIn := runtimeToolDefinition(tools.NewScopedApplyPatchTool(t.TempDir(), nil))
+	if builtIn.Type != zeroruntime.ToolDefinitionFreeform {
+		t.Fatalf("built-in apply_patch type = %q, want freeform", builtIn.Type)
+	}
+
+	calls := 0
+	custom := runtimeToolDefinition(countingSchemaTool{name: "apply_patch", calls: &calls})
+	if custom.Type != "" {
+		t.Fatalf("custom apply_patch type = %q, want legacy function shape", custom.Type)
+	}
+}
+
 // The cache renders a tool's schema once and reuses it across calls, and its
 // output is identical to the uncached path.
 func TestPartitionToolsCacheRendersOnceAndMatchesUncached(t *testing.T) {

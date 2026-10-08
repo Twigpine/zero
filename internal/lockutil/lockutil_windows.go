@@ -4,77 +4,206 @@ package lockutil
 
 import (
 	"errors"
+	"fmt"
 	"os"
-	"syscall"
-	"time"
+	"path/filepath"
+	"strings"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-// RestoreLockFile restores a sidelined lock file on Windows. It moves the file
-// with a no-replace MoveFileEx so a competing lock created at path in the
-// meantime wins: the move fails with os.ErrExist instead of overwriting it. If
-// the move fails for any other reason (ERROR_SHARING_VIOLATION or
-// ERROR_ACCESS_DENIED under concurrent access to the file), it falls back to
-// an O_EXCL copy rather than leaving path missing and the live holder's lock
-// stranded in reclaimed.
-func RestoreLockFile(reclaimed, path string) error {
-	err := moveFileNoReplace(reclaimed, path)
-	if err == nil || errors.Is(err, os.ErrExist) {
-		return err
-	}
-	return restoreByCopy(reclaimed, path, moveFileNoReplace)
+type platformLockState struct {
+	overlapped windows.Overlapped
 }
 
-// moveFileNoReplace renames from to to, failing if to already exists. It calls
-// MoveFileExW directly via golang.org/x/sys/windows (the standard library's
-// syscall package does not export MoveFileEx on this platform) with no flags,
-// so an existing destination fails with ERROR_ALREADY_EXISTS, which satisfies
-// errors.Is(err, os.ErrExist) (pinned by
-// TestMoveFileNoReplaceMapsAlreadyExistsToErrExist), instead of overwriting it
-// the way os.Rename does on Windows (it passes MOVEFILE_REPLACE_EXISTING to
-// match POSIX rename semantics cross-platform).
-func moveFileNoReplace(from, to string) error {
-	fromPtr, err := windows.UTF16PtrFromString(from)
+const lockByteOffsetHigh = 1
+
+func openLockFileAt(root, relative, displayPath string) (_ *os.File, resultErr error) {
+	rootPtr, err := windows.UTF16PtrFromString(root)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	toPtr, err := windows.UTF16PtrFromString(to)
+	parent, err := windows.CreateFile(
+		rootPtr,
+		windows.FILE_READ_ATTRIBUTES|windows.FILE_TRAVERSE|windows.SYNCHRONIZE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS,
+		0,
+	)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("open lock root: %w", err)
 	}
-	return windows.MoveFileEx(fromPtr, toPtr, 0)
-}
-
-// isReclaimContended reports whether a failed rename-aside of a suspected
-// stale lock means the file was concurrently open or pending deletion (which
-// surfaces as ERROR_SHARING_VIOLATION or ERROR_ACCESS_DENIED on Windows)
-// rather than a hard failure, so ReclaimStaleLock reports a lost race instead
-// of an error. Neither errno satisfies errors.Is(err, os.ErrExist), and
-// ERROR_SHARING_VIOLATION does not satisfy errors.Is(err, os.ErrPermission)
-// either, so the classification compares raw errnos like RemoveLockFile below.
-func isReclaimContended(err error) bool {
-	var errno syscall.Errno
-	return errors.As(err, &errno) && (errno == windows.ERROR_SHARING_VIOLATION || errno == windows.ERROR_ACCESS_DENIED)
-}
-
-// RemoveLockFile removes a lock file on Windows, retrying on the sharing
-// violation or access denied errors that are common under heavy concurrent
-// contention. Removing an already-missing file reports nil, matching the
-// non-Windows implementation, so callers see one cross-platform contract.
-func RemoveLockFile(path string) error {
-	var err error
-	for i := 0; i < 15; i++ {
-		err = os.Remove(path)
-		if err == nil || os.IsNotExist(err) {
-			return nil
+	defer func() {
+		if parent != 0 {
+			resultErr = errors.Join(resultErr, windows.CloseHandle(parent))
 		}
-		var errno syscall.Errno
-		if errors.As(err, &errno) && (errno == windows.ERROR_SHARING_VIOLATION || errno == windows.ERROR_ACCESS_DENIED) {
-			time.Sleep(5 * time.Millisecond)
+	}()
+
+	components := strings.Split(filepath.Clean(relative), string(filepath.Separator))
+	for _, component := range components[:len(components)-1] {
+		next, openErr := openLockDirectoryAt(parent, component)
+		if openErr != nil {
+			return nil, fmt.Errorf("open lock path component %q: %w", component, openErr)
+		}
+		if closeErr := windows.CloseHandle(parent); closeErr != nil {
+			_ = windows.CloseHandle(next)
+			parent = 0
+			return nil, fmt.Errorf("close lock path component: %w", closeErr)
+		}
+		parent = next
+	}
+
+	handle, err := openLockFileHandleAt(parent, components[len(components)-1])
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(handle), displayPath)
+	if file == nil {
+		_ = windows.CloseHandle(handle)
+		return nil, errors.New("convert lock handle to file")
+	}
+	if err := windows.CloseHandle(parent); err != nil {
+		parent = 0
+		return nil, errors.Join(fmt.Errorf("close lock parent: %w", err), file.Close())
+	}
+	parent = 0
+	return file, nil
+}
+
+func validateRootLockFile(file *os.File) error {
+	return validateWindowsLockHandle(windows.Handle(file.Fd()), false)
+}
+
+func openLockDirectoryAt(parent windows.Handle, name string) (windows.Handle, error) {
+	handle, err := openLockPathAt(
+		parent,
+		name,
+		windows.FILE_READ_ATTRIBUTES|windows.FILE_TRAVERSE|windows.SYNCHRONIZE,
+		windows.FILE_OPEN,
+		windows.FILE_ATTRIBUTE_DIRECTORY,
+		windows.FILE_DIRECTORY_FILE|windows.FILE_SYNCHRONOUS_IO_NONALERT|windows.FILE_OPEN_REPARSE_POINT,
+	)
+	if err != nil {
+		return 0, err
+	}
+	if err := validateWindowsLockHandle(handle, true); err != nil {
+		return 0, errors.Join(err, windows.CloseHandle(handle))
+	}
+	return handle, nil
+}
+
+func openLockFileHandleAt(parent windows.Handle, name string) (windows.Handle, error) {
+	for attempt := 0; attempt < 10; attempt++ {
+		handle, err := openLockPathAt(
+			parent,
+			name,
+			windows.GENERIC_READ|windows.GENERIC_WRITE|windows.SYNCHRONIZE,
+			windows.FILE_OPEN,
+			windows.FILE_ATTRIBUTE_NORMAL,
+			windows.FILE_NON_DIRECTORY_FILE|windows.FILE_SYNCHRONOUS_IO_NONALERT|windows.FILE_OPEN_REPARSE_POINT,
+		)
+		if err == nil {
+			if err := validateWindowsLockHandle(handle, false); err != nil {
+				return 0, errors.Join(err, windows.CloseHandle(handle))
+			}
+			return handle, nil
+		}
+		if !windowsLockPathMissing(err) {
+			return 0, err
+		}
+
+		handle, err = openLockPathAt(
+			parent,
+			name,
+			windows.GENERIC_READ|windows.GENERIC_WRITE|windows.SYNCHRONIZE,
+			windows.FILE_CREATE,
+			windows.FILE_ATTRIBUTE_NORMAL,
+			windows.FILE_NON_DIRECTORY_FILE|windows.FILE_SYNCHRONOUS_IO_NONALERT|windows.FILE_OPEN_REPARSE_POINT,
+		)
+		if err == windows.STATUS_OBJECT_NAME_COLLISION || errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
 			continue
 		}
-		return err
+		if err != nil {
+			return 0, err
+		}
+		if err := validateWindowsLockHandle(handle, false); err != nil {
+			return 0, errors.Join(err, windows.CloseHandle(handle))
+		}
+		return handle, nil
 	}
-	return err
+	return 0, errors.New("lock file creation did not stabilize")
+}
+
+func windowsLockPathMissing(err error) bool {
+	return err == windows.STATUS_NO_SUCH_FILE ||
+		err == windows.STATUS_OBJECT_NAME_NOT_FOUND ||
+		err == windows.STATUS_OBJECT_PATH_NOT_FOUND ||
+		errors.Is(err, windows.ERROR_FILE_NOT_FOUND) ||
+		errors.Is(err, windows.ERROR_PATH_NOT_FOUND)
+}
+
+func openLockPathAt(parent windows.Handle, name string, access, disposition, attributes, options uint32) (windows.Handle, error) {
+	objectName, err := windows.NewNTUnicodeString(name)
+	if err != nil {
+		return 0, err
+	}
+	objectAttributes := &windows.OBJECT_ATTRIBUTES{
+		Length:        uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
+		RootDirectory: parent,
+		ObjectName:    objectName,
+		Attributes:    windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
+	}
+	var handle windows.Handle
+	err = windows.NtCreateFile(
+		&handle,
+		access,
+		objectAttributes,
+		&windows.IO_STATUS_BLOCK{},
+		nil,
+		attributes,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		disposition,
+		options,
+		0,
+		0,
+	)
+	return handle, err
+}
+
+func validateWindowsLockHandle(handle windows.Handle, wantDirectory bool) error {
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return fmt.Errorf("inspect lock path handle: %w", err)
+	}
+	isDirectory := info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || isDirectory != wantDirectory {
+		return errors.New("refusing non-file or reparse-point lock path")
+	}
+	if !wantDirectory && info.NumberOfLinks != 1 {
+		return errors.New("refusing multiply-linked lock file")
+	}
+	return nil
+}
+
+func tryLockFile(file *os.File) (platformLockState, bool, error) {
+	state := platformLockState{overlapped: windows.Overlapped{OffsetHigh: lockByteOffsetHigh}}
+	flags := uint32(windows.LOCKFILE_EXCLUSIVE_LOCK | windows.LOCKFILE_FAIL_IMMEDIATELY)
+	err := windows.LockFileEx(windows.Handle(file.Fd()), flags, 0, 1, 0, &state.overlapped)
+	if err == nil {
+		return state, false, nil
+	}
+	if errors.Is(err, windows.ERROR_LOCK_VIOLATION) || errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+		return platformLockState{}, true, nil
+	}
+	return platformLockState{}, false, err
+}
+
+func unlockFile(file *os.File, state *platformLockState) error {
+	if file == nil {
+		return nil
+	}
+	return windows.UnlockFileEx(windows.Handle(file.Fd()), 0, 1, 0, &state.overlapped)
 }

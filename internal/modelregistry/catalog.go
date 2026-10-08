@@ -231,6 +231,12 @@ func reasoningEffortsForModelName(name string) []ReasoningEffort {
 		// the gateway's translation concern — unknown fields are ignored, so the
 		// worst case is a silent no-op rather than a 400.
 		return []ReasoningEffort{ReasoningEffortLow, ReasoningEffortMedium, ReasoningEffortHigh}
+	case strings.Contains(n, "deepseek"):
+		// DeepSeek V4 (deepseek-v4-flash / deepseek-v4-pro) exposes thinking-mode
+		// effort control through the OpenAI-compatible reasoning_effort parameter.
+		// The API accepts low/high/max and maps medium/xhigh onto high, so only
+		// the three distinct tiers are advertised.
+		return []ReasoningEffort{ReasoningEffortLow, ReasoningEffortHigh, ReasoningEffortMax}
 	default:
 		return nil
 	}

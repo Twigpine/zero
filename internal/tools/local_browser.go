@@ -548,11 +548,11 @@ func browserActionArgs(args map[string]any) (string, []string, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	command = strings.ToLower(strings.TrimSpace(command))
-	spec, ok := browserActionSpecs[command]
+	command, ok := NormalizedBrowserActionCommand(command)
 	if !ok {
 		return "", nil, fmt.Errorf("command must be one of: %s", strings.Join(browserActionCommandNames(), ", "))
 	}
+	spec := browserActionSpecs[command]
 	values, err := stringArrayArg(args, "args")
 	if err != nil {
 		return "", nil, err
@@ -568,6 +568,16 @@ func browserActionArgs(args map[string]any) (string, []string, error) {
 		return "", nil, err
 	}
 	return command, commandArgs, nil
+}
+
+// NormalizedBrowserActionCommand returns the exact action that browser_action
+// will execute after normalizing its command argument. ACP uses it only for a
+// permission title, so an unrecognised command is never reflected as text that
+// the tool would reject.
+func NormalizedBrowserActionCommand(command string) (string, bool) {
+	command = strings.ToLower(strings.TrimSpace(command))
+	_, ok := browserActionSpecs[command]
+	return command, ok
 }
 
 func browserActionCommandArgs(command string, spec browserActionSpec, values []string) ([]string, error) {
@@ -657,6 +667,13 @@ func browserOpenURLArg(args map[string]any) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return NormalizeBrowserOpenURL(rawURL)
+}
+
+// NormalizeBrowserOpenURL applies the browser_open URL rules before execution.
+// Keeping this exported within the internal package lets permission displays
+// describe the same destination the browser helper will open.
+func NormalizeBrowserOpenURL(rawURL string) (string, error) {
 	normalized := strings.TrimSpace(rawURL)
 	if !strings.Contains(normalized, "://") {
 		normalized = "https://" + normalized

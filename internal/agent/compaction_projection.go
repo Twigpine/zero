@@ -126,8 +126,11 @@ func capCompactionBrief(brief string) (string, bool) {
 
 func compactionToolCallLine(call zeroruntime.ToolCall) string {
 	detail := ""
+	if call.Freeform && call.Name == "apply_patch" {
+		detail = strings.Join(patchPaths(call.Arguments), ", ")
+	}
 	var arguments map[string]any
-	if json.Unmarshal([]byte(strings.TrimSpace(call.Arguments)), &arguments) == nil {
+	if detail == "" && json.Unmarshal([]byte(strings.TrimSpace(call.Arguments)), &arguments) == nil {
 		for _, key := range []string{"file_path", "path", "url", "query", "pattern", "prompt", "description", "question"} {
 			if value, ok := arguments[key].(string); ok && strings.TrimSpace(value) != "" {
 				detail = value

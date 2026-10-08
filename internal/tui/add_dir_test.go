@@ -42,8 +42,8 @@ func TestHandleAddDirCommand(t *testing.T) {
 	if roots := scope.Roots(); len(roots) != initialRootCount+1 {
 		t.Fatalf("expected one additional write root after grant, got %#v", roots)
 	}
-	notice := lastTranscriptText(next)
-	if !strings.Contains(notice, "write access added") || !strings.Contains(notice, "session only") {
+	notice := next.transientNotice.text
+	if !strings.Contains(notice, "Write access added") || !strings.Contains(notice, "session only") {
 		t.Fatalf("grant notice = %q, want it to mention the grant and its session-only lifetime", notice)
 	}
 

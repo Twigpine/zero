@@ -221,6 +221,112 @@ func TestApplyPatchCompleteCreationCreditsSuppliedFile(t *testing.T) {
 	}
 }
 
+func TestStructuredPatchDoesNotCreditUnreadFileForOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(path, []byte("alpha\nbeta\ngamma\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	registry := safetyRegistry(t, dir)
+	registry.Register(NewScopedApplyPatchTool(dir, nil))
+	tracker := NewFileTracker()
+	opts := grantedOpts(tracker)
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: f.txt",
+		"@@",
+		"-beta",
+		"+updated",
+		"*** End Patch",
+		"",
+	}, "\n")
+
+	if result := registry.RunWithOptions(context.Background(), "apply_patch", map[string]any{"patch": patch}, opts); result.Status != StatusOK {
+		t.Fatalf("structured patch failed: %s", result.Output)
+	}
+	trackedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tracker.SeenWhole(trackedPath) {
+		t.Fatal("a partial structured patch credited the unread file as fully seen")
+	}
+	result := registry.RunWithOptions(context.Background(), "write_file", map[string]any{
+		"path": "f.txt", "content": "blind overwrite\n", "overwrite": true,
+	}, opts)
+	if result.Status != StatusError || !strings.Contains(result.Output, "has not been read exactly") {
+		t.Fatalf("blind overwrite after a partial patch was not refused: %#v", result)
+	}
+	if got, want := mustReadTestFile(t, path), "alpha\nupdated\ngamma\n"; got != want {
+		t.Fatalf("file = %q, want %q", got, want)
+	}
+}
+
+func TestStructuredPatchPreservesWholeFileObservation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(path, []byte("alpha\nbeta\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	registry := safetyRegistry(t, dir)
+	registry.Register(NewScopedApplyPatchTool(dir, nil))
+	tracker := NewFileTracker()
+	opts := grantedOpts(tracker)
+	if result := registry.RunWithOptions(context.Background(), "read_file", map[string]any{"path": "f.txt"}, opts); result.Status != StatusOK {
+		t.Fatalf("read_file failed: %s", result.Output)
+	}
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: f.txt",
+		"@@",
+		"-alpha",
+		"+updated",
+		"*** End Patch",
+		"",
+	}, "\n")
+	if result := registry.RunWithOptions(context.Background(), "apply_patch", map[string]any{"patch": patch}, opts); result.Status != StatusOK {
+		t.Fatalf("structured patch failed: %s", result.Output)
+	}
+	trackedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tracker.SeenWhole(trackedPath) {
+		t.Fatal("structured patch discarded an existing whole-file observation")
+	}
+	result := registry.RunWithOptions(context.Background(), "write_file", map[string]any{
+		"path": "f.txt", "content": "known overwrite\n", "overwrite": true,
+	}, opts)
+	if result.Status != StatusOK {
+		t.Fatalf("overwrite after a whole-file read was refused: %s", result.Output)
+	}
+}
+
+func TestStructuredPatchCreationCreditsSuppliedFile(t *testing.T) {
+	dir := t.TempDir()
+	registry := safetyRegistry(t, dir)
+	registry.Register(NewScopedApplyPatchTool(dir, nil))
+	tracker := NewFileTracker()
+	opts := grantedOpts(tracker)
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Add File: created.txt",
+		"+supplied",
+		"*** End Patch",
+		"",
+	}, "\n")
+	if result := registry.RunWithOptions(context.Background(), "apply_patch", map[string]any{"patch": patch}, opts); result.Status != StatusOK {
+		t.Fatalf("structured patch failed: %s", result.Output)
+	}
+	path, err := filepath.EvalSymlinks(filepath.Join(dir, "created.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tracker.SeenWhole(path) {
+		t.Fatal("a fully supplied structured add was not credited as fully seen")
+	}
+}
+
 func TestWriteFileOverwriteRefusedWhenChangedOnDisk(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.txt")

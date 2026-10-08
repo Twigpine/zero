@@ -1,6 +1,7 @@
 package background
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -188,6 +189,88 @@ func TestManagerSkipsInvalidPersistedMetadata(t *testing.T) {
 	warnings := strings.Join(manager.LoadWarnings(), "\n")
 	if !strings.Contains(warnings, "does not match file id") {
 		t.Fatalf("load warnings = %q, want id mismatch warning", warnings)
+	}
+}
+
+func TestManagerMigratesLegacyOutputPathWhenCanonicalOutputExists(t *testing.T) {
+	root := t.TempDir()
+	const taskID = "legacy_task"
+	canonicalOutput := filepath.Join(root, taskID+".ndjson")
+	if err := os.WriteFile(canonicalOutput, []byte("legacy output\n"), 0o600); err != nil {
+		t.Fatalf("write canonical output: %v", err)
+	}
+	legacyOutput := filepath.Join(t.TempDir(), "zero", "background", taskID+".ndjson")
+	metadata, err := json.Marshal(Task{
+		ID:         taskID,
+		Type:       "specialist",
+		Status:     StatusCompleted,
+		OutputFile: legacyOutput,
+		StartedAt:  time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("marshal legacy metadata: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, taskID+".json"), append(metadata, '\n'), 0o600); err != nil {
+		t.Fatalf("write legacy metadata: %v", err)
+	}
+
+	manager, err := NewManager(root)
+	if err != nil {
+		t.Fatalf("NewManager returned error: %v", err)
+	}
+	task, ok := manager.Get(taskID)
+	if !ok {
+		t.Fatal("manager did not load migrated task")
+	}
+	if task.OutputFile != canonicalOutput {
+		t.Fatalf("migrated output file = %q, want %q", task.OutputFile, canonicalOutput)
+	}
+	if warnings := manager.LoadWarnings(); len(warnings) != 0 {
+		t.Fatalf("migration produced load warnings: %#v", warnings)
+	}
+
+	persisted, err := os.ReadFile(filepath.Join(root, taskID+".json"))
+	if err != nil {
+		t.Fatalf("read migrated metadata: %v", err)
+	}
+	var saved Task
+	if err := json.Unmarshal(persisted, &saved); err != nil {
+		t.Fatalf("decode migrated metadata: %v", err)
+	}
+	if saved.OutputFile != canonicalOutput {
+		t.Fatalf("persisted output file = %q, want %q", saved.OutputFile, canonicalOutput)
+	}
+}
+
+func TestManagerRejectsUnrelatedAbsoluteOutputPathDuringMigration(t *testing.T) {
+	root := t.TempDir()
+	const taskID = "legacy_task"
+	if err := os.WriteFile(filepath.Join(root, taskID+".ndjson"), []byte("output\n"), 0o600); err != nil {
+		t.Fatalf("write canonical output: %v", err)
+	}
+	metadata, err := json.Marshal(Task{
+		ID:         taskID,
+		Type:       "specialist",
+		Status:     StatusCompleted,
+		OutputFile: filepath.Join(t.TempDir(), taskID+".ndjson"),
+		StartedAt:  time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("marshal metadata: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, taskID+".json"), append(metadata, '\n'), 0o600); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	manager, err := NewManager(root)
+	if err != nil {
+		t.Fatalf("NewManager returned error: %v", err)
+	}
+	if _, ok := manager.Get(taskID); ok {
+		t.Fatal("manager loaded task with an unrelated absolute output path")
+	}
+	if warnings := strings.Join(manager.LoadWarnings(), "\n"); !strings.Contains(warnings, "output file must be inside") {
+		t.Fatalf("load warnings = %q, want containment rejection", warnings)
 	}
 }
 

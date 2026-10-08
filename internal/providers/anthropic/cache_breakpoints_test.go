@@ -16,6 +16,7 @@ import (
 // unmarked (Anthropic caps breakpoints at 4 per request: system, tools, and
 // these two).
 func TestAnthropicRequestMarksLastTwoMessagesForCaching(t *testing.T) {
+	t.Parallel()
 	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
@@ -73,6 +74,7 @@ func TestAnthropicRequestMarksLastTwoMessagesForCaching(t *testing.T) {
 // the breakpoint, and thinking blocks must never carry cache_control (the API
 // rejects them) — the marker goes on the last cacheable block instead.
 func TestApplyMessageCacheBreakpointsSkipsThinkingBlocks(t *testing.T) {
+	t.Parallel()
 	messages := []anthropicMessage{
 		{Role: "user", Content: "plain string"},
 		{Role: "assistant", Content: []map[string]any{

@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,11 +12,28 @@ import (
 	"github.com/Gitlawb/zero/internal/providercatalog"
 )
 
-func UpsertProvider(path string, profile ProviderProfile, setActive bool) (FileConfig, error) {
+func UpsertProvider(path string, profile ProviderProfile, setActive bool) (result FileConfig, err error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFileFn(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	// Joined, not chosen between: a release failure annotates the result
+	// instead of masking the mutation error that actually explains what went
+	// wrong. Reporting success after a failed unlock would claim a state the
+	// next mutation cannot reproduce.
+	defer func() { err = errors.Join(err, unlock()) }()
+	return upsertProviderLocked(path, profile, setActive)
+}
+
+// upsertProviderLocked is UpsertProvider's body for a caller that already holds
+// the config lock. EnsureCatalogProvider reads the document and then upserts
+// into it, and the lock is not reentrant, so it must reach the work this way
+// rather than through the exported function.
+func upsertProviderLocked(path string, profile ProviderProfile, setActive bool) (FileConfig, error) {
 	profile.Name = strings.TrimSpace(profile.Name)
 	if profile.Name == "" {
 		return FileConfig{}, fmt.Errorf("provider name is required")
@@ -72,7 +90,7 @@ type EnsuredProvider struct {
 // Name or CatalogID already matches is left completely untouched (its name,
 // credentials, and model are the user's), and a created profile is NOT marked
 // active unless no provider was active at all.
-func EnsureCatalogProvider(path string, catalogID string) (EnsuredProvider, error) {
+func EnsureCatalogProvider(path string, catalogID string) (result EnsuredProvider, err error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return EnsuredProvider{}, fmt.Errorf("config path is required")
@@ -81,6 +99,18 @@ func EnsureCatalogProvider(path string, catalogID string) (EnsuredProvider, erro
 	if err != nil {
 		return EnsuredProvider{}, err
 	}
+	// One lock spans the existence scan AND the upsert: releasing between them
+	// would let another process create the same catalog profile in the window,
+	// and the second writer would clobber the first.
+	unlock, err := lockConfigFileFn(path)
+	if err != nil {
+		return EnsuredProvider{}, err
+	}
+	// Joined, not chosen between: a release failure annotates the result
+	// instead of masking the mutation error that actually explains what went
+	// wrong. Reporting success after a failed unlock would claim a state the
+	// next mutation cannot reproduce.
+	defer func() { err = errors.Join(err, unlock()) }()
 
 	cfg := FileConfig{}
 	if data, err := os.ReadFile(path); err == nil {
@@ -104,7 +134,7 @@ func EnsureCatalogProvider(path string, catalogID string) (EnsuredProvider, erro
 		BaseURL:      descriptor.DefaultBaseURL,
 		Model:        descriptor.DefaultModel,
 	}
-	written, err := UpsertProvider(path, profile, false)
+	written, err := upsertProviderLocked(path, profile, false)
 	if err != nil {
 		return EnsuredProvider{}, err
 	}
@@ -115,11 +145,20 @@ func EnsureCatalogProvider(path string, catalogID string) (EnsuredProvider, erro
 // credential store. It also clears inline/env key fields so the stored key is the
 // runtime credential; an old apiKeyEnv value must not keep overriding a freshly
 // captured key from `zero auth openrouter` or provider setup.
-func MarkProviderAPIKeyStored(path string, provider string) error {
+func MarkProviderAPIKeyStored(path string, provider string) (err error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFileFn(path)
+	if err != nil {
+		return err
+	}
+	// Joined, not chosen between: a release failure annotates the result
+	// instead of masking the mutation error that actually explains what went
+	// wrong. Reporting success after a failed unlock would claim a state the
+	// next mutation cannot reproduce.
+	defer func() { err = errors.Join(err, unlock()) }()
 	provider = strings.TrimSpace(provider)
 	if provider == "" {
 		return fmt.Errorf("provider name is required")
@@ -144,11 +183,20 @@ func MarkProviderAPIKeyStored(path string, provider string) error {
 	return fmt.Errorf("provider %q not found", provider)
 }
 
-func SetActiveProvider(path string, name string) (FileConfig, error) {
+func SetActiveProvider(path string, name string) (result FileConfig, err error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFileFn(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	// Joined, not chosen between: a release failure annotates the result
+	// instead of masking the mutation error that actually explains what went
+	// wrong. Reporting success after a failed unlock would claim a state the
+	// next mutation cannot reproduce.
+	defer func() { err = errors.Join(err, unlock()) }()
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return FileConfig{}, fmt.Errorf("provider name is required")
@@ -174,6 +222,51 @@ func SetActiveProvider(path string, name string) (FileConfig, error) {
 		}
 	}
 
+	return FileConfig{}, fmt.Errorf("provider %q not found", name)
+}
+
+// SetActiveProviderModel persists a provider selection as one lock-held
+// read-modify-write. The active provider and that provider's model are one UI
+// choice; publishing them separately can leave a partially applied selection
+// if another writer wins the lock between calls.
+func SetActiveProviderModel(path string, name string, model string) (result FileConfig, err error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return FileConfig{}, fmt.Errorf("config path is required")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return FileConfig{}, fmt.Errorf("provider name is required")
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return FileConfig{}, fmt.Errorf("model is required")
+	}
+
+	unlock, err := lockConfigFileFn(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	defer func() { err = errors.Join(err, unlock()) }()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+	cfg := FileConfig{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+	}
+	for index := range cfg.Providers {
+		if strings.EqualFold(strings.TrimSpace(cfg.Providers[index].Name), name) {
+			cfg.ActiveProvider = cfg.Providers[index].Name
+			cfg.Providers[index].Model = model
+			if err := writeConfigFile(path, cfg); err != nil {
+				return FileConfig{}, err
+			}
+			return cfg, nil
+		}
+	}
 	return FileConfig{}, fmt.Errorf("provider %q not found", name)
 }
 
@@ -210,11 +303,20 @@ func ProviderPersisted(path string, name string) (bool, error) {
 // a profile that no longer exists. The caller owns cleaning up the credential
 // store entry — config stays pure of secret I/O on the read path, and remove
 // keeps that symmetry by only touching config.json.
-func RemoveProvider(path string, name string) (FileConfig, error) {
+func RemoveProvider(path string, name string) (result FileConfig, err error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFileFn(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	// Joined, not chosen between: a release failure annotates the result
+	// instead of masking the mutation error that actually explains what went
+	// wrong. Reporting success after a failed unlock would claim a state the
+	// next mutation cannot reproduce.
+	defer func() { err = errors.Join(err, unlock()) }()
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return FileConfig{}, fmt.Errorf("provider name is required")
@@ -261,11 +363,20 @@ func RemoveProvider(path string, name string) (FileConfig, error) {
 // resolves. OAuth tokens are deliberately not migrated: the runtime's login
 // candidates fall back to the profile's CatalogID, which every OAuth-capable
 // catalog profile carries, so a rename keeps the login reachable.
-func RenameProvider(path string, oldName string, newName string) (FileConfig, error) {
+func RenameProvider(path string, oldName string, newName string) (result FileConfig, err error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFileFn(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	// Joined, not chosen between: a release failure annotates the result
+	// instead of masking the mutation error that actually explains what went
+	// wrong. Reporting success after a failed unlock would claim a state the
+	// next mutation cannot reproduce.
+	defer func() { err = errors.Join(err, unlock()) }()
 	oldName = strings.TrimSpace(oldName)
 	newName = strings.TrimSpace(newName)
 	if oldName == "" || newName == "" {
@@ -347,11 +458,20 @@ type ProviderEdit struct {
 // and, unlike UpsertProvider's exact-name merge, the case-insensitive match
 // here makes a case-only rename (groq -> Groq) an in-place update instead of
 // an appended duplicate profile.
-func EditProvider(path string, edit ProviderEdit) (FileConfig, error) {
+func EditProvider(path string, edit ProviderEdit) (result FileConfig, err error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFileFn(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	// Joined, not chosen between: a release failure annotates the result
+	// instead of masking the mutation error that actually explains what went
+	// wrong. Reporting success after a failed unlock would claim a state the
+	// next mutation cannot reproduce.
+	defer func() { err = errors.Join(err, unlock()) }()
 	oldName := strings.TrimSpace(edit.Name)
 	if oldName == "" {
 		return FileConfig{}, fmt.Errorf("provider name is required")
@@ -461,11 +581,20 @@ func migrateStoredProviderKey(configPath string, oldName string, newName string)
 	return nil
 }
 
-func SetProviderModel(path string, name string, model string) (FileConfig, error) {
+func SetProviderModel(path string, name string, model string) (result FileConfig, err error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFileFn(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	// Joined, not chosen between: a release failure annotates the result
+	// instead of masking the mutation error that actually explains what went
+	// wrong. Reporting success after a failed unlock would claim a state the
+	// next mutation cannot reproduce.
+	defer func() { err = errors.Join(err, unlock()) }()
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return FileConfig{}, fmt.Errorf("provider name is required")
@@ -498,11 +627,20 @@ func SetProviderModel(path string, name string, model string) (FileConfig, error
 	return FileConfig{}, fmt.Errorf("provider %q not found", name)
 }
 
-func SetFavoriteModels(path string, models []string) (FileConfig, error) {
+func SetFavoriteModels(path string, models []string) (result FileConfig, err error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFileFn(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	// Joined, not chosen between: a release failure annotates the result
+	// instead of masking the mutation error that actually explains what went
+	// wrong. Reporting success after a failed unlock would claim a state the
+	// next mutation cannot reproduce.
+	defer func() { err = errors.Join(err, unlock()) }()
 
 	cfg := FileConfig{}
 	if data, err := os.ReadFile(path); err == nil {
@@ -524,11 +662,20 @@ func SetFavoriteModels(path string, models []string) (FileConfig, error) {
 // mirroring SetFavoriteModels (read-modify-atomic-write). Unlike favorites,
 // order is preserved (newest first) rather than sorted, since it reflects
 // switch recency, not an alphabetical preference list.
-func SetRecentModels(path string, entries []RecentModelEntry) (FileConfig, error) {
+func SetRecentModels(path string, entries []RecentModelEntry) (result FileConfig, err error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFileFn(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	// Joined, not chosen between: a release failure annotates the result
+	// instead of masking the mutation error that actually explains what went
+	// wrong. Reporting success after a failed unlock would claim a state the
+	// next mutation cannot reproduce.
+	defer func() { err = errors.Join(err, unlock()) }()
 
 	cfg := FileConfig{}
 	if data, err := os.ReadFile(path); err == nil {
@@ -548,11 +695,20 @@ func SetRecentModels(path string, entries []RecentModelEntry) (FileConfig, error
 
 // SetRecapsEnabled persists the idle recap preference, mirroring
 // SetFavoriteModels (read-modify-atomic-write).
-func SetRecapsEnabled(path string, enabled bool) (FileConfig, error) {
+func SetRecapsEnabled(path string, enabled bool) (result FileConfig, err error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFileFn(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	// Joined, not chosen between: a release failure annotates the result
+	// instead of masking the mutation error that actually explains what went
+	// wrong. Reporting success after a failed unlock would claim a state the
+	// next mutation cannot reproduce.
+	defer func() { err = errors.Join(err, unlock()) }()
 	cfg := FileConfig{}
 	if data, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(data, &cfg); err != nil {
@@ -571,11 +727,20 @@ func SetRecapsEnabled(path string, enabled bool) (FileConfig, error) {
 
 // SetTheme persists the TUI theme preference, mirroring SetFavoriteModels
 // (read-modify-atomic-write). A blank theme clears the stored preference.
-func SetTheme(path string, theme string) (FileConfig, error) {
+func SetTheme(path string, theme string) (result FileConfig, err error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFileFn(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	// Joined, not chosen between: a release failure annotates the result
+	// instead of masking the mutation error that actually explains what went
+	// wrong. Reporting success after a failed unlock would claim a state the
+	// next mutation cannot reproduce.
+	defer func() { err = errors.Join(err, unlock()) }()
 	cfg := FileConfig{}
 	if data, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(data, &cfg); err != nil {
@@ -591,15 +756,62 @@ func SetTheme(path string, theme string) (FileConfig, error) {
 	return cfg, nil
 }
 
-// SetSTTModel persists the dictation model and its provider, mirroring
-// SetTheme (read-modify-atomic-write). provider must be one of the known STT
-// provider kinds; a local provider stores the model as stt.localModelPath,
-// otherwise as stt.model. A blank model clears the stored value for that slot.
-func SetSTTModel(path string, provider STTProviderKind, model string) (FileConfig, error) {
+// SetPet persists only the terminal-pet preference while preserving every
+// unrelated user setting through the config writer's atomic replace path.
+func SetPet(path string, pet string) (result FileConfig, err error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFileFn(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	// Joined, not chosen between: a release failure annotates the result
+	// instead of masking the mutation error that actually explains what went
+	// wrong. Reporting success after a failed unlock would claim a state the
+	// next mutation cannot reproduce.
+	defer func() { err = errors.Join(err, unlock()) }()
+	cfg := FileConfig{}
+	data := []byte("{}")
+	if existing, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(existing, &cfg); err != nil {
+			return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+		}
+		data = existing
+	} else if !os.IsNotExist(err) {
+		return FileConfig{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+	pet = strings.TrimSpace(pet)
+	cfg.Preferences.Pet = pet
+	data, err = setPetPreferenceJSON(data, pet)
+	if err != nil {
+		return FileConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+	}
+	if err := writeConfigData(path, data); err != nil {
+		return FileConfig{}, err
+	}
+	return cfg, nil
+}
+
+// SetSTTModel persists the dictation model and its provider, mirroring
+// SetTheme (read-modify-atomic-write). provider must be one of the known STT
+// provider kinds; a local provider stores the model as stt.localModelPath,
+// otherwise as stt.model. A blank model clears the stored value for that slot.
+func SetSTTModel(path string, provider STTProviderKind, model string) (result FileConfig, err error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return FileConfig{}, fmt.Errorf("config path is required")
+	}
+	unlock, err := lockConfigFileFn(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	// Joined, not chosen between: a release failure annotates the result
+	// instead of masking the mutation error that actually explains what went
+	// wrong. Reporting success after a failed unlock would claim a state the
+	// next mutation cannot reproduce.
+	defer func() { err = errors.Join(err, unlock()) }()
 	cfg := FileConfig{}
 	if data, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(data, &cfg); err != nil {
@@ -631,11 +843,20 @@ func SetSTTModel(path string, provider STTProviderKind, model string) (FileConfi
 // (read-modify-atomic-write). streaming selects the pipeline matching the
 // downloaded model (a streaming transducer vs a batch model). Called after a
 // download completes.
-func SetSTTLocalEngine(path, binary, serverBinary, modelPath string, streaming bool) (FileConfig, error) {
+func SetSTTLocalEngine(path, binary, serverBinary, modelPath string, streaming bool) (result FileConfig, err error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFileFn(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	// Joined, not chosen between: a release failure annotates the result
+	// instead of masking the mutation error that actually explains what went
+	// wrong. Reporting success after a failed unlock would claim a state the
+	// next mutation cannot reproduce.
+	defer func() { err = errors.Join(err, unlock()) }()
 	cfg := FileConfig{}
 	if data, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(data, &cfg); err != nil {
@@ -668,11 +889,20 @@ func SetSTTLocalEngine(path, binary, serverBinary, modelPath string, streaming b
 }
 
 // SetSTTProvider persists just the dictation batch provider, mirroring SetTheme.
-func SetSTTProvider(path string, provider STTProviderKind) (FileConfig, error) {
+func SetSTTProvider(path string, provider STTProviderKind) (result FileConfig, err error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
 	}
+	unlock, err := lockConfigFileFn(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	// Joined, not chosen between: a release failure annotates the result
+	// instead of masking the mutation error that actually explains what went
+	// wrong. Reporting success after a failed unlock would claim a state the
+	// next mutation cannot reproduce.
+	defer func() { err = errors.Join(err, unlock()) }()
 	cfg := FileConfig{}
 	if data, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(data, &cfg); err != nil {
@@ -736,17 +966,23 @@ func NormalizeRecentModels(entries []RecentModelEntry) []RecentModelEntry {
 }
 
 func writeConfigFile(path string, cfg FileConfig) error {
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode config JSON: %w", err)
+	}
+	return writeConfigData(path, data)
+}
+
+func writeConfigData(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	if dir != "." && dir != "" {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("create config directory %s: %w", dir, err)
 		}
 	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode config JSON: %w", err)
+	if len(data) == 0 || data[len(data)-1] != '\n' {
+		data = append(data, '\n')
 	}
-	data = append(data, '\n')
 	// Write-to-temp + rename: an in-place write interrupted mid-way (crash,
 	// disk full) would leave the user's only config truncated or corrupt.
 	tmp, err := os.CreateTemp(dir, ".zero-config-*.tmp")

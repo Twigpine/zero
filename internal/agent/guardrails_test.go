@@ -257,19 +257,16 @@ func TestRunDoesNotCountDroppedToolCallTurnsAsEmpty(t *testing.T) {
 }
 
 func TestRunInjectsPlanNotCalledReminderForMultiStepTask(t *testing.T) {
+	const expectedThreshold = 7
+	if planReminderToolThreshold != expectedThreshold {
+		t.Fatalf("plan reminder tool threshold = %d, want %d", planReminderToolThreshold, expectedThreshold)
+	}
 	root := t.TempDir()
 	writeAgentTestFile(t, root+"/notes.txt", "alpha")
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewScopedReadFileTool(root, nil))
 
-	provider := &mockProvider{
-		turns: [][]zeroruntime.StreamEvent{
-			toolTurn("call-1", "read_file", `{"path":"notes.txt"}`), // turn 1: other tool call
-			toolTurn("call-2", "read_file", `{"path":"notes.txt"}`), // turn 2: still no update_plan
-			toolTurn("call-3", "read_file", `{"path":"notes.txt"}`), // turn 3: reminder fires here
-			textTurn("done"),
-		},
-	}
+	provider := &mockProvider{turns: append(repeatedReadTurns(expectedThreshold), textTurn("done"))}
 
 	result, err := Run(context.Background(), "go", provider, Options{
 		Registry: registry,
@@ -285,6 +282,44 @@ func TestRunInjectsPlanNotCalledReminderForMultiStepTask(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("expected exactly one not-called plan reminder, got %d", count)
 	}
+}
+
+func TestRunDoesNotInjectPlanReminderForBoundedToolSequence(t *testing.T) {
+	const expectedThreshold = 7
+	root := t.TempDir()
+	writeAgentTestFile(t, root+"/notes.txt", "alpha")
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewScopedReadFileTool(root, nil))
+
+	provider := &mockProvider{turns: append(repeatedReadTurns(expectedThreshold-1), textTurn("done"))}
+	result, err := Run(context.Background(), "go", provider, Options{Registry: registry, MaxTurns: 12})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FinalAnswer != "done" {
+		t.Fatalf("expected final answer, got %q", result.FinalAnswer)
+	}
+	if count := countUserMessagesContaining(result.Messages, planNotCalledReminderMarker); count != 0 {
+		t.Fatalf("bounded tool sequence must not draw a plan reminder, got %d", count)
+	}
+}
+
+func TestPlanReminderWaitsForTurnThresholdAfterEnoughToolCalls(t *testing.T) {
+	state := guardState{totalToolCalls: 7}
+	if got := state.planReminder(6); got != "" {
+		t.Fatalf("planReminder(6) = %q, want no reminder before turn threshold", got)
+	}
+	if state.notCalledReminderSent {
+		t.Fatal("early turn marked the not-called reminder as sent")
+	}
+}
+
+func repeatedReadTurns(count int) [][]zeroruntime.StreamEvent {
+	turns := make([][]zeroruntime.StreamEvent, 0, count)
+	for range count {
+		turns = append(turns, toolTurn("call", "read_file", `{"path":"notes.txt"}`))
+	}
+	return turns
 }
 
 func TestRunDoesNotInjectPlanReminderForTrivialTask(t *testing.T) {

@@ -91,32 +91,12 @@ func TestCtrlPNMovesPermissionOptions(t *testing.T) {
 	}
 }
 
-func TestCtrlPTogglesPlanWhenNoModal(t *testing.T) {
-	m := newModel(context.Background(), Options{ModelName: "gpt-4o"})
-	m.plan = planPanelState{
-		steps: []planStep{{content: "step one", status: "pending"}},
-	}
-	if m.plan.isEmpty() {
-		t.Fatal("setup: plan should be non-empty")
-	}
-	initial := m.plan.expanded
-	updated, _ := m.Update(testKeyCtrl('p'))
-	next := updated.(model)
-	if next.plan.expanded == initial {
-		t.Fatal("Ctrl+P with no modal should toggle plan.expanded")
-	}
-}
-
-func TestCtrlPDoesNotTogglePlanInPicker(t *testing.T) {
+func TestCtrlPMovesPickerSelection(t *testing.T) {
 	m := newModel(context.Background(), Options{
 		ModelName:    "gpt-4o",
 		ProviderName: "openai",
 		Provider:     &fakeProvider{},
 	})
-	m.plan = planPanelState{
-		steps:    []planStep{{content: "step one", status: "pending"}},
-		expanded: true,
-	}
 	m.input.SetValue("/model")
 	updated, _ := m.handleSubmit()
 	m = updated.(model)
@@ -125,9 +105,6 @@ func TestCtrlPDoesNotTogglePlanInPicker(t *testing.T) {
 	}
 	updated, _ = m.Update(testKeyCtrl('p'))
 	next := updated.(model)
-	if !next.plan.expanded {
-		t.Fatal("Ctrl+P in picker must not collapse the plan panel")
-	}
 	if next.picker == nil {
 		t.Fatal("picker should remain open")
 	}
@@ -135,18 +112,10 @@ func TestCtrlPDoesNotTogglePlanInPicker(t *testing.T) {
 
 func TestCtrlNNoOpWithoutModal(t *testing.T) {
 	m := newModel(context.Background(), Options{ModelName: "gpt-4o"})
-	m.plan = planPanelState{
-		steps:    []planStep{{content: "step one", status: "pending"}},
-		expanded: false,
-	}
-	before := m.plan.expanded
 	updated, _ := m.Update(testKeyCtrl('n'))
 	next := updated.(model)
 	if next.picker != nil || next.suggestionsActive() {
 		t.Fatal("Ctrl+N idle must not open a modal")
-	}
-	if next.plan.expanded != before {
-		t.Fatal("Ctrl+N idle must not toggle the plan panel")
 	}
 	if next.composerValue() != "" {
 		t.Fatalf("Ctrl+N idle must not type into composer, got %q", next.composerValue())

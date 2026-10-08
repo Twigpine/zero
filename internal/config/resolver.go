@@ -166,6 +166,7 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		Providers:           providers,
 		Provider:            active,
 		MaxTurns:            cfg.MaxTurns,
+		MaxTurnsSet:         cfg.maxTurnsSet,
 		MCP:                 cfg.MCP,
 		Sandbox:             cfg.Sandbox,
 		Notify:              cfg.Notify,
@@ -180,7 +181,7 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 }
 
 func ResolveMCP(options ResolveOptions) (MCPConfig, error) {
-	// Seed Zero's built-in default MCP servers (e.g. keyless Firecrawl for free,
+	// Seed Zero's built-in default MCP servers (e.g. keyless Exa for free,
 	// no-setup web search/scrape) BEFORE merging user/project config, so the user
 	// can override any field or disable a default by writing over it.
 	cfg := FileConfig{MCP: MCPConfig{Servers: DefaultMCPServers()}}
@@ -194,6 +195,10 @@ func ResolveMCP(options ResolveOptions) (MCPConfig, error) {
 		// server the user disabled (a user-level disable is sticky, but the user
 		// scope itself may lift it).
 		mergeMCPConfig(&cfg.MCP, fileConfig.MCP, true)
+		// Reconcile config written against a default Zero has since retired,
+		// here while the user layer is the only one merged — so a carried-over
+		// disable counts as a user-level decision the project layer cannot lift.
+		migrateRetiredDefaultMCPServers(&cfg.MCP)
 	}
 	// Drop the project layer when the workspace is untrusted, so a cloned repo's
 	// ./.zero/config.json cannot register (and spawn) MCP servers. Fail-closed:
@@ -230,6 +235,7 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	}
 	if src.MaxTurns > 0 {
 		dst.MaxTurns = src.MaxTurns
+		dst.maxTurnsSet = true
 	}
 	for _, provider := range src.Providers {
 		mergeProvider(dst, provider)
@@ -273,6 +279,9 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	if strings.TrimSpace(src.Preferences.Theme) != "" {
 		dst.Preferences.Theme = strings.TrimSpace(src.Preferences.Theme)
 	}
+	if strings.TrimSpace(src.Preferences.Pet) != "" {
+		dst.Preferences.Pet = strings.TrimSpace(src.Preferences.Pet)
+	}
 	mergeLocalControlConfig(&dst.LocalControl, src.LocalControl)
 	mergeKeyBindings(&dst.KeyBindings, src.KeyBindings)
 	mergeSTTConfig(&dst.STT, src.STT)
@@ -287,6 +296,7 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 	}
 	if src.MaxTurns > 0 {
 		dst.MaxTurns = src.MaxTurns
+		dst.maxTurnsSet = true
 	}
 	for _, provider := range src.Providers {
 		candidate := providerMergeCandidate(*dst, provider)
@@ -599,6 +609,7 @@ func applyEnv(cfg *FileConfig, env map[string]string) {
 				n = MaxTurnsCeiling
 			}
 			cfg.MaxTurns = n
+			cfg.maxTurnsSet = true
 		}
 	}
 
@@ -719,6 +730,7 @@ func applyOverrides(cfg *FileConfig, overrides Overrides) {
 	}
 	if overrides.MaxTurns > 0 {
 		cfg.MaxTurns = overrides.MaxTurns
+		cfg.maxTurnsSet = true
 	}
 	if overrides.Sandbox.Enabled != nil {
 		cfg.Sandbox.Enabled = overrides.Sandbox.Enabled

@@ -144,9 +144,10 @@ func TestRunSwitchesProviderOnEscalationRequest(t *testing.T) {
 	var switchedTo string
 	switchCount := 0
 	result, err := Run(context.Background(), "go", firstProvider, Options{
-		Registry: registry,
-		Model:    "claude-sonnet-4.5",
-		MaxTurns: 4,
+		Registry:    registry,
+		Model:       "claude-sonnet-4.5",
+		ServiceTier: "priority",
+		MaxTurns:    4,
 		ModelSwitcher: func(_ context.Context, modelID string) (Provider, error) {
 			switchCount++
 			switchedTo = modelID
@@ -167,8 +168,14 @@ func TestRunSwitchesProviderOnEscalationRequest(t *testing.T) {
 	if len(firstProvider.requests) != 1 {
 		t.Fatalf("expected first provider to handle exactly the escalation turn, got %d requests", len(firstProvider.requests))
 	}
+	if got := firstProvider.requests[0].ServiceTier; got != "priority" {
+		t.Fatalf("initial request service tier = %q, want priority", got)
+	}
 	if len(secondProvider.requests) != 1 {
 		t.Fatalf("expected second provider to handle the post-switch turn, got %d requests", len(secondProvider.requests))
+	}
+	if got := secondProvider.requests[0].ServiceTier; got != "" {
+		t.Fatalf("post-switch request retained service tier %q", got)
 	}
 	if result.FinalAnswer != "answered on the upgraded model" {
 		t.Fatalf("expected final answer from the swapped provider, got %q", result.FinalAnswer)
@@ -211,9 +218,10 @@ func TestRunEscalationSwitcherErrorIsNonFatal(t *testing.T) {
 	provider := &mockProvider{turns: escalateThenAnswerTurns("recovered")}
 
 	result, err := Run(context.Background(), "go", provider, Options{
-		Registry: registry,
-		Model:    "claude-sonnet-4.5",
-		MaxTurns: 4,
+		Registry:    registry,
+		Model:       "claude-sonnet-4.5",
+		ServiceTier: "priority",
+		MaxTurns:    4,
 		ModelSwitcher: func(_ context.Context, _ string) (Provider, error) {
 			return nil, errors.New("provider build blew up")
 		},
@@ -224,6 +232,9 @@ func TestRunEscalationSwitcherErrorIsNonFatal(t *testing.T) {
 	// The run continues on the same provider through the answer turn.
 	if len(provider.requests) != 2 {
 		t.Fatalf("expected the run to continue on the original provider, got %d requests", len(provider.requests))
+	}
+	if got := provider.requests[1].ServiceTier; got != "priority" {
+		t.Fatalf("failed-switch request service tier = %q, want priority", got)
 	}
 	if result.FinalAnswer != "recovered" {
 		t.Fatalf("expected final answer after non-fatal switch error, got %q", result.FinalAnswer)

@@ -17,6 +17,7 @@ func TestMutationTargets(t *testing.T) {
 		{"write_file", map[string]any{"path": "a/b.txt", "content": "x"}, []string{"a/b.txt"}},
 		{"edit_file", map[string]any{"path": "c.txt", "old_string": "x", "new_string": "y"}, []string{"c.txt"}},
 		{"apply_patch", map[string]any{"patch": "--- a/d.txt\n+++ b/d.txt\n@@ -1 +1 @@\n-x\n+y\n"}, []string{"d.txt"}},
+		{"apply_patch", map[string]any{"patch": "*** Begin Patch\n*** Add File: nested/new.txt\n+x\n*** Update File: old.txt\n*** Move to: moved.txt\n@@\n-old\n+new\n*** End Patch\n"}, []string{"nested/new.txt", "old.txt", "moved.txt"}},
 		{"bash", map[string]any{"command": "echo hi"}, nil},
 		{"read_file", map[string]any{"path": "e.txt"}, nil},
 		{"grep", map[string]any{"pattern": "x"}, nil},
@@ -62,6 +63,10 @@ func TestMutationTargetsRejectsEscapingPaths(t *testing.T) {
 	if got := MutationTargets(root, "apply_patch", map[string]any{"patch": escapePatch}); len(got) != 0 {
 		t.Errorf("expected no targets for escaping apply_patch, got %v", got)
 	}
+	structuredEscapePatch := "*** Begin Patch\n*** Add File: ../escape.txt\n+x\n*** End Patch\n"
+	if got := MutationTargets(root, "apply_patch", map[string]any{"patch": structuredEscapePatch}); len(got) != 0 {
+		t.Errorf("expected no targets for escaping structured apply_patch, got %v", got)
+	}
 }
 
 // Finding 3: with cwd != ".", apply_patch's MutationTargets must return
@@ -80,6 +85,12 @@ func TestMutationTargetsApplyPatchPrefixesCwd(t *testing.T) {
 	want := []string{"sub/dir/d.txt"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
+	}
+
+	structuredPatch := "*** Begin Patch\n*** Update File: d.txt\n@@\n-x\n+y\n*** End Patch\n"
+	got = MutationTargets(root, "apply_patch", map[string]any{"patch": structuredPatch, "cwd": "sub/dir"})
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("structured cwd: got %v, want %v", got, want)
 	}
 
 	// cwd "." (the default) must keep paths unprefixed.

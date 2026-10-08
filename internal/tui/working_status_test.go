@@ -5,68 +5,170 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/lipgloss/v2"
 	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/charmbracelet/colorprofile"
 )
 
-// TestWorkingPlanLine: the working indicator's second line carries the plan's
-// done/total and the in-progress step while a plan is active, and is empty when
-// there's no plan or the plan is complete.
-func TestWorkingPlanLine(t *testing.T) {
+// TestWorkingStatusDoesNotDuplicatePlan keeps the activity cue focused on the
+// current model/tool phase. Full plan state belongs to its transcript update.
+func TestWorkingStatusDoesNotDuplicatePlan(t *testing.T) {
 	m := model{now: time.Now}
-	if got := m.workingPlanLine(); got != "" {
-		t.Errorf("no plan: want empty, got %q", got)
-	}
-
-	m.plan.steps = []planStep{
-		{content: "Research the topic", status: "completed"},
-		{content: "Add product catalog", status: "in_progress"},
-		{content: "Write the docs", status: "pending"},
-	}
-	got := plainRender(t, m.workingPlanLine())
-	if !strings.Contains(got, "plan 1/3") {
-		t.Errorf("active plan line missing count: %q", got)
-	}
-	if !strings.Contains(got, "Add product catalog") {
-		t.Errorf("active plan line missing current step: %q", got)
-	}
-
-	for i := range m.plan.steps {
-		m.plan.steps[i].status = "completed"
-	}
-	if got := m.workingPlanLine(); got != "" {
-		t.Errorf("complete plan: want empty, got %q", got)
+	m.plan.steps = []planStep{{content: "Add product catalog", status: "in_progress"}}
+	got := plainRender(t, m.workingStatusLine())
+	if strings.Contains(got, "plan") || strings.Contains(got, "Add product catalog") {
+		t.Fatalf("working line duplicated plan state: %q", got)
 	}
 }
 
-// TestHiddenPlumbingToolsSkippedFromTranscript: the plumbing tools (update_plan,
-// tool_search) render nothing — their call AND result rows are dropped; real
-// work tools still render.
+func TestWorkingActivityNamesCurrentPhase(t *testing.T) {
+	tests := []struct {
+		name  string
+		model model
+		want  string
+	}{
+		{name: "default", want: "thinking"},
+		{name: "assistant text", model: model{streamingText: []byte("drafting")}, want: "writing"},
+		{name: "permission", model: model{pendingPermission: &pendingPermissionPrompt{}}, want: "waiting for approval"},
+		{name: "question", model: model{pendingAskUser: &pendingAskUserPrompt{}}, want: "waiting for your answer"},
+		{name: "streamed tool", model: model{streamCallName: "grep"}, want: "searching"},
+		{
+			name: "outstanding tool",
+			model: model{
+				pending:     true,
+				activeRunID: 7,
+				transcript:  []transcriptRow{{kind: rowToolCall, id: "call-1", runID: 7, tool: "read_file"}},
+			},
+			want: "reading",
+		},
+		{
+			name: "completed tool",
+			model: model{
+				pending:     true,
+				activeRunID: 7,
+				transcript: []transcriptRow{
+					{kind: rowToolCall, id: "call-1", runID: 7, tool: "read_file"},
+					{kind: rowToolResult, id: "call-1", runID: 7, tool: "read_file", status: tools.StatusOK},
+				},
+			},
+			want: "thinking",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.model.workingActivity(); got != test.want {
+				t.Fatalf("workingActivity() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestWorkingStatusAnimationAdvancesAcrossActiveRun(t *testing.T) {
+	previousProfile := lipgloss.Writer.Profile
+	lipgloss.Writer.Profile = colorprofile.TrueColor
+	t.Cleanup(func() { lipgloss.Writer.Profile = previousProfile })
+
+	m := newModel(t.Context(), Options{})
+	m.width = 100
+	m.pending = true
+	m.reducedMotion = false
+
+	m.spinnerPhase = 0
+	first := m.workingStatusLine()
+	m.spinnerPhase = 3
+	second := m.workingStatusLine()
+	if first == second {
+		t.Fatalf("working status animation did not advance across phases:\nfirst:  %q\nsecond: %q", first, second)
+	}
+	firstPlain, secondPlain := []rune(plainRender(t, first)), []rune(plainRender(t, second))
+	if len(firstPlain) < 3 || len(secondPlain) < 3 || string(firstPlain[2:]) != string(secondPlain[2:]) || !strings.Contains(string(firstPlain), "Working") {
+		t.Fatalf("status animation must preserve its text while the grid moves:\nfirst:  %q\nsecond: %q", string(firstPlain), string(secondPlain))
+	}
+	if got := plainRender(t, m.workingStatusIndicator()); len([]rune(got)) != 2 {
+		t.Fatalf("working status indicator = %q, want a compact two-cell 3x3 grid", got)
+	}
+	m.spinnerPhase = 0
+	firstLabel := m.workingStatusLabel()
+	m.spinnerPhase = 3
+	secondLabel := m.workingStatusLabel()
+	if firstLabel == secondLabel {
+		t.Fatalf("working label shimmer did not advance across phases:\nfirst:  %q\nsecond: %q", firstLabel, secondLabel)
+	}
+	if got := plainRender(t, firstLabel); got != "Working" {
+		t.Fatalf("working label shimmer changed its text: %q", got)
+	}
+
+	if got := workingDriveLevels(0)[3]; got != workingDriveBright {
+		t.Fatalf("chevron lead cell level = %v, want bright", got)
+	}
+	if got := workingDriveLevelAt(12, 4*workingDriveStep); got != workingDriveBright {
+		t.Fatalf("first Working letter level = %v, want bright after the grid", got)
+	}
+
+	m.reducedMotion = true
+	m.spinnerPhase = 0
+	first = m.workingStatusLine()
+	m.spinnerPhase = 2
+	second = m.workingStatusLine()
+	if first != second {
+		t.Fatalf("reduced-motion working status should stay stable:\nfirst:  %q\nsecond: %q", first, second)
+	}
+	if got := m.workingStatusIndicator(); got != "" {
+		t.Fatalf("reduced-motion status indicator = %q, want empty", got)
+	}
+	if got := plainRender(t, m.workingStatusLabel()); got != "Working" {
+		t.Fatalf("reduced-motion working label = %q, want Working", got)
+	}
+}
+
+func TestModelUsesSmoothActiveAnimationCadence(t *testing.T) {
+	m := newModel(t.Context(), Options{})
+	if got := m.spinner.Spinner.FPS; got != activeAnimationFrameInterval {
+		t.Fatalf("active spinner FPS = %v, want %v", got, activeAnimationFrameInterval)
+	}
+}
+
+// TestHiddenPlumbingToolsSkippedFromTranscript: tool-search and specialist
+// plumbing render nothing on success. update_plan hides only its call; the
+// completed result is the user-facing plan checklist in the transcript.
 func TestHiddenPlumbingToolsSkippedFromTranscript(t *testing.T) {
 	rows := []transcriptRow{
 		{kind: rowToolCall, tool: "update_plan", id: "c1", runID: 1},
 		{kind: rowToolResult, tool: "update_plan", id: "c1", runID: 1, text: "10 steps · 2 done"},
 		{kind: rowToolCall, tool: "tool_search", id: "c2", runID: 1},
 		{kind: rowToolResult, tool: "tool_search", id: "c2", runID: 1, text: "select:swarm_spawn,…"},
-		{kind: rowToolResult, tool: "bash", id: "c3", runID: 1, text: "ok"},
+		{kind: rowToolCall, tool: "TaskOutput", id: "c3", runID: 1},
+		{kind: rowToolResult, tool: "TaskOutput", id: "c3", runID: 1, text: "task result"},
+		{kind: rowToolResult, tool: "bash", id: "c4", runID: 1, text: "ok"},
 	}
 	rc := buildRowContext(rows)
-	for _, i := range []int{0, 1, 2, 3} {
+	for _, i := range []int{0, 2, 3, 4, 5} {
 		if !rc.skip(rows[i]) {
 			t.Errorf("plumbing row %d (%s/%v) should be skipped", i, rows[i].tool, rows[i].kind)
 		}
 	}
-	if rc.skip(rows[4]) {
+	if rc.skip(rows[1]) {
+		t.Error("completed update_plan result should render as a transcript checklist")
+	}
+	if rc.skip(rows[6]) {
 		t.Error("a normal tool result (bash) must not be skipped")
 	}
 
 	// A FAILED plumbing result must still render — its error has to surface.
-	failed := transcriptRow{kind: rowToolResult, tool: "update_plan", id: "c9", runID: 1, status: tools.StatusError, text: "tool result: update_plan error boom"}
-	if buildRowContext([]transcriptRow{failed}).skip(failed) {
-		t.Error("a failed plumbing result must NOT be skipped (the error must show)")
+	for _, failed := range []transcriptRow{
+		{kind: rowToolResult, tool: "update_plan", id: "c9", runID: 1, status: tools.StatusError, text: "tool result: update_plan error boom"},
+		{kind: rowToolResult, tool: "TaskOutput", id: "c10", runID: 1, status: tools.StatusError, text: "tool result: TaskOutput error boom"},
+	} {
+		if buildRowContext([]transcriptRow{failed}).skip(failed) {
+			t.Errorf("a failed plumbing result (%s) must NOT be skipped", failed.tool)
+		}
 	}
 
-	if !isHiddenPlumbingTool("update_plan") || !isHiddenPlumbingTool("tool_search") {
-		t.Error("update_plan and tool_search must be hidden plumbing")
+	if !isHiddenPlumbingTool("tool_search") || !isHiddenPlumbingTool("TaskOutput") {
+		t.Error("tool_search and TaskOutput must be hidden plumbing")
+	}
+	if isHiddenPlumbingTool("update_plan") {
+		t.Error("update_plan result must remain visible as its dedicated checklist")
 	}
 	if isHiddenPlumbingTool("write_file") || isHiddenPlumbingTool("web_search") {
 		t.Error("real work tools must NOT be hidden")
@@ -160,24 +262,20 @@ func TestQuietGenerationHintEscalatesPastHalfIdleTimeout(t *testing.T) {
 	}
 }
 
-// TestQuietHintHiddenWhenSidebarShowsIt: when the context sidebar is up (it
-// carries the "generating…" pulse in ACTIVITY), the working line must NOT also
-// show the hint — it appears in exactly one place.
-func TestQuietHintHiddenWhenSidebarShowsIt(t *testing.T) {
+// TestQuietHintShownWithRunDetails verifies a silent generation remains visible
+// in the working line, including while run details are available on demand.
+func TestQuietHintShownWithRunDetails(t *testing.T) {
 	base := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
 	m := sidebarTestModel() // alt-screen + a plan -> sidebar active
 	m.now = func() time.Time { return base.Add(30 * time.Second) }
 	m.activeRunID = 7
 	m.turnStartedAt = base
 	m.lastStreamActivity = base.Add(2 * time.Second) // 28s quiet
-	if !m.sidebarActive() {
-		t.Fatal("precondition: sidebar should be active for this model")
-	}
-	if line := plainRender(t, m.workingStatusLine()); strings.Contains(line, "still generating") {
-		t.Errorf("working line must NOT duplicate the hint when the sidebar shows it:\n%s", line)
+	if line := plainRender(t, m.workingStatusLine()); !strings.Contains(line, "still generating") {
+		t.Errorf("working line should carry the quiet hint:\n%s", line)
 	}
 	if act := plainRender(t, strings.Join(m.sidebarActivityLines(sidebarWidth(m.width), 10), "\n")); !strings.Contains(act, "generating") {
-		t.Errorf("the sidebar ACTIVITY should carry the generating pulse instead:\n%s", act)
+		t.Errorf("run details should retain the generating pulse:\n%s", act)
 	}
 }
 

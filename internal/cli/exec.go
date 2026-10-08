@@ -49,6 +49,14 @@ const (
 	exitInterrupted = 130
 )
 
+// defaultExecMaxTurns is the headless tool-turn budget when no source sets one.
+// An interactive run can be continued past the shared interactive default by the
+// user; an exec run has nobody to unstick it, so evals and automation would
+// truncate mid-task at 80 turns. The ceiling is the already-justified bound —
+// still finite against a genuinely runaway loop, which the loop's empty-turn
+// guard also cuts independently of this budget.
+const defaultExecMaxTurns = config.MaxTurnsCeiling
+
 type execOutputFormat string
 type execInputFormat string
 
@@ -320,6 +328,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		}
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", err.Error())
 	}
+	resolved.MaxTurns = execTurnBudget(resolved)
 	var displacedMaxTurns int
 	resolved.MaxTurns, displacedMaxTurns = applyProfileTurnBudget(execProfile, options.maxTurns, resolved.MaxTurns)
 	execScope, err := sandbox.NewScope(workspaceRoot, append(append([]string{}, resolved.Sandbox.AdditionalWriteRoots...), options.addDirs...))
@@ -442,57 +451,22 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// the resolved model and is reassigned by the model switcher on a mid-run
 	// escalation so post-switch turns are attributed to the escalated model.
 	currentModel := resolved.Provider.Model
-	var modelSwitcher func(context.Context, string) (agent.Provider, error)
-	if options.allowEscalation {
-		modelSwitcher = func(_ context.Context, modelID string) (agent.Provider, error) {
-			// deps.newProvider is wrapped (fillAppDeps) to apply the stored key, so
-			// the escalated provider is authenticated even though resolved.Provider
-			// is the pure profile — no per-site key handling here.
-			switchedProfile := resolved.Provider
-			switchedProfile.Model = modelID
-			switchedProvider, err := deps.newProvider(switchedProfile)
-			if err != nil {
-				return nil, err
-			}
-			// Mirror the agent loop's switch guard (it only reassigns the provider
-			// when newProvider != nil). Updating currentModel only on a non-nil
-			// provider keeps usage attribution consistent with whether the loop
-			// actually switched — a (nil, nil) return leaves both untouched.
-			if switchedProvider != nil {
-				currentModel = modelID
-			}
-			return switchedProvider, nil
-		}
-	}
-
-	// Optimized OpenAI turn sessions (ZERO_OPENAI_TURN_SESSION, default off).
-	// nil when gated off or the profile is ineligible: agent.Run then wraps the
-	// provider in its default adapter — the exact code path of today. The
-	// session switcher is installed only when the run START is optimized, so
-	// the legacy ModelSwitcher path above stays untouched otherwise.
+	// Optimized OpenAI turn sessions (ZERO_OPENAI_TURN_SESSION, default off). nil
+	// when gated off or the profile is ineligible: agent.Run then wraps the
+	// provider in its default adapter. This is the run's STARTING session provider
+	// and is used whether or not escalation is enabled.
 	turnSessions, _ := providers.OptimizedTurnSessions(resolved.Provider, provider, providers.Options{})
+	// Both switchers come from one shared builder so exec and the interactive TUI
+	// cannot drift on the nil contracts the agent loop depends on. The session
+	// switcher is nil unless this run STARTED optimized, which is what keeps a
+	// default-adapter run on the default adapter.
+	var modelSwitcher func(context.Context, string) (agent.Provider, error)
 	var modelSessionSwitcher func(context.Context, string) (zeroruntime.TurnSessionProvider, error)
-	if options.allowEscalation && turnSessions != nil {
-		modelSessionSwitcher = func(_ context.Context, modelID string) (zeroruntime.TurnSessionProvider, error) {
-			switchedProfile := resolved.Provider
-			switchedProfile.Model = modelID
-			switchedProvider, err := deps.newProvider(switchedProfile)
-			if err != nil {
-				return nil, err
-			}
-			if switchedProvider == nil {
-				// The loop treats a nil session source as "no swap" — mirror the
-				// legacy closure's (nil, nil) contract.
-				return nil, nil
-			}
-			currentModel = modelID
-			if optimized, ok := providers.OptimizedTurnSessions(switchedProfile, switchedProvider, providers.Options{}); ok {
-				return optimized, nil
-			}
-			// Ineligible switch target: default adapter, but with the switched
-			// model's resolved capability projection preserved.
-			return providers.DefaultTurnSessions(switchedProfile, switchedProvider, providers.Options{}), nil
-		}
+	if options.allowEscalation {
+		modelSwitcher, modelSessionSwitcher = providers.EscalationSwitchers(
+			resolved.Provider, provider, deps.newProvider,
+			func(modelID string) { currentModel = modelID },
+		)
 	}
 
 	runMetadata, err := resolveExecRunMetadata(resolved.Provider)
@@ -682,16 +656,20 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		ModelSwitcher:        modelSwitcher,
 		TurnSessionProvider:  turnSessions,
 		ModelSessionSwitcher: modelSessionSwitcher,
-		ReasoningEffort:      forwardEffort,
-		Trace:                traceRecorder,
-		Cwd:                  workspaceRoot,
-		Images:               images,
-		Registry:             registry,
-		PermissionMode:       permissionMode,
-		Autonomy:             options.autonomy,
-		SelfCorrect:          selfCorrector,
-		FileDiagnostics:      fileDiagnostics,
-		Profile:              execProfile.Policy(displacedMaxTurns, execProfileFilledEffort),
+		Summarizer:           summarizerFactory(resolved, deps.newProvider),
+		ContextWindowFor: func(modelID string) int {
+			return modelregistry.AgentContextWindow(modelContextWindow(modelRegistry, modelID))
+		},
+		ReasoningEffort: forwardEffort,
+		Trace:           traceRecorder,
+		Cwd:             workspaceRoot,
+		Images:          images,
+		Registry:        registry,
+		PermissionMode:  permissionMode,
+		Autonomy:        options.autonomy,
+		SelfCorrect:     selfCorrector,
+		FileDiagnostics: fileDiagnostics,
+		Profile:         execProfile.Policy(displacedMaxTurns, execProfileFilledEffort),
 		// Headless exec: don't accept a no-tool-call turn as "done" while work
 		// clearly remains (pending plan items / a mid-step continuation cue) —
 		// nudge to continue, and finalize as INCOMPLETE rather than false success
@@ -937,6 +915,9 @@ func deferredEligibleCount(registry *tools.Registry, permissionMode agent.Permis
 // the same tools.
 func registerToolSearchIfEligible(registry *tools.Registry, deferThreshold int, permissionMode agent.PermissionMode, enabledTools []string, disabledTools []string) {
 	if deferThreshold <= 0 {
+		return
+	}
+	if _, registered := registry.Get(tools.ToolSearchToolName); registered {
 		return
 	}
 	if deferredEligibleCount(registry, permissionMode, enabledTools, disabledTools) < deferThreshold {
@@ -1248,6 +1229,20 @@ func applyExecProfile(options *execOptions) (execprofile.Profile, bool, error) {
 // there: escalation must never clear an effort the user pinned by hand.
 func specProfileEffortFilled(effortFilled bool, specReasoningEffort string) bool {
 	return effortFilled && strings.TrimSpace(specReasoningEffort) == ""
+}
+
+// execTurnBudget applies the headless default to the resolved turn budget: an
+// interactive run can be continued past the shared default by the user, but an
+// exec run has nobody to unstick it, so an unconfigured budget starts at the
+// documented ceiling instead of truncating mid-task. Explicit sources
+// (--max-turns, mode presets, ZERO_MAX_TURNS, config files) resolve as
+// MaxTurnsSet and pass through; an exec-profile budget still wins via
+// applyProfileTurnBudget afterward.
+func execTurnBudget(resolved config.ResolvedConfig) int {
+	if resolved.MaxTurnsSet {
+		return resolved.MaxTurns
+	}
+	return defaultExecMaxTurns
 }
 
 // applyProfileTurnBudget decides the run's turn budget once config is resolved.

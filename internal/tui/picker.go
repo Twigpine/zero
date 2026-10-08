@@ -14,6 +14,7 @@ import (
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/providermodelcatalog"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
+	"github.com/Gitlawb/zero/internal/providers"
 )
 
 // pickerKind identifies which command a picker selection feeds back into.
@@ -27,17 +28,21 @@ const (
 	pickerSkill
 	pickerSTTModel
 	pickerSTTDownload
+	pickerPet
 )
 
 // pickerItem is one selectable row: Label is shown, Value is passed to the
 // underlying command handler when chosen. Meta is the optional right-aligned
 // readout (ctx window · capabilities); the dot flags mark provider locality
-// for model rows (accent = remote, blue = local).
+// for model rows (accent = remote, blue = local). Detail is an optional faint
+// second line under the row (project · model · size for sessions), rendered
+// only on medium-and-wider tiers where the extra line reads cleanly.
 type pickerItem struct {
 	Group    string
 	Label    string
 	Value    string
 	Meta     string
+	Detail   string
 	Provider string // display tag (catalog id / locality)
 	// OwnerProvider is the saved provider profile name a model belongs to, so the
 	// /model picker can switch providers when a model from a non-active provider is
@@ -165,7 +170,7 @@ func (p *commandPicker) applyQuery() {
 // the joined haystack, and a fuzzy subsequence is the last-resort match.
 func scorePickerItem(item pickerItem, query string) (int, bool) {
 	label := strings.ToLower(item.Label)
-	hay := strings.ToLower(strings.Join([]string{item.Group, item.Label, item.Value, item.Meta}, " "))
+	hay := strings.ToLower(strings.Join([]string{item.Group, item.Label, item.Value, item.Meta, item.Detail}, " "))
 	switch {
 	case label == query:
 		return 0, true
@@ -406,8 +411,9 @@ func (m model) modelPickerProviderDiscoveryCmd(descriptor providercatalog.Descri
 	needOAuth := key == "" && descriptor.OAuth && !descriptor.OAuthMintsKey
 	discover := m.discoverProviderModels
 	if discover == nil {
+		discoveryOptions := m.modelPickerDiscoveryOptions(authed)
 		discover = func(ctx context.Context, p config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
-			return providermodeldiscovery.DiscoverCatalog(ctx, descriptor, p, providermodeldiscovery.Options{})
+			return providermodeldiscovery.DiscoverCatalog(ctx, descriptor, p, discoveryOptions)
 		}
 	}
 	providerID := descriptor.ID
@@ -422,6 +428,15 @@ func (m model) modelPickerProviderDiscoveryCmd(descriptor providercatalog.Descri
 		}
 		models, err := discover(ctx, providerWizardDiscoveryProfile(descriptor, k, authed.BaseURL))
 		return modelPickerModelsDiscoveredMsg{providerID: providerID, models: models, err: err}
+	}
+}
+
+func (m model) modelPickerDiscoveryOptions(profile config.ProviderProfile) providermodeldiscovery.Options {
+	oauthResolver, loginKey := providers.OAuthLoginForProfile(profile)
+	return providermodeldiscovery.Options{
+		OAuthResolver:        oauthResolver,
+		CodexAccountResolver: providers.CodexAccountResolverForLogin(loginKey),
+		UserAgent:            m.userAgent,
 	}
 }
 
@@ -510,7 +525,41 @@ func (m model) recentModelPairsForPicker() []config.RecentModelEntry {
 	pairs := make([]config.RecentModelEntry, 0, len(m.recentModels)+1)
 	pairs = append(pairs, config.RecentModelEntry{Provider: m.providerName, Model: m.modelName})
 	pairs = append(pairs, m.recentModels...)
+	for index := range pairs {
+		pairs[index] = m.canonicalRecentModelPair(pairs[index])
+	}
 	return config.NormalizeRecentModels(pairs)
+}
+
+// canonicalRecentModelPair collapses legacy OpenAI-prefixed model IDs for a
+// ChatGPT profile. ChatGPT's Codex endpoint uses bare model IDs, while older
+// hand-entered configuration could retain the equivalent openai/<id> spelling.
+// Keep this picker-only so OpenAI-compatible gateway IDs remain untouched.
+func (m model) canonicalRecentModelPair(pair config.RecentModelEntry) config.RecentModelEntry {
+	pair.Provider = strings.TrimSpace(pair.Provider)
+	pair.Model = strings.TrimSpace(pair.Model)
+	if !m.recentPairUsesChatGPT(pair.Provider) {
+		return pair
+	}
+	if len(pair.Model) >= len("openai/") && strings.EqualFold(pair.Model[:len("openai/")], "openai/") {
+		pair.Model = strings.TrimSpace(pair.Model[len("openai/"):])
+	}
+	return pair
+}
+
+func (m model) recentPairUsesChatGPT(providerName string) bool {
+	if profile, ok := m.savedProviderByName(providerName); ok {
+		if descriptor, hasDescriptor := m.descriptorForProfile(profile); hasDescriptor {
+			return providercatalog.NormalizeID(descriptor.ID) == "chatgpt"
+		}
+	}
+	if !strings.EqualFold(strings.TrimSpace(providerName), strings.TrimSpace(m.providerName)) {
+		return false
+	}
+	if descriptor, ok := m.activeProviderDescriptor(); ok {
+		return providercatalog.NormalizeID(descriptor.ID) == "chatgpt"
+	}
+	return providercatalog.NormalizeID(m.providerProfile.CatalogID) == "chatgpt"
 }
 
 // modelPickerRecentItem resolves one "Recent" row for a provider+model pair,
@@ -899,6 +948,23 @@ func (m model) persistFavoriteModels() error {
 // of the session. Returns the receiver unchanged (no re-normalization, no
 // write) when every pair has a blank model id.
 func (m model) recordRecentModels(pairs ...config.RecentModelEntry) model {
+	m, changed := m.updateRecentModels(pairs...)
+	if !changed {
+		return m
+	}
+	if path := strings.TrimSpace(m.userConfigPath); path != "" {
+		if _, err := config.SetRecentModels(path, m.recentModels); err != nil {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "recent model save error: " + err.Error()})
+		}
+	}
+	return m
+}
+
+// updateRecentModels performs recordRecentModels' in-memory half. A model
+// switch whose selection transaction failed still belongs in this session's
+// picker history, but must not make another blocking persistence attempt while
+// the same config lock is unavailable.
+func (m model) updateRecentModels(pairs ...config.RecentModelEntry) (model, bool) {
 	entries := append([]config.RecentModelEntry{}, m.recentModels...)
 	changed := false
 	for _, pair := range pairs {
@@ -910,15 +976,10 @@ func (m model) recordRecentModels(pairs ...config.RecentModelEntry) model {
 		entries = append([]config.RecentModelEntry{{Provider: strings.TrimSpace(pair.Provider), Model: modelID}}, entries...)
 	}
 	if !changed {
-		return m
+		return m, false
 	}
 	m.recentModels = normalizeRecentModelEntries(entries)
-	if path := strings.TrimSpace(m.userConfigPath); path != "" {
-		if _, err := config.SetRecentModels(path, m.recentModels); err != nil {
-			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "recent model save error: " + err.Error()})
-		}
-	}
-	return m
+	return m, true
 }
 
 // normalizeRecentModelEntries trims, drops entries with no model id,
@@ -996,43 +1057,41 @@ func (m model) newEffortPicker() *commandPicker {
 	return &commandPicker{kind: pickerEffort, title: "select reasoning effort", items: items, selected: selected}
 }
 
-// newThemePicker lists `auto` plus every registered theme as a popup, grouped into
-// Dark/Light sections (the registry is ordered dark-then-light so the group header
-// changes exactly once), preselecting the active preference. Bare `/theme` opens the
-// same overlay /model and /effort use. Moving the cursor live-previews each palette
-// (previewSelectedTheme); Enter commits the highlighted theme (choosePicker) and Esc
-// restores the previous one (Update's picker-cancel path). Items stay 1:1 with
-// themeModes and in the same order, so the popup and /theme state list agree.
+// newThemePicker lists the terminal-native system theme followed by named palettes
+// in one flat list. Old dark/light preferences migrate to System rather than
+// appearing as choices: they would imply a terminal-canvas change that Zero
+// deliberately does not make.
 func (m model) newThemePicker() *commandPicker {
 	items := make([]pickerItem, 0, len(themeModes))
 	selected := 0
-	// `auto` sits at the top with an empty Group, so it renders header-less above
-	// the Dark/Light sections.
-	items = append(items, pickerItem{Label: string(themeAuto), Value: string(themeAuto), Meta: "match terminal"})
-	for _, entry := range themeRegistry {
-		group := "Light"
-		if entry.IsDark {
-			group = "Dark"
+	for _, name := range themeModes {
+		item := pickerItem{Label: name, Value: name}
+		if name == string(themeSystem) {
+			item.Label = "System"
+		} else if entry, ok := lookupTheme(name); ok {
+			item.Label = entry.Label
 		}
-		items = append(items, pickerItem{Group: group, Label: entry.Label, Value: entry.Name})
-		if entry.Name == string(m.themeMode) {
+		items = append(items, item)
+		if name == string(m.themeMode) {
 			selected = len(items) - 1
 		}
 	}
 	// allItems lets the query filter restore rows on Backspace (one-way narrowing
 	// otherwise, since applyQuery falls back to the current items without it).
-	return &commandPicker{kind: pickerTheme, title: "select theme", items: items, allItems: append([]pickerItem{}, items...), selected: selected}
+	return &commandPicker{kind: pickerTheme, title: "Choose a theme", items: items, allItems: append([]pickerItem{}, items...), selected: selected}
 }
 
-// pickerMoved advances the open picker's cursor by delta and live-previews the new
-// selection where the picker supports it — stepping through the /theme popup
-// repaints the UI in the hovered palette. Safe to call with no picker open. Callers
-// mutate through m.picker (a pointer) and the global theme, so the value receiver
-// is fine.
-func (m model) pickerMoved(delta int) {
+// pickerMoved advances the open picker's cursor by delta. Theme candidates render
+// only in the picker preview; their active palette is applied only after Enter.
+// Safe to call with no picker open. Callers mutate through m.picker (a pointer),
+// so the value receiver is fine.
+func (m model) pickerMoved(delta int) (model, tea.Cmd) {
 	if m.picker == nil {
-		return
+		return m, nil
 	}
 	m.picker.move(delta)
-	m.previewSelectedTheme()
+	if m.picker.kind == pickerPet {
+		return m.schedulePetPreview()
+	}
+	return m, nil
 }

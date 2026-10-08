@@ -1,5 +1,7 @@
 package tools
 
+import "path/filepath"
+
 // MutationTargets returns the workspace-relative paths a tool call will write to,
 // so the session layer can snapshot their before-state for safe rewind. It is a
 // pure helper (no I/O beyond path resolution) and returns nil for read-only tools
@@ -36,6 +38,19 @@ func MutationTargets(workspaceRoot string, name string, args map[string]any) []s
 		if err != nil {
 			return nil
 		}
+		if isStructuredPatch(patch) {
+			operations, err := parseStructuredPatch(patch)
+			if err != nil {
+				return nil
+			}
+			paths := structuredPatchOperationPaths(operations)
+			for _, path := range paths {
+				if _, _, err := resolveWorkspaceTargetPath(applyRoot, path); err != nil {
+					return nil
+				}
+			}
+			return prefixPatchPaths(relativeRoot, paths)
+		}
 		// Enforce the same workspace confinement apply_patch applies (against the
 		// resolved apply dir), so a patch with a traversal path (../x) never yields
 		// an out-of-workspace target.
@@ -50,4 +65,23 @@ func MutationTargets(workspaceRoot string, name string, args map[string]any) []s
 	default:
 		return nil
 	}
+}
+
+func prefixPatchPaths(relativeRoot string, paths []string) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var out []string
+	for _, path := range paths {
+		workspacePath := path
+		if relativeRoot != "" && relativeRoot != "." {
+			workspacePath = filepath.ToSlash(filepath.Join(relativeRoot, path))
+		}
+		if !seen[workspacePath] {
+			seen[workspacePath] = true
+			out = append(out, workspacePath)
+		}
+	}
+	return out
 }

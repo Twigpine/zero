@@ -51,21 +51,10 @@ func mouseHover(msg tea.MouseMsg) bool {
 	return mouseEvent(msg).Button == tea.MouseNone
 }
 
-// updateHoverTarget resolves what's under the cursor for a hover motion, using
-// the SAME hit-testers and priority order as the click handlers in
-// handleTranscriptSelectionMouse's press case: a sidebar row (agent, then plan
-// step) takes priority since it's outside the chat column, then a clickable
-// transcript line. Clears the hover when nothing clickable is under the cursor.
+// updateHoverTarget resolves visible transcript targets for a hover motion.
+// Context data lives in the run-details overlay; the former sidebar rail is not
+// rendered and therefore cannot own a hover target.
 func (m model) updateHoverTarget(msg tea.MouseMsg) model {
-	if hit, ok := m.sidebarLineAtMouse(msg); ok {
-		return m.withHover(hoverTarget{kind: hoverSidebarAgent, sessionID: hit.sessionID})
-	}
-	if stepIndex, ok := m.planStepAtMouse(msg); ok {
-		return m.withHover(hoverTarget{kind: hoverPlanStep, stepIndex: stepIndex})
-	}
-	if path, ok := m.fileRowAtMouse(msg); ok {
-		return m.withHover(hoverTarget{kind: hoverFileRow, filePath: path})
-	}
 	if line, ok := m.transcriptLineAtMouse(msg); ok {
 		// A permission option reuses its OWN existing keyboard-cursor highlight
 		// (see hoverPermissionOption) rather than the m.hover mechanism, so there's

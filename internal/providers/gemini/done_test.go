@@ -10,6 +10,7 @@ import (
 // emitDone must mark the shared state done so callers observe it through the
 // pointer (a by-value receiver would make state.done a dead store).
 func TestEmitDoneMarksStateDoneThroughPointer(t *testing.T) {
+	t.Parallel()
 	provider, err := New(Options{Model: "gemini-test"})
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)

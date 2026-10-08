@@ -6,6 +6,7 @@ type chatCompletionRequest struct {
 	Tools               []toolDefinition `json:"tools,omitempty"`
 	MaxCompletionTokens int              `json:"max_completion_tokens,omitempty"`
 	ReasoningEffort     string           `json:"reasoning_effort,omitempty"`
+	ServiceTier         string           `json:"service_tier,omitempty"`
 	Stream              bool             `json:"stream"`
 	StreamOptions       *streamOptions   `json:"stream_options,omitempty"`
 	// PromptCacheKey asks the backend to route the request to a replica that
@@ -108,7 +109,8 @@ type usage struct {
 }
 
 type promptTokenDetails struct {
-	CachedTokens int `json:"cached_tokens"`
+	CachedTokens     int `json:"cached_tokens"`
+	CacheWriteTokens int `json:"cache_write_tokens"`
 }
 
 type completionTokenDetails struct {

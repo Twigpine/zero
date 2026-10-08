@@ -216,6 +216,9 @@ func (client *networkClient) request(ctx context.Context, method string, params 
 	if err != nil {
 		return err
 	}
+	if message.isRequestOrNotification() {
+		return fmt.Errorf("MCP %s expected a response from server %s, got method %q instead", method, client.server.Name, message.Method)
+	}
 	if !rpcIDMatches(message.ID, id) {
 		return fmt.Errorf("MCP %s response id mismatch for server %s", method, client.server.Name)
 	}
@@ -539,6 +542,9 @@ func (client *remoteSSEClient) deliverEventMessage(value string) error {
 	if err := decoder.Decode(&message); err != nil {
 		return fmt.Errorf("decode MCP SSE stream message: %w", err)
 	}
+	if message.isRequestOrNotification() {
+		return nil
+	}
 	key := rpcResponseKey(message.ID)
 	if key == "" {
 		return nil
@@ -633,7 +639,7 @@ func decodeSSERPCMessage(reader io.Reader) (rpcMessage, error) {
 		// those — the response has no method — and keep scanning. Previously the
 		// first message event was returned unconditionally, so a leading
 		// notification surfaced to the caller as an id mismatch and failed the call.
-		if candidate.Method != "" {
+		if candidate.isRequestOrNotification() {
 			return true
 		}
 		decoded = candidate

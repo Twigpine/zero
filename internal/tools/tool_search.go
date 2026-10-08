@@ -58,6 +58,11 @@ func NewToolSearchTool(registry *Registry) Tool {
 	}
 }
 
+func (tool toolSearchTool) cloneForRegistry(registry *Registry) Tool {
+	tool.registry = registry
+	return tool
+}
+
 // Run satisfies the Tool interface; actual dispatch goes through RunWithOptions.
 func (tool toolSearchTool) Run(ctx context.Context, args map[string]any) Result {
 	return tool.RunWithOptions(ctx, args, RunOptions{})
@@ -130,6 +135,9 @@ func (tool toolSearchTool) visibleDeferredTools(enabled []string, disabled []str
 	var deferred []Tool
 	if tool.registry != nil {
 		for _, candidate := range tool.registry.All() {
+			if !ModelVisible(candidate) {
+				continue
+			}
 			if !IsDeferred(candidate) {
 				continue
 			}
@@ -158,6 +166,9 @@ func (tool toolSearchTool) visibleEagerToolNames(enabled []string, disabled []st
 		return names
 	}
 	for _, candidate := range tool.registry.All() {
+		if !ModelVisible(candidate) {
+			continue
+		}
 		if IsDeferred(candidate) || candidate.Name() == ToolSearchToolName {
 			continue
 		}

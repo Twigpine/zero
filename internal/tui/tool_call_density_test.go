@@ -183,6 +183,9 @@ func TestConsecutiveExplorationResultsGroup(t *testing.T) {
 	if strings.Count(got, "Search") != 2 || !strings.Contains(got, "├ Search") || !strings.Contains(got, "└ Search") {
 		t.Fatalf("grouped exploration card should show both searches, got:\n%s", got)
 	}
+	if strings.Contains(got, "details") {
+		t.Fatalf("grouped exploration card must not advertise an inert details action, got:\n%s", got)
+	}
 }
 
 // looksLikeRedundantConfirmation unit coverage (verb table + multiline guard).

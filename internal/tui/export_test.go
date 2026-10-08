@@ -2,14 +2,14 @@
 package tui
 
 import (
-	"context"
 	"fmt"
-	"os"
 	"strings"
+	"testing"
 	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/Gitlawb/zero/internal/dictation"
+	"github.com/Gitlawb/zero/internal/tools"
 )
 
 func renderMarkdownInline(text string) string {
@@ -50,6 +50,26 @@ func formatGroupedCommandHelpLines() []string {
 	return lines
 }
 
+// runningPlanModel supplies plan state for tests that exercise contextual
+// details without reviving the former persistent plan presentation.
+func runningPlanModel(t *testing.T, steps int) model {
+	t.Helper()
+	m := newModel(t.Context(), Options{ModelName: "gpt-4"})
+	m.width = 100
+	base := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
+	m.now = func() time.Time { return base.Add(15 * time.Second) }
+	items := make([]tools.PlanItem, steps)
+	for i := range items {
+		status := "pending"
+		if i == 0 {
+			status = "in_progress"
+		}
+		items[i] = tools.PlanItem{Content: fmt.Sprintf("Step number %d here", i+1), Status: status}
+	}
+	m.plan.updateFromItems(items, base)
+	return m
+}
+
 func listCommandNames() []string {
 	names := make([]string, 0, len(commandDefinitions))
 	for _, command := range commandDefinitions {
@@ -88,34 +108,6 @@ func (m model) scrollableTranscriptLayoutView(header string, body transcriptBody
 
 func (m model) overlayMouseTop(overlayHeight int, width int) int {
 	return m.overlayMouseRect(overlayHeight, width).y
-}
-
-// height returns the number of terminal lines renderPlanPanel will occupy at
-// the given width (0 when the panel is not visible). The step list is shown
-// when the panel is expanded or still running; a collapsed, finished plan is
-// just the header and progress bar.
-func (s planPanelState) height(width int, now time.Time) int {
-	if !s.visible(now) {
-		return 0
-	}
-	if s.expanded || !s.isComplete() {
-		return 2 + len(s.steps)
-	}
-	return 2
-}
-
-func GetLocalDiffStats(baseBranch string) (additions int, deletions int, err error) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return 0, 0, err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), prCommandTimeout)
-	defer cancel()
-	return getLocalDiffStats(ctx, cwd, baseBranch, defaultPRCommandRunner)
-}
-
-func WatchPRState(service *PrService, onChange func(PrState)) func() {
-	return WatchPRStateContext(context.Background(), service, onChange)
 }
 
 func (c *staticRenderCache) retainedCharacters() int {
@@ -244,7 +236,8 @@ func (m model) renderSelectableSpecialistRow(rowIndex int, row transcriptRow, wi
 }
 
 func (m model) renderSelectableToolResultRow(rowIndex int, row transcriptRow, width int, rc rowContext, startBodyY int) (string, []transcriptSelectableLine) {
-	return m.renderSelectableToolResultRowFn(rowIndex, row, width, rc, startBodyY, m.renderRow)
+	opts := cardRenderOptions{bodyCap: cardBodyMaxLines, cwd: m.cwd}
+	return m.renderSelectableToolResultRowFn(rowIndex, row, width, rc, startBodyY, m.renderRow, opts)
 }
 
 func (m model) transcriptBody(width int, emptyOverlay string) (string, []transcriptSelectableLine) {

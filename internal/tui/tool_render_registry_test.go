@@ -41,7 +41,7 @@ func TestDefaultToolBodyRegistrySelectsCoreRenderers(t *testing.T) {
 		{
 			name:   "read_file",
 			hint:   "README.md",
-			detail: "File: README.md\n\n  7 | # Zero",
+			detail: "File: README.md\n\n7→# Zero",
 			want:   []string{"Read", "README.md"},
 		},
 		{

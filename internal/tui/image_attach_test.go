@@ -188,6 +188,22 @@ func TestSubmitThreadsImagesThenClears(t *testing.T) {
 	if len(next.pendingImages) != 0 || len(next.pendingImageLabels) != 0 {
 		t.Fatalf("submit must clear pending images, got %d/%d", len(next.pendingImages), len(next.pendingImageLabels))
 	}
+	if len(next.transcript) == 0 || next.transcript[len(next.transcript)-1].kind != rowUser {
+		t.Fatalf("submit should append a user row, got %#v", next.transcript)
+	}
+	if rendered := plainRender(t, renderUserRow(next.transcript[len(next.transcript)-1], 80)); !strings.Contains(rendered, "[Image #1]") {
+		t.Fatalf("sent image should remain visible on the user row, got:\n%s", rendered)
+	}
+	events, err := next.sessionStore.ReadEvents(next.activeSession.SessionID)
+	if err != nil {
+		t.Fatalf("ReadEvents returned error: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("submit should persist the user event")
+	}
+	if got := attachmentSummaryFromPayload(sessionPayload(events[0])); got.images != 1 || got.documents != 0 {
+		t.Fatalf("persisted attachment summary = %#v, want one image", got)
+	}
 
 	execCmd(cmd) // run the agent goroutine; it invokes captureRunImages
 

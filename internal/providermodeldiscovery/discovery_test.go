@@ -80,6 +80,175 @@ func TestParseModelsResponseCapturesContextAndFree(t *testing.T) {
 	}
 }
 
+func TestParseModelsResponseSupportsChatGPTCatalog(t *testing.T) {
+	models, err := parseModelsResponse([]byte(`{
+		"models": [
+			{"slug":"gpt-5.6-sol","display_name":"GPT-5.6 Sol","description":"Frontier coding model","visibility":"list","context_window":400000,"default_reasoning_level":"high","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"}],"service_tiers":[{"id":"priority"}],"default_service_tier":"standard"},
+			{"slug":"gpt-5.6-terra","display_name":"GPT-5.6 Terra","visibility":"list"},
+			{"slug":"internal-router","display_name":"Internal","visibility":"hide"},
+			{"slug":"server-only","display_name":"Server only","visibility":"none"}
+		]
+	}`))
+	if err != nil {
+		t.Fatalf("parseModelsResponse: %v", err)
+	}
+	if got, want := modelIDs(models), []string{"gpt-5.6-sol", "gpt-5.6-terra"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("models = %#v, want visible ChatGPT models %#v", got, want)
+	}
+	if models[0].Description != "GPT-5.6 Sol" || models[0].ContextWindow != 400000 {
+		t.Fatalf("ChatGPT metadata = %#v", models[0])
+	}
+	if got := strings.Join(models[0].ReasoningEfforts, ","); got != "low,medium,high,xhigh" {
+		t.Fatalf("reasoning efforts = %q", got)
+	}
+	if models[0].DefaultReasoningEffort != "high" || !models[0].Reasoning {
+		t.Fatalf("reasoning metadata = %#v", models[0])
+	}
+	if got := strings.Join(models[0].ServiceTiers, ","); got != "priority" || models[0].DefaultServiceTier != "standard" {
+		t.Fatalf("service tier metadata = %#v", models[0])
+	}
+}
+
+func TestParseModelsResponseNormalizesLegacyFastTier(t *testing.T) {
+	models, err := parseModelsResponse([]byte(`{"data":[{"id":"gpt-test","additional_speed_tiers":["fast","priority"]}]}`))
+	if err != nil {
+		t.Fatalf("parseModelsResponse: %v", err)
+	}
+	if got := strings.Join(models[0].ServiceTiers, ","); got != "priority" {
+		t.Fatalf("service tiers = %q, want priority", got)
+	}
+}
+
+func TestMergeChatGPTModelsKeepsLiveOnlyEntries(t *testing.T) {
+	models := mergeLiveModels(
+		providercatalog.Descriptor{ID: "chatgpt"},
+		[]Model{
+			{ID: "gpt-5.5", ReasoningEfforts: []string{"low", "high"}, ServiceTiers: []string{"priority"}},
+			{ID: "gpt-5.6-sol", ReasoningEfforts: []string{"low", "ultra"}},
+		},
+		[]Model{{ID: "gpt-5.5", Description: "fallback"}},
+	)
+	if got, want := strings.Join(modelIDs(models), ","), "gpt-5.5,gpt-5.6-sol"; got != want {
+		t.Fatalf("models = %q, want %q", got, want)
+	}
+	if got := strings.Join(models[0].ReasoningEfforts, ","); got != "low,high" {
+		t.Fatalf("merged reasoning efforts = %q", got)
+	}
+	if got := strings.Join(models[0].ServiceTiers, ","); got != "priority" {
+		t.Fatalf("merged service tiers = %q", got)
+	}
+}
+
+func TestDiscoverCatalogChatGPTMergesOpenAIModelsDevMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api.json":
+			_, _ = w.Write([]byte(`{
+				"openai": {"models": {
+					"gpt-5.6-sol": {
+						"id": "gpt-5.6-sol",
+						"name": "GPT-5.6 Sol",
+						"description": "Frontier coding model",
+						"tool_call": true,
+						"reasoning": true,
+						"reasoning_efforts": ["low", "high", "max"],
+						"limit": {"context": 1050000},
+						"modalities": {"input": ["text", "image", "pdf"], "output": ["text"]}
+					}
+				}}
+			}`))
+		case "/backend-api/codex/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"gpt-5.6-sol"}]}`))
+		default:
+			t.Errorf("unexpected request path %q", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+	}))
+	defer server.Close()
+
+	provider, ok := providercatalog.Get("chatgpt")
+	if !ok {
+		t.Fatal("ChatGPT provider missing from catalog")
+	}
+	models, err := DiscoverCatalog(context.Background(), provider, config.ProviderProfile{
+		Name:         "chatgpt",
+		CatalogID:    "chatgpt",
+		ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL:      server.URL + "/backend-api/codex",
+	}, Options{
+		HTTPClient:   server.Client(),
+		ModelsDevURL: server.URL + "/api.json",
+		OAuthResolver: func(context.Context, bool) (string, string, bool, error) {
+			return "Authorization", "Bearer test", true, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("DiscoverCatalog returned error: %v", err)
+	}
+	if len(models) != 1 {
+		t.Fatalf("models = %#v, want one ChatGPT live model", models)
+	}
+	model := models[0]
+	if model.ID != "gpt-5.6-sol" || model.ContextWindow != 1050000 || !model.ToolCall || !model.Reasoning {
+		t.Fatalf("merged ChatGPT model = %#v, want models.dev metadata", model)
+	}
+	if got := strings.Join(model.InputModalities, ","); got != "text,image,pdf" {
+		t.Fatalf("input modalities = %q, want text,image,pdf", got)
+	}
+	if got := strings.Join(model.ReasoningEfforts, ","); got != "low,high,max" {
+		t.Fatalf("reasoning efforts = %q, want low,high,max", got)
+	}
+}
+
+func TestMergeLiveModelsUsesLiveDefaultsAndReasoningCapability(t *testing.T) {
+	models := mergeLiveModels(
+		providercatalog.Descriptor{ID: "chatgpt"},
+		[]Model{{
+			ID:                     "gpt-live",
+			Reasoning:              true,
+			DefaultReasoningEffort: "high",
+			DefaultServiceTier:     "priority",
+		}},
+		[]Model{{
+			ID:                     "gpt-live",
+			Reasoning:              false,
+			DefaultReasoningEffort: "low",
+			DefaultServiceTier:     "standard",
+		}},
+	)
+	if len(models) != 1 {
+		t.Fatalf("merged models = %#v, want one model", models)
+	}
+	got := models[0]
+	if !got.Reasoning || got.DefaultReasoningEffort != "high" || got.DefaultServiceTier != "priority" {
+		t.Fatalf("merged live metadata = %#v", got)
+	}
+}
+
+func TestMergeLocalModelsKeepsLiveOnlyEntries(t *testing.T) {
+	models := mergeLiveModels(
+		providercatalog.Descriptor{ID: "lmstudio", Local: true},
+		[]Model{
+			{ID: "qwen3-coder-30b", ContextWindow: 32768},
+			{ID: "text-embedding-local"},
+			{ID: "qwen2.5-coder-32b-instruct", Description: "live description"},
+		},
+		[]Model{{ID: "qwen2.5-coder-32b-instruct", Description: "catalog description", ToolCall: true}},
+	)
+
+	if got, want := strings.Join(modelIDs(models), ","), "qwen3-coder-30b,qwen2.5-coder-32b-instruct"; got != want {
+		t.Fatalf("models = %q, want %q", got, want)
+	}
+	for _, model := range models {
+		if model.ID == "qwen2.5-coder-32b-instruct" {
+			if model.Description != "catalog description" || !model.ToolCall {
+				t.Fatalf("merged catalog metadata = %#v", model)
+			}
+		}
+	}
+}
+
 func TestDiscoverCatalogOpenGatewayUsesLiveListWithoutKey(t *testing.T) {
 	// Catalog and live endpoints return distinct payloads so the merge must keep
 	// live-only ids that are absent from the remote catalog response.
@@ -205,6 +374,9 @@ func TestDiscoverChatGPTModelsUsesOAuthAndCodexHeaders(t *testing.T) {
 		requests++
 		if got := r.URL.Path; got != "/backend-api/codex/models" {
 			t.Errorf("path = %q, want Codex models endpoint", got)
+		}
+		if got := r.URL.Query().Get("client_version"); got != chatGPTModelsProtocolVersion {
+			t.Errorf("client_version = %q, want %q", got, chatGPTModelsProtocolVersion)
 		}
 		wantToken := "Bearer old-token"
 		wantAccount := "old-account"

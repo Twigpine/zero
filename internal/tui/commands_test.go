@@ -47,7 +47,8 @@ func TestFormatCommandHelpLinesGroupsCommandsByStableOrder(t *testing.T) {
 		"model:",
 		"  /provider [add|status] - Manage providers: activate, add, edit, delete.",
 		"  /model [list|id] - Show or switch the active model.",
-		"  /effort [list|low|medium|high|auto] - Show or set reasoning effort for supported models.",
+		"  /effort [list|level|auto] - Show or set reasoning effort for supported models.",
+		"  /fast - Toggle fast mode for supported ChatGPT subscription models.",
 		"session:",
 		"  /plan [status|on|off] - Show plan status, or enter/exit read-only planning mode.",
 		"runtime:",
@@ -976,6 +977,8 @@ func TestParseBackgroundTerminalCommands(t *testing.T) {
 		{input: "/ps", kind: commandPS, text: ""},
 		{input: "/stop", kind: commandStop, text: ""},
 		{input: "/stop 1000", kind: commandStop, text: "1000"},
+		{input: "/attach", kind: commandAttach, text: ""},
+		{input: "/attach 7", kind: commandAttach, text: "7"},
 	}
 	for _, tc := range cases {
 		got := parseCommand(tc.input)

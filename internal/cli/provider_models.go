@@ -73,6 +73,18 @@ func runProvidersModels(args []string, stdout io.Writer, stderr io.Writer, deps 
 			if description := strings.TrimSpace(model.Description); description != "" {
 				entry["description"] = description
 			}
+			if len(model.ReasoningEfforts) > 0 {
+				entry["reasoning_efforts"] = append([]string{}, model.ReasoningEfforts...)
+			}
+			if effort := strings.TrimSpace(model.DefaultReasoningEffort); effort != "" {
+				entry["default_reasoning_effort"] = effort
+			}
+			if len(model.ServiceTiers) > 0 {
+				entry["service_tiers"] = append([]string{}, model.ServiceTiers...)
+			}
+			if tier := strings.TrimSpace(model.DefaultServiceTier); tier != "" {
+				entry["default_service_tier"] = tier
+			}
 			items = append(items, entry)
 		}
 		payload := map[string]any{

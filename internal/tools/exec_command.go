@@ -47,8 +47,11 @@ type ExecSessionSnapshot = execution.ProcessSnapshot
 
 type ExecSessionController interface {
 	ExecSessions() []ExecSessionSnapshot
+	ExecSession(id int) (ExecSessionSnapshot, bool)
 	StopExecSession(id int) bool
 	StopAllExecSessions() []int
+	WriteExecSessionInput(id int, data []byte) error
+	ResizeExecSession(id int, cols, rows int) error
 }
 
 type execCommandTool struct {
@@ -75,14 +78,10 @@ func NewScopedExecCommandTool(workspaceRoot string, scope PathScope, manager *ex
 	if manager == nil {
 		manager = defaultExecSessionManager
 	}
-	description := "Runs a command in a PTY, returning output or a session ID for ongoing interaction."
-	if runtimeGOOS() == "windows" {
-		description += "\n\n" + shellGuidanceForGOOS(runtimeGOOS())
-	}
 	return execCommandTool{
 		baseTool: baseTool{
 			name:        ExecCommandToolName,
-			description: description,
+			description: execCommandDescription(runtimeGOOS()),
 			parameters: Schema{
 				Type: "object",
 				Properties: map[string]PropertySchema{
@@ -99,7 +98,7 @@ func NewScopedExecCommandTool(workspaceRoot string, scope PathScope, manager *ex
 					},
 					"justification": {Type: "string", Description: "User-facing approval question for `require_escalated`; omit otherwise."},
 					"prefix_rule":   {Type: "array", Items: &PropertySchema{Type: "string"}, Description: "Reusable approval prefix for this command, only with `sandbox_permissions: \"require_escalated\"`; keep it narrow, for example [\"git\", \"pull\"]."},
-					"tty":           {Type: "boolean", Description: "True allocates a PTY for the command; false or omitted uses plain pipes.", Default: false},
+					"tty":           {Type: "boolean", Description: "True allocates a PTY for the command; false or omitted uses plain pipes. Use true for commands that may prompt for input (sudo, ssh, interactive installers): the user can then type into the session directly. Setuid tools such as sudo also need sandbox_permissions \"require_escalated\", since the sandbox blocks privilege escalation.", Default: false},
 				},
 				Required:             []string{"cmd"},
 				AdditionalProperties: false,
@@ -135,12 +134,24 @@ func (tool execCommandTool) ExecSessions() []ExecSessionSnapshot {
 	return tool.manager.List()
 }
 
+func (tool execCommandTool) ExecSession(id int) (ExecSessionSnapshot, bool) {
+	return tool.manager.Snapshot(id)
+}
+
 func (tool execCommandTool) StopExecSession(id int) bool {
 	return tool.manager.Stop(id)
 }
 
 func (tool execCommandTool) StopAllExecSessions() []int {
 	return tool.manager.StopAll()
+}
+
+func (tool execCommandTool) WriteExecSessionInput(id int, data []byte) error {
+	return tool.manager.WriteInput(id, data)
+}
+
+func (tool execCommandTool) ResizeExecSession(id int, cols, rows int) error {
+	return tool.manager.ResizeInput(id, cols, rows)
 }
 
 func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine *zeroSandbox.Engine, directBudget bool) Result {
@@ -176,8 +187,14 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 	if issue := detectShellCommandIssueForRuntime(commandText, detectShellRuntime(runtimeGOOS())); issue != nil && !msysGuardBypassed(issue, commandEngine) {
 		return shellIssueBlockResult(*issue)
 	}
-	if interactive := zeroSandbox.DetectInteractiveCommand(commandText, runtimeGOOS()); interactive.Interactive {
-		return interactiveBlockResult(interactive)
+	// tty:true exists exactly to run prompting commands, so the
+	// non-interactive guard steps aside and the PTY path gets the session.
+	if !ttyRequested {
+		if interactive := zeroSandbox.DetectInteractiveCommand(commandText, runtimeGOOS()); interactive.Interactive {
+			result := interactiveBlockResult(interactive)
+			result.Output += "\nRerun with tty:true if the user should interact with it."
+			return result
+		}
 	}
 	absoluteCwd, relativeCwd, err := resolveScopedPath(tool.workspaceRoot, tool.scope, workdir)
 	if err != nil {
@@ -457,7 +474,7 @@ func execToolResultWithBudget(input execToolResultInput, directBudget bool) Resu
 	if input.exited && input.exitCode != 0 && !input.interrupted {
 		status = StatusError
 	}
-	body := formatExecCommandOutput(output, input.sessionID, input.exited, input.exitCode, input.interrupted)
+	body := formatExecCommandOutput(output, input.sessionID, input.exited, input.exitCode, input.interrupted, input.tty)
 	if status == StatusError && input.exited && !input.interrupted {
 		if issue := detectShellOutputIssueForRuntime(output, detectShellRuntime(runtimeGOOS())); issue != nil {
 			meta["shell_issue"] = issue.Kind
@@ -579,7 +596,7 @@ func executionChangeSummaries(changes []execution.Change) []execution.Change {
 	return summaries
 }
 
-func formatExecCommandOutput(output string, sessionID int, exited bool, exitCode int, interrupted bool) string {
+func formatExecCommandOutput(output string, sessionID int, exited bool, exitCode int, interrupted bool, tty bool) string {
 	output = strings.TrimRight(output, "\r\n")
 	parts := []string{}
 	if output != "" {
@@ -597,12 +614,18 @@ func formatExecCommandOutput(output string, sessionID int, exited bool, exitCode
 			parts = append(parts, "interrupted: true")
 		}
 		parts = append(parts, fmt.Sprintf("exit_code: %d", exitCode))
+		if exitCode != 0 && strings.Contains(output, "no new privileges") {
+			parts = append(parts, `Hint: this command needs sandbox_permissions "require_escalated" (the sandbox blocks setuid); retry with it and tty:true if it prompts.`)
+		}
 	} else {
 		if output == "" {
 			parts = append(parts, "Command is still running.")
 		}
 		parts = append(parts, fmt.Sprintf("session_id: %d", sessionID))
 		parts = append(parts, fmt.Sprintf("Use write_stdin with session_id %d and empty chars to poll; send chars \"\\u0003\" to interrupt/stop it.", sessionID))
+		if tty {
+			parts = append(parts, fmt.Sprintf("This session has a terminal and the user can already type into it (it opened in their TUI; /attach %d reopens it). If it is waiting on a password or confirmation, say so in one line, then keep polling with write_stdin (empty chars, yield_time_ms 60000) until it exits. Do not end your turn while it is running, and never ask for the password in chat.", sessionID))
+		}
 	}
 	return strings.Join(parts, "\n")
 }
@@ -673,4 +696,20 @@ func execDisplaySummary(commandText string, sessionID int, exited bool, exitCode
 
 func runtimeGOOS() string {
 	return runtime.GOOS
+}
+
+// execCommandDescription is exec_command's description as a host running goos
+// would see it. The shell guidance is appended on Windows only.
+//
+// Taking goos as an argument rather than reading it is what lets the guidance
+// contract be checked for every platform from any one of them. internal/agent's
+// token ratchet removes exactly this appended text before charging the schemas,
+// so the condition here and hostExecCommandShellGuidance have to agree on all
+// three platforms, not only on whichever one the test happens to run on.
+func execCommandDescription(goos string) string {
+	description := "Runs a command in a PTY, returning output or a session ID for ongoing interaction."
+	if goos == "windows" {
+		description += "\n\n" + shellGuidanceForGOOS(goos)
+	}
+	return description
 }

@@ -1,64 +1,184 @@
-// Package lockutil provides the platform-specific file primitives behind the
-// O_EXCL lock files in cron, daemon, hooks, oauth, and swarm: a no-overwrite
-// restore for locks that were sidelined during a stale-reclaim attempt, and a
-// lock file remover with one cross-platform contract (missing files are a
-// no-op; Windows retries transient sharing violations).
+// Package lockutil provides cross-process advisory file locks used by cron,
+// daemon, hooks, oauth, and swarm. Locks are held by the kernel for the lifetime
+// of an open file handle, so process exit releases them without a stale-file
+// reclaim protocol. The lock file itself is stable: holders never rename or
+// remove it while another process may still have its inode locked.
 package lockutil
 
 import (
-	"io"
+	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
 )
 
-// restoreByCopy restores reclaimed to path without overwriting an existing
-// path, as a fallback for when the platform's primary no-replace primitive
-// (hard link on POSIX, MoveFileEx on Windows) fails for a reason other than
-// the destination existing. It stages a full copy under a private name next
-// to reclaimed and publishes it to path with publish (the same no-replace
-// primitive the caller's platform uses for the primary restore), so path
-// never appears in a partially-copied state: a crash between staging and
-// publish leaves path exactly as it was (missing or, if a competing holder
-// created it, untouched), never a truncated file that a PID/content-based
-// liveness check could mistake for dead. Leaving path missing here would let
-// the next O_EXCL create succeed while the sidelined holder is still live,
-// breaking mutual exclusion. publish keeps the no-overwrite guarantee: a new
-// holder that appeared in the meantime wins and this returns os.ErrExist. The
-// copy resets the lock's mtime to now, which only makes the restored lock
-// look fresher; that is safe, since it is being handed back to a live holder.
-func restoreByCopy(reclaimed, path string, publish func(from, to string) error) error {
-	staged := reclaimed + ".copy"
-	src, err := os.Open(reclaimed)
+var (
+	// ErrLockHeld reports that another process or goroutine currently holds the
+	// advisory lock. Callers may wait and retry until their own deadline.
+	ErrLockHeld = errors.New("lockutil: lock is held")
+	// ErrLockReleased reports an attempt to update metadata after Release.
+	ErrLockReleased = errors.New("lockutil: lock is released")
+)
+
+var holderSequence atomic.Uint64
+
+// FileLock is an exclusive advisory lock held through an open file handle.
+// Release is idempotent. The lock path remains on disk after release; deleting
+// or replacing it would let different processes lock different inodes.
+type FileLock struct {
+	mu         sync.Mutex
+	file       *os.File
+	state      platformLockState
+	released   bool
+	releaseErr error
+}
+
+// TryAcquireFileLock attempts to take an exclusive advisory lock without
+// waiting. A contended lock returns ErrLockHeld. The kernel releases a lock if
+// its process exits, so an old unlocked file never needs stale reclamation.
+func TryAcquireFileLock(path string) (*FileLock, error) {
+	return TryAcquireFileLockAt(filepath.Dir(path), path)
+}
+
+// TryAcquireFileLockAt attempts to lock path while confining every component
+// below root to a handle-relative traversal. root is the caller's trusted
+// boundary and may itself be reached through a legitimate link; links and
+// reparse points below it are rejected before metadata can be written.
+func TryAcquireFileLockAt(root, path string) (*FileLock, error) {
+	if root == "" {
+		return nil, errors.New("lockutil: lock root is empty")
+	}
+	relative, err := filepath.Rel(root, path)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("lockutil: resolve lock path relative to root: %w", err)
 	}
-	dst, err := os.OpenFile(staged, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	relative = filepath.Clean(relative)
+	if relative == "." || relative == ".." || filepath.IsAbs(relative) || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("lockutil: lock path %q escapes root %q", path, root)
+	}
+
+	file, err := openLockFileAt(root, relative, path)
 	if err != nil {
-		_ = src.Close()
-		return err
+		return nil, fmt.Errorf("lockutil: open lock file: %w", err)
 	}
-	_, err = io.Copy(dst, src)
-	// Close the source before removing anything below: Go opens files without
-	// FILE_SHARE_DELETE on Windows, so deleting reclaimed or staged while src
-	// is open would fail with a sharing violation.
-	_ = src.Close()
+	return acquireOpenedFileLock(file)
+}
+
+// TryAcquireFileLockRoot attempts to lock name relative to an already-bound
+// directory root. It is intended for lifecycle owners that must not resolve the
+// root pathname again between validation and lock acquisition.
+func TryAcquireFileLockRoot(root *os.Root, name, displayPath string) (*FileLock, error) {
+	if root == nil {
+		return nil, errors.New("lockutil: lock root is nil")
+	}
+	name = filepath.Clean(name)
+	if name == "." || name == ".." || filepath.IsAbs(name) || strings.HasPrefix(name, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("lockutil: lock name %q escapes root", name)
+	}
+	file, err := openLockFileRoot(root, name, displayPath)
 	if err != nil {
-		_ = dst.Close()
-		_ = os.Remove(staged)
-		return err
+		return nil, fmt.Errorf("lockutil: open rooted lock file: %w", err)
 	}
-	if err := dst.Close(); err != nil {
-		_ = os.Remove(staged)
-		return err
+	return acquireOpenedFileLock(file)
+}
+
+func acquireOpenedFileLock(file *os.File) (*FileLock, error) {
+	state, contended, err := tryLockFile(file)
+	if err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("lockutil: acquire advisory lock: %w", err)
 	}
-	if err := publish(staged, path); err != nil {
-		_ = os.Remove(staged)
-		return err
+	if contended {
+		_ = file.Close()
+		return nil, ErrLockHeld
 	}
-	// publish may leave staged behind (a hard-link publish keeps both names),
-	// so remove it explicitly; a move-based publish already made this a no-op.
-	_ = os.Remove(staged)
-	// The lock is back at path, so the restore has succeeded; failing to clean
-	// up the sidelined name must not be reported as a failed restore.
-	_ = RemoveLockFile(reclaimed)
+
+	lock := &FileLock{file: file, state: state}
+	metadata := []byte(fmt.Sprintf("%d-%d\n", os.Getpid(), holderSequence.Add(1)))
+	if err := lock.WriteMetadata(metadata); err != nil {
+		return nil, errors.Join(err, lock.Release())
+	}
+	return lock, nil
+}
+
+func openLockFileRoot(root *os.Root, name, displayPath string) (*os.File, error) {
+	info, err := root.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		file, createErr := root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+		if createErr != nil {
+			return nil, createErr
+		}
+		if err := validateRootLockFile(file); err != nil {
+			return nil, errors.Join(err, file.Close())
+		}
+		return file, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("refusing non-regular rooted lock file")
+	}
+	file, err := root.OpenFile(name, os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, errors.Join(err, file.Close())
+	}
+	if !os.SameFile(info, opened) {
+		return nil, errors.Join(errors.New("rooted lock file changed while opening"), file.Close())
+	}
+	if err := validateRootLockFile(file); err != nil {
+		return nil, errors.Join(err, file.Close())
+	}
+	return file, nil
+}
+
+// WriteMetadata replaces the diagnostic contents of the lock file while the
+// caller holds it. Metadata does not establish ownership; the kernel lock does.
+func (lock *FileLock) WriteMetadata(data []byte) error {
+	if lock == nil {
+		return ErrLockReleased
+	}
+	lock.mu.Lock()
+	defer lock.mu.Unlock()
+	if lock.released || lock.file == nil {
+		return ErrLockReleased
+	}
+	if err := lock.file.Truncate(0); err != nil {
+		return fmt.Errorf("lockutil: truncate lock metadata: %w", err)
+	}
+	if _, err := lock.file.Seek(0, 0); err != nil {
+		return fmt.Errorf("lockutil: seek lock metadata: %w", err)
+	}
+	if _, err := lock.file.Write(data); err != nil {
+		return fmt.Errorf("lockutil: write lock metadata: %w", err)
+	}
 	return nil
+}
+
+// Release unlocks and closes the held file handle. It deliberately leaves the
+// stable lock file in place. Repeated calls return the first release result.
+func (lock *FileLock) Release() error {
+	if lock == nil {
+		return nil
+	}
+	lock.mu.Lock()
+	defer lock.mu.Unlock()
+	if lock.released {
+		return lock.releaseErr
+	}
+	lock.released = true
+	unlockErr := unlockFile(lock.file, &lock.state)
+	closeErr := lock.file.Close()
+	lock.file = nil
+	if err := errors.Join(unlockErr, closeErr); err != nil {
+		lock.releaseErr = fmt.Errorf("lockutil: release advisory lock: %w", err)
+	}
+	return lock.releaseErr
 }

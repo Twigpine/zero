@@ -76,12 +76,17 @@ type BuildArgsInput struct {
 }
 
 type BuildResumeArgsInput struct {
-	SessionID      string
-	Prompt         string
-	CurrentDepth   int
-	Manifest       Manifest
-	Cwd            string
-	PermissionMode string
+	SessionID    string
+	Prompt       string
+	CurrentDepth int
+	Manifest     Manifest
+	Cwd          string
+	// ParentModel and ParentReasoningEffort are the same fallbacks the fresh
+	// path takes, and they are here for the same reason: appendModelArgs uses
+	// them only when the manifest pins nothing of its own.
+	ParentModel           string
+	ParentReasoningEffort string
+	PermissionMode        string
 }
 
 type BuildArgsResult struct {
@@ -344,6 +349,18 @@ func (executor Executor) BuildResumeArgs(input BuildResumeArgsInput) (BuildArgsR
 	}
 	args := []string{"exec", "--resume", sessionID}
 	args = append(args, promptArgs...)
+	// A RESUMED SPECIALIST KEEPS THE MODEL ITS MANIFEST PINNED.
+	//
+	// The fresh path appends this and the resume path did not, so a specialist
+	// pinned to a cheap model ran on that model once and then silently reverted
+	// to the parent's configured model on every resume. Nothing reports it: the
+	// child starts normally and the only symptom is the bill.
+	//
+	// Resuming does not restore the recorded model on its own. sessions.PrepareExec
+	// records the model it ran under but never feeds it back into provider
+	// construction, so without this the child takes whatever the config default
+	// resolves to now.
+	args = appendModelArgs(args, input.Manifest, input.ParentModel, input.ParentReasoningEffort)
 	args = append(args, "--auto", specialistAutonomy(input.PermissionMode), "--output-format", "stream-json")
 	// See BuildArgs: only plan/spec-draft propagate --permission-mode so --auto
 	// remains the authority for member/auto/ask/unsafe child resolution.
@@ -424,12 +441,14 @@ func (executor Executor) runResume(ctx context.Context, params TaskParameters, o
 		return ExecResult{}, err
 	}
 	built, err := executor.BuildResumeArgs(BuildResumeArgsInput{
-		SessionID:      params.Resume,
-		Prompt:         params.Prompt,
-		CurrentDepth:   options.CurrentDepth,
-		Manifest:       manifest,
-		Cwd:            options.Cwd,
-		PermissionMode: options.PermissionMode,
+		SessionID:             params.Resume,
+		Prompt:                params.Prompt,
+		CurrentDepth:          options.CurrentDepth,
+		Manifest:              manifest,
+		Cwd:                   options.Cwd,
+		ParentModel:           options.ParentModel,
+		ParentReasoningEffort: options.ParentReasoningEffort,
+		PermissionMode:        options.PermissionMode,
 	})
 	if err != nil {
 		return ExecResult{}, err

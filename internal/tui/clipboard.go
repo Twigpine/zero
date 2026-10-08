@@ -57,9 +57,10 @@ func pasteFromClipboardCmd() tea.Cmd {
 // shared by the terminal bracketed-paste handler (tea.PasteMsg) and the
 // right-click paste (clipboardReadMsg) so a bracketed paste and a right-click
 // paste behave identically. Surfaces with no editable text field (a permission/
-// spec prompt, the MCP manager, an open picker, the detailed transcript) swallow
-// the paste. The session rename editor accepts text only; empty content is a
-// no-op there rather than an image probe.
+// spec prompt, the MCP manager, or the detailed transcript) swallow the paste.
+// Searchable pickers consume pasted text through the same filtering path as
+// typed characters. The session rename editor accepts text only; empty content
+// is a no-op there rather than an image probe.
 func (m model) routePaste(content string) (tea.Model, tea.Cmd) {
 	// A paste is a deliberate action, same as a keypress or click — it means
 	// the user moved on to something else, so it disarms a stale Esc
@@ -101,7 +102,17 @@ func (m model) routePaste(content string) (tea.Model, tea.Cmd) {
 	if m.providerWizard != nil {
 		return m.handleProviderWizardPaste(content)
 	}
-	if m.transcriptDetailed || m.pendingSpecReview != nil || m.pendingPermission != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil {
+	if m.picker != nil {
+		if m.modelPickerIsLoading() {
+			return m, nil
+		}
+		m.picker.appendQuery([]rune(sanitizeComposerInput(content)))
+		if m.picker.kind == pickerPet {
+			return m.schedulePetPreview()
+		}
+		return m, nil
+	}
+	if m.transcriptDetailed || m.pendingSpecReview != nil || m.pendingPermission != nil || m.mcpAddWizard != nil || m.mcpManager != nil {
 		return m, nil
 	}
 	// A drag-dropped image/PDF arrives as a (backslash-escaped) file path. Attach

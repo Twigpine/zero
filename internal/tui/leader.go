@@ -5,6 +5,7 @@ import (
 	"unicode"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // leaderTimeout is how long Ctrl+X waits for a follow-up key before the chord
@@ -136,12 +137,12 @@ func renderLeaderHelpLines(innerWidth int) []string {
 }
 
 // renderLeaderHelpOverlay frames the Ctrl+X ? chord map exactly like the
-// general ? keyboard-shortcut overlay: same width helper, border style
-// (zeroTheme.line), panel fill, and centered block.
+// general ? keyboard-shortcut overlay. Its interior stays transparent so a
+// terminal's own canvas remains visible without jagged panel-fill padding.
 func (m model) renderLeaderHelpOverlay(width int) string {
 	overlayWidth := keybindingHelpOverlayWidth(width)
 	lines := renderLeaderHelpLines(overlayWidth - 4)
-	block := styledBlockFillTitle(overlayWidth, "Ctrl+X Shortcuts", lines, zeroTheme.line, zeroTheme.panel)
+	block := styledBlockFillTitle(overlayWidth, "Ctrl+X Shortcuts", lines, zeroTheme.line, lipgloss.NewStyle())
 	return centerRenderedBlock(block, width)
 }
 

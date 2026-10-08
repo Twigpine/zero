@@ -162,11 +162,3 @@ func ValidateCapabilities(name string, caps ToolCapabilities) []string {
 	}
 	return problems
 }
-
-// ValidateToolCapabilities validates CapabilitiesOf(tool) for a registered tool.
-func ValidateToolCapabilities(tool Tool) []string {
-	if tool == nil {
-		return []string{"<nil tool>"}
-	}
-	return ValidateCapabilities(tool.Name(), CapabilitiesOf(tool))
-}

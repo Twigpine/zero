@@ -45,12 +45,27 @@ func TestSelectBackendChoosesPlatformAdapterWithFallback(t *testing.T) {
 				}
 				return "", errors.New("missing")
 			},
+			DetectWSL: func() WSLInfo { return WSLInfo{} },
 		})
 		if backend.Name != BackendUnavailable || backend.Available {
 			t.Fatalf("linux backend = %#v, want native sandbox unavailable without Linux helper", backend)
 		}
 		if !strings.Contains(backend.Message, "Linux sandbox helper is not available") {
 			t.Fatalf("linux fallback message = %q, want missing helper", backend.Message)
+		}
+	})
+
+	t.Run("linux helper missing under WSL reports WSL fallback", func(t *testing.T) {
+		backend := SelectBackend(BackendOptions{
+			GOOS:             "linux",
+			LookupExecutable: func(string) (string, error) { return "", errors.New("missing") },
+			DetectWSL:        func() WSLInfo { return WSLInfo{IsWSL: true, IsWSL2: true} },
+		})
+		if backend.Name != BackendWSL || backend.Available || !backend.Fallback {
+			t.Fatalf("linux backend = %#v, want explicit WSL fallback", backend)
+		}
+		if !strings.Contains(backend.Message, "WSL2") {
+			t.Fatalf("linux fallback message = %q, want WSL2 diagnostic", backend.Message)
 		}
 	})
 

@@ -407,7 +407,11 @@ func formatProviderCatalogLine(provider providerCatalogSummary) string {
 		provider.RuntimeSupported,
 	))
 	if provider.RuntimeSupported {
-		lines = append(lines, "    setup: zero providers setup "+displayCLIValue(provider.ID, "unknown")+" --set-active")
+		setup := "    setup: zero providers setup " + displayCLIValue(provider.ID, "unknown") + " --set-active"
+		if provider.ID == "atomic-chat-local" {
+			setup = "    setup: run zero setup to select a loaded model, or zero providers detect to get an add command"
+		}
+		lines = append(lines, setup)
 	} else {
 		lines = append(lines, "    unsupported: "+displayCLIValue(provider.RuntimeUnsupportedReason, "unknown"))
 	}
@@ -502,7 +506,7 @@ func writeProvidersHelp(w io.Writer) error {
   zero providers models [name] [flags]
 
 Inspects resolved provider profiles and provider catalog descriptors without printing secrets.
-Detect probes for running local runtimes (Ollama, LM Studio) and prints adopt commands plus per-provider next steps.
+Detect probes for running local runtimes (Ollama, LM Studio, Atomic Chat) and prints adopt commands plus per-provider next steps.
 Models probes a provider's live model-listing endpoint (e.g. an OpenAI-compatible /v1/models) and lists the models it serves — including custom OpenAI-/Anthropic-compatible endpoints — so a self-hosted provider needs no per-model config.
 
 Flags:

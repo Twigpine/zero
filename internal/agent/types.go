@@ -84,6 +84,7 @@ type ToolResult struct {
 	Images       []zeroruntime.ImageBlock
 	Redacted     bool
 	ChangedFiles []string
+	FileDiffs    []tools.FileDiff
 	// ChangeSummaries are non-selectable generated-tree summaries emitted by
 	// command execution; callers must not schedule per-file work from them.
 	ChangeSummaries []execution.Change
@@ -325,6 +326,7 @@ type Options struct {
 	ProviderName     string
 	Model            string
 	ReasoningEffort  string
+	ServiceTier      string
 	Cwd              string
 	SystemPrompt     string
 	// TransientSystemPrompt adds trusted runtime guidance for this run only.
@@ -347,10 +349,26 @@ type Options struct {
 	// CompactionPreserveLast is how many trailing messages compaction keeps
 	// verbatim. <= 0 falls back to defaultCompactionPreserveLast.
 	CompactionPreserveLast int
-	Registry               *tools.Registry
-	PermissionMode         PermissionMode
-	Autonomy               string
-	Sandbox                *sandbox.Engine
+	// Summarizer, when set, lazily builds the provider used for compaction
+	// summarization calls — typically a cheap/fast model, since summaries at
+	// main-model prices are the single most expensive recurring event in a
+	// long run. It receives the main model currently in force and may return
+	// (nil, nil) when no dedicated summarizer applies to it (the main model is
+	// already the cheap one). Built on the first paid compaction and again
+	// after a mid-run model switch. Any failure (build or call) falls back to
+	// the run's main provider until the next switch, so a misconfigured
+	// summarizer can never break compaction. nil keeps today's behavior.
+	Summarizer func(ctx context.Context, mainModelID string) (Provider, error)
+	// ContextWindowFor, when set, resolves a model ID to its context window so
+	// the compactor can re-derive its threshold after a mid-run model switch
+	// (escalate_model). Without it a switch keeps compacting against the
+	// original model's window — overflowing a smaller target or over-compacting
+	// a larger one. Return <= 0 when the model is unknown (window unchanged).
+	ContextWindowFor func(modelID string) int
+	Registry         *tools.Registry
+	PermissionMode   PermissionMode
+	Autonomy         string
+	Sandbox          *sandbox.Engine
 	// FileTracker records per-session file read/write versions so the write tools
 	// can detect a file changed on disk outside Zero since it was last read. nil
 	// disables the check. Created once per session and threaded into every tool run.

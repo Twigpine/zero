@@ -11,6 +11,7 @@ import (
 // truncated at the output cap. The provider must surface it on the done event so
 // the agent does not treat a clipped answer as complete.
 func TestStreamCompletionSurfacesMaxTokensStopReason(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSEEvent(w, "message_start", `{"type":"message_start","message":{"usage":{"input_tokens":5,"output_tokens":0}}}`)
 		writeSSEEvent(w, "content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"cut"}}`)
@@ -37,6 +38,7 @@ func TestStreamCompletionSurfacesMaxTokensStopReason(t *testing.T) {
 
 // A normal end_turn stop_reason must leave the done event's FinishReason empty.
 func TestStreamCompletionNormalStopReasonHasNoFinishReason(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSEEvent(w, "content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`)
 		writeSSEEvent(w, "message_delta", `{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}`)

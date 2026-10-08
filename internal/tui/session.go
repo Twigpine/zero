@@ -4,10 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/execution"
@@ -95,6 +95,7 @@ func (m model) startNewSession() model {
 	// documents, or queued text.
 	m.pendingImages = nil
 	m.pendingImageLabels = nil
+	m.pendingImageThumbnails = nil
 	m.pendingDocuments = nil
 	m.queuedMessage = ""
 	// The remembered /retry attachment snapshot belongs to the previous session
@@ -358,28 +359,10 @@ func (m model) formatResumeSummary(session sessions.Metadata, eventCount int) st
 	})
 }
 
-// sessionWhen formats a session's RFC3339 timestamp for the picker: a precise
-// clock time (with seconds) for today so same-minute sessions stay distinct, the
-// month/day and time earlier this year, else the date. Empty on a parse error.
-func sessionWhen(timestamp string, now time.Time) string {
-	parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(timestamp))
-	if err != nil {
-		return ""
-	}
-	parsed, now = parsed.Local(), now.Local()
-	switch {
-	case parsed.Year() == now.Year() && parsed.YearDay() == now.YearDay():
-		return parsed.Format("15:04:05")
-	case parsed.Year() == now.Year():
-		return parsed.Format("Jan _2 15:04")
-	default:
-		return parsed.Format("2006-01-02")
-	}
-}
-
 // newSessionPicker builds the interactive /resume picker (mirrors /model & /provider):
-// one row per resumable session — title (Label) + id and relative age (Meta). Returns
-// nil when there are no resumable sessions so the caller falls back to the text path.
+// one row per resumable session — age + title (Label), session id (Value), and a
+// project/model/size line (Detail). Returns nil when there are no resumable
+// sessions so the caller falls back to the text path.
 func (m model) newSessionPicker() *commandPicker {
 	if m.sessionStore == nil {
 		return nil
@@ -412,13 +395,17 @@ func (m model) newSessionPicker() *commandPicker {
 		// Lead with a fixed-width timestamp so titles form one scannable column.
 		// The raw id remains the selection/search value but stays out of the row:
 		// rendering it consumed half the picker and truncated the useful title.
-		label := displayValue(meta.Title, "untitled")
-		if when := sessionWhen(meta.UpdatedAt, now); when != "" {
+		// Session metadata is persisted, user-controlled text — a title from
+		// --session-title or /rename can legally contain newlines, which would
+		// break the picker's fixed row geometry.
+		label := displayValue(sanitizeCardField(meta.Title), "untitled")
+		if when := relativeAge(meta.UpdatedAt, now); when != "" {
 			label = sessionPickerLabel(when, label)
 		}
 		items = append(items, pickerItem{
-			Label: label,
-			Value: meta.SessionID,
+			Label:  label,
+			Value:  meta.SessionID,
+			Detail: m.sessionPickerDetail(meta),
 		})
 	}
 	if len(items) == 0 {
@@ -433,10 +420,43 @@ func (m model) newSessionPicker() *commandPicker {
 	}
 }
 
-const sessionPickerTimeWidth = len("Jan 02 15:04")
+const sessionPickerTimeWidth = len("2006-01-02")
 
 func sessionPickerLabel(when, title string) string {
 	return fmt.Sprintf("%-*s  %s", sessionPickerTimeWidth, when, title)
+}
+
+// sessionPickerDetail composes the faint second line under a /resume row:
+// the session's project directory (~/-contracted), the model it ran on, and a
+// short status chip when the session is not a plain mainline run (forks,
+// tagged sessions such as btw side-chats). Missing fields are simply omitted —
+// the picker is workspace-scoped, so the project column is a confirmation,
+// not a disambiguator.
+func (m model) sessionPickerDetail(meta sessions.Metadata) string {
+	parts := make([]string, 0, 3)
+	if project := displayPath(m.cwd, meta.Cwd); project != "" {
+		parts = append(parts, project)
+	}
+	if modelID := strings.TrimSpace(meta.ModelID); modelID != "" {
+		parts = append(parts, modelID)
+	}
+	if status := sessionPickerStatus(meta); status != "" {
+		parts = append(parts, status)
+	}
+	return sanitizeCardField(strings.Join(parts, " · "))
+}
+
+// sessionPickerStatus is the concise status chip for a /resume row: an
+// explicit tag when the session carries one, otherwise a marker for forked
+// sessions. Plain mainline sessions get none — their shape is the default.
+func sessionPickerStatus(meta sessions.Metadata) string {
+	if tag := strings.TrimSpace(meta.Tag); tag != "" {
+		return tag
+	}
+	if meta.SessionKind == sessions.SessionKindFork {
+		return "fork"
+	}
+	return ""
 }
 
 // sessionHasResumableContent reports whether a session has anything worth
@@ -582,7 +602,7 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 			}
 			switch role {
 			case "user":
-				rows = append(rows, transcriptRow{kind: rowUser, text: content})
+				rows = append(rows, transcriptRow{kind: rowUser, text: content, attachments: attachmentSummaryFromPayload(payload)})
 			case "assistant":
 				// A persisted assistant message was a turn's final answer. Tool/timing
 				// counters were not recorded; the completion line omits those segments.
@@ -640,13 +660,17 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 				status = tools.StatusOK
 			}
 			output := payloadString(payload, "output")
+			detail := payloadString(payload, "displayPreview")
+			if detail == "" {
+				detail = output
+			}
 			rows = append(rows, transcriptRow{
 				kind:            rowToolResult,
 				id:              effectiveToolRowID(id, callSeq[id]),
 				text:            fmt.Sprintf("tool result: %s %s %s", name, status, truncateTUIOutput(output, tuiToolOutputLimit)),
 				tool:            name,
 				status:          status,
-				detail:          output,
+				detail:          detail,
 				meta:            payloadStringMap(payload, "meta"),
 				changedFiles:    payloadStringSlice(payload, "changedFiles"),
 				changeSummaries: payloadExecutionChanges(payload, "changeSummaries"),
@@ -884,6 +908,28 @@ func payloadBool(payload map[string]any, key string) bool {
 	default:
 		return false
 	}
+}
+
+func attachmentSummaryFromPayload(payload map[string]any) transcriptAttachmentSummary {
+	attachments, ok := payloadMap(payload, "attachments")
+	if !ok {
+		return transcriptAttachmentSummary{}
+	}
+	return transcriptAttachmentSummary{
+		images:    payloadNonNegativeInt(attachments, "images"),
+		documents: payloadNonNegativeInt(attachments, "documents"),
+	}
+}
+
+func payloadNonNegativeInt(payload map[string]any, key string) int {
+	value, ok := payload[key].(float64)
+	if !ok || value <= 0 || value != math.Trunc(value) {
+		return 0
+	}
+	if value > persistedAttachmentCountLimit {
+		return persistedAttachmentCountLimit
+	}
+	return int(value)
 }
 
 func payloadMap(payload map[string]any, key string) (map[string]any, bool) {

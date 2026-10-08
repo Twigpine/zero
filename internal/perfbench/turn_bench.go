@@ -191,6 +191,7 @@ type TurnBenchResult struct {
 type TurnBenchTotals struct {
 	InputTokens       int64 `json:"inputTokens"`
 	CachedInputTokens int64 `json:"cachedInputTokens"`
+	CacheWriteTokens  int64 `json:"cacheWriteTokens"`
 	OutputTokens      int64 `json:"outputTokens"`
 	ModelRequests     int64 `json:"modelRequests"`
 	ToolCalls         int64 `json:"toolCalls"`
@@ -479,6 +480,7 @@ func topLatencySources(perSpan map[string]SpanStats, top int) []LatencySource {
 func aggregateTotals(totals *TurnBenchTotals, tr *trace.TurnTrace) {
 	totals.InputTokens += tr.Counter(trace.CounterInputTokens)
 	totals.CachedInputTokens += tr.Counter(trace.CounterCachedInputTokens)
+	totals.CacheWriteTokens += tr.Counter(trace.CounterCacheWriteTokens)
 	totals.OutputTokens += tr.Counter(trace.CounterOutputTokens)
 	totals.ModelRequests += tr.Counter(trace.CounterModelRequests)
 	totals.ToolCalls += tr.Counter(trace.CounterToolCalls)
@@ -531,8 +533,9 @@ func FormatTurnBenchSummary(result TurnBenchResult) string {
 			lines = append(lines, fmt.Sprintf("  %-18s %10s  %5.1f%%", src.Span, FormatMetric(src.TotalMs, "ms"), src.Share*100))
 		}
 	}
-	lines = append(lines, fmt.Sprintf("totals: in=%d (cached %d) out=%d | requests=%d tools=%d retries=%d reconnects=%d compactions=%d",
-		result.Totals.InputTokens, result.Totals.CachedInputTokens, result.Totals.OutputTokens,
+	lines = append(lines, fmt.Sprintf("totals: in=%d (cache-read %d, cache-write %d, uncached %d) out=%d | requests=%d tools=%d retries=%d reconnects=%d compactions=%d",
+		result.Totals.InputTokens, result.Totals.CachedInputTokens, result.Totals.CacheWriteTokens,
+		uncachedInputTokens(result.Totals), result.Totals.OutputTokens,
 		result.Totals.ModelRequests, result.Totals.ToolCalls, result.Totals.Retries,
 		result.Totals.Reconnects, result.Totals.Compactions))
 	for _, class := range sortedClasses(result.PerClass) {
@@ -543,6 +546,23 @@ func FormatTurnBenchSummary(result TurnBenchResult) string {
 			class, tier, summary.Passed, summary.Verified, summary.LatencyOnly, median))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func uncachedInputTokens(totals TurnBenchTotals) int64 {
+	remaining := totals.InputTokens
+	if remaining <= 0 {
+		return 0
+	}
+	for _, cached := range []int64{totals.CachedInputTokens, totals.CacheWriteTokens} {
+		if cached <= 0 {
+			continue
+		}
+		if cached >= remaining {
+			return 0
+		}
+		remaining -= cached
+	}
+	return remaining
 }
 
 // classTier returns the oracle tier label a class was classified into, so the

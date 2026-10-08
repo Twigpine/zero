@@ -29,10 +29,6 @@ func ParseTraceEventKeys(stdout string) []string {
 	return keys
 }
 
-func TraceEventKeys(stdout string) []string {
-	return ParseTraceEventKeys(stdout)
-}
-
 func MissingTraceEvents(required []string, stdout string) []string {
 	seen := map[string]bool{}
 	for _, key := range ParseTraceEventKeys(stdout) {

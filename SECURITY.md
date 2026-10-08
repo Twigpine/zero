@@ -33,4 +33,4 @@ Please include, where possible:
   depend on a user explicitly disabling the sandbox (`--skip-permissions-unsafe`), are generally
   out of scope — but please report anything you are unsure about.
 - Zero sends no telemetry. Network calls go to the model/tool providers you configure (and, for
-  keyless web search, to the documented Firecrawl endpoint — see the README).
+  keyless web search, to Exa's hosted MCP endpoint at `https://mcp.exa.ai/mcp`).

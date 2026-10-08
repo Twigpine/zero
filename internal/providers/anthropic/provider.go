@@ -90,6 +90,7 @@ type Options struct {
 	// When unset, Zero uses providerio.ResolveStreamIdleTimeout — the
 	// ZERO_STREAM_IDLE_TIMEOUT override or providerio.DefaultStreamIdleTimeout.
 	StreamIdleTimeout time.Duration
+	SessionHeader     string
 }
 
 // Provider streams completions from Anthropic's Messages API.
@@ -108,6 +109,7 @@ type Provider struct {
 	httpClient        *http.Client
 	userAgent         string
 	streamIdleTimeout time.Duration
+	sessionHeader     providerio.SessionHeader
 }
 
 // New creates an Anthropic provider.
@@ -143,6 +145,7 @@ func New(options Options) (*Provider, error) {
 		httpClient:        providerio.HTTPClient(options.HTTPClient),
 		userAgent:         options.UserAgent,
 		streamIdleTimeout: providerio.ResolveStreamIdleTimeout(options.StreamIdleTimeout),
+		sessionHeader:     providerio.NewSessionHeader(options.SessionHeader),
 	}, nil
 }
 
@@ -163,12 +166,12 @@ func (provider *Provider) StreamCompletion(
 	events := make(chan zeroruntime.StreamEvent, 16)
 	go func() {
 		defer close(events)
-		provider.stream(ctx, body, events)
+		provider.stream(ctx, body, request.PromptCacheKey, events)
 	}()
 	return events, nil
 }
 
-func (provider *Provider) stream(ctx context.Context, body []byte, events chan<- zeroruntime.StreamEvent) {
+func (provider *Provider) stream(ctx context.Context, body []byte, sessionID string, events chan<- zeroruntime.StreamEvent) {
 	// streamCtx lets the idle watchdog abort an in-flight body read by cancelling
 	// the request, which unblocks the SSE reader goroutine.
 	streamCtx, cancelStream := context.WithCancel(ctx)
@@ -185,6 +188,7 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 		},
 		provider.oauthResolver,
 		func(request *http.Request) {
+			provider.sessionHeader.Apply(request, sessionID)
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("anthropic-version", provider.version)
 			if provider.beta != "" {

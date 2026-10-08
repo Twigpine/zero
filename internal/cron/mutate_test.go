@@ -64,7 +64,7 @@ func TestMutateRemovedJobReturnsNotFound(t *testing.T) {
 	if !errors.Is(err, ErrJobNotFound) {
 		t.Fatalf("Mutate on removed job = %v, want ErrJobNotFound", err)
 	}
-	// And the lock file left no litter / did not resurrect the job dir.
+	// The stable advisory-lock file does not resurrect the removed job dir.
 	if _, gerr := store.Get(job.ID); !errors.Is(gerr, ErrJobNotFound) {
 		t.Fatalf("job should remain removed, Get = %v", gerr)
 	}

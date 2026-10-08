@@ -52,6 +52,7 @@ func openOptimizedSession(t *testing.T, provider *Provider) *turnSession {
 }
 
 func TestTurnSessionPrewarmSendsSingleHEAD(t *testing.T) {
+	t.Parallel()
 	var requests atomic.Int64
 	var lastMethod atomic.Value
 	provider := newPrewarmTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
@@ -84,6 +85,7 @@ func TestTurnSessionPrewarmSendsSingleHEAD(t *testing.T) {
 }
 
 func TestTurnSessionPrewarmNonFatalOnConnectError(t *testing.T) {
+	t.Parallel()
 	// A server that is immediately closed leaves a port that refuses connections.
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	deadURL := server.URL
@@ -101,6 +103,7 @@ func TestTurnSessionPrewarmNonFatalOnConnectError(t *testing.T) {
 }
 
 func TestTurnSessionPrewarmTraceStamps(t *testing.T) {
+	t.Parallel()
 	provider := newPrewarmTestProvider(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	})
@@ -130,6 +133,7 @@ func TestTurnSessionPrewarmTraceStamps(t *testing.T) {
 }
 
 func TestTurnSessionStreamDelegatesToProvider(t *testing.T) {
+	t.Parallel()
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n"))
@@ -173,6 +177,7 @@ func TestTurnSessionStreamDelegatesToProvider(t *testing.T) {
 }
 
 func TestTurnSessionFingerprintIgnoresMessages(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(http.ResponseWriter, *http.Request) {})
 	session := openOptimizedSession(t, provider)
 
@@ -197,6 +202,7 @@ func TestTurnSessionFingerprintIgnoresMessages(t *testing.T) {
 }
 
 func TestTurnSessionFingerprintDriftOnCacheKey(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(http.ResponseWriter, *http.Request) {})
 	session := openOptimizedSession(t, provider)
 
@@ -209,6 +215,7 @@ func TestTurnSessionFingerprintDriftOnCacheKey(t *testing.T) {
 }
 
 func TestTurnSessionFingerprintDriftOnToolsAndEffort(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(http.ResponseWriter, *http.Request) {})
 	session := openOptimizedSession(t, provider)
 
@@ -231,14 +238,22 @@ func TestTurnSessionFingerprintDriftOnToolsAndEffort(t *testing.T) {
 	// Unrecognized efforts normalize to omitted — same as empty.
 	droppedEffort := session.computeFingerprint(zeroruntime.CompletionRequest{
 		Tools:           []zeroruntime.ToolDefinition{{Name: "read_file", Parameters: map[string]any{"type": "object"}}},
-		ReasoningEffort: "xhigh",
+		ReasoningEffort: "bogus",
 	})
 	if base != droppedEffort {
 		t.Fatal("an effort the wire would omit must fingerprint like no effort")
 	}
+	changedTier := session.computeFingerprint(zeroruntime.CompletionRequest{
+		Tools:       []zeroruntime.ToolDefinition{{Name: "read_file", Parameters: map[string]any{"type": "object"}}},
+		ServiceTier: "priority",
+	})
+	if base == changedTier {
+		t.Fatal("fingerprint did not drift on a changed service tier")
+	}
 }
 
 func TestTurnSessionFingerprintDriftOnToolDescription(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(http.ResponseWriter, *http.Request) {})
 	session := openOptimizedSession(t, provider)
 
@@ -254,6 +269,7 @@ func TestTurnSessionFingerprintDriftOnToolDescription(t *testing.T) {
 }
 
 func TestTurnSessionFingerprintDriftOnToolReorder(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(http.ResponseWriter, *http.Request) {})
 	session := openOptimizedSession(t, provider)
 
@@ -274,6 +290,7 @@ func TestTurnSessionFingerprintDriftOnToolReorder(t *testing.T) {
 // prewarm probe must appear ONLY under provider_prewarm — a provider_connect
 // stamp from the probe would contaminate the exact span the benchmark compares.
 func TestTurnSessionPrewarmDoesNotStampProviderConnect(t *testing.T) {
+	t.Parallel()
 	provider := newPrewarmTestProvider(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	})
@@ -299,6 +316,7 @@ func TestTurnSessionPrewarmDoesNotStampProviderConnect(t *testing.T) {
 // spent when the transport cannot retain idle connections (the macOS shared
 // transport): no request, no trace stamps, and the done channel still closes.
 func TestTurnSessionPrewarmSkippedWhenKeepAlivesDisabled(t *testing.T) {
+	t.Parallel()
 	var requests atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requests.Add(1)
@@ -338,6 +356,7 @@ func TestTurnSessionPrewarmSkippedWhenKeepAlivesDisabled(t *testing.T) {
 }
 
 func TestTurnSessionPrefixCounters(t *testing.T) {
+	t.Parallel()
 	handler := func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: [DONE]\n\n"))
@@ -373,6 +392,7 @@ func TestTurnSessionPrefixCounters(t *testing.T) {
 }
 
 func TestTurnSessionCloseIdempotentAndCompactUnsupported(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(http.ResponseWriter, *http.Request) {})
 	session := openOptimizedSession(t, provider)
 	if err := session.Close(); err != nil {

@@ -27,6 +27,23 @@ type mockProvider struct {
 	requests []zeroruntime.CompletionRequest
 }
 
+func TestPrePermissionRejectScrubsFileDiffs(t *testing.T) {
+	secret := "sk-proj-abcdefghijklmnopqrstuvwxyz"
+	result := toolResultFromPrePermissionReject(ToolCall{ID: "call", Name: "test"}, tools.Result{
+		Status: tools.StatusError,
+		FileDiffs: []tools.FileDiff{{
+			Path:      filepath.Join(t.TempDir(), "secret.txt"),
+			OldExists: true,
+			NewExists: true,
+			OldText:   "token=" + secret,
+			NewText:   "safe",
+		}},
+	})
+	if len(result.FileDiffs) != 1 || strings.Contains(result.FileDiffs[0].OldText, secret) || !result.Redacted {
+		t.Fatalf("pre-permission FileDiff = %#v, redacted = %t", result.FileDiffs, result.Redacted)
+	}
+}
+
 func TestTypedExecutionOutcomeOverridesLegacySandboxHeuristics(t *testing.T) {
 	engine := sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: t.TempDir(), Policy: sandbox.DefaultPolicy()})
 	call := ToolCall{Name: tools.ExecCommandToolName}
@@ -1853,7 +1870,7 @@ func TestRunAbortsWhenPermissionRequestCanceled(t *testing.T) {
 		},
 	})
 
-	if !errors.Is(err, errPermissionApprovalCanceled) {
+	if !errors.Is(err, ErrPermissionApprovalCanceled) {
 		t.Fatalf("expected permission approval cancel error, got %v", err)
 	}
 	if result.FinalAnswer != "" {
@@ -4096,7 +4113,7 @@ func TestRunDoesNotFlagCleanToolOutput(t *testing.T) {
 // caller's callback AND stamps token counters, and the run completes.
 func TestRunTracingWrapperStampsUsage(t *testing.T) {
 	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{{
-		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 100, CachedInputTokens: 20, OutputTokens: 40}},
+		{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{PromptTokens: 100, CachedInputTokens: 20, CacheWriteTokens: 10, CompletionTokens: 40}},
 		{Type: zeroruntime.StreamEventText, Content: "done"},
 		{Type: zeroruntime.StreamEventDone},
 	}}}
@@ -4134,6 +4151,9 @@ func TestRunTracingWrapperStampsUsage(t *testing.T) {
 	}
 	if got := tr.Counter(trace.CounterCachedInputTokens); got != 20 {
 		t.Fatalf("cached input token counter = %d, want 20", got)
+	}
+	if got := tr.Counter(trace.CounterCacheWriteTokens); got != 10 {
+		t.Fatalf("cache-write token counter = %d, want 10", got)
 	}
 	if got := tr.Counter(trace.CounterOutputTokens); got != 40 {
 		t.Fatalf("output token counter = %d, want 40", got)
@@ -4378,5 +4398,97 @@ func TestPlanModeHonorsBeforeToolVeto(t *testing.T) {
 	}
 	if !strings.Contains(combined, "blocked") && !strings.Contains(combined, "zero.veto") && !strings.Contains(strings.ToLower(combined), "hook") {
 		t.Fatalf("expected tool result to mention the beforeTool veto, got %q", combined)
+	}
+}
+
+// A cancelled permission on either sandbox-retry path must abort the run with a
+// recognisable cancellation, and must not run the escalated retry.
+//
+// BOTH PATHS, because both wrap ErrPermissionApprovalCanceled and each is
+// reached by a different kind of denial: one by an unrestricted platform denial
+// asking for approval, the other by an external-network denial. Surfaces map
+// this sentinel onto their own idea of a cancel — ACP returns stopReason
+// "cancelled" for it — so a path that produced a bare error instead would show
+// the user a crash where they had simply declined.
+func TestCancellingASandboxRetryAbortsWithoutRetrying(t *testing.T) {
+	denial := func(capability execution.CapabilityKind, scope string) tools.Result {
+		return tools.Result{
+			Status: tools.StatusError,
+			ExecutionOutcome: &execution.Outcome{
+				State: execution.StateDenied,
+				Kind:  execution.OutcomeEnforcementDenied,
+				Denial: &execution.Denial{
+					Capability:  execution.Capability{Kind: capability, Scope: scope},
+					Source:      execution.DenialSourcePlatformSandbox,
+					Reason:      "denied by the sandbox",
+					Recoverable: true,
+					NextAction:  execution.DenialNextActionRequestApproval,
+				},
+			},
+		}
+	}
+
+	for _, testCase := range []struct {
+		name   string
+		result tools.Result
+		run    func(context.Context, *tools.Registry, ToolCall, tools.Tool, map[string]any, tools.Result, Options) error
+	}{
+		{
+			name:   "unsandboxed retry",
+			result: denial(execution.CapabilityUnrestricted, "host"),
+			run: func(ctx context.Context, registry *tools.Registry, call ToolCall, tool tools.Tool, args map[string]any, result tools.Result, options Options) error {
+				_, _, _, _, _, _, abortErr := maybeRetryUnsandboxedAfterSandboxRestriction(
+					ctx, registry, call, tool, args, result, PermissionModeAsk, options, nil)
+				return abortErr
+			},
+		},
+		{
+			name:   "network retry",
+			result: denial(execution.CapabilityExternalNetwork, ""),
+			run: func(ctx context.Context, registry *tools.Registry, call ToolCall, tool tools.Tool, args map[string]any, result tools.Result, options Options) error {
+				_, _, _, _, _, abortErr := maybeRetryWithNetworkAfterSandboxDenial(
+					ctx, registry, call, tool, args, result, PermissionModeAsk, options, nil)
+				return abortErr
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			retryTool := &sandboxNamespaceLimitedRetryTool{}
+			registry := tools.NewRegistry()
+			registry.Register(retryTool)
+
+			asked := 0
+			options := Options{
+				Registry:       registry,
+				PermissionMode: PermissionModeAsk,
+				Autonomy:       "medium",
+				Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+					WorkspaceRoot: t.TempDir(),
+					Policy:        sandbox.DefaultPolicy(),
+				}),
+				OnPermissionRequest: func(context.Context, PermissionRequest) (PermissionDecision, error) {
+					asked++
+					return PermissionDecision{Action: PermissionDecisionCancel, Reason: "client cancelled"}, nil
+				},
+			}
+
+			call := ToolCall{ID: "call-1", Name: "bash", Arguments: `{"command":"curl example.com"}`}
+			args := map[string]any{"command": "curl example.com"}
+
+			abortErr := testCase.run(context.Background(), registry, call, retryTool, args, testCase.result, options)
+
+			if asked != 1 {
+				t.Fatalf("permission was requested %d times, want exactly 1", asked)
+			}
+			if !errors.Is(abortErr, ErrPermissionApprovalCanceled) {
+				t.Fatalf("abort error = %v, want it to match ErrPermissionApprovalCanceled", abortErr)
+			}
+			// The escalated retry is the thing the permission was gating. A
+			// cancelled prompt that still ran it would have run the command the
+			// user just declined.
+			if len(retryTool.calls) != 0 {
+				t.Fatalf("the escalated retry ran %d times after a cancel: %+v", len(retryTool.calls), retryTool.calls)
+			}
+		})
 	}
 }

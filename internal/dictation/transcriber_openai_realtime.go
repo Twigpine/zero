@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/providers/providerio"
 	"github.com/coder/websocket"
 )
 
@@ -22,6 +23,10 @@ type OpenAIRealtimeConfig struct {
 	Model  string // default "gpt-4o-transcribe"
 	// BaseURL overrides the wss endpoint (tests point it at a fake server).
 	BaseURL string
+	// writeErrInjector, when set, is consulted before each JSON websocket write.
+	// Used by same-package tests to force controllable write failures that embed
+	// secrets; production callers leave it nil.
+	writeErrInjector func() error
 }
 
 type openAIRealtimeTranscriber struct {
@@ -59,7 +64,15 @@ func (o *openAIRealtimeTranscriber) StreamTranscribe(ctx context.Context, chunks
 		},
 	})
 	if err != nil {
-		return "", fmt.Errorf("connecting to OpenAI Realtime: %w", err)
+		// Preserve the context.Canceled sentinel (it carries no key) so an
+		// Esc-abort during dial still matches the UI's errors.Is check. Key
+		// on ctx.Err() itself rather than unwrapping err: a cancellation can
+		// surface as a plain transport error (e.g. "closed network
+		// connection") rather than context.Canceled directly.
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("connecting to OpenAI Realtime: %s", providerio.Redact(err.Error(), o.cfg.APIKey))
 	}
 	defer conn.CloseNow()
 
@@ -73,24 +86,53 @@ func (o *openAIRealtimeTranscriber) StreamTranscribe(ctx context.Context, chunks
 			},
 		},
 	}
-	if err := writeJSON(ctx, conn, sessionUpdate); err != nil {
-		return "", fmt.Errorf("configuring OpenAI Realtime session: %w", err)
+	if err := o.writeJSON(ctx, conn, sessionUpdate); err != nil {
+		// Same cancellation short-circuit as the dial above: an Esc-abort
+		// while the session update is in flight must stay context.Canceled.
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("configuring OpenAI Realtime session: %s", providerio.Redact(err.Error(), o.cfg.APIKey))
 	}
 
 	writeErrCh := make(chan error, 1)
 	go func() {
-		for chunk := range chunks {
-			appendMsg := map[string]any{
-				"type":  "input_audio_buffer.append",
-				"audio": base64.StdEncoding.EncodeToString(chunk),
-			}
-			if err := writeJSON(ctx, conn, appendMsg); err != nil {
-				writeErrCh <- err
+		// Select on ctx.Done() while waiting for the next chunk so a cancelled
+		// session does not leave this goroutine blocked on an open idle channel.
+		for {
+			select {
+			case <-ctx.Done():
+				writeErrCh <- ctx.Err()
 				return
+			case chunk, ok := <-chunks:
+				if !ok {
+					// Commit the buffered audio to force final transcription.
+					if err := o.writeJSON(ctx, conn, map[string]any{"type": "input_audio_buffer.commit"}); err != nil {
+						writeErrCh <- err
+						// Unblock the reader: without a close, conn.Read stays
+						// parked on a silent peer and the error is never drained
+						// from writeErrCh. CloseNow aborts instead of waiting on
+						// the close handshake, which a silent peer never answers.
+						conn.CloseNow()
+						return
+					}
+					writeErrCh <- nil
+					return
+				}
+				appendMsg := map[string]any{
+					"type":  "input_audio_buffer.append",
+					"audio": base64.StdEncoding.EncodeToString(chunk),
+				}
+				if err := o.writeJSON(ctx, conn, appendMsg); err != nil {
+					writeErrCh <- err
+					// Same unblocking close as the commit path: a server that
+					// goes silent after session setup would otherwise leave the
+					// reader blocked in conn.Read with the error undrained.
+					conn.CloseNow()
+					return
+				}
 			}
 		}
-		// Commit the buffered audio to force final transcription of the utterance.
-		writeErrCh <- writeJSON(ctx, conn, map[string]any{"type": "input_audio_buffer.commit"})
 	}()
 
 	// OpenAI deltas are incremental (append), unlike Deepgram/sherpa's cumulative
@@ -113,7 +155,17 @@ func (o *openAIRealtimeTranscriber) StreamTranscribe(ctx context.Context, chunks
 				}
 			default:
 			}
-			return compose(), fmt.Errorf("OpenAI Realtime stream error: %w", err)
+			// A user abort cancels the streaming context; the UI matches it
+			// with errors.Is(err, context.Canceled), so return the sentinel
+			// itself (it carries no key) instead of a flat redacted string.
+			// Key on ctx.Err() rather than unwrapping err: the writeErrCh
+			// swap above can replace err with a plain transport error (e.g.
+			// "closed network connection") that doesn't itself unwrap to
+			// context.Canceled even though the cancellation is what caused it.
+			if ctx.Err() != nil {
+				return compose(), ctx.Err()
+			}
+			return compose(), fmt.Errorf("OpenAI Realtime stream error: %s", providerio.Redact(err.Error(), o.cfg.APIKey))
 		}
 		if typ != websocket.MessageText {
 			continue
@@ -124,6 +176,12 @@ func (o *openAIRealtimeTranscriber) StreamTranscribe(ctx context.Context, chunks
 			current.WriteString(evt.text)
 			if onPartial != nil {
 				onPartial(compose(), false)
+			}
+			// onPartial may deliver the partial that makes the TUI cancel
+			// (Esc). Observe that before the next Read, which can already
+			// have a racing OpenAI error frame buffered.
+			if ctx.Err() != nil {
+				return compose(), ctx.Err()
 			}
 		case realtimeCompleted:
 			// A completed item replaces the in-progress delta buffer with the
@@ -138,6 +196,9 @@ func (o *openAIRealtimeTranscriber) StreamTranscribe(ctx context.Context, chunks
 			if onPartial != nil {
 				onPartial(compose(), true)
 			}
+			if ctx.Err() != nil {
+				return compose(), ctx.Err()
+			}
 			// Once we've committed the buffer (user stopped) and the server has
 			// returned a completed transcription, the utterance is done.
 			if committed {
@@ -147,7 +208,15 @@ func (o *openAIRealtimeTranscriber) StreamTranscribe(ctx context.Context, chunks
 		case realtimeCommitted:
 			committed = true
 		case realtimeError:
-			return compose(), fmt.Errorf("OpenAI Realtime error: %s", evt.text)
+			// Esc can race an incoming error event: conn.Read may already have
+			// the OpenAI error in hand by the time cancellation lands. Key on
+			// ctx.Err() first, same as every other return point in this loop,
+			// so a cancel that wins the race still surfaces as context.Canceled
+			// instead of a spurious redacted failure alongside it.
+			if ctx.Err() != nil {
+				return compose(), ctx.Err()
+			}
+			return compose(), fmt.Errorf("OpenAI Realtime error: %s", providerio.Redact(evt.text, o.cfg.APIKey))
 		}
 		// The writer signals commit completion out of band; observe it so a
 		// stop with no further audio still flips `committed`.
@@ -155,6 +224,10 @@ func (o *openAIRealtimeTranscriber) StreamTranscribe(ctx context.Context, chunks
 		case werr := <-writeErrCh:
 			if werr == nil {
 				committed = true
+			} else if ctx.Err() != nil {
+				return compose(), ctx.Err()
+			} else {
+				return compose(), fmt.Errorf("OpenAI Realtime stream error: %s", providerio.Redact(werr.Error(), o.cfg.APIKey))
 			}
 		default:
 		}
@@ -199,6 +272,15 @@ func parseRealtimeEvent(data []byte) realtimeEvent {
 		return realtimeEvent{kind: realtimeError, text: msg.Error.Message}
 	}
 	return realtimeEvent{kind: realtimeOther}
+}
+
+func (o *openAIRealtimeTranscriber) writeJSON(ctx context.Context, conn *websocket.Conn, v any) error {
+	if o.cfg.writeErrInjector != nil {
+		if err := o.cfg.writeErrInjector(); err != nil {
+			return err
+		}
+	}
+	return writeJSON(ctx, conn, v)
 }
 
 func writeJSON(ctx context.Context, conn *websocket.Conn, v any) error {

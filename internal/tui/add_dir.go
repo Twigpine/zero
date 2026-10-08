@@ -22,7 +22,7 @@ func (m model) handleAddDirCommand(arg string) model {
 	if err != nil {
 		return m.appendSystemNotice("add-dir: " + err.Error())
 	}
-	return m.appendSystemNotice("write access added: " + root + " (this session only)")
+	return m.showTransientNoticeInline("Write access added: "+root+" (this session only).", transientNoticeSuccess)
 }
 
 // appendSystemNotice appends a system transcript line and returns the updated

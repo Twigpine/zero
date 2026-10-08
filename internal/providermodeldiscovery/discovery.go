@@ -19,20 +19,27 @@ import (
 	"github.com/Gitlawb/zero/internal/redaction"
 )
 
-const anthropicVersion = "2023-06-01"
+const (
+	anthropicVersion             = "2023-06-01"
+	chatGPTModelsProtocolVersion = "0.146.0"
+)
 
 type Model struct {
-	ID               string
-	Description      string
-	ContextWindow    int
-	ToolCall         bool
-	Reasoning        bool
-	InputModalities  []string
-	OutputModalities []string
-	InputCost        float64
-	OutputCost       float64
-	Tags             []string
-	Source           string
+	ID                     string
+	Description            string
+	ContextWindow          int
+	ToolCall               bool
+	Reasoning              bool
+	ReasoningEfforts       []string
+	DefaultReasoningEffort string
+	ServiceTiers           []string
+	DefaultServiceTier     string
+	InputModalities        []string
+	OutputModalities       []string
+	InputCost              float64
+	OutputCost             float64
+	Tags                   []string
+	Source                 string
 }
 
 type Options struct {
@@ -43,6 +50,7 @@ type Options struct {
 	OAuthResolver        providerio.TokenResolver
 	CodexAccountResolver openai.CodexAccountResolver
 	UserAgent            string
+	ClientVersion        string
 }
 
 func DiscoverCatalog(ctx context.Context, provider providercatalog.Descriptor, profile config.ProviderProfile, options Options) ([]Model, error) {
@@ -51,6 +59,7 @@ func DiscoverCatalog(ctx context.Context, provider providercatalog.Descriptor, p
 	// without credentials so the picker stays current before a key is entered.
 	canProbeProvider := modelDiscoveryAllowed(profile) && (!provider.RequiresAuth ||
 		discoveryHasCredential(profile) ||
+		options.OAuthResolver != nil ||
 		publicLiveCatalogProvider(provider, profile))
 	if canProbeProvider {
 		liveModels, liveErr := Discover(ctx, profile, options)
@@ -204,6 +213,18 @@ func discoverOpenAIModels(ctx context.Context, profile config.ProviderProfile, o
 	}
 	var configure func(*http.Request)
 	if providercatalog.NormalizeID(profile.CatalogID) == "chatgpt" {
+		parsed, parseErr := url.Parse(endpoint)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse ChatGPT models endpoint: %w", parseErr)
+		}
+		clientVersion := strings.TrimSpace(options.ClientVersion)
+		if clientVersion == "" {
+			clientVersion = chatGPTModelsProtocolVersion
+		}
+		query := parsed.Query()
+		query.Set("client_version", clientVersion)
+		parsed.RawQuery = query.Encode()
+		endpoint = parsed.String()
 		configure = func(request *http.Request) {
 			account := ""
 			if options.CodexAccountResolver != nil {
@@ -326,24 +347,39 @@ func anthropicModelsEndpoint(baseURL string) (string, error) {
 	return parsed.String(), nil
 }
 
+type modelsResponseItem struct {
+	ID                 string   `json:"id"`
+	Slug               string   `json:"slug"`
+	DisplayName        string   `json:"display_name"`
+	Name               string   `json:"name"`
+	Description        string   `json:"description"`
+	Visibility         string   `json:"visibility"`
+	ContextWindow      int      `json:"context_window"`
+	ContextWindowAlt   int      `json:"contextWindow"`
+	ContextLength      int      `json:"context_length"`
+	MaxContextLength   int      `json:"max_context_length"`
+	Free               bool     `json:"free"`
+	IsFree             bool     `json:"is_free"`
+	ToolCall           bool     `json:"tool_call"`
+	ToolCallCamel      bool     `json:"toolCall"`
+	Tools              bool     `json:"tools"`
+	Reasoning          bool     `json:"reasoning"`
+	ReasoningEfforts   []string `json:"reasoning_efforts"`
+	DefaultReasoning   string   `json:"default_reasoning_level"`
+	SupportedReasoning []struct {
+		Effort string `json:"effort"`
+	} `json:"supported_reasoning_levels"`
+	ServiceTiers []struct {
+		ID string `json:"id"`
+	} `json:"service_tiers"`
+	AdditionalSpeedTiers []string `json:"additional_speed_tiers"`
+	DefaultServiceTier   string   `json:"default_service_tier"`
+	SupportedParameters  []string `json:"supported_parameters"`
+}
+
 type modelsResponse struct {
-	Data []struct {
-		ID                  string   `json:"id"`
-		DisplayName         string   `json:"display_name"`
-		Name                string   `json:"name"`
-		Description         string   `json:"description"`
-		ContextWindow       int      `json:"context_window"`
-		ContextWindowAlt    int      `json:"contextWindow"`
-		ContextLength       int      `json:"context_length"`
-		MaxContextLength    int      `json:"max_context_length"`
-		Free                bool     `json:"free"`
-		IsFree              bool     `json:"is_free"`
-		ToolCall            bool     `json:"tool_call"`
-		ToolCallCamel       bool     `json:"toolCall"`
-		Tools               bool     `json:"tools"`
-		Reasoning           bool     `json:"reasoning"`
-		SupportedParameters []string `json:"supported_parameters"`
-	} `json:"data"`
+	Data   []modelsResponseItem `json:"data"`
+	Models []modelsResponseItem `json:"models"`
 }
 
 func parseModelsResponse(body []byte) ([]Model, error) {
@@ -352,10 +388,19 @@ func parseModelsResponse(body []byte) ([]Model, error) {
 		return nil, fmt.Errorf("decode models response: %w", err)
 	}
 	seen := map[string]bool{}
-	models := make([]Model, 0, len(payload.Data))
-	for _, item := range payload.Data {
-		id := strings.TrimSpace(item.ID)
+	items := payload.Data
+	if len(items) == 0 {
+		items = payload.Models
+	}
+	models := make([]Model, 0, len(items))
+	for _, item := range items {
+		id := firstNonEmptyDiscovery(item.ID, item.Slug)
 		if id == "" || seen[id] {
+			continue
+		}
+		// The ChatGPT catalog includes hidden/internal entries alongside picker
+		// models. Generic OpenAI-compatible responses omit visibility entirely.
+		if visibility := strings.ToLower(strings.TrimSpace(item.Visibility)); visibility != "" && visibility != "list" {
 			continue
 		}
 		seen[id] = true
@@ -381,13 +426,19 @@ func parseModelsResponse(body []byte) ([]Model, error) {
 			discoveryContainsFold(item.SupportedParameters, "reasoning") ||
 			discoveryContainsFold(item.SupportedParameters, "reasoning_effort") ||
 			discoveryContainsFold(item.SupportedParameters, "include_reasoning")
+		efforts := reasoningEfforts(item)
+		serviceTiers := modelServiceTiers(item)
 		models = append(models, Model{
-			ID:            id,
-			Description:   description,
-			ContextWindow: contextWindow,
-			ToolCall:      toolCall,
-			Reasoning:     reasoning,
-			Source:        "live",
+			ID:                     id,
+			Description:            description,
+			ContextWindow:          contextWindow,
+			ToolCall:               toolCall,
+			Reasoning:              reasoning || len(efforts) > 0,
+			ReasoningEfforts:       efforts,
+			DefaultReasoningEffort: strings.TrimSpace(item.DefaultReasoning),
+			ServiceTiers:           serviceTiers,
+			DefaultServiceTier:     normalizeServiceTier(item.DefaultServiceTier),
+			Source:                 "live",
 		})
 	}
 	sort.SliceStable(models, func(i, j int) bool {
@@ -397,6 +448,50 @@ func parseModelsResponse(body []byte) ([]Model, error) {
 		return nil, fmt.Errorf("models endpoint returned no model ids")
 	}
 	return models, nil
+}
+
+func modelServiceTiers(item modelsResponseItem) []string {
+	values := append([]string{}, item.AdditionalSpeedTiers...)
+	for _, tier := range item.ServiceTiers {
+		values = append(values, tier.ID)
+	}
+	seen := map[string]bool{}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = normalizeServiceTier(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
+}
+
+func normalizeServiceTier(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "fast" {
+		return "priority"
+	}
+	return value
+}
+
+func reasoningEfforts(item modelsResponseItem) []string {
+	efforts := append([]string{}, item.ReasoningEfforts...)
+	for _, level := range item.SupportedReasoning {
+		efforts = append(efforts, level.Effort)
+	}
+	seen := map[string]bool{}
+	result := make([]string, 0, len(efforts))
+	for _, effort := range efforts {
+		effort = strings.ToLower(strings.TrimSpace(effort))
+		if effort == "" || seen[effort] {
+			continue
+		}
+		seen[effort] = true
+		result = append(result, effort)
+	}
+	return result
 }
 
 func fetchCatalogModels(ctx context.Context, provider providercatalog.Descriptor, options Options) ([]Model, error) {
@@ -416,17 +511,21 @@ func modelsFromCatalog(models []providermodelcatalog.Model) []Model {
 	result := make([]Model, 0, len(models))
 	for _, model := range models {
 		result = append(result, Model{
-			ID:               model.ID,
-			Description:      model.Description,
-			ContextWindow:    model.ContextWindow,
-			ToolCall:         model.ToolCall,
-			Reasoning:        model.Reasoning,
-			InputModalities:  append([]string{}, model.InputModalities...),
-			OutputModalities: append([]string{}, model.OutputModalities...),
-			InputCost:        model.InputCost,
-			OutputCost:       model.OutputCost,
-			Tags:             append([]string{}, model.Tags...),
-			Source:           model.Source,
+			ID:                     model.ID,
+			Description:            model.Description,
+			ContextWindow:          model.ContextWindow,
+			ToolCall:               model.ToolCall,
+			Reasoning:              model.Reasoning,
+			ReasoningEfforts:       append([]string{}, model.ReasoningEfforts...),
+			DefaultReasoningEffort: model.DefaultReasoningEffort,
+			ServiceTiers:           append([]string{}, model.ServiceTiers...),
+			DefaultServiceTier:     model.DefaultServiceTier,
+			InputModalities:        append([]string{}, model.InputModalities...),
+			OutputModalities:       append([]string{}, model.OutputModalities...),
+			InputCost:              model.InputCost,
+			OutputCost:             model.OutputCost,
+			Tags:                   append([]string{}, model.Tags...),
+			Source:                 model.Source,
 		})
 	}
 	return result
@@ -440,7 +539,9 @@ func mergeLiveModels(provider providercatalog.Descriptor, liveModels []Model, ca
 	hasCatalog := len(byID) > 0
 	// Aggregators publish the live list as the source of truth. Keep live-only
 	// ids even when a remote catalog also loaded, instead of intersecting.
-	preferLive := providermodelcatalog.PublicLiveCatalog(provider.ID)
+	preferLive := provider.Local ||
+		providermodelcatalog.PublicLiveCatalog(provider.ID) ||
+		providercatalog.NormalizeID(provider.ID) == "chatgpt"
 	result := make([]Model, 0, len(liveModels))
 	for _, live := range liveModels {
 		if catalog, ok := byID[live.ID]; ok {
@@ -457,6 +558,21 @@ func mergeLiveModels(provider providercatalog.Descriptor, liveModels []Model, ca
 			}
 			if strings.TrimSpace(catalog.Description) == "" && strings.TrimSpace(live.Description) != "" {
 				catalog.Description = live.Description
+			}
+			if len(live.ReasoningEfforts) > 0 {
+				catalog.ReasoningEfforts = append([]string{}, live.ReasoningEfforts...)
+			}
+			if live.DefaultReasoningEffort != "" {
+				catalog.DefaultReasoningEffort = live.DefaultReasoningEffort
+			}
+			if live.Reasoning || len(live.ReasoningEfforts) > 0 || live.DefaultReasoningEffort != "" {
+				catalog.Reasoning = true
+			}
+			if len(live.ServiceTiers) > 0 {
+				catalog.ServiceTiers = append([]string{}, live.ServiceTiers...)
+			}
+			if live.DefaultServiceTier != "" {
+				catalog.DefaultServiceTier = live.DefaultServiceTier
 			}
 			catalog.Source = firstDiscoverySource(catalog.Source, "live")
 			result = append(result, catalog)
@@ -526,17 +642,21 @@ func liveModelAllowedWithoutCatalog(provider providercatalog.Descriptor, id stri
 
 func catalogModelFromDiscovery(model Model) providermodelcatalog.Model {
 	return providermodelcatalog.Model{
-		ID:               model.ID,
-		Description:      model.Description,
-		ContextWindow:    model.ContextWindow,
-		ToolCall:         model.ToolCall,
-		Reasoning:        model.Reasoning,
-		InputModalities:  append([]string{}, model.InputModalities...),
-		OutputModalities: append([]string{}, model.OutputModalities...),
-		InputCost:        model.InputCost,
-		OutputCost:       model.OutputCost,
-		Tags:             append([]string{}, model.Tags...),
-		Source:           model.Source,
+		ID:                     model.ID,
+		Description:            model.Description,
+		ContextWindow:          model.ContextWindow,
+		ToolCall:               model.ToolCall,
+		Reasoning:              model.Reasoning,
+		ReasoningEfforts:       append([]string{}, model.ReasoningEfforts...),
+		DefaultReasoningEffort: model.DefaultReasoningEffort,
+		ServiceTiers:           append([]string{}, model.ServiceTiers...),
+		DefaultServiceTier:     model.DefaultServiceTier,
+		InputModalities:        append([]string{}, model.InputModalities...),
+		OutputModalities:       append([]string{}, model.OutputModalities...),
+		InputCost:              model.InputCost,
+		OutputCost:             model.OutputCost,
+		Tags:                   append([]string{}, model.Tags...),
+		Source:                 model.Source,
 	}
 }
 

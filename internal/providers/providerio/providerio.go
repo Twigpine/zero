@@ -169,9 +169,52 @@ var sharedHTTPClient = func() *http.Client {
 	// content-stall watchdogs.
 	transport.ResponseHeaderTimeout = 120 * time.Second
 	transport.IdleConnTimeout = 30 * time.Second
+	// Periodically close idle connections to prevent stale HTTP/2
+	// connections from causing PROTOCOL_ERROR on the next request.
+	// OpenRouter (and other HTTP/2 backends) can silently RST or
+	// GOAWAY a connection that has been idle in the pool; the next
+	// request over that connection gets a PROTOCOL_ERROR. Closing
+	// idle connections every 30s forces a fresh dial so the error
+	// window is bounded to ~30s while reuse still benefits healthy
+	// connections. No-op on darwin where DisableKeepAlives already
+	// prevents pooling.
+	if runtime.GOOS != "darwin" {
+		startIdleConnCloser(transport, defaultIdleConnCloseInterval)
+	}
 	transport.DisableKeepAlives = runtime.GOOS == "darwin"
 	return &http.Client{Transport: transport}
 }()
+
+const defaultIdleConnCloseInterval = 30 * time.Second
+
+// startIdleConnCloser launches a background goroutine that periodically closes
+// idle keep-alive connections on transport until the returned stop function is
+// invoked.
+func startIdleConnCloser(transport *http.Transport, interval time.Duration) func() {
+	if interval <= 0 || transport == nil {
+		return func() {}
+	}
+	ticker := time.NewTicker(interval)
+	done := make(chan struct{})
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				transport.CloseIdleConnections()
+			}
+		}
+	}()
+	return func() {
+		select {
+		case <-done:
+		default:
+			close(done)
+		}
+	}
+}
 
 // HTTPClient returns the configured client or the shared, stall-hardened default.
 func HTTPClient(client *http.Client) *http.Client {

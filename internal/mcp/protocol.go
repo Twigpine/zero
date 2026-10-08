@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,12 +18,49 @@ import (
 const maxMessageBytes = 64 * 1024 * 1024
 
 type rpcMessage struct {
-	JSONRPC string          `json:"jsonrpc,omitempty"`
-	ID      any             `json:"id,omitempty"`
-	Method  string          `json:"method,omitempty"`
-	Params  json.RawMessage `json:"params,omitempty"`
-	Result  json.RawMessage `json:"result,omitempty"`
-	Error   *rpcError       `json:"error,omitempty"`
+	JSONRPC       string          `json:"jsonrpc,omitempty"`
+	ID            any             `json:"id,omitempty"`
+	Method        string          `json:"method,omitempty"`
+	Params        json.RawMessage `json:"params,omitempty"`
+	Result        json.RawMessage `json:"result,omitempty"`
+	Error         *rpcError       `json:"error,omitempty"`
+	methodPresent bool            `json:"-"`
+}
+
+func (m rpcMessage) isRequestOrNotification() bool {
+	return m.methodPresent || m.Method != ""
+}
+
+func (m *rpcMessage) UnmarshalJSON(data []byte) error {
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var wire struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      any             `json:"id"`
+		Params  json.RawMessage `json:"params"`
+		Result  json.RawMessage `json:"result"`
+		Error   *rpcError       `json:"error"`
+	}
+	if err := decoder.Decode(&wire); err != nil {
+		return err
+	}
+	m.JSONRPC = wire.JSONRPC
+	m.ID = wire.ID
+	m.Params = wire.Params
+	m.Result = wire.Result
+	m.Error = wire.Error
+	if raw, ok := probe["method"]; ok {
+		m.methodPresent = true
+		var method string
+		if err := json.Unmarshal(raw, &method); err == nil {
+			m.Method = method
+		}
+	}
+	return nil
 }
 
 type rpcError struct {

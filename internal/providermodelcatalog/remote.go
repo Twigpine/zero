@@ -184,6 +184,10 @@ func parseOpenAIStyleModelList(body []byte) ([]remoteModel, error) {
 
 func ModelsDevProviderID(provider providercatalog.Descriptor) string {
 	switch strings.TrimSpace(provider.ID) {
+	case "chatgpt":
+		// ChatGPT authenticates against the Codex backend, while its public
+		// model metadata is published under the OpenAI provider on models.dev.
+		return "openai"
 	case "dashscope":
 		return "alibaba"
 	case "github":
@@ -230,6 +234,11 @@ type remoteModel struct {
 	Tools              bool   `json:"tools"`
 	// ReasoningRaw accepts both a boolean (models.dev) and OpenRouter's object form.
 	ReasoningRaw        json.RawMessage    `json:"reasoning"`
+	ReasoningEfforts    []string           `json:"reasoning_efforts"`
+	DefaultReasoning    string             `json:"default_reasoning_effort"`
+	ServiceTiers        []string           `json:"service_tiers"`
+	AdditionalSpeed     []string           `json:"additional_speed_tiers"`
+	DefaultServiceTier  string             `json:"default_service_tier"`
 	Free                bool               `json:"free"`
 	IsFree              bool               `json:"is_free"`
 	InputCost           float64            `json:"input_cost"`
@@ -309,6 +318,8 @@ func (model remoteModel) toModel(key string, source string) Model {
 		containsFold(model.SupportedParameters, "reasoning") ||
 		containsFold(model.SupportedParameters, "reasoning_effort") ||
 		containsFold(model.SupportedParameters, "include_reasoning")
+	reasoningEfforts := model.supportedReasoningEfforts()
+	serviceTiers := normalizedServiceTiers(model.ServiceTiers, model.AdditionalSpeed)
 
 	// Prefer the short display name for aggregator catalogs (OpenRouter's
 	// description field is multi-sentence marketing copy). models.dev and
@@ -319,18 +330,54 @@ func (model remoteModel) toModel(key string, source string) Model {
 	}
 
 	return Model{
-		ID:               strings.TrimSpace(id),
-		Description:      description,
-		ContextWindow:    contextWindow,
-		ToolCall:         toolCall,
-		Reasoning:        reasoning,
-		InputModalities:  inputModalities,
-		OutputModalities: outputModalities,
-		InputCost:        inputCost,
-		OutputCost:       outputCost,
-		Tags:             cleanStrings(model.Tags),
-		Source:           source,
+		ID:                     strings.TrimSpace(id),
+		Description:            description,
+		ContextWindow:          contextWindow,
+		ToolCall:               toolCall,
+		Reasoning:              reasoning,
+		ReasoningEfforts:       reasoningEfforts,
+		DefaultReasoningEffort: strings.TrimSpace(model.DefaultReasoning),
+		ServiceTiers:           serviceTiers,
+		DefaultServiceTier:     normalizeServiceTier(model.DefaultServiceTier),
+		InputModalities:        inputModalities,
+		OutputModalities:       outputModalities,
+		InputCost:              inputCost,
+		OutputCost:             outputCost,
+		Tags:                   cleanStrings(model.Tags),
+		Source:                 source,
 	}
+}
+
+func normalizedServiceTiers(tiers []string, legacy []string) []string {
+	values := append(append([]string{}, tiers...), legacy...)
+	seen := map[string]bool{}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = normalizeServiceTier(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
+}
+
+func normalizeServiceTier(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "fast" {
+		return "priority"
+	}
+	return value
+}
+
+func (model remoteModel) supportedReasoningEfforts() []string {
+	efforts := append([]string{}, model.ReasoningEfforts...)
+	var info remoteReasoningInfo
+	if err := json.Unmarshal(bytes.TrimSpace(model.ReasoningRaw), &info); err == nil {
+		efforts = append(efforts, info.Supported...)
+	}
+	return cleanStrings(efforts)
 }
 
 func (model remoteModel) supportsReasoning() bool {

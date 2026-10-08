@@ -2,7 +2,9 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -14,6 +16,60 @@ func TestUseAltScreenForInteractiveChat(t *testing.T) {
 	if !useAltScreen(Options{Setup: SetupOptions{Visible: true}}) {
 		t.Fatal("setup takeover should also use the alternate screen")
 	}
+}
+
+func TestTerminalPetFrameCache(t *testing.T) {
+	configRoot := filepath.Join(t.TempDir(), "config-root")
+	cacheRoot := filepath.Join(t.TempDir(), "cache-root")
+	absConfig := filepath.Join(t.TempDir(), "custom", "config.json")
+	configDir := func() (string, error) { return configRoot, nil }
+	cacheDir := func() (string, error) { return cacheRoot, nil }
+
+	tests := []struct {
+		name    string
+		options Options
+		want    string
+	}{
+		{name: "absolute config", options: Options{UserConfigPath: absConfig}, want: filepath.Join(filepath.Dir(absConfig), "pets", "frame-cache")},
+		{name: "relative config falls back", options: Options{UserConfigPath: "config.json"}, want: filepath.Join(configRoot, "zero", "pets", "frame-cache")},
+		{name: "whitespace config falls back", options: Options{UserConfigPath: "   "}, want: filepath.Join(configRoot, "zero", "pets", "frame-cache")},
+		{name: "empty config falls back", options: Options{}, want: filepath.Join(configRoot, "zero", "pets", "frame-cache")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := terminalPetFrameCacheWith(test.options, configDir, cacheDir)
+			if canonicalTestPath(t, got) != canonicalTestPath(t, test.want) {
+				t.Fatalf("terminalPetFrameCacheWith() = %q, want %q", got, test.want)
+			}
+		})
+	}
+
+	unavailable := func() (string, error) { return "", errors.New("unavailable") }
+	blank := func() (string, error) { return "", nil }
+	if got, want := terminalPetFrameCacheWith(Options{}, unavailable, cacheDir), filepath.Join(cacheRoot, "zero", "pets", "frame-cache"); canonicalTestPath(t, got) != canonicalTestPath(t, want) {
+		t.Fatalf("cache fallback = %q, want %q", got, want)
+	}
+	if got, want := terminalPetFrameCacheWith(Options{}, blank, cacheDir), filepath.Join(cacheRoot, "zero", "pets", "frame-cache"); canonicalTestPath(t, got) != canonicalTestPath(t, want) {
+		t.Fatalf("blank config root fallback = %q, want %q", got, want)
+	}
+	if got := terminalPetFrameCacheWith(Options{}, unavailable, unavailable); got != "" {
+		t.Fatalf("unavailable roots returned %q, want empty", got)
+	}
+	if got := terminalPetFrameCacheWith(Options{}, unavailable, blank); got != "" {
+		t.Fatalf("blank cache root returned %q, want empty", got)
+	}
+}
+
+func canonicalTestPath(t *testing.T, value string) string {
+	t.Helper()
+	abs, err := filepath.Abs(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	return filepath.Clean(abs)
 }
 
 // TestRunRejectsNonTTYStdin pins that the interactive shell fails fast with a

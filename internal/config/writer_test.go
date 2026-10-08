@@ -151,6 +151,32 @@ func TestSetActiveProviderTightensExistingConfigFilePermissions(t *testing.T) {
 	}
 }
 
+func TestSetActiveProviderModelPersistsSelectionTogether(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	writeConfigFixture(t, path, FileConfig{
+		ActiveProvider: "openai",
+		Providers: []ProviderProfile{
+			{Name: "openai", ProviderKind: ProviderKindOpenAI, Model: "gpt-4.1"},
+			{Name: "Anthropic", ProviderKind: ProviderKindAnthropic, Model: "old-model"},
+		},
+	}, 0o600)
+
+	cfg, err := SetActiveProviderModel(path, " anthropic ", " claude-sonnet-4.5 ")
+	if err != nil {
+		t.Fatalf("SetActiveProviderModel() error = %v", err)
+	}
+	if cfg.ActiveProvider != "Anthropic" || cfg.Providers[1].Model != "claude-sonnet-4.5" {
+		t.Fatalf("returned selection = active %q model %q", cfg.ActiveProvider, cfg.Providers[1].Model)
+	}
+	persisted := readConfigFixture(t, path)
+	if persisted.ActiveProvider != "Anthropic" || persisted.Providers[1].Model != "claude-sonnet-4.5" {
+		t.Fatalf("persisted selection = active %q model %q", persisted.ActiveProvider, persisted.Providers[1].Model)
+	}
+	if persisted.Providers[0].Model != "gpt-4.1" {
+		t.Fatalf("unrelated provider changed: %#v", persisted.Providers[0])
+	}
+}
+
 func TestSetProviderModelUpdatesConfiguredProvider(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "zero.json")
 	writeConfigFixture(t, path, FileConfig{
@@ -366,6 +392,37 @@ func TestSetThemePersistsUserPreference(t *testing.T) {
 	}
 	if cfg.Preferences.Theme != "" {
 		t.Fatalf("SetTheme(\"\") should clear the theme, got %q", cfg.Preferences.Theme)
+	}
+}
+
+func TestSetThemePreservesUnknownTopLevelFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "zero.json")
+	if err := os.WriteFile(path, []byte(`{
+  "preferences": {"theme": "default"},
+  "futureSetting": {"a": 1}
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := SetTheme(path, "dracula"); err != nil {
+		t.Fatalf("SetTheme() error = %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted map[string]json.RawMessage
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	var futureSetting struct {
+		A int `json:"a"`
+	}
+	if err := json.Unmarshal(persisted["futureSetting"], &futureSetting); err != nil {
+		t.Fatalf("unknown field was not preserved: %v\nconfig: %s", err, data)
+	}
+	if futureSetting.A != 1 {
+		t.Fatalf("futureSetting = %s, want {\"a\":1}", persisted["futureSetting"])
 	}
 }
 

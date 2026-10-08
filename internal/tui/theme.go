@@ -1,20 +1,25 @@
 package tui
 
 import (
+	"fmt"
 	"image/color"
+	"strconv"
 
 	"charm.land/lipgloss/v2"
 )
 
-// tuiTheme is the resolved terminal palette Zero renders with. It is produced by
-// buildTheme from a palette, so the same renderers serve both the dark default
-// and the light variant; the active theme lives in the package var zeroTheme and
-// may be swapped at startup (background detection / ZERO_THEME / --theme) or live
-// via /theme. Colors are truecolor hex; lipgloss downsamples on limited displays
-// and renders plain text when there is no TTY (tests). Every renderer consumes
-// these named styles — no hex literal may appear outside theme_palettes.go (the
-// palette tables + theme registry).
+// tuiTheme is the resolved terminal palette Zero renders with. The default system
+// theme keeps the terminal's foreground and background intact; named palettes only
+// style local UI surfaces. The active theme lives in zeroTheme and changes only
+// after an explicit /theme selection. Every renderer consumes these named styles —
+// no hex literal may appear outside theme_palettes.go (the palette tables + theme
+// registry).
 type tuiTheme struct {
+	// codeTheme supplies lexical colors for code views and diff bodies. It is nil
+	// when the active palette has no matching code palette, in which case the
+	// renderer uses the existing semantic token colors below.
+	codeTheme *codeSyntaxTheme
+
 	// Base tokens.
 	ink        lipgloss.Style // primary text
 	muted      lipgloss.Style // secondary text, assistant interim prose
@@ -128,7 +133,9 @@ type palette struct {
 	cardPerm  string // permission card border (amber mixed into line)
 }
 
-// buildTheme resolves a palette into the styles every renderer uses.
+// buildTheme resolves a named palette into the styles every renderer uses. Palette
+// backgrounds are intentionally limited to local cards and diff rows; View never
+// paints the full terminal canvas.
 func buildTheme(p palette) tuiTheme {
 	col := func(s string) color.Color { return lipgloss.Color(s) }
 	fg := func(s string) lipgloss.Style { return lipgloss.NewStyle().Foreground(col(s)) }
@@ -204,10 +211,243 @@ func buildTheme(p palette) tuiTheme {
 	}
 }
 
-// zeroTheme is the active palette every renderer reads. It defaults to dark and is
-// reassigned by theme selection at startup and by /theme. All references are
-// .field accesses evaluated at render time, so reassigning this var repaints every
-// subsequent render.
+// paletteForTerminal keeps a palette readable without changing the terminal's
+// canvas. A light palette on a dark terminal (or the reverse) mirrors its colors,
+// preserving the palette's relationships while switching it to the terminal's
+// contrast direction. This lets every listed theme remain usable with transparent
+// terminals and wallpapers.
+func paletteForTerminal(p palette, paletteDark, terminalDark bool) palette {
+	if paletteDark == terminalDark {
+		return p
+	}
+	return invertedPalette(p)
+}
+
+func invertedPalette(p palette) palette {
+	p.ink = invertPaletteColor(p.ink)
+	p.muted = invertPaletteColor(p.muted)
+	p.faint = invertPaletteColor(p.faint)
+	p.faintest = invertPaletteColor(p.faintest)
+	p.accent = invertPaletteColor(p.accent)
+	p.green = invertPaletteColor(p.green)
+	p.red = invertPaletteColor(p.red)
+	p.amber = invertPaletteColor(p.amber)
+	p.blue = invertPaletteColor(p.blue)
+	p.gitAdd = invertPaletteColor(p.gitAdd)
+	p.gitDel = invertPaletteColor(p.gitDel)
+	p.line = invertPaletteColor(p.line)
+	p.line2 = invertPaletteColor(p.line2)
+	p.panel = invertPaletteColor(p.panel)
+	p.promptBg = invertPaletteColor(p.promptBg)
+	p.permBg = invertPaletteColor(p.permBg)
+	p.addBg = invertPaletteColor(p.addBg)
+	p.delBg = invertPaletteColor(p.delBg)
+	p.addBgWord = invertPaletteColor(p.addBgWord)
+	p.delBgWord = invertPaletteColor(p.delBgWord)
+	p.selBg = invertPaletteColor(p.selBg)
+	p.addInk = invertPaletteColor(p.addInk)
+	p.delInk = invertPaletteColor(p.delInk)
+	p.onAccent = invertPaletteColor(p.onAccent)
+	p.cardRun = invertPaletteColor(p.cardRun)
+	p.cardErr = invertPaletteColor(p.cardErr)
+	p.cardPerm = invertPaletteColor(p.cardPerm)
+	return p
+}
+
+func invertPaletteColor(value string) string {
+	if len(value) != 7 || value[0] != '#' {
+		return value
+	}
+	rgb, err := strconv.ParseUint(value[1:], 16, 32)
+	if err != nil {
+		return value
+	}
+	r := float64((rgb>>16)&0xff) / 255
+	g := float64((rgb>>8)&0xff) / 255
+	b := float64(rgb&0xff) / 255
+	h, s, l := rgbToHSL(r, g, b)
+	r, g, b = hslToRGB(h, s, 1-l)
+	return fmt.Sprintf("#%02x%02x%02x", colorChannel(r), colorChannel(g), colorChannel(b))
+}
+
+func rgbToHSL(r, g, b float64) (h, s, l float64) {
+	max, min := r, r
+	for _, component := range []float64{g, b} {
+		if component > max {
+			max = component
+		}
+		if component < min {
+			min = component
+		}
+	}
+	l = (max + min) / 2
+	delta := max - min
+	if delta == 0 {
+		return 0, 0, l
+	}
+	if l > 0.5 {
+		s = delta / (2 - max - min)
+	} else {
+		s = delta / (max + min)
+	}
+	switch max {
+	case r:
+		h = (g - b) / delta
+		if g < b {
+			h += 6
+		}
+	case g:
+		h = (b-r)/delta + 2
+	default:
+		h = (r-g)/delta + 4
+	}
+	return h / 6, s, l
+}
+
+func hslToRGB(h, s, l float64) (r, g, b float64) {
+	if s == 0 {
+		return l, l, l
+	}
+	q := l * (1 + s)
+	if l >= 0.5 {
+		q = l + s - l*s
+	}
+	p := 2*l - q
+	return hueToRGB(p, q, h+1.0/3), hueToRGB(p, q, h), hueToRGB(p, q, h-1.0/3)
+}
+
+func hueToRGB(p, q, t float64) float64 {
+	if t < 0 {
+		t++
+	}
+	if t > 1 {
+		t--
+	}
+	switch {
+	case t < 1.0/6:
+		return p + (q-p)*6*t
+	case t < 0.5:
+		return q
+	case t < 2.0/3:
+		return p + (q-p)*(2.0/3-t)*6
+	default:
+		return p
+	}
+}
+
+func colorChannel(value float64) int {
+	if value <= 0 {
+		return 0
+	}
+	if value >= 1 {
+		return 255
+	}
+	return int(value*255 + 0.5)
+}
+
+// buildSystemTheme is the dark-terminal default for package-level render helpers
+// and tests. The running TUI resolves the matching contrast direction through
+// buildSystemThemeForTerminal.
+func buildSystemTheme() tuiTheme {
+	return buildSystemThemeForTerminal(true)
+}
+
+// buildSystemThemeForTerminal preserves the terminal canvas and its foreground
+// color. It uses ANSI role colors for semantic cues and confines fixed local
+// surfaces to selected and diff rows, so those states remain visible even in
+// terminals where reverse-video is disabled or visually indistinguishable.
+func buildSystemThemeForTerminal(terminalDark bool) tuiTheme {
+	base := lipgloss.NewStyle()
+	accentColor := lipgloss.Color("6")
+	greenColor := lipgloss.Color("2")
+	redColor := lipgloss.Color("1")
+	amberColor := lipgloss.Color("3")
+	blueColor := lipgloss.Color("4")
+	// Local surfaces use quiet truecolor tints. They do not alter the terminal
+	// canvas, but remain legible beside syntax colors on terminals that support
+	// them. The dark diff values are intentionally close to the canvas.
+	surfaces := darkSystemSurfaces
+	if !terminalDark {
+		surfaces = lightSystemSurfaces
+	}
+	selectionBg := lipgloss.Color(surfaces.selection)
+	addBg := lipgloss.Color(surfaces.add)
+	delBg := lipgloss.Color(surfaces.del)
+	addBgWord := lipgloss.Color(surfaces.addWord)
+	delBgWord := lipgloss.Color(surfaces.delWord)
+	noColor := lipgloss.NoColor{}
+	accent := lipgloss.NewStyle().Foreground(accentColor).Bold(true)
+	green := lipgloss.NewStyle().Foreground(greenColor)
+	red := lipgloss.NewStyle().Foreground(redColor)
+	amber := lipgloss.NewStyle().Foreground(amberColor)
+	blue := lipgloss.NewStyle().Foreground(blueColor)
+	return tuiTheme{
+		ink:        base,
+		muted:      base.Faint(true),
+		faint:      base.Faint(true),
+		faintest:   base.Faint(true),
+		accent:     accent,
+		green:      green,
+		red:        red,
+		amber:      amber,
+		blue:       blue,
+		gitAdd:     green,
+		gitDel:     red,
+		line:       base.Faint(true),
+		lineStrong: base.Faint(true),
+		selection:  base.Background(selectionBg),
+		hover:      base.Underline(true),
+
+		badge: base.Foreground(accentColor).Bold(true),
+
+		userPrompt: base.Foreground(accentColor).Bold(true),
+		sayText:    base.Faint(true),
+		toolName:   base.Bold(true),
+		toolTarget: base,
+		toolArg:    base.Faint(true),
+		cardRun:    accent,
+		cardErr:    red,
+		bashPrompt: accent,
+		grepLoc:    blue,
+
+		diffAdd:     green,
+		diffDel:     red,
+		diffMeta:    base.Faint(true),
+		addLineWord: green.Bold(true).Underline(true).Background(addBgWord),
+		delLineWord: red.Bold(true).Underline(true).Background(delBgWord),
+		addLine:     base.Background(addBg),
+		delLine:     base.Background(delBg),
+		addLineNum:  base.Faint(true).Background(addBg),
+		delLineNum:  base.Faint(true).Background(delBg),
+		addSign:     green.Background(addBg),
+		delSign:     red.Background(delBg),
+		delText:     red,
+
+		permBadge:  amber.Bold(true),
+		permBg:     base,
+		permBorder: amber,
+
+		panel:           base,
+		userPromptPanel: base,
+
+		modeAuto:   green.Bold(true),
+		modeAsk:    amber,
+		modeUnsafe: red.Bold(true),
+		modePlan:   blue.Bold(true),
+
+		accentColor: accentColor,
+		inkColor:    noColor,
+		bgPanel:     noColor,
+		bgPrompt:    noColor,
+		bgSel:       selectionBg,
+		bgPerm:      noColor,
+	}
+}
+
+// zeroTheme is the active palette every renderer reads. Run applies the terminal-
+// native system default before it creates the interactive program; the dark palette
+// here keeps package-level render helpers deterministic before a model has started
+// (including in unit tests that construct more than one model).
 var zeroTheme = buildTheme(darkPalette)
 
 // onPanel returns a copy of style that paints on the panel surface. lipgloss

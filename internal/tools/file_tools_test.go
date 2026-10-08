@@ -26,8 +26,8 @@ func TestReadFileToolReadsLineRanges(t *testing.T) {
 	}
 	for _, want := range []string{
 		"File: notes.txt (lines 2-3 of 4)",
-		"2 | beta",
-		"3 | gamma",
+		"2→beta",
+		"3→gamma",
 	} {
 		if !strings.Contains(result.Output, want) {
 			t.Fatalf("expected output to contain %q, got %q", want, result.Output)
@@ -54,7 +54,7 @@ func TestReadFileToolReadsCanonicalLineRange(t *testing.T) {
 	if result.Truncated {
 		t.Fatalf("canonical limit defines the requested range and must not mark it truncated: %#v", result.Meta)
 	}
-	if !strings.Contains(result.Output, "2 | beta") || !strings.Contains(result.Output, "3 | gamma") {
+	if !strings.Contains(result.Output, "2→beta") || !strings.Contains(result.Output, "3→gamma") {
 		t.Fatalf("canonical range returned the wrong lines: %q", result.Output)
 	}
 	if strings.Contains(result.Output, "alpha") || strings.Contains(result.Output, "delta") {
@@ -94,7 +94,7 @@ func TestReadFileToolMixedLegacyRangesPreferLines(t *testing.T) {
 	if result.Status != StatusOK {
 		t.Fatalf("mixed legacy range should recover, got %s: %s", result.Status, result.Output)
 	}
-	if !strings.Contains(result.Output, "2 | beta") || !strings.Contains(result.Output, "3 | gamma") {
+	if !strings.Contains(result.Output, "2→beta") || !strings.Contains(result.Output, "3→gamma") {
 		t.Fatalf("mixed legacy range did not prefer lines: %q", result.Output)
 	}
 }
@@ -110,7 +110,7 @@ func TestReadFileToolCombinesLegacyStartWithCanonicalLimit(t *testing.T) {
 	if result.Status != StatusOK || result.Truncated {
 		t.Fatalf("mixed compatible range should be exact, got status=%s truncated=%v: %s", result.Status, result.Truncated, result.Output)
 	}
-	if !strings.Contains(result.Output, "2 | beta") || !strings.Contains(result.Output, "3 | gamma") {
+	if !strings.Contains(result.Output, "2→beta") || !strings.Contains(result.Output, "3→gamma") {
 		t.Fatalf("mixed compatible range returned the wrong lines: %q", result.Output)
 	}
 	if strings.Contains(result.Output, "alpha") || strings.Contains(result.Output, "delta") {
@@ -955,7 +955,7 @@ func TestReadFileToolRecoversBackwardsRange(t *testing.T) {
 	for _, want := range []string{
 		"end_line 2 was before start_line 3", // the note
 		"only line 3 was read",
-		"3 | gamma",
+		"3→gamma",
 	} {
 		if !strings.Contains(result.Output, want) {
 			t.Fatalf("expected %q in output, got %q", want, result.Output)
@@ -984,7 +984,7 @@ func TestReadFileToolValidRangeUnchangedByRecovery(t *testing.T) {
 	// Byte-for-byte: header, blank separator, the exact selected lines, and no
 	// recovery note or trailing content. An altered header/separator or a stray
 	// out-of-range line would fail this where a substring check would not.
-	const want = "File: notes.txt (lines 2-4 of 5)\n\n2 | beta\n3 | gamma\n4 | delta"
+	const want = "File: notes.txt (lines 2-4 of 5)\n\n2→beta\n3→gamma\n4→delta"
 	if result.Output != want {
 		t.Fatalf("valid-range output changed by the recovery path:\n got: %q\nwant: %q", result.Output, want)
 	}

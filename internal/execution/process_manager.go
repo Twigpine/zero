@@ -224,6 +224,49 @@ func (manager *ProcessManager) Continue(ctx context.Context, input ProcessContin
 	return result, nil
 }
 
+// WriteInput writes bytes to a retained interactive process's stdin without
+// collecting output. Unlike Continue it never drains the pending output
+// buffer, so a concurrent write_stdin poll still sees everything the process
+// emitted; callers that only need the rolling tail use Snapshot instead.
+func (manager *ProcessManager) WriteInput(id int, data []byte) error {
+	process, ok := manager.get(id)
+	if !ok {
+		return ErrProcessNotFound
+	}
+	process.touch()
+	if len(data) == 0 {
+		return nil
+	}
+	if !process.tty || process.stdin == nil {
+		return ErrProcessStdinDisabled
+	}
+	if _, err := process.stdin.Write(data); err != nil && !process.doneClosed() {
+		return err
+	}
+	return nil
+}
+
+// ResizeInput updates the PTY window size of a retained interactive process
+// so an attached terminal can fill its viewport. Non-positive dimensions are
+// a no-op; platforms without PTY support report the transport's error.
+func (manager *ProcessManager) ResizeInput(id int, cols, rows int) error {
+	if cols <= 0 || rows <= 0 {
+		return nil
+	}
+	process, ok := manager.get(id)
+	if !ok {
+		return ErrProcessNotFound
+	}
+	process.touch()
+	if !process.tty || process.stdin == nil {
+		return ErrProcessStdinDisabled
+	}
+	if err := resizePTY(process.stdin, cols, rows); err != nil && !process.doneClosed() {
+		return err
+	}
+	return nil
+}
+
 func clampInitialProcessWait(wait time.Duration) time.Duration {
 	return min(wait, maxInteractiveYield)
 }

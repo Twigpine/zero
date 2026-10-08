@@ -120,32 +120,6 @@ func (m model) sidebarPlanSelectables(width int) []planStepHit {
 	return hits
 }
 
-// planStepAtMouse maps a left-click in the context sidebar to a plan step index,
-// mirroring sidebarLineAtMouse's column/x gate.
-func (m model) planStepAtMouse(msg tea.MouseMsg) (int, bool) {
-	if !m.sidebarActive() {
-		return 0, false
-	}
-	if m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil || m.suggestionsActive() {
-		return 0, false
-	}
-	sidebarW := sidebarWidth(m.width)
-	if sidebarW <= 0 {
-		return 0, false
-	}
-	x0 := m.chatColumnWidth() + 3 // " │ " divider between the columns
-	x, y := mouseX(msg), mouseY(msg)
-	if x < x0 || x >= x0+sidebarW {
-		return 0, false
-	}
-	for _, hit := range m.sidebarPlanSelectables(sidebarW) {
-		if hit.lineOffset == y {
-			return hit.stepIndex, true
-		}
-	}
-	return 0, false
-}
-
 // planStepDetailRowID is the stable transcript id for the single plan-step
 // detail card, so re-clicking toggles it instead of stacking duplicates.
 const planStepDetailRowID = "plan/step-detail"

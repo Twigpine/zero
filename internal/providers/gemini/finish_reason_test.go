@@ -12,6 +12,7 @@ import (
 // MAX_TOKENS to length, and every other non-STOP reason surfaces its raw value
 // (M3) so the turn is not mistaken for a clean completion.
 func TestMapFinishReasonNonNormal(t *testing.T) {
+	t.Parallel()
 	for _, normal := range []string{"", "STOP", "FINISH_REASON_UNSPECIFIED"} {
 		if got := mapFinishReason(normal); got != "" {
 			t.Errorf("%q should be a normal stop (empty), got %q", normal, got)
@@ -35,6 +36,7 @@ func TestMapFinishReasonNonNormal(t *testing.T) {
 // A candidate finishReason of MAX_TOKENS means the response was truncated at the
 // output cap. The provider must surface it on the done event.
 func TestStreamCompletionSurfacesMaxTokensFinishReason(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"cut"}]},"finishReason":"MAX_TOKENS"}]}`)
 	})
@@ -58,6 +60,7 @@ func TestStreamCompletionSurfacesMaxTokensFinishReason(t *testing.T) {
 
 // A SAFETY finishReason maps to the runtime's content-filter reason.
 func TestStreamCompletionSurfacesSafetyFinishReason(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"SAFETY"}]}`)
 	})
@@ -81,6 +84,7 @@ func TestStreamCompletionSurfacesSafetyFinishReason(t *testing.T) {
 // M3 maps it to content_filter. This exercises that fix through the full
 // SSE → done-event wiring, not just mapFinishReason in isolation.
 func TestStreamCompletionSurfacesRecitationFinishReason(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"RECITATION"}]}`)
 	})
@@ -102,6 +106,7 @@ func TestStreamCompletionSurfacesRecitationFinishReason(t *testing.T) {
 
 // A normal STOP finishReason must leave the done event's FinishReason empty.
 func TestStreamCompletionNormalFinishReasonHasNoReason(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`)
 	})
@@ -125,6 +130,7 @@ func TestStreamCompletionNormalFinishReasonHasNoReason(t *testing.T) {
 // signal a dropped tool call (once) so the agent can ask the model to retry,
 // rather than silently skipping it.
 func TestStreamCompletionEmitsDroppedOnNamelessFunctionCallPart(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"","args":{"a":1}}}]}}]}`)
 	})
@@ -149,6 +155,7 @@ func TestStreamCompletionEmitsDroppedOnNamelessFunctionCallPart(t *testing.T) {
 
 // A nameless top-level functionCall must also be signalled as dropped.
 func TestStreamCompletionEmitsDroppedOnNamelessTopLevelFunctionCall(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"functionCalls":[{"name":"","args":{"a":1}}]}`)
 	})
@@ -173,6 +180,7 @@ func TestStreamCompletionEmitsDroppedOnNamelessTopLevelFunctionCall(t *testing.T
 
 // A well-formed functionCall must NOT emit a dropped signal.
 func TestStreamCompletionDoesNotDropValidFunctionCall(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"read_file","args":{"path":"x"}}}]}}]}`)
 	})

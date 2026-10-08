@@ -105,7 +105,17 @@ func TestLoadProviderCommandTimeout(t *testing.T) {
 //
 // This is a hang-breaker, not a tuned margin. Nothing in a healthy run waits on
 // it, since both tests return about one WaitDelay after the fixture exits.
-const providerCommandTestBudget = 60 * time.Second
+const (
+	providerCommandTestBudget        = 90 * time.Second
+	providerCommandReadyWaitAttempts = 45
+)
+
+func TestProviderCommandBudgetLeavesCleanupMargin(t *testing.T) {
+	readyWaitCeiling := time.Duration(providerCommandReadyWaitAttempts) * time.Second
+	if providerCommandTestBudget < 2*readyWaitCeiling {
+		t.Fatalf("provider command test budget %s leaves less than one readiness window for cleanup after %s", providerCommandTestBudget, readyWaitCeiling)
+	}
+}
 
 // backgroundChildLifetime must exceed providerCommandTestBudget so that a child
 // dying of old age is unobservable: any run where runProviderCommand has not
@@ -341,15 +351,15 @@ func writeCommand(t *testing.T, script commandScript) string {
 			// assertion fail is far more diagnosable than blocking until the
 			// timeout fires and reporting an unrelated error. Each iteration is
 			// about a second, since `ping -n 2` sleeps between its two echoes,
-			// so the ceiling is roughly 15s: far longer than any cold PowerShell
-			// start seen on a runner, and far shorter than
-			// providerCommandTestBudget, so giving up surfaces a legible
+			// so the ceiling is roughly 45s: enough for a heavily loaded Windows
+			// runner while leaving the other half of providerCommandTestBudget for
+			// process exit, PID-file verification, and cleanup. Giving up surfaces a legible
 			// PID-file failure rather than a timeout that hides the real cause.
 			lines = append(lines,
 				":zeroWaitReady",
 				"if exist \""+readyFile+"\" goto zeroReady",
 				"set /a ZERO_READY_TRIES+=1",
-				"if %ZERO_READY_TRIES% GEQ 15 goto zeroReady",
+				"if %ZERO_READY_TRIES% GEQ "+itoa(providerCommandReadyWaitAttempts)+" goto zeroReady",
 				"ping -n 2 127.0.0.1 >nul",
 				"goto zeroWaitReady",
 				":zeroReady",

@@ -226,7 +226,7 @@ func (m model) handleSTTModelSelection(value string) (model, string) {
 			// instead); this is the manual-setup path (e.g. Termux).
 			hint += " Set stt.localModelPath to a model directory (see docs/dictation.md)."
 		} else {
-			hint += " Run /voice, then hold Space to dictate."
+			hint += " Run /voice; " + voiceCaptureUsage + "."
 		}
 		return m, hint
 	}
@@ -373,7 +373,7 @@ func (m model) applyInstalledModel(v dictation.ModelVariant) (model, tea.Cmd) {
 	if aerr != nil {
 		return m.appendSystemNotice("Couldn't save the config: " + aerr.Error()), nil
 	}
-	return m.appendSystemNotice(v.Label + " is already downloaded — dictation ready. Run /voice, then hold Space to dictate."), nil
+	return m.showTransientNoticeInline(v.Label+" is ready. Run /voice to start dictating.", transientNoticeSuccess), nil
 }
 
 // sttDownloadVariants returns the variants currently offered — the full fetched
