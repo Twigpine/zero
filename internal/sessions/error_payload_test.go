@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -123,5 +125,35 @@ func TestStoreAppendEventPersistsErrorEventStatusCodeAndCause(t *testing.T) {
 	}
 	if got, want := payload["cause"], "upstream returned an empty completion"; got != want {
 		t.Fatalf("persisted cause = %v, want %v", got, want)
+	}
+}
+
+func TestErrorEventPayloadBoundsCause(t *testing.T) {
+	// "é" is two bytes; an odd cap boundary must not split it.
+	cause := strings.Repeat("é", maxErrorCauseBytes)
+	payload := ErrorEventPayload(&zeroruntime.StreamError{Message: "m", StatusCode: 500, Cause: cause})
+
+	got, ok := payload["cause"].(string)
+	if !ok {
+		t.Fatalf("cause = %#v, want string", payload["cause"])
+	}
+	if !strings.HasSuffix(got, errorCauseTruncationMarker) {
+		t.Fatalf("cause missing truncation marker: ...%q", got[len(got)-20:])
+	}
+	body := strings.TrimSuffix(got, errorCauseTruncationMarker)
+	if len(body) > maxErrorCauseBytes {
+		t.Fatalf("bounded cause body is %d bytes, want <= %d", len(body), maxErrorCauseBytes)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatal("bounded cause is not valid UTF-8")
+	}
+}
+
+func TestErrorEventPayloadKeepsCauseAtCap(t *testing.T) {
+	cause := strings.Repeat("a", maxErrorCauseBytes)
+	payload := ErrorEventPayload(&zeroruntime.StreamError{Message: "m", Cause: cause})
+
+	if got := payload["cause"]; got != cause {
+		t.Fatalf("cause at exactly the cap was altered (len %d)", len(got.(string)))
 	}
 }
