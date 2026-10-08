@@ -25,6 +25,13 @@ func TestPosixRootedPathHint(t *testing.T) {
 			wantHint: true,
 		},
 		{
+			name:     "windows unc-style double slash keeps its raw error",
+			goos:     "windows",
+			path:     "//server/share/missing.go",
+			err:      fs.ErrNotExist,
+			wantHint: false,
+		},
+		{
 			name:     "linux posix-rooted miss keeps its raw error",
 			goos:     "linux",
 			path:     "/home/user/repo/main.go",

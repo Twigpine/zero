@@ -83,13 +83,16 @@ func resolveWorkspacePath(workspaceRoot string, requestedPath string) (string, s
 // false and "/home/user/repo/file.go" joins onto the workspace root; the raw
 // miss that follows ("GetFileAttributesEx <root>\home: ...") names a directory
 // the model never meant and invites retrying the same wrong shape. Naming the
-// host OS and the workspace root lets one retry correct the shape. The hint
-// deliberately does not echo the requested path: echoing a POSIX fragment
-// next to the workspace root trips the no-leak checks that confine
-// out-of-workspace escapes, and tool wrappers that name the request add it
-// themselves. Only the message changes; the path itself is never rewritten.
+// host OS and the workspace root lets one retry correct the shape. A double
+// leading slash is excluded: Go treats //server/share/... as an absolute UNC
+// path on Windows, so a miss there never joined the workspace root and the
+// hint would misstate how the path was resolved. The hint deliberately does
+// not echo the requested path: echoing a POSIX fragment next to the workspace
+// root trips the no-leak checks that confine out-of-workspace escapes, and
+// tool wrappers that name the request add it themselves. Only the message
+// changes; the path itself is never rewritten.
 func posixRootedPathHint(goos, requestedPath, root string, err error) string {
-	if goos != "windows" || !strings.HasPrefix(requestedPath, "/") || !errors.Is(err, fs.ErrNotExist) {
+	if goos != "windows" || !strings.HasPrefix(requestedPath, "/") || strings.HasPrefix(requestedPath, "//") || !errors.Is(err, fs.ErrNotExist) {
 		return ""
 	}
 	return fmt.Sprintf("path does not exist on this Windows host: a leading / carries no drive here, so it resolved against the workspace root %s. Use a workspace-relative path or a Windows absolute path", root)
