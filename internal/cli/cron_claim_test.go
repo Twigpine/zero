@@ -108,7 +108,7 @@ func TestFireJobOverlappingAdjacentSlots(t *testing.T) {
 					t.Fatalf("already claimed slot became available: claimed=%v err=%v", claimed, err)
 				}
 			}
-			runs, err := stores[0].Runs(job.ID)
+			runs, err := stores[0].Runs(job.ID, 0)
 			if err != nil || len(runs) != 2 {
 				t.Fatalf("runs=%v err=%v", runs, err)
 			}
@@ -150,7 +150,7 @@ func TestFireJobCompletionReadErrorDoesNotOverwriteState(t *testing.T) {
 	if want := "fired " + job.ID + " -> exit 0 (next: unknown)\n"; stdout.String() != want {
 		t.Fatalf("completion summary = %q; want %q", stdout.String(), want)
 	}
-	runs, err := store.Runs(job.ID)
+	runs, err := store.Runs(job.ID, 0)
 	if err != nil || len(runs) != 1 || runs[0].ExitCode != 0 {
 		t.Fatalf("execution should still be recorded: runs=%v err=%v", runs, err)
 	}
