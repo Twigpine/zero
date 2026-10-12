@@ -153,7 +153,7 @@ describe a version that is no longer on disk. Prefer `mise upgrade`.
 go install github.com/Gitlawb/zero/cmd/zero@latest
 ```
 
-This builds from source, so it needs Go 1.26.6+ and it does not go through the
+This builds from source, so it needs Go 1.26.9+ and it does not go through the
 release archives. Two consequences worth knowing before you pick it:
 
 - On Linux you also need the sandbox helper, which is a separate binary and is
@@ -180,7 +180,7 @@ Build a local binary:
 go build -o zero ./cmd/zero
 ```
 
-Source builds require Go 1.26.6+.
+Source builds require Go 1.26.9+.
 
 ### Sandbox Helpers For Source Builds
 
