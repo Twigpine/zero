@@ -1,7 +1,9 @@
 package acp
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -911,6 +913,48 @@ func TestACPRunTurnClosesWorkspaceAfterSuccessAndFailure(t *testing.T) {
 	}
 }
 
+func TestACPWiresSupportsVision(t *testing.T) {
+	deps := testDeps(t)
+	var captured agent.Options
+	deps.RunAgent = func(_ context.Context, _ string, _ zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
+		captured = opts
+		return agent.Result{FinalAnswer: "done"}, nil
+	}
+	deps.DiscoverModels = func(_ context.Context, _ config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+		return []providermodeldiscovery.Model{
+			{ID: "custom-vision", InputModalities: []string{"text", "image"}},
+			{ID: "custom-text", InputModalities: []string{"text"}},
+		}, nil
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var newRes NewSessionResult
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir(), McpServers: []McpServer{}}, &newRes); err != nil {
+		t.Fatalf("session/new: %v", err)
+	}
+	var promptRes PromptResult
+	if err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{
+		SessionID: newRes.SessionID,
+		Prompt: []ContentBlock{
+			{Type: "text", Text: "hello"},
+		},
+	}, &promptRes); err != nil {
+		t.Fatalf("session/prompt: %v", err)
+	}
+	if captured.SupportsVision == nil {
+		t.Fatal("SupportsVision was not wired into agent.Options")
+	}
+	if !captured.SupportsVision("custom-vision") {
+		t.Fatal("SupportsVision(custom-vision) = false, want true")
+	}
+	if captured.SupportsVision("custom-text") {
+		t.Fatal("SupportsVision(custom-text) = true, want false")
+	}
+}
+
 // TestACPRejectsInvalidCwd confirms session/new fails when the workspace root
 // resolver rejects the client cwd (e.g. filesystem root).
 func TestACPRejectsInvalidCwd(t *testing.T) {
@@ -1314,6 +1358,85 @@ func TestACPResumeAppliesStandaloneSessionKindPolicy(t *testing.T) {
 				SessionID: created.SessionID, Cwd: workspace,
 			}, &LoadSessionResult{}); err != nil {
 				t.Fatalf("session/load should retain render-only access: %v", err)
+			}
+			// The check above only showed the refused resume never registered the
+			// session. Load does register it, so the prompt that matters is the one
+			// AFTER the load: render-only means the transcript can be read and the
+			// sub-run cannot be continued.
+			err = h.client.Call(ctx, MethodSessionPrompt, PromptParams{
+				SessionID: created.SessionID, Prompt: []ContentBlock{TextBlock("must stay closed after load")},
+			}, &PromptResult{})
+			if !errors.As(err, &rpcErr) || rpcErr.Code != codeInvalidParams {
+				t.Fatalf("session/prompt after load of a %s session = %v, want invalid params", tc.name, err)
+			}
+		})
+	}
+}
+
+// LOAD PUBLISHES A SUB-RUN FOR VIEWING, NOT FOR CONTINUING. Every other resume
+// path (the TUI, exec sessions, the exec CLI, and ACP's own session/resume)
+// refuses a kind sessions.IsResumableKind rejects. session/load has a real
+// render-only use, a client rebuilding a transcript it can scroll, so it keeps
+// loading those sessions; what it must not do is publish one that accepts a
+// prompt, because the prompt would carry on a child, side or spec sub-run as a
+// standalone conversation. Checked in both directions, so a gate that refused
+// everything would fail on the resumable kinds.
+func TestACPLoadPublishesSubRunsReadOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		kind     sessions.SessionKind
+		readOnly bool
+	}{
+		{name: "regular", kind: ""},
+		{name: "fork", kind: sessions.SessionKindFork},
+		{name: "child", kind: sessions.SessionKindChild, readOnly: true},
+		{name: "side", kind: sessions.SessionKindSide, readOnly: true},
+		{name: "spec draft", kind: sessions.SessionKindSpecDraft, readOnly: true},
+		{name: "spec impl", kind: sessions.SessionKindSpecImpl, readOnly: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := !sessions.IsResumableKind(tc.kind); got != tc.readOnly {
+				t.Fatalf("SETUP INVALID: IsResumableKind(%q) disagrees with this table (readOnly=%v), so the cases no longer mean what they say", tc.kind, tc.readOnly)
+			}
+			deps := testDeps(t)
+			workspace := t.TempDir()
+			created, err := deps.Store.Create(sessions.CreateInput{
+				SessionID: "load-" + strings.ReplaceAll(tc.name, " ", "-"), Cwd: workspace, SessionKind: tc.kind,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := newHarness(t, deps)
+			defer h.stop()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{
+				SessionID: created.SessionID, Cwd: workspace,
+			}, &LoadSessionResult{}); err != nil {
+				t.Fatalf("session/load of a %s session: %v", tc.name, err)
+			}
+			err = h.client.Call(ctx, MethodSessionPrompt, PromptParams{
+				SessionID: created.SessionID, Prompt: []ContentBlock{TextBlock("continue")},
+			}, &PromptResult{})
+			// A resumable session has to be genuinely promptable, not merely "not
+			// refused as view-only": any other failure would hide a broken
+			// writable path behind a passing test.
+			if !tc.readOnly {
+				if err != nil {
+					t.Fatalf("session/prompt after load of a %s session = %v, want success", tc.name, err)
+				}
+				return
+			}
+			// The decision is the RPC code; the message only distinguishes the
+			// view-only refusal from other invalid-params errors such as an
+			// unknown session id.
+			var rpcErr *rpcError
+			if !errors.As(err, &rpcErr) || rpcErr.Code != codeInvalidParams {
+				t.Fatalf("session/prompt after load of a %s session = %v, want invalid params", tc.name, err)
+			}
+			if !strings.Contains(rpcErr.Message, "loaded for viewing only") {
+				t.Fatalf("session/prompt after load of a %s session was refused for another reason: %v", tc.name, err)
 			}
 		})
 	}
@@ -2497,4 +2620,201 @@ func configOptionByID(t *testing.T, options []SessionConfigOption, id string) Se
 	}
 	t.Fatalf("no config option %q was advertised; got %+v", id, options)
 	return SessionConfigOption{}
+}
+
+func TestACPPromptUnsupportedModelDropsImagesAndNotifies(t *testing.T) {
+	deps := testDeps(t)
+	deps.DiscoverModels = func(ctx context.Context, p config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+		return []providermodeldiscovery.Model{
+			{ID: "fake-model", InputModalities: []string{"text"}},
+		}, nil
+	}
+	var capturedOpts agent.Options
+	var capturedPrompt string
+	deps.RunAgent = func(ctx context.Context, prompt string, provider zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
+		capturedPrompt = prompt
+		capturedOpts = opts
+		return agent.Result{FinalAnswer: "Answered without images"}, nil
+	}
+
+	h := newHarness(t, deps)
+	defer h.stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var initRes InitializeResult
+	if err := h.client.Call(ctx, MethodInitialize, InitializeParams{ProtocolVersion: ProtocolVersion}, &initRes); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+
+	var newRes NewSessionResult
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir(), McpServers: []McpServer{}}, &newRes); err != nil {
+		t.Fatalf("session/new: %v", err)
+	}
+
+	rawPng := "\x89PNG\r\n\x1a\nfake-image-bytes"
+	b64Png := base64.StdEncoding.EncodeToString([]byte(rawPng))
+	var promptRes PromptResult
+	if err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{
+		SessionID: newRes.SessionID,
+		Prompt: []ContentBlock{
+			TextBlock("look at this image"),
+			ImageBlock(b64Png, "image/png"),
+		},
+	}, &promptRes); err != nil {
+		t.Fatalf("session/prompt: %v", err)
+	}
+	if promptRes.StopReason != StopEndTurn {
+		t.Fatalf("stopReason = %q, want %q", promptRes.StopReason, StopEndTurn)
+	}
+
+	got := drainTextUntil(t, h.updates, func(text string) bool {
+		return strings.Contains(text, "does not support image input")
+	})
+	if !strings.Contains(got, "Model fake-model does not support image input; ignoring 1 prompt image(s).") {
+		t.Fatalf("streamed text = %q, want drop notice", got)
+	}
+	if len(capturedOpts.Images) != 0 {
+		t.Fatalf("captured %d images, want 0 (images should be withheld)", len(capturedOpts.Images))
+	}
+	if !strings.Contains(capturedPrompt, "[Note: Model fake-model does not support image input; ignoring 1 prompt image(s).]") {
+		t.Fatalf("captured prompt = %q, want prompt note", capturedPrompt)
+	}
+}
+
+func TestACPSessionPrompt_SupportsVisionMemoizedPerRun(t *testing.T) {
+	deps := testDeps(t)
+	var discoverCount int
+	var discoverMu sync.Mutex
+	deps.DiscoverModels = func(ctx context.Context, p config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+		discoverMu.Lock()
+		discoverCount++
+		discoverMu.Unlock()
+		return []providermodeldiscovery.Model{
+			{ID: "fake-model", InputModalities: []string{"text", "image"}},
+		}, nil
+	}
+	deps.RunAgent = func(ctx context.Context, prompt string, provider zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
+		for i := 0; i < 5; i++ {
+			if !opts.SupportsVision(opts.Model) {
+				t.Error("expected SupportsVision to report true")
+			}
+		}
+		return agent.Result{FinalAnswer: "Done"}, nil
+	}
+
+	h := newHarness(t, deps)
+	defer h.stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var initRes InitializeResult
+	if err := h.client.Call(ctx, MethodInitialize, InitializeParams{ProtocolVersion: ProtocolVersion}, &initRes); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+
+	var newRes NewSessionResult
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir(), McpServers: []McpServer{}}, &newRes); err != nil {
+		t.Fatalf("session/new: %v", err)
+	}
+
+	discoverMu.Lock()
+	discoverCount = 0
+	discoverMu.Unlock()
+
+	rawPng := "\x89PNG\r\n\x1a\nfake-image-bytes"
+	b64Png := base64.StdEncoding.EncodeToString([]byte(rawPng))
+	var promptRes PromptResult
+	if err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{
+		SessionID: newRes.SessionID,
+		Prompt: []ContentBlock{
+			TextBlock("look at this"),
+			ImageBlock(b64Png, "image/png"),
+		},
+	}, &promptRes); err != nil {
+		t.Fatalf("session/prompt: %v", err)
+	}
+	if promptRes.StopReason != StopEndTurn {
+		t.Fatalf("stopReason = %q, want %q", promptRes.StopReason, StopEndTurn)
+	}
+
+	discoverMu.Lock()
+	count := discoverCount
+	discoverMu.Unlock()
+	if count != 1 {
+		t.Fatalf("DiscoverModels was called %d times, want exactly 1 call (memoized per run)", count)
+	}
+}
+
+func TestACPEndToEndImagePromptSupportedModel(t *testing.T) {
+	deps := testDeps(t)
+	deps.DiscoverModels = func(ctx context.Context, p config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+		return []providermodeldiscovery.Model{
+			{ID: "discovered-vision-model", InputModalities: []string{"text", "image"}},
+		}, nil
+	}
+	deps.ResolveConfig = func(_ string, o config.Overrides) (config.ResolvedConfig, error) {
+		model := "discovered-vision-model"
+		if o.Provider.Model != "" {
+			model = o.Provider.Model
+		}
+		return config.ResolvedConfig{
+			Provider: config.ProviderProfile{Name: "fake", Model: model},
+			MaxTurns: 4,
+		}, nil
+	}
+	var capturedOpts agent.Options
+	var capturedPrompt string
+	deps.RunAgent = func(ctx context.Context, prompt string, provider zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
+		capturedPrompt = prompt
+		capturedOpts = opts
+		return agent.Result{FinalAnswer: "I can see the image!"}, nil
+	}
+
+	h := newHarness(t, deps)
+	defer h.stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var initRes InitializeResult
+	if err := h.client.Call(ctx, MethodInitialize, InitializeParams{ProtocolVersion: ProtocolVersion}, &initRes); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+
+	var newRes NewSessionResult
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir(), McpServers: []McpServer{}}, &newRes); err != nil {
+		t.Fatalf("session/new: %v", err)
+	}
+
+	rawPng := []byte("\x89PNG\r\n\x1a\nreal-png-bytes")
+	b64Png := base64.StdEncoding.EncodeToString(rawPng)
+	var promptRes PromptResult
+	if err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{
+		SessionID: newRes.SessionID,
+		Prompt: []ContentBlock{
+			TextBlock("analyze this image"),
+			ImageBlock(b64Png, "image/png"),
+		},
+	}, &promptRes); err != nil {
+		t.Fatalf("session/prompt: %v", err)
+	}
+	if promptRes.StopReason != StopEndTurn {
+		t.Fatalf("stopReason = %q, want %q", promptRes.StopReason, StopEndTurn)
+	}
+
+	if len(capturedOpts.Images) != 1 {
+		t.Fatalf("captured %d images, want 1", len(capturedOpts.Images))
+	}
+	if capturedOpts.Images[0].MediaType != "image/png" {
+		t.Fatalf("mediaType = %q, want image/png", capturedOpts.Images[0].MediaType)
+	}
+	if !bytes.Equal(capturedOpts.Images[0].Data, rawPng) {
+		t.Fatalf("image bytes mismatch: got %v, want %v", capturedOpts.Images[0].Data, rawPng)
+	}
+	if strings.Contains(capturedPrompt, "does not support image input") {
+		t.Fatalf("prompt unexpectedly contains refusal note: %q", capturedPrompt)
+	}
 }

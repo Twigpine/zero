@@ -1,6 +1,6 @@
 module github.com/Gitlawb/zero
 
-go 1.26.6
+go 1.26.9
 
 require (
 	charm.land/bubbles/v2 v2.1.1

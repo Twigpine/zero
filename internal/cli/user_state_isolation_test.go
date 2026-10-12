@@ -63,6 +63,10 @@ func TestCLILaunchHelpersLeaveUserStateAlone(t *testing.T) {
 			_ = execAdvertisesEscalateModel(t, []string{"--allow-escalation", "exec", "say hi"})
 		}},
 		{"execListToolsFor", func(t *testing.T) { _ = execListToolsFor(t, "--auto", "high") }},
+		{"runExecWithSandbox", func(t *testing.T) {
+			_, _, _ = runExecWithSandbox(t, []string{"exec", "hello"}, unavailableTestSandbox, config.SandboxConfig{})
+		}},
+		{"launchTUIWithSandbox", func(t *testing.T) { _ = launchTUIWithSandbox(t, config.SandboxConfig{}) }},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			seedRoot, configPath, seeded, before := seedEmulatedUserConfig(t)

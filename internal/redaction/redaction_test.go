@@ -4,7 +4,31 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestRedactStringRedactsAdjacentAWSKeys(t *testing.T) {
+	// Two AWS keys glued end to end have no word boundary between them, so a
+	// plain \b-anchored pattern only matches the first. Both must be redacted.
+	// gitleaks:allow -- synthetic redaction fixtures below
+	key1 := "AKIAIOSFODNN7EXAMPLE"
+	key2 := "ASIAIOSFODNN7EXAMPLE"
+	input := key1 + key2
+	if got := RedactString(input, Options{}); got != RedactedSecret+RedactedSecret {
+		t.Fatalf("adjacent AWS keys not both redacted: got %q", got)
+	}
+
+	// Three glued keys chain as well.
+	input3 := key1 + key2 + key1
+	if got := RedactString(input3, Options{}); got != RedactedSecret+RedactedSecret+RedactedSecret {
+		t.Fatalf("three adjacent AWS keys not all redacted: got %q", got)
+	}
+
+	// A mid-word AKIA that does not abut a redacted span still must not match.
+	if got := RedactString("prefixAKIAIOSFODNN7EXAMPLE", Options{}); got != "prefixAKIAIOSFODNN7EXAMPLE" {
+		t.Fatalf("mid-word AKIA should not be redacted: got %q", got)
+	}
+}
 
 func TestRedactStringCoversCommonSecretShapes(t *testing.T) {
 	input := strings.Join([]string{
@@ -140,4 +164,24 @@ func containsCircular(v any) bool {
 		}
 	}
 	return false
+}
+
+func TestRedactStringLongAdjacentKeyRunCompletesPromptly(t *testing.T) {
+	// A long run of glued AWS keys must not blow up the span-chaining loop in
+	// redactAdjacent: the outer loop is bounded to the original match count,
+	// so appended spans are never re-chained. On the old code this input
+	// grows the span list exponentially and never finishes.
+	// The key is assembled at runtime so the literal never appears in source.
+	// gitleaks:allow -- synthetic redaction fixture below
+	key := "AKIA" + strings.Repeat("A", 16)
+	const count = 64
+	input := strings.Repeat(key, count)
+	start := time.Now()
+	got := RedactString(input, Options{})
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("RedactString took %v on %d glued keys", elapsed, count)
+	}
+	if want := strings.Repeat(RedactedSecret, count); got != want {
+		t.Fatalf("expected %d redaction markers, got %d", count, strings.Count(got, RedactedSecret))
+	}
 }

@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -205,6 +207,130 @@ func TestSessionManagerKeepsRunningOverCap(t *testing.T) {
 	}
 	if _, ok := mgr.Get("r2"); !ok {
 		t.Fatal("a running session must never be evicted, even past the cap")
+	}
+}
+
+func TestSessionManagerAdmissionBound(t *testing.T) {
+	block := make(chan struct{})
+	launcher, _ := seqLauncher(&fakeWorker{pid: 1, waitCh: block})
+	pool, _ := NewPool(PoolOptions{Size: 1, Launcher: launcher})
+	mgr, _ := NewSessionManager(SessionManagerOptions{Pool: pool, MaxSessions: 2})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer func() {
+		cancel()
+		close(block)
+		testutil.WaitFor(t, "all admitted sessions finished", func() bool {
+			mgr.mu.Lock()
+			defer mgr.mu.Unlock()
+			return mgr.pending == 0
+		})
+	}()
+	var wg sync.WaitGroup
+	var accepted atomic.Int32
+	for i := 0; i < 300; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := mgr.Start(ctx, WorkerSpec{Session: fmt.Sprintf("s%d", i)}); err == nil {
+				accepted.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := accepted.Load(); got != 256 {
+		t.Fatalf("accepted %d unfinished sessions, want default bound 256", got)
+	}
+	if got := len(mgr.Statuses()); got != 256 {
+		t.Fatalf("registered %d sessions, want 256", got)
+	}
+}
+
+func TestSessionManagerCancellationReleasesAdmission(t *testing.T) {
+	block := make(chan struct{})
+	var release sync.Once
+	defer release.Do(func() { close(block) })
+	launcher, _ := seqLauncher(&fakeWorker{pid: 1, waitCh: block}, &fakeWorker{pid: 2, exitCode: ExitPermanent}, &fakeWorker{pid: 3})
+	pool, _ := NewPool(PoolOptions{Size: 1, Launcher: launcher})
+	mgr, _ := NewSessionManager(SessionManagerOptions{Pool: pool, MaxPending: 2, MaxSessions: 10})
+	first, err := mgr.Start(context.Background(), WorkerSpec{Session: "running"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.WaitFor(t, "first running", func() bool { return first.State() == SessionRunning })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	queued, err := mgr.Start(ctx, WorkerSpec{Session: "queued"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s, err := mgr.Start(context.Background(), WorkerSpec{Session: "retry"}); s != nil || !errors.Is(err, ErrSessionOverloaded) {
+		t.Fatalf("overloaded Start = (%v, %v)", s, err)
+	}
+	if _, ok := mgr.Get("retry"); ok {
+		t.Fatal("rejected session was registered")
+	}
+	if _, err := mgr.Start(context.Background(), WorkerSpec{Session: "running"}); !errors.Is(err, ErrSessionExists) {
+		t.Fatalf("duplicate at capacity: %v", err)
+	}
+	cancel()
+	testutil.WaitFor(t, "queued cancellation", func() bool { return queued.State() == SessionFailed })
+	if !errors.Is(queued.Err(), context.Canceled) {
+		t.Fatalf("queued error = %v", queued.Err())
+	}
+	if s, err := mgr.Start(ctx, WorkerSpec{Session: "canceled"}); s != nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled Start = (%v, %v)", s, err)
+	}
+	retry, err := mgr.Start(context.Background(), WorkerSpec{Session: "retry"})
+	if err != nil {
+		t.Fatalf("capacity not released after cancellation: %v", err)
+	}
+	release.Do(func() { close(block) })
+	testutil.WaitFor(t, "first completed", func() bool { return first.State() == SessionDone })
+	testutil.WaitFor(t, "retry failed", func() bool { return retry.State() == SessionFailed })
+	if !errors.Is(retry.Err(), ErrPermanent) {
+		t.Fatalf("retry error = %v", retry.Err())
+	}
+	last, err := mgr.Start(context.Background(), WorkerSpec{Session: "last"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.WaitFor(t, "last completed", func() bool { return last.State() == SessionDone })
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if mgr.pending != 0 || len(mgr.sessions) != 4 {
+		t.Fatalf("pending=%d retained=%d, want 0 and 4", mgr.pending, len(mgr.sessions))
+	}
+}
+
+func TestSessionManagerPrunesOnCompletion(t *testing.T) {
+	block := make(chan struct{})
+	var release sync.Once
+	defer release.Do(func() { close(block) })
+	launcher, _ := seqLauncher(
+		&fakeWorker{pid: 1, waitCh: block},
+		&fakeWorker{pid: 2},
+		&fakeWorker{pid: 3, exitCode: ExitPermanent},
+	)
+	pool, _ := NewPool(PoolOptions{Size: 1, Launcher: launcher})
+	mgr, _ := NewSessionManager(SessionManagerOptions{Pool: pool, MaxSessions: 2})
+	sessions := make([]*Session, 3)
+	for i := range sessions {
+		var err error
+		sessions[i], err = mgr.Start(context.Background(), WorkerSpec{Session: fmt.Sprintf("s%d", i)})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	release.Do(func() { close(block) })
+	for _, s := range sessions {
+		select {
+		case <-s.Done():
+		case <-time.After(2 * time.Second):
+			t.Fatal("session did not finish")
+		}
+	}
+	if got := len(mgr.Statuses()); got != 2 {
+		t.Fatalf("retained %d completed sessions without another Start, want 2", got)
 	}
 }
 

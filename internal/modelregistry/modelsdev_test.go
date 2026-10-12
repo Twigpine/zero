@@ -256,3 +256,25 @@ func TestDefaultModelEntriesAppliesFreshCache(t *testing.T) {
 	}
 	t.Fatal("claude-sonnet-4.5 not found")
 }
+
+// With the fetch off, no refresh is started at all, so none is left running to
+// read the environment after a test has restored it and fetch into the real
+// cache.
+func TestStartModelsDevRefreshStartsNothingWhenTheFetchIsOff(t *testing.T) {
+	started := 0
+	previous := startModelsDevRefresh
+	startModelsDevRefresh = func() { started++ }
+	t.Cleanup(func() { startModelsDevRefresh = previous })
+
+	t.Setenv("ZERO_DISABLE_MODELS_FETCH", "1")
+	StartModelsDevRefresh()
+	if started != 0 {
+		t.Fatalf("started %d refreshes with the fetch off, want none", started)
+	}
+
+	t.Setenv("ZERO_DISABLE_MODELS_FETCH", "")
+	StartModelsDevRefresh()
+	if started != 1 {
+		t.Fatalf("started %d refreshes with the fetch on, want 1", started)
+	}
+}

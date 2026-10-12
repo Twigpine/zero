@@ -197,6 +197,24 @@ func cachedModelsDevProviders() map[string]map[string]modelsDevModel {
 	return modelsDevCached
 }
 
+// startModelsDevRefresh starts a background RefreshModelsDevCache. Tests
+// replace it to see whether a refresh was started.
+var startModelsDevRefresh = func() {
+	go func() { _ = RefreshModelsDevCache(context.Background()) }()
+}
+
+// StartModelsDevRefresh refreshes the models.dev cache in the background when
+// the fetch is on. ZERO_DISABLE_MODELS_FETCH is read here, before anything is
+// started: a refresh goroutine reads the environment when it runs, so one
+// started by a caller that had turned the fetch off (a test, through t.Setenv)
+// could run after that setting was restored and fetch into the real cache.
+func StartModelsDevRefresh() {
+	if strings.TrimSpace(os.Getenv("ZERO_DISABLE_MODELS_FETCH")) != "" {
+		return
+	}
+	startModelsDevRefresh()
+}
+
 // RefreshModelsDevCache fetches models.dev/api.json into the on-disk cache
 // when the cache is missing or older than modelsDevRefreshAfter. It is safe to
 // call fire-and-forget from startup (use a goroutine); it never affects the

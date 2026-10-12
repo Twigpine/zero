@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
-  <img alt="Go 1.26.6+" src="https://img.shields.io/badge/Go-1.26.6+-00ADD8?logo=go&logoColor=white">
+  <img alt="Go 1.26.9+" src="https://img.shields.io/badge/Go-1.26.9+-00ADD8?logo=go&logoColor=white">
   <img alt="25+ providers" src="https://img.shields.io/badge/providers-25+-34E2EA">
   <a href="https://discord.gg/CaQDS6wdFn"><img alt="Discord" src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white"></a>
   <br>
@@ -76,7 +76,7 @@ irm https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.ps1 | ie
 
 ### From source
 
-Source builds require Go 1.26.6+.
+Source builds require Go 1.26.9+.
 
 ```bash
 git clone https://github.com/Gitlawb/zero.git
@@ -330,6 +330,13 @@ zero cron             scheduled agent jobs
 zero update --check   check for newer releases
 zero upgrade          download, verify, and install the latest release
 ```
+
+Cron keeps the newest 1,000 run outcomes per job in `runs.jsonl`. Each new run
+atomically replaces the history with the retained tail; existing larger histories
+are trimmed on their next run. Archive the file before that run if you need older
+outcomes. This retention does not delete session directories or reset fire counts.
+Malformed records and legacy lines of 1 MiB or more are skipped when reading or
+compacting history; new records of that size are rejected.
 
 ## Extending Zero
 

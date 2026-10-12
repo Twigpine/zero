@@ -10,6 +10,24 @@ import (
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
+func TestNonVisionImageNoticeQualifiesBudgetRecovery(t *testing.T) {
+	result := ToolResult{
+		Name:   "mcp_screenshot",
+		Output: "One image exceeded this result's remaining image budget. Retrying with fewer images can recover this payload.",
+		Images: []zeroruntime.ImageBlock{{MediaType: "image/png", Data: []byte("image")}},
+	}
+	notice, ok := toolResultImageMessage(result, Options{
+		SupportsVision: func(string) bool { return false },
+	})
+	if !ok || len(notice.Images) != 0 {
+		t.Fatal("non-vision delivery must produce a text-only notice")
+	}
+	if !strings.Contains(notice.Content, "Switch to a vision-capable model before retrying") ||
+		!strings.Contains(notice.Content, "budget") {
+		t.Fatalf("notice does not qualify budget recovery: %s", notice.Content)
+	}
+}
+
 // imageTool returns a tool result carrying an image, the way a screenshot tool
 // should be able to.
 type imageTool struct {
@@ -62,6 +80,7 @@ func TestRunDeliversToolResultImagesToTheModel(t *testing.T) {
 	result, err := Run(context.Background(), "screenshot please", provider, Options{
 		Registry: registry,
 		MaxTurns: 2,
+		Model:    "gpt-4o",
 	})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -86,10 +105,15 @@ func TestRunDeliversToolResultImagesToTheModel(t *testing.T) {
 
 	// The tool-result pairing must be untouched: one tool result per tool call.
 	toolResults := 0
+	var toolText string
 	for _, message := range result.Messages {
 		if message.Role == zeroruntime.MessageRoleTool {
 			toolResults++
+			toolText = message.Content
 		}
+	}
+	if toolText != "Captured a screenshot." {
+		t.Fatalf("tool text = %q, want preserved", toolText)
 	}
 	if toolResults != 1 {
 		t.Errorf("got %d tool-result messages for 1 tool call", toolResults)
@@ -136,7 +160,7 @@ func TestRunKeepsToolResultsContiguousWhenAToolReturnsAnImage(t *testing.T) {
 		{{Type: zeroruntime.StreamEventText, Content: "done"}, {Type: zeroruntime.StreamEventDone}},
 	}}
 
-	result, err := Run(context.Background(), "two calls", provider, Options{Registry: registry, MaxTurns: 2})
+	result, err := Run(context.Background(), "two calls", provider, Options{Registry: registry, MaxTurns: 2, Model: "gpt-4o"})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -204,4 +228,177 @@ func messageShape(messages []zeroruntime.Message) string {
 		parts = append(parts, part)
 	}
 	return "[" + strings.Join(parts, " ") + "]"
+}
+
+func TestRunDropsToolResultImagesForANonVisionModel(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(imageTool{media: "image/png", data: []byte("\x89PNG\r\n\x1a\nfake")})
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		{
+			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call_1", ToolName: "capture"},
+			{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call_1", ArgumentsFragment: `{}`},
+			{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call_1"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+		{{Type: zeroruntime.StreamEventText, Content: "ok"}, {Type: zeroruntime.StreamEventDone}},
+	}}
+
+	result, err := Run(context.Background(), "screenshot please", provider, Options{
+		Registry: registry,
+		MaxTurns: 2,
+		Model:    "totally-made-up-model",
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var toolText string
+	var noticed bool
+	for _, message := range result.Messages {
+		if message.Role == zeroruntime.MessageRoleTool {
+			toolText = message.Content
+		}
+		if len(message.Images) > 0 {
+			t.Fatalf("non-vision model received image bytes on %q: %s", message.Role, messageShape(result.Messages))
+		}
+		if strings.Contains(message.Content, "does not support image input") {
+			noticed = true
+		}
+	}
+	if toolText != "Captured a screenshot." {
+		t.Fatalf("tool text = %q, want preserved on the non-vision path", toolText)
+	}
+	if !noticed {
+		t.Fatalf("non-vision model was not told the image was dropped; recorded %s", messageShape(result.Messages))
+	}
+}
+
+type switchAndCaptureTool struct {
+	targetModel string
+}
+
+func (switchAndCaptureTool) Name() string        { return "switch_and_capture" }
+func (switchAndCaptureTool) Description() string { return "Switches model and captures image" }
+func (switchAndCaptureTool) Parameters() tools.Schema {
+	return tools.Schema{Type: "object", Properties: map[string]tools.PropertySchema{}}
+}
+func (switchAndCaptureTool) Safety() tools.Safety {
+	return tools.Safety{Permission: tools.PermissionAllow}
+}
+func (t switchAndCaptureTool) Run(context.Context, map[string]any) tools.Result {
+	return tools.Result{
+		Status: tools.StatusOK,
+		Output: "[image returned by tool]",
+		Images: []zeroruntime.ImageBlock{{MediaType: "image/png", Data: []byte("\x89PNG\r\n\x1a\nfake")}},
+		Meta:   map[string]string{"escalate_to_model": t.targetModel},
+	}
+}
+
+func TestRunToolImagesRespectsModelSwitch(t *testing.T) {
+	t.Run("Non-vision to vision model escalation forwards images", func(t *testing.T) {
+		registry := tools.NewRegistry()
+		registry.Register(switchAndCaptureTool{targetModel: "gpt-4o"})
+
+		provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call_1", ToolName: "switch_and_capture"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call_1", ArgumentsFragment: `{}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call_1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "I see it on gpt-4o."},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		}}
+
+		switched := false
+		switcher := func(_ context.Context, modelID string) (Provider, error) {
+			switched = true
+			return provider, nil
+		}
+
+		result, err := Run(context.Background(), "test", provider, Options{
+			Registry:      registry,
+			MaxTurns:      2,
+			Model:         "non-vision-initial",
+			ModelSwitcher: switcher,
+			SupportsVision: func(modelID string) bool {
+				return modelID == "gpt-4o"
+			},
+		})
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if !switched {
+			t.Fatal("expected model switch to occur")
+		}
+
+		var carrier *zeroruntime.Message
+		for index := range result.Messages {
+			if len(result.Messages[index].Images) > 0 {
+				carrier = &result.Messages[index]
+			}
+			if strings.Contains(result.Messages[index].Content, "does not support image input") {
+				t.Fatalf("images were unexpectedly dropped after switch to vision model: %v", result.Messages[index])
+			}
+		}
+		if carrier == nil {
+			t.Fatal("expected image carrier message after escalation to vision model")
+		}
+	})
+
+	t.Run("Vision to non-vision model switch drops images with notice", func(t *testing.T) {
+		registry := tools.NewRegistry()
+		registry.Register(switchAndCaptureTool{targetModel: "text-only-dest"})
+
+		provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call_1", ToolName: "switch_and_capture"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call_1", ArgumentsFragment: `{}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call_1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "ok."},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		}}
+
+		switcher := func(_ context.Context, modelID string) (Provider, error) {
+			return provider, nil
+		}
+
+		result, err := Run(context.Background(), "test", provider, Options{
+			Registry:      registry,
+			MaxTurns:      2,
+			Model:         "gpt-4o",
+			ModelSwitcher: switcher,
+			SupportsVision: func(modelID string) bool {
+				return modelID == "gpt-4o"
+			},
+		})
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		var noticed bool
+		var toolOutputSeen bool
+		for _, m := range result.Messages {
+			if len(m.Images) > 0 {
+				t.Fatalf("image delivered to non-vision destination model: %v", m)
+			}
+			if strings.Contains(m.Content, "does not support image input") {
+				noticed = true
+			}
+			if strings.Contains(m.Content, "[image returned by tool]") {
+				toolOutputSeen = true
+			}
+		}
+		if !noticed {
+			t.Fatal("expected drop notice when switching to non-vision model")
+		}
+		if !toolOutputSeen {
+			t.Fatal("expected tool output preserved in message history")
+		}
+	})
 }

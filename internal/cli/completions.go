@@ -40,7 +40,11 @@ var completionRoot = completionNode{
 		},
 		{names: []string{"daemon"}, children: leafNodes("start", "stop", "status", "run", "attach", "serve-remote", "link")},
 		{names: []string{"setup"}},
-		{names: []string{"config"}},
+		{names: []string{"config"}, flags: []string{"-h", "--help", "--json"}, children: []completionNode{
+			{names: []string{"notify"}, flags: []string{
+				"-h", "--help", "--mode", "--focus", "--reset", "--json",
+			}},
+		}},
 		{names: []string{"models"}, children: []completionNode{{names: []string{"list", "ls"}}}},
 		{names: []string{"providers"}, children: []completionNode{
 			{names: []string{"current"}}, {names: []string{"list"}}, {names: []string{"catalog"}},

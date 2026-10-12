@@ -118,12 +118,15 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 	hookDispatcher, hookSkip := newHookDispatcher(run.workspaceRoot, run.trustRoot, execution.NewRunner(run.sandboxEngine))
 	emitTrustNotice(run.stderr, hookSkip, run.mcpSkip)
 	result, err := agent.Run(runCtx, run.prompt, run.provider, agent.Options{
-		MaxTurns:        run.resolved.MaxTurns,
-		ContextWindow:   resolveAgentContextWindow(runCtx, run.modelRegistry, run.resolved.Provider),
-		SessionID:       draftSession.SessionID,
-		SessionTitle:    run.sessionTitle,
-		ProviderName:    run.resolved.Provider.Name,
-		Model:           run.resolved.Provider.Model,
+		MaxTurns:      run.resolved.MaxTurns,
+		ContextWindow: resolveAgentContextWindow(runCtx, run.modelRegistry, run.resolved.Provider),
+		SessionID:     draftSession.SessionID,
+		SessionTitle:  run.sessionTitle,
+		ProviderName:  run.resolved.Provider.Name,
+		Model:         run.resolved.Provider.Model,
+		SupportsVision: func(modelID string) bool {
+			return modelregistry.SupportsVision(run.modelRegistry, modelID)
+		},
 		ReasoningEffort: run.reasoningEffort,
 		Profile:         run.profilePolicy,
 		Cwd:             run.workspaceRoot,
