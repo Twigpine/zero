@@ -214,6 +214,14 @@ var curatedModels = map[string][]Model{
 		{ID: "gpt-4.1", Description: "catalog default"},
 		{ID: "gpt-4o-mini", Description: "fast model"},
 	},
+	// yolo-auto publishes the model list for the account at GET /v1/models; the
+	// key-aware discovery probe merges that response onto these entries. The two
+	// stable public aliases below are the offline/pre-key fallback and the
+	// picker's default order; the live catalog is at https://yolo-auto.com/v1/models.
+	"yolo-auto": {
+		{ID: "yolo", Description: "catalog default"},
+		{ID: "yolo-small", Description: "fast model"},
+	},
 	// atomic-chat-local has no curated list: discover the user-loaded model
 	// from the runtime's /v1/models endpoint.
 	"opencode-go-anthropic-compatible": {

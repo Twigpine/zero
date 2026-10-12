@@ -77,6 +77,11 @@ func TestModelsAreProviderScoped(t *testing.T) {
 			want:     []string{"minimax-m3", "minimax-m2.7", "qwen3.7-plus", "qwen3.7-max"},
 			notWant:  []string{"gpt-4.1", "claude-sonnet-4.5", "deepseek-chat"},
 		},
+		{
+			provider: "yolo-auto",
+			want:     []string{"yolo", "yolo-small"},
+			notWant:  []string{"gpt-4.1", "claude-sonnet-4.5", "deepseek-chat"},
+		},
 	}
 
 	for _, tt := range tests {

@@ -46,6 +46,7 @@ var expectedCatalogIDs = []string{
 	"opencode-go",
 	"opencode-go-anthropic-compatible",
 	"atomic-chat",
+	"yolo-auto",
 	"chatgpt-proxy",
 	"custom-openai-compatible",
 	"custom-anthropic-compatible",
@@ -198,6 +199,28 @@ func TestAtlasCloudDescriptor(t *testing.T) {
 	}
 	if !reflect.DeepEqual(descriptor.AuthEnvVars, []string{"ATLASCLOUD_API_KEY"}) {
 		t.Fatalf("AuthEnvVars = %#v, want ATLASCLOUD_API_KEY", descriptor.AuthEnvVars)
+	}
+}
+
+func TestYoloAutoDescriptor(t *testing.T) {
+	descriptor, err := Require("yolo-auto")
+	if err != nil {
+		t.Fatalf("Require(yolo-auto) error = %v", err)
+	}
+	if descriptor.Name != "Yolo-Auto" {
+		t.Fatalf("Name = %q, want Yolo-Auto", descriptor.Name)
+	}
+	if descriptor.DefaultBaseURL != "https://yolo-auto.com/v1" {
+		t.Fatalf("DefaultBaseURL = %q, want Yolo-Auto OpenAI-compatible endpoint", descriptor.DefaultBaseURL)
+	}
+	if descriptor.DefaultModel != "yolo" {
+		t.Fatalf("DefaultModel = %q, want yolo", descriptor.DefaultModel)
+	}
+	if descriptor.Transport != TransportOpenAICompatible {
+		t.Fatalf("Transport = %q, want %q", descriptor.Transport, TransportOpenAICompatible)
+	}
+	if !reflect.DeepEqual(descriptor.AuthEnvVars, []string{"YOLO_AUTO_API_KEY"}) {
+		t.Fatalf("AuthEnvVars = %#v, want YOLO_AUTO_API_KEY", descriptor.AuthEnvVars)
 	}
 }
 
@@ -371,7 +394,7 @@ func TestListByTransportPreservesCatalogOrder(t *testing.T) {
 		TransportBedrock:         {"bedrock"},
 		TransportVertex:          {"vertex"},
 		TransportAnthropicCompat: {"minimax", "minimaxi-cn", "opencode-go-anthropic-compatible", "custom-anthropic-compatible"},
-		TransportOpenAICompat:    {"gitlawb-opengateway", "aimlapi", "ollama-cloud", "ollama", "lmstudio", "atomic-chat-local", "openrouter", "huggingface", "chatgpt", "groq", "deepseek", "together", "fireworks", "dashscope", "moonshot", "atlascloud", "longcat", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "zai-cn", "kilocode", "opencode", "opencode-go", "atomic-chat", "chatgpt-proxy", "custom-openai-compatible"},
+		TransportOpenAICompat:    {"gitlawb-opengateway", "aimlapi", "ollama-cloud", "ollama", "lmstudio", "atomic-chat-local", "openrouter", "huggingface", "chatgpt", "groq", "deepseek", "together", "fireworks", "dashscope", "moonshot", "atlascloud", "longcat", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "zai-cn", "kilocode", "opencode", "opencode-go", "atomic-chat", "yolo-auto", "chatgpt-proxy", "custom-openai-compatible"},
 	}
 
 	for transport, wantIDs := range cases {
