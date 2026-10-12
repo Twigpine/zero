@@ -1,6 +1,6 @@
 {
   "name": "@gitlawb/zero",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Zero — a fast, multi-provider terminal coding agent.",
   "type": "module",
   "module": "bin/zero.js",

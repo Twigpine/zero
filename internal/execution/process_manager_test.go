@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -82,6 +83,126 @@ func TestProcessManagerInterruptsRetainedProcess(t *testing.T) {
 	}
 	if !stopped.Exited || !stopped.Interrupted {
 		t.Fatalf("interrupt result = %#v", stopped)
+	}
+}
+
+func TestProcessManagerWriteInputUnknownProcess(t *testing.T) {
+	manager := NewProcessManager(ProcessManagerOptions{})
+	if err := manager.WriteInput(4242, []byte("x")); !errors.Is(err, ErrProcessNotFound) {
+		t.Fatalf("WriteInput unknown id = %v, want ErrProcessNotFound", err)
+	}
+}
+
+func TestProcessManagerWriteInputRejectsPipeProcess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test command uses a POSIX shell")
+	}
+	root := t.TempDir()
+	manager := NewProcessManager(ProcessManagerOptions{})
+	command := exec.Command("/bin/sh", "-c", "sleep 30")
+	started, err := manager.Start(context.Background(), ProcessStart{
+		Prepared: PreparedCommand{Command: command}, Request: processManagerRequest(root, command),
+	}, time.Millisecond)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer manager.Stop(started.ProcessID)
+	if started.TTY {
+		t.Fatal("pipe process reported a TTY")
+	}
+	if err := manager.WriteInput(started.ProcessID, []byte("x")); !errors.Is(err, ErrProcessStdinDisabled) {
+		t.Fatalf("WriteInput pipe process = %v, want ErrProcessStdinDisabled", err)
+	}
+	if err := manager.WriteInput(started.ProcessID, nil); err != nil {
+		t.Fatalf("WriteInput empty data = %v, want nil", err)
+	}
+}
+
+func TestProcessManagerWriteInputDoesNotDrainPendingOutput(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("PTY sessions are only available on Linux")
+	}
+	root := t.TempDir()
+	manager := NewProcessManager(ProcessManagerOptions{})
+	command := exec.CommandContext(context.Background(), "cat")
+	started, err := manager.Start(context.Background(), ProcessStart{
+		Prepared: PreparedCommand{Command: command}, Request: processManagerRequest(root, command),
+		CommandText: "cat", TTY: true,
+	}, 50*time.Millisecond)
+	if err != nil {
+		t.Skipf("PTY transport unavailable: %v", err)
+	}
+	if !started.TTY {
+		t.Skip("PTY transport fell back to pipes")
+	}
+	defer manager.Stop(started.ProcessID)
+
+	if err := manager.WriteInput(started.ProcessID, []byte("hello\r")); err != nil {
+		t.Fatalf("WriteInput: %v", err)
+	}
+	// The PTY echoes input back into the output stream, so the rolling recent
+	// tail shows what was typed without anything being drained.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		snapshot, ok := manager.Snapshot(started.ProcessID)
+		if ok && strings.Contains(snapshot.RecentOutput, "hello") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("recent output never echoed the input: %q", snapshot.RecentOutput)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// WriteInput must not have consumed the pending buffer: a write_stdin-style
+	// Continue still collects the echoed bytes.
+	continued, err := manager.Continue(context.Background(), ProcessContinue{
+		ProcessID: started.ProcessID, Wait: 200 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("Continue: %v", err)
+	}
+	if !strings.Contains(continued.Output, "hello") {
+		t.Fatalf("WriteInput drained the pending output: continued output = %q", continued.Output)
+	}
+}
+
+func TestProcessManagerResizeInputUnknownProcess(t *testing.T) {
+	manager := NewProcessManager(ProcessManagerOptions{})
+	if err := manager.ResizeInput(4242, 100, 40); !errors.Is(err, ErrProcessNotFound) {
+		t.Fatalf("ResizeInput unknown id = %v, want ErrProcessNotFound", err)
+	}
+}
+
+func TestProcessManagerResizeInputUpdatesWindowSize(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("PTY sessions are only available on Linux")
+	}
+	root := t.TempDir()
+	manager := NewProcessManager(ProcessManagerOptions{})
+	command := exec.CommandContext(context.Background(), "/bin/sh", "-c", "sleep 0.3; stty size")
+	started, err := manager.Start(context.Background(), ProcessStart{
+		Prepared: PreparedCommand{Command: command}, Request: processManagerRequest(root, command),
+		CommandText: "stty size", TTY: true,
+	}, time.Millisecond)
+	if err != nil {
+		t.Skipf("PTY transport unavailable: %v", err)
+	}
+	if !started.TTY {
+		t.Skip("PTY transport fell back to pipes")
+	}
+	defer manager.Stop(started.ProcessID)
+
+	if err := manager.ResizeInput(started.ProcessID, 100, 40); err != nil {
+		t.Fatalf("ResizeInput: %v", err)
+	}
+	continued, err := manager.Continue(context.Background(), ProcessContinue{
+		ProcessID: started.ProcessID, Wait: 2 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Continue: %v", err)
+	}
+	if combined := started.Output + continued.Output; !strings.Contains(combined, "40 100") {
+		t.Fatalf("stty size output = %q, want %q", combined, "40 100")
 	}
 }
 

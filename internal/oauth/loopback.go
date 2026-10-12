@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 )
 
 // LoopbackListener is a single-use loopback HTTP server that captures an OAuth
@@ -19,7 +18,7 @@ type LoopbackListener struct {
 	listener net.Listener
 	state    string
 	result   chan callbackResult
-	server   *http.Server
+	server   *CallbackServer
 }
 
 type callbackResult struct {
@@ -38,6 +37,14 @@ func NewLoopbackListener(state string) (*LoopbackListener, error) {
 // port (0 = OS-assigned). Used by ChatGPT OAuth which requires a fixed
 // redirect_uri of http://localhost:1455/auth/callback.
 func NewLoopbackListenerOnPort(state string, port int) (*LoopbackListener, error) {
+	return newLoopbackListener(state, port, nil)
+}
+
+// newLoopbackListener is NewLoopbackListenerOnPort with an optional ConnState
+// hook, set before the Serve goroutine starts so tests can synchronize on
+// connection lifecycle events (e.g. a stalled request header being accepted)
+// without racing the running server.
+func newLoopbackListener(state string, port int, connState func(net.Conn, http.ConnState)) (*LoopbackListener, error) {
 	if strings.TrimSpace(state) == "" {
 		return nil, errors.New("oauth: loopback listener requires a non-empty CSRF state")
 	}
@@ -50,8 +57,7 @@ func NewLoopbackListenerOnPort(state string, port int) (*LoopbackListener, error
 		state:    state,
 		result:   make(chan callbackResult, 1),
 	}
-	l.server = &http.Server{Handler: http.HandlerFunc(l.handle)}
-	go func() { _ = l.server.Serve(ln) }()
+	l.server = startCallbackServer(ln, http.HandlerFunc(l.handle), connState)
 	return l, nil
 }
 
@@ -99,11 +105,13 @@ func (l *LoopbackListener) Wait(ctx context.Context) (string, error) {
 	}
 }
 
-// Close shuts the listener down (bounded), idempotent.
+// Close shuts the listener down (bounded), idempotent. If a client leaves a
+// connection open past the shutdown deadline (e.g. a stalled request header),
+// Close forcibly closes it rather than leaking it past the end of the flow,
+// and waits for the Serve goroutine to finish before returning. See
+// CallbackServer.Close.
 func (l *LoopbackListener) Close() {
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_ = l.server.Shutdown(shutdownCtx)
+	l.server.Close()
 }
 
 // parseCallback validates the redirect query and returns the authorization code,

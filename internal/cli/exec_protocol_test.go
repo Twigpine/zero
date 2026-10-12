@@ -70,8 +70,8 @@ func TestRunExecListsFilteredToolsWithoutPromptOrProvider(t *testing.T) {
 	if exitCode != exitSuccess {
 		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
 	}
-	if stderr.Len() != 0 {
-		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	if stderr.String() != hostSandboxNotice(t) {
+		t.Fatalf("expected no stderr beyond this host's sandbox notice, got %q", stderr.String())
 	}
 	if providerBuilt {
 		t.Fatal("provider should not be constructed for --list-tools")
@@ -108,8 +108,8 @@ func TestRunExecListsToolsAsStreamJSONWhenRequested(t *testing.T) {
 	if exitCode != exitSuccess {
 		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
 	}
-	if stderr.Len() != 0 {
-		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	if stderr.String() != hostSandboxNotice(t) {
+		t.Fatalf("expected no stderr beyond this host's sandbox notice, got %q", stderr.String())
 	}
 	if providerBuilt {
 		t.Fatal("provider should not be constructed for --list-tools")
@@ -176,8 +176,8 @@ func TestRunExecListsMCPToolsWithoutProviderConstruction(t *testing.T) {
 	if !closed {
 		t.Fatal("MCP runtime was not closed after --list-tools")
 	}
-	if stderr.Len() != 0 {
-		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	if stderr.String() != hostSandboxNotice(t) {
+		t.Fatalf("expected no stderr beyond this host's sandbox notice, got %q", stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "mcp_docs_lookup") || !strings.Contains(stdout.String(), "Lookup documentation") {
 		t.Fatalf("expected MCP tool in list output, got %q", stdout.String())
@@ -323,8 +323,8 @@ func TestRunExecStreamJSONOutputsRunEndAndRecordsSession(t *testing.T) {
 	if exitCode != exitSuccess {
 		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
 	}
-	if stderr.Len() != 0 {
-		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	if stderr.String() != hostSandboxNotice(t) {
+		t.Fatalf("expected no stderr beyond this host's sandbox notice, got %q", stderr.String())
 	}
 
 	events := decodeJSONLines(t, stdout.String())
@@ -388,8 +388,8 @@ func TestRunExecStreamJSONEmitsAndRecordsPermissionEvents(t *testing.T) {
 	if exitCode != exitSuccess {
 		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
 	}
-	if stderr.Len() != 0 {
-		t.Fatalf("expected empty stderr, got %q", stderr.String())
+	if stderr.String() != hostSandboxNotice(t) {
+		t.Fatalf("expected no stderr beyond this host's sandbox notice, got %q", stderr.String())
 	}
 
 	events := decodeJSONLines(t, stdout.String())
@@ -460,7 +460,7 @@ func TestRunExecStreamJSONEmitsAndRecordsPermissionEvents(t *testing.T) {
 	if exitCode != exitSuccess {
 		t.Fatalf("approved exec exit = %d, stderr = %q", exitCode, stderr.String())
 	}
-	if stderr.String() != "" {
+	if stderr.String() != hostSandboxNotice(t) {
 		t.Fatalf("approved exec wrote stderr = %q", stderr.String())
 	}
 	approvedEvents := decodeJSONLines(t, stdout.String())

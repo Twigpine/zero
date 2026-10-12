@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/testutil"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -111,7 +112,11 @@ func TestAsyncDiagnosticsReEditReplacesResult(t *testing.T) {
 	diagnostics := newAsyncDiagnostics(check, "/ws")
 
 	diagnostics.enqueue(context.Background(), []string{"a.go"})
-	waitForIdle(t, diagnostics)
+	testutil.WaitFor(t, "worker idle", func() bool {
+		diagnostics.mu.Lock()
+		defer diagnostics.mu.Unlock()
+		return diagnostics.working == nil
+	})
 	mu.Lock()
 	response = "ERR new"
 	mu.Unlock()
@@ -120,23 +125,6 @@ func TestAsyncDiagnosticsReEditReplacesResult(t *testing.T) {
 	nudge := diagnostics.drain(context.Background())
 	if !strings.Contains(nudge, "ERR new") || strings.Contains(nudge, "ERR old") {
 		t.Fatalf("nudge = %q, want only the re-check result", nudge)
-	}
-}
-
-func waitForIdle(t *testing.T, diagnostics *asyncDiagnostics) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		diagnostics.mu.Lock()
-		busy := diagnostics.working
-		diagnostics.mu.Unlock()
-		if busy == nil {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("worker never went idle")
-		}
-		time.Sleep(2 * time.Millisecond)
 	}
 }
 

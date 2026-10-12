@@ -129,17 +129,15 @@ func reconcileOverdue(store *cron.Store, now func() time.Time, ids []string, std
 	}
 }
 
-// fireJob runs one job via the exec runner, records the outcome, advances the
-// schedule, and persists. The foreground loop is single-goroutine, so the
-// previous fire has already returned before the next tick — no overlap.
+// fireJob claims one job, runs it via the exec runner, and records the outcome.
+// Separate scheduler processes can have adjacent slots executing concurrently.
 func fireJob(store *cron.Store, now func() time.Time, job cron.Job, stdout io.Writer, stderr io.Writer, exec execRunner) {
 	fired := now()
 	// Atomically claim this fire before running it so concurrent schedulers (or
 	// --once overlapping the forever loop) can't both execute the same due job: the
 	// winner advances NextRunAt under the per-job lock, and a loser sees the
-	// advanced time and skips. The post-exec advance recomputes the same
-	// NextRunAt (sched.Next(fired) is deterministic), so the claim serializes the
-	// fire decision without changing any persisted schedule state (M9).
+	// advanced time and skips. Only the claim writes schedule state; completion
+	// must not overwrite a later slot's claim with this run's stale job copy.
 	claimed, claimErr := claimFire(store, fired, job.ID)
 	if claimErr != nil {
 		if errors.Is(claimErr, cron.ErrJobNotFound) {
@@ -178,44 +176,25 @@ func fireJob(store *cron.Store, now func() time.Time, job cron.Job, stdout io.Wr
 		rec.Error = cronTruncate(detail, 500)
 	}
 
-	job.FireCount++
-	// Advance the schedule. If the expression can no longer produce a future run
-	// (became invalid, or is an impossible spec whose Next is zero), pause the job
-	// so it cannot re-fire on every tick.
+	// Explain schedules that claimFire paused because they cannot advance.
 	if sched, perr := cron.Parse(job.Expr); perr != nil {
-		job.Status = cron.StatusPaused
 		if rec.Error == "" {
 			rec.Error = "invalid schedule; job paused: " + perr.Error()
 		}
 	} else if nxt := sched.Next(fired.Truncate(time.Minute)); nxt.IsZero() {
-		job.Status = cron.StatusPaused
 		if rec.Error == "" {
 			rec.Error = "schedule no longer fires; job paused"
 		}
-	} else {
-		// Minute-aligned input keeps this advance identical to claimFire's and lets
-		// the DST fall-back collapse guard engage (AUDIT-M4).
-		job.NextRunAt = nxt
 	}
-	// Re-read and persist the advanced state ATOMICALLY under the per-job lock. The
-	// job may have been paused or removed while it executed, and this in-memory copy
-	// is stale from tick start. Mutate closes the read-modify-write window a single
-	// scheduler alone could only narrow (Store.Mutate took a cross-process lock): a
-	// concurrent scheduler or an external pause/remove landing here can no longer be
-	// clobbered.
+	// Count this completion against current state under the cross-process lock.
+	// The claim already advanced or paused the schedule. Leave that state alone:
+	// another scheduler may have claimed a later slot or a user may have edited it.
 	persisted, err := store.Mutate(job.ID, func(current cron.Job, readErr error) (cron.Job, error) {
 		if readErr != nil {
-			// A transient read failure (IO/permission) is NOT removal — persist the
-			// computed next state anyway so the schedule advances and the job does not
-			// re-fire next tick.
-			fmt.Fprintf(stderr, "warning: could not re-read job %s before persist: %v\n", job.ID, readErr)
-			return job, nil
+			// Never replace unknown newer state with the pre-execution snapshot.
+			return current, readErr
 		}
-		current.FireCount = job.FireCount
-		current.NextRunAt = job.NextRunAt
-		if current.Status != cron.StatusPaused {
-			current.Status = job.Status
-		}
+		current.FireCount++
 		return current, nil
 	})
 	if errors.Is(err, cron.ErrJobNotFound) {
@@ -229,19 +208,21 @@ func fireJob(store *cron.Store, now func() time.Time, job cron.Job, stdout io.Wr
 	if aerr := store.AppendRun(job.ID, rec); aerr != nil {
 		fmt.Fprintf(stderr, "warning: failed to record run for %s: %v\n", job.ID, aerr)
 	}
+	next := "unknown"
 	if err != nil {
 		fmt.Fprintf(stderr, "warning: failed to persist job state for %s: %v\n", job.ID, err)
-		persisted = job
+	} else {
+		next = formatCronTime(persisted.NextRunAt)
 	}
-	fmt.Fprintf(stdout, "fired %s -> exit %d (next: %s)\n", job.ID, code, formatCronTime(persisted.NextRunAt))
+	fmt.Fprintf(stdout, "fired %s -> exit %d (next: %s)\n", job.ID, code, next)
 }
 
 // claimFire atomically claims a due job's fire under the per-job lock and reports
 // whether THIS caller should run it. It returns false only when the job was paused
 // externally or another scheduler already advanced NextRunAt past `fired` (so a
 // valid recurring job never double-fires). A valid due job has its NextRunAt
-// advanced here to claim the slot; an invalid or exhausted schedule is left for the
-// caller to fire-once and pause (preserving existing single-scheduler behavior).
+// advanced here to claim the slot; an invalid or exhausted schedule is paused
+// here and the caller still fires once (preserving single-scheduler behavior).
 func claimFire(store *cron.Store, fired time.Time, id string) (bool, error) {
 	claimed := true
 	_, err := store.Mutate(id, func(current cron.Job, readErr error) (cron.Job, error) {
@@ -268,8 +249,8 @@ func claimFire(store *cron.Store, fired time.Time, id string) (bool, error) {
 		}
 		// Unparseable or unadvanceable schedule (an impossible spec whose Next is
 		// zero): pause the job inside this same locked claim so a concurrent scheduler
-		// sees a non-active job and does NOT also fire it. The winner still fires once
-		// and fireJob's post-exec keeps it paused. Without this, both callers leave
+		// sees a non-active job and does NOT also fire it. The winner still fires once.
+		// Without this, both callers leave
 		// NextRunAt unchanged, both see the job due, and both fire the same slot
 		// (AUDIT-M5).
 		current.Status = cron.StatusPaused

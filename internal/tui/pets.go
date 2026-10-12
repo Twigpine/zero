@@ -411,7 +411,7 @@ func (m model) petLayoutActive() bool {
 func (m model) petObscuringModalActive() bool {
 	return m.pendingAskUser != nil || m.pendingSpecReview != nil || m.providerWizard != nil ||
 		m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil ||
-		m.sttKeyPrompt != nil || m.renamePrompt != nil
+		m.sttKeyPrompt != nil || m.renamePrompt != nil || m.terminalAttach != nil
 }
 
 func (m model) petComposerReservedColumns(width int) int {

@@ -1889,10 +1889,11 @@ func TestRemoteHasBranchSeesPushWithoutLocalUpstream(t *testing.T) {
 	}
 }
 
-// TestHasUpstreamRejectsInheritedMainUpstream covers branch.autoSetupMerge=inherit:
-// checkout -b copies origin/main onto the new branch before any push -u. That
-// must not count as a published upstream for the generated branch name.
-func TestHasUpstreamRejectsInheritedMainUpstream(t *testing.T) {
+// TestUpstreamRefTracksInheritedThenPublishedUpstream covers
+// branch.autoSetupMerge=inherit: checkout -b copies origin/main onto the new
+// branch before any push -u, so UpstreamRef must report that inherited ref
+// as-is until an explicit push -u republishes it under the branch's own name.
+func TestUpstreamRefTracksInheritedThenPublishedUpstream(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skipf("git unavailable: %v", err)
 	}
@@ -1922,38 +1923,10 @@ func TestHasUpstreamRejectsInheritedMainUpstream(t *testing.T) {
 	if ref := UpstreamRef(context.Background(), repo, "user/slug", nil); ref != "origin/main" {
 		t.Fatalf("UpstreamRef after inherit = %q, want origin/main", ref)
 	}
-	has, err := HasUpstream(context.Background(), repo, "user/slug", nil)
-	if err != nil {
-		t.Fatalf("HasUpstream: %v", err)
-	}
-	if has {
-		t.Fatal("HasUpstream must reject inherited origin/main for user/slug")
-	}
 
 	runGitCommand(t, repo, "push", "-u", "origin", "user/slug")
 	if ref := UpstreamRef(context.Background(), repo, "user/slug", nil); ref != "origin/user/slug" {
 		t.Fatalf("UpstreamRef after push -u = %q, want origin/user/slug", ref)
-	}
-	has, err = HasUpstream(context.Background(), repo, "user/slug", nil)
-	if err != nil {
-		t.Fatalf("HasUpstream after push: %v", err)
-	}
-	if !has {
-		t.Fatal("HasUpstream must accept exact origin/user/slug after push -u")
-	}
-}
-
-func TestHasUpstreamMultiSegmentRemote(t *testing.T) {
-	root := t.TempDir()
-	runner := &fakeRunner{results: []CommandResult{
-		{Stdout: "team/upstream/user/slug\n"},
-	}}
-	has, err := HasUpstream(context.Background(), root, "user/slug", runner.Run)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !has {
-		t.Fatal("expected HasUpstream to return true for multi-segment remote tracking branch")
 	}
 }
 

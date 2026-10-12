@@ -4,6 +4,8 @@ import (
 	"math"
 	"testing"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/testutil"
 )
 
 // testTicker returns a ticker factory backed by a single unbounded-handshake
@@ -39,11 +41,11 @@ func TestSchedulerFiresAndCountsRuns(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		ticks <- time.Time{}
 		want := i + 1
-		waitFor(t, "task completed", func() bool { return sw.Coordinator().Summarize().Done == want })
+		testutil.WaitFor(t, "task completed", func() bool { return sw.Coordinator().Summarize().Done == want })
 	}
 
 	// After MaxRuns the job retires itself.
-	waitFor(t, "job retired", func() bool { _, ok := findJob(sched.List(), id); return !ok })
+	testutil.WaitFor(t, "job retired", func() bool { _, ok := findJob(sched.List(), id); return !ok })
 	if got := len(l.recorded()); got != 3 {
 		t.Fatalf("spawned %d members, want 3", got)
 	}
@@ -68,11 +70,11 @@ func TestSchedulerSkipsWhilePreviousRuns(t *testing.T) {
 
 	// Fire 1: spawns and the member stays running (gated).
 	ticks <- time.Time{}
-	waitFor(t, "first spawn", func() bool { return len(l.recorded()) == 1 })
+	testutil.WaitFor(t, "first spawn", func() bool { return len(l.recorded()) == 1 })
 
 	// Fire 2: previous still running => skipped, no new spawn.
 	ticks <- time.Time{}
-	waitFor(t, "skip recorded", func() bool {
+	testutil.WaitFor(t, "skip recorded", func() bool {
 		j, ok := findJob(sched.List(), id)
 		return ok && j.Skipped == 1
 	})
@@ -82,14 +84,14 @@ func TestSchedulerSkipsWhilePreviousRuns(t *testing.T) {
 
 	// Release the first member, then fire 3: previous terminal => spawns again.
 	close(gate)
-	waitFor(t, "first done", func() bool { return sw.Coordinator().Summarize().Done == 1 })
+	testutil.WaitFor(t, "first done", func() bool { return sw.Coordinator().Summarize().Done == 1 })
 	ticks <- time.Time{}
-	waitFor(t, "second spawn", func() bool { return len(l.recorded()) == 2 })
+	testutil.WaitFor(t, "second spawn", func() bool { return len(l.recorded()) == 2 })
 	// fireIfIdle's spawn (what "second spawn" observes via the launcher) and
 	// run's subsequent job.incRuns() are sequential but distinct steps in the
 	// scheduler's goroutine; wait for Runs itself rather than assuming the
 	// launcher recording it means the job's counter is updated too.
-	waitFor(t, "second run recorded", func() bool {
+	testutil.WaitFor(t, "second run recorded", func() bool {
 		j, ok := findJob(sched.List(), id)
 		return ok && j.Runs == 2
 	})
@@ -215,7 +217,7 @@ func TestSchedulerDailyRecomputesNextDelay(t *testing.T) {
 	}
 	for i := 0; i < 2; i++ {
 		ticks <- time.Time{}
-		waitFor(t, "task completed", func() bool { return sw.Coordinator().Summarize().Done == i+1 })
+		testutil.WaitFor(t, "task completed", func() bool { return sw.Coordinator().Summarize().Done == i+1 })
 	}
 	if len(delays) < 2 {
 		t.Fatalf("expected at least two requested delays, got %v", delays)

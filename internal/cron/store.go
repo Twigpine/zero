@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -16,6 +17,10 @@ import (
 const (
 	StatusActive = "active"
 	StatusPaused = "paused"
+
+	// MaxRunHistory is the number of recent outcomes retained per job.
+	MaxRunHistory = 1000
+	maxRunBytes   = 1024 * 1024
 )
 
 // ErrJobNotFound is returned (wrapped) by Get when a job's metadata file is
@@ -56,6 +61,9 @@ type StoreOptions struct {
 type Store struct {
 	root string
 	now  func() time.Time
+	// replace overrides the run-history replacement primitive in tests; nil
+	// uses the platform default.
+	replace func(src, dst string) error
 }
 
 func NewStore(opts StoreOptions) *Store {
@@ -228,8 +236,7 @@ func (s *Store) Update(job Job) error {
 // Remove). It re-reads the CURRENT on-disk job and passes it to mutate along with
 // any read error; mutate returns the job to persist. A removed job aborts with
 // ErrJobNotFound (no recreate). A transient read error (not removal) is surfaced
-// via readErr so the caller can still persist a best-effort state — the fire path
-// advances the schedule regardless, to avoid a re-fire.
+// via readErr; the callback can return it to abort without overwriting state.
 func (s *Store) Mutate(id string, mutate func(current Job, readErr error) (Job, error)) (Job, error) {
 	if !validID(id) {
 		return Job{}, fmt.Errorf("invalid cron job id %q", id)
@@ -309,10 +316,8 @@ func (s *Store) AppendRun(id string, rec RunRecord) error {
 		return err
 	}
 	defer unlock()
-	// Bail if the job was removed (e.g. mid-run) — otherwise the MkdirAll below
-	// would resurrect a deleted job's directory with an orphaned runs.jsonl and no
-	// metadata.json (which Runs would then still return). Under the per-job lock
-	// this stat-then-write is race-free against a concurrent Remove.
+	// Do not resurrect a job removed mid-run. The lock serializes this check
+	// and publication against Remove and other history writers/readers.
 	if _, err := os.Stat(filepath.Join(s.jobDir(id), "metadata.json")); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
@@ -320,30 +325,98 @@ func (s *Store) AppendRun(id string, rec RunRecord) error {
 		return err
 	}
 	dir := s.jobDir(id)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(filepath.Join(dir, "runs.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
 	line, err := json.Marshal(rec)
 	if err != nil {
+		return err
+	}
+	if len(line) >= maxRunBytes {
+		return fmt.Errorf("cron run record exceeds %d bytes", maxRunBytes-1)
+	}
+	runs, err := s.readRuns(id, MaxRunHistory-1)
+	if err != nil {
+		return err
+	}
+	// Publish a complete snapshot even below the retention boundary so readers
+	// never see a partial append. Legacy oversized logs compact on their next run.
+	f, err := os.CreateTemp(dir, "runs-*.tmp")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	w := bufio.NewWriter(f)
+	for _, run := range runs {
+		if err := json.NewEncoder(w).Encode(run); err != nil {
+			_ = f.Close()
+			return err
+		}
+	}
+	if _, err := w.Write(append(line, '\n')); err != nil {
 		_ = f.Close()
 		return err
 	}
-	if _, err := f.Write(append(line, '\n')); err != nil {
+	if err := w.Flush(); err != nil {
 		_ = f.Close()
 		return err
 	}
 	// Surface a buffered-write failure that only materializes on Close.
+	if err := f.Close(); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, "runs.jsonl")
+	// ReplaceWithRetry keeps a DACL applied to runs.jsonl itself; a rename would
+	// publish the temporary file's inherited directory DACL instead.
+	err = fsutil.ReplaceWithRetry(f.Name(), path, s.replace)
+	var committed *fsutil.CommittedReplacementCleanupError
+	if err == nil || errors.As(err, &committed) || !fsutil.IsSharingOrLockViolation(err) {
+		return err
+	}
+	// Windows refuses to replace a log another process holds open. Append the
+	// record instead so the outcome survives; compaction resumes on a later run.
+	// Other failures are returned so a log that can never be replaced cannot
+	// grow past the retention limit. The leading newline ends any unterminated
+	// tail, and readRuns skips the blank line it may leave. Zero's own readers
+	// hold the job lock.
+	if appendErr := appendRunLine(path, line); appendErr != nil {
+		return errors.Join(err, appendErr)
+	}
+	return nil
+}
+
+func appendRunLine(path string, line []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		return err
+	}
+	record := append(append([]byte{'\n'}, line...), '\n')
+	if _, err := f.Write(record); err != nil {
+		_ = f.Close()
+		return err
+	}
 	return f.Close()
 }
 
-func (s *Store) Runs(id string) ([]RunRecord, error) {
+// Runs returns the newest limit valid records in append order (oldest first).
+// Non-positive limits and limits above MaxRunHistory use MaxRunHistory. It reads
+// backwards from the tail, including for legacy logs not yet compacted.
+func (s *Store) Runs(id string, limit int) ([]RunRecord, error) {
 	if !validID(id) {
 		return nil, fmt.Errorf("invalid cron job id %q", id)
 	}
+	if limit <= 0 || limit > MaxRunHistory {
+		limit = MaxRunHistory
+	}
+	unlock, err := s.lockJob(id)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	return s.readRuns(id, limit)
+}
+
+// readRuns requires the job lock. Memory is bounded by limit records plus one
+// line. Malformed and oversized legacy lines are skipped so they cannot prevent
+// recording new outcomes during compaction.
+func (s *Store) readRuns(id string, limit int) ([]RunRecord, error) {
 	f, err := os.Open(filepath.Join(s.jobDir(id), "runs.jsonl"))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -352,14 +425,48 @@ func (s *Store) Runs(id string) ([]RunRecord, error) {
 		return nil, err
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
 	var runs []RunRecord
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
+	var line []byte
+	oversized := false
+	decode := func() {
+		slices.Reverse(line)
 		var rec RunRecord
-		if json.Unmarshal(scanner.Bytes(), &rec) == nil {
+		if json.Unmarshal(line, &rec) == nil {
 			runs = append(runs, rec)
 		}
+		line = line[:0]
 	}
-	return runs, scanner.Err()
+	var block [4096]byte
+	for end := info.Size(); end > 0 && len(runs) < limit; {
+		start := max(int64(0), end-int64(len(block)))
+		n, err := f.ReadAt(block[:end-start], start)
+		if err != nil {
+			return nil, err
+		}
+		for i := n - 1; i >= 0 && len(runs) < limit; i-- {
+			if block[i] == '\n' {
+				if !oversized {
+					decode()
+				}
+				oversized = false
+			} else if !oversized {
+				if len(line) >= maxRunBytes-1 {
+					line = line[:0]
+					oversized = true
+					continue
+				}
+				line = append(line, block[i])
+			}
+		}
+		end = start
+	}
+	if len(runs) < limit && len(line) > 0 {
+		decode()
+	}
+	slices.Reverse(runs)
+	return runs, nil
 }

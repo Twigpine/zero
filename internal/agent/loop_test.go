@@ -27,6 +27,23 @@ type mockProvider struct {
 	requests []zeroruntime.CompletionRequest
 }
 
+func TestPrePermissionRejectScrubsFileDiffs(t *testing.T) {
+	secret := "sk-proj-abcdefghijklmnopqrstuvwxyz"
+	result := toolResultFromPrePermissionReject(ToolCall{ID: "call", Name: "test"}, tools.Result{
+		Status: tools.StatusError,
+		FileDiffs: []tools.FileDiff{{
+			Path:      filepath.Join(t.TempDir(), "secret.txt"),
+			OldExists: true,
+			NewExists: true,
+			OldText:   "token=" + secret,
+			NewText:   "safe",
+		}},
+	})
+	if len(result.FileDiffs) != 1 || strings.Contains(result.FileDiffs[0].OldText, secret) || !result.Redacted {
+		t.Fatalf("pre-permission FileDiff = %#v, redacted = %t", result.FileDiffs, result.Redacted)
+	}
+}
+
 func TestTypedExecutionOutcomeOverridesLegacySandboxHeuristics(t *testing.T) {
 	engine := sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: t.TempDir(), Policy: sandbox.DefaultPolicy()})
 	call := ToolCall{Name: tools.ExecCommandToolName}

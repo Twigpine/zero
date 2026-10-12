@@ -76,6 +76,20 @@ func openLockFileAt(root, relative, displayPath string) (_ *os.File, resultErr e
 	return file, nil
 }
 
+func validateRootLockFile(file *os.File) error {
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
+		return fmt.Errorf("inspect rooted lock file: %w", err)
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
+		return errors.New("refusing non-regular rooted lock file")
+	}
+	if stat.Nlink != 1 {
+		return errors.New("refusing multiply-linked rooted lock file")
+	}
+	return nil
+}
+
 func tryLockFile(file *os.File) (platformLockState, bool, error) {
 	err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
 	if err == nil {

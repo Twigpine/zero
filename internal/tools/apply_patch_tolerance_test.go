@@ -2,8 +2,10 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -363,7 +365,7 @@ func TestUnifiedPatchCopyOperation(t *testing.T) {
 	if content, _ := os.ReadFile(filepath.Join(root, "dst.txt")); string(content) != "hello\nnew\n" {
 		t.Fatalf("copy destination = %q", string(content))
 	}
-	if len(result.ChangedFiles) != 2 || result.ChangedFiles[0] != "src.txt" || result.ChangedFiles[1] != "dst.txt" {
+	if len(result.ChangedFiles) != 1 || result.ChangedFiles[0] != "dst.txt" {
 		t.Fatalf("changed files = %v", result.ChangedFiles)
 	}
 	destination, err := filepath.EvalSymlinks(filepath.Join(root, "dst.txt"))
@@ -571,9 +573,9 @@ func TestApplyStructuredPatchChangeRefusesSourceChangedAfterPlanning(t *testing.
 		"copy":   {kind: structuredPatchCopy, from: target, to: destination, before: "planned\n", after: "planned\n", mode: 0o644},
 	} {
 		writeTestFile(t, path, "changed after planning\n")
-		committed, err := applyStructuredPatchChange(workspace, change)
-		if err == nil || committed || !strings.Contains(err.Error(), "changed on disk between planning and commit") {
-			t.Fatalf("%s: expected a refusal, got committed=%v err=%v", name, committed, err)
+		outcome, err := applyStructuredPatchChange(workspace, change)
+		if err == nil || len(outcome.completed) != 0 || len(outcome.incompletePaths) != 0 || !strings.Contains(err.Error(), "changed on disk between planning and commit") {
+			t.Fatalf("%s: expected a refusal, got outcome=%#v err=%v", name, outcome, err)
 		}
 		if content, _ := os.ReadFile(path); string(content) != "changed after planning\n" {
 			t.Fatalf("%s: file must be untouched, got %q", name, string(content))
@@ -708,5 +710,159 @@ func TestApplyPatchOperationsReportsCommittedPrefixOnFailure(t *testing.T) {
 	}
 	if content, _ := os.ReadFile(filepath.Join(root, "third.txt")); string(content) != "three\n" {
 		t.Fatalf("third.txt must be untouched, got %q", string(content))
+	}
+	if got := result.ChangedFiles; len(got) != 1 || got[0] != "first.txt" {
+		t.Fatalf("partial patch ChangedFiles = %#v, want committed prefix only", got)
+	}
+	resolvedFirst, err := filepath.EvalSymlinks(filepath.Join(root, "first.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.FileDiffs; len(got) != 1 || got[0] != (FileDiff{Path: resolvedFirst, OldExists: true, NewExists: true, OldText: "one\n", NewText: "ONE\n"}) {
+		t.Fatalf("partial patch FileDiffs = %#v", got)
+	}
+}
+
+func TestApplyPatchOperationsReportsWorkspaceRelativeCommittedPrefixUnderCwd(t *testing.T) {
+	root := t.TempDir()
+	applyRoot := filepath.Join(root, "sub", "dir")
+	if err := os.MkdirAll(applyRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(applyRoot, "first.txt"), "one\n")
+	writeTestFile(t, filepath.Join(applyRoot, "second.txt"), "two\n")
+	structuredPatchBeforeCommit = func(change structuredPatchChange) {
+		if change.to.relative == "second.txt" {
+			writeTestFile(t, filepath.Join(applyRoot, "second.txt"), "changed\n")
+		}
+	}
+	t.Cleanup(func() { structuredPatchBeforeCommit = nil })
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: first.txt", "@@", "-one", "+ONE",
+		"*** Update File: second.txt", "@@", "-two", "+TWO",
+		"*** End Patch", "",
+	}, "\n")
+
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{
+		"cwd": "sub/dir", "patch": patch,
+	})
+	if result.Status != StatusError || !strings.Contains(result.Output, "already committed: sub/dir/first.txt") {
+		t.Fatalf("nested partial failure = status=%s output=%q", result.Status, result.Output)
+	}
+	if got := result.ChangedFiles; len(got) != 1 || got[0] != "sub/dir/first.txt" {
+		t.Fatalf("nested partial ChangedFiles = %#v", got)
+	}
+}
+
+func TestApplyPatchSeparatesVerifiedAndUnverifiedPartialPublications(t *testing.T) {
+	root := t.TempDir()
+	priorPublish := structuredPatchPublishNoReplace
+	structuredPatchPublishNoReplace = func(workspace *os.Root, source, target string, mode os.FileMode) (bool, error) {
+		if target != "uncertain.txt" {
+			return priorPublish(workspace, source, target, mode)
+		}
+		file, err := workspace.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode.Perm())
+		if err != nil {
+			return false, err
+		}
+		if _, err := file.WriteString("partial"); err != nil {
+			_ = file.Close()
+			return true, err
+		}
+		if err := file.Close(); err != nil {
+			return true, err
+		}
+		return true, errors.New("injected failure after partial publication")
+	}
+	t.Cleanup(func() { structuredPatchPublishNoReplace = priorPublish })
+
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Add File: verified.txt", "+verified",
+		"*** Add File: uncertain.txt", "+intended complete content",
+		"*** Add File: untouched.txt", "+untouched",
+		"*** End Patch", "",
+	}, "\n")
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
+
+	if result.Status != StatusError {
+		t.Fatalf("partial publication status = %s, want error", result.Status)
+	}
+	for _, want := range []string{"already committed: verified.txt", "published but unverified: uncertain.txt"} {
+		if !strings.Contains(result.Output, want) {
+			t.Fatalf("partial publication error must contain %q: %s", want, result.Output)
+		}
+	}
+	committedFragment := strings.SplitN(result.Output, "; published but unverified:", 2)[0]
+	if strings.Contains(committedFragment, "uncertain.txt") {
+		t.Fatalf("unverified path appears in committed fragment: %s", result.Output)
+	}
+	if got, want := result.ChangedFiles, []string{"verified.txt"}; !slices.Equal(got, want) {
+		t.Fatalf("ChangedFiles = %#v, want verified publications only %#v", got, want)
+	}
+	resolvedVerified, err := filepath.EvalSymlinks(filepath.Join(root, "verified.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.FileDiffs; len(got) != 1 || got[0].Path != resolvedVerified {
+		t.Fatalf("FileDiffs = %#v, want verified.txt only", got)
+	}
+	if got := mustReadTestFile(t, filepath.Join(root, "verified.txt")); got != "verified\n" {
+		t.Fatalf("verified publication = %q", got)
+	}
+	if got := mustReadTestFile(t, filepath.Join(root, "uncertain.txt")); got != "partial" {
+		t.Fatalf("unverified publication = %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(root, "untouched.txt")); !os.IsNotExist(err) {
+		t.Fatalf("later publication must remain untouched: %v", err)
+	}
+}
+
+func TestApplyPatchMoveReportsPublishedDestinationWhenSourceRemovalFails(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "source.txt"), "before\n")
+	priorRemove := structuredPatchRemove
+	structuredPatchRemove = func(workspace *os.Root, name string) error {
+		if name == "source.txt" {
+			return os.ErrPermission
+		}
+		return priorRemove(workspace, name)
+	}
+	t.Cleanup(func() { structuredPatchRemove = priorRemove })
+
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: source.txt",
+		"*** Move to: destination.txt",
+		"@@",
+		"-before",
+		"+after",
+		"*** End Patch",
+		"",
+	}, "\n")
+	result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
+	if result.Status != StatusError {
+		t.Fatalf("move status = %s, want error", result.Status)
+	}
+	if got := mustReadTestFile(t, filepath.Join(root, "source.txt")); got != "before\n" {
+		t.Fatalf("source content = %q", got)
+	}
+	if got := mustReadTestFile(t, filepath.Join(root, "destination.txt")); got != "after\n" {
+		t.Fatalf("destination content = %q", got)
+	}
+	if got, want := result.ChangedFiles, []string{"destination.txt"}; !slices.Equal(got, want) {
+		t.Fatalf("ChangedFiles = %#v, want %#v", got, want)
+	}
+	resolvedDestination, err := filepath.EvalSymlinks(filepath.Join(root, "destination.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDiff := FileDiff{Path: resolvedDestination, OldExists: false, NewExists: true, NewText: "after\n"}
+	if got := result.FileDiffs; len(got) != 1 || got[0] != wantDiff {
+		t.Fatalf("FileDiffs = %#v, want %#v", got, []FileDiff{wantDiff})
+	}
+	if !strings.Contains(result.Display.Preview, "destination.txt") || strings.Contains(result.Display.Preview, "source.txt") {
+		t.Fatalf("preview must show only destination creation: %q", result.Display.Preview)
 	}
 }

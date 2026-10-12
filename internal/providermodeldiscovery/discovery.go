@@ -375,6 +375,14 @@ type modelsResponseItem struct {
 	AdditionalSpeedTiers []string `json:"additional_speed_tiers"`
 	DefaultServiceTier   string   `json:"default_service_tier"`
 	SupportedParameters  []string `json:"supported_parameters"`
+	Modalities           struct {
+		Input  []string `json:"input"`
+		Output []string `json:"output"`
+	} `json:"modalities"`
+	Architecture struct {
+		InputModalities  []string `json:"input_modalities"`
+		OutputModalities []string `json:"output_modalities"`
+	} `json:"architecture"`
 }
 
 type modelsResponse struct {
@@ -428,6 +436,14 @@ func parseModelsResponse(body []byte) ([]Model, error) {
 			discoveryContainsFold(item.SupportedParameters, "include_reasoning")
 		efforts := reasoningEfforts(item)
 		serviceTiers := modelServiceTiers(item)
+		inputModalities := cleanDiscoveryStrings(item.Modalities.Input)
+		if len(inputModalities) == 0 {
+			inputModalities = cleanDiscoveryStrings(item.Architecture.InputModalities)
+		}
+		outputModalities := cleanDiscoveryStrings(item.Modalities.Output)
+		if len(outputModalities) == 0 {
+			outputModalities = cleanDiscoveryStrings(item.Architecture.OutputModalities)
+		}
 		models = append(models, Model{
 			ID:                     id,
 			Description:            description,
@@ -438,6 +454,8 @@ func parseModelsResponse(body []byte) ([]Model, error) {
 			DefaultReasoningEffort: strings.TrimSpace(item.DefaultReasoning),
 			ServiceTiers:           serviceTiers,
 			DefaultServiceTier:     normalizeServiceTier(item.DefaultServiceTier),
+			InputModalities:        inputModalities,
+			OutputModalities:       outputModalities,
 			Source:                 "live",
 		})
 	}
@@ -574,6 +592,12 @@ func mergeLiveModels(provider providercatalog.Descriptor, liveModels []Model, ca
 			if live.DefaultServiceTier != "" {
 				catalog.DefaultServiceTier = live.DefaultServiceTier
 			}
+			if len(catalog.InputModalities) == 0 && len(live.InputModalities) > 0 {
+				catalog.InputModalities = append([]string{}, live.InputModalities...)
+			}
+			if len(catalog.OutputModalities) == 0 && len(live.OutputModalities) > 0 {
+				catalog.OutputModalities = append([]string{}, live.OutputModalities...)
+			}
 			catalog.Source = firstDiscoverySource(catalog.Source, "live")
 			result = append(result, catalog)
 			continue
@@ -596,6 +620,20 @@ func mergeLiveModels(provider providercatalog.Descriptor, liveModels []Model, ca
 		}
 		live.Source = firstDiscoverySource(live.Source, "live")
 		result = append(result, live)
+	}
+	return result
+}
+
+func cleanDiscoveryStrings(values []string) []string {
+	result := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
 	}
 	return result
 }

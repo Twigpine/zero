@@ -12,6 +12,7 @@ type writeFileTool struct {
 	baseTool
 	workspaceRoot string
 	scope         PathScope
+	readFile      func(string) ([]byte, error)
 }
 
 func NewScopedWriteFileTool(workspaceRoot string, scope PathScope) Tool {
@@ -34,6 +35,7 @@ func NewScopedWriteFileTool(workspaceRoot string, scope PathScope) Tool {
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
 		scope:         scope,
+		readFile:      os.ReadFile,
 	}
 }
 
@@ -61,8 +63,10 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	}
 
 	existed := false
-	if _, err := os.Stat(absolutePath); err == nil {
+	var priorInfo os.FileInfo
+	if info, err := os.Stat(absolutePath); err == nil {
 		existed = true
+		priorInfo = info
 		if !overwrite {
 			return errorResult("Error: " + relativePath + " already exists. Pass overwrite: true to replace it.")
 		}
@@ -82,7 +86,7 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 			// Fail CLOSED: if the tracked file can't be re-read to verify it, refuse
 			// the overwrite rather than clobbering a file whose current state is
 			// unknown (it may have been replaced or removed out from under us).
-			current, rerr := os.ReadFile(absolutePath)
+			current, rerr := tool.readFile(absolutePath)
 			if rerr != nil {
 				return errorResult(fileConflictMessage(relativePath))
 			}
@@ -95,9 +99,11 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	// Capture the prior content (before we replace it) so an overwrite can show a
 	// real diff; a fresh create stays "" and previews as all-additions.
 	priorContent := ""
+	priorContentKnown := !existed
 	if existed {
-		if prev, rerr := os.ReadFile(absolutePath); rerr == nil {
+		if prev, rerr := tool.readFile(absolutePath); rerr == nil {
 			priorContent = string(prev)
+			priorContentKnown = true
 		}
 	}
 
@@ -107,20 +113,36 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
-	if err := os.WriteFile(absolutePath, []byte(content), 0o644); err != nil {
+	var expectedContent *string
+	if priorContentKnown {
+		expectedContent = &priorContent
+	}
+	if err := commitFileContents(absolutePath, priorInfo, expectedContent, content); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
 	modelKnownContent := content
 	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
 	// FileTracker baseline: recording pre-format content would make the very
 	// next edit look like an external modification and trip the conflict guard.
-	formatting := maybeFormatWrittenFile(ctx, absolutePath, content)
+	restoreMode := os.FileMode(0o644)
+	if priorInfo != nil {
+		restoreMode = priorInfo.Mode().Perm()
+	}
+	formatting := maybeFormatWrittenFileScoped(ctx, tool.workspaceRoot, tool.scope, absolutePath, content, restoreMode)
 	content = formatting.Content
+	finalContentKnown := formatting.ContentKnown
 	// Baseline the freshly written content so a later edit/overwrite in this
 	// session compares against what is now on disk.
-	newInfo, _ := os.Stat(absolutePath)
-	options.FileTracker.Record(absolutePath, []byte(content), newInfo)
-	if content == modelKnownContent {
+	newInfo := formatting.Info
+	if newInfo == nil {
+		newInfo, _ = os.Stat(absolutePath)
+	}
+	if finalContentKnown {
+		options.FileTracker.Record(absolutePath, []byte(content), newInfo)
+	} else {
+		options.FileTracker.Forget(absolutePath)
+	}
+	if finalContentKnown && content == modelKnownContent {
 		options.FileTracker.RecordSeenRange(absolutePath, 1, trackedLineTotal(content), trackedLineTotal(content))
 	}
 	if !existed {
@@ -139,13 +161,28 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	}
 	summary := fmt.Sprintf("%s %s (%d lines).", verb, relativePath, lines)
 	summary += formatting.notice(relativePath)
-	summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
+	if finalContentKnown {
+		summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
+	}
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}
+	// Do not pretend an unreadable overwrite was a creation. The write may be
+	// valid, but ACP only receives an exact before/after pair we actually saw.
+	if priorContentKnown && finalContentKnown {
+		if diff, ok := boundedFileDiff(absolutePath, priorContent, content, existed, true); ok {
+			result.FileDiffs = []FileDiff{diff}
+		} else if diffTextRevealsObfuscatedSecret(priorContent) || diffTextRevealsObfuscatedSecret(content) {
+			result.Redacted = true
+		}
+	}
 	// Card-only preview: a real unified diff (all-green for a create, red/green for
 	// an overwrite) on Display.Preview. Output stays the summary, so the model never
 	// re-reads the file — the rich preview costs zero model tokens.
-	result.Display = Display{Summary: summary, Kind: "file", Preview: boundedUnifiedDiff(relativePath, priorContent, content)}
+	preview := ""
+	if priorContentKnown && finalContentKnown {
+		preview = boundedUnifiedDiff(relativePath, priorContent, content)
+	}
+	result.Display = Display{Summary: summary, Kind: "file", Preview: preview}
 	return result
 }
 

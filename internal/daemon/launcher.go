@@ -72,9 +72,10 @@ func (w *execWorker) Kill() error {
 	if w.cmd.Process == nil {
 		return nil
 	}
-	// background.TerminateProcess is the cross-platform terminate (kills the
-	// process group on POSIX, taskkill /T on Windows).
-	return background.TerminateProcess(w.cmd.Process.Pid)
+	// The group the worker was launched into, not one rediscovered from its PID:
+	// the pool may call this after the worker has exited and been waited, and its
+	// children can still be running. See background.TerminateCommandGroup.
+	return background.TerminateCommandGroup(w.cmd)
 }
 
 // readerLines adapts a bufio.Reader to the Lines interface. Unlike a capped
@@ -154,13 +155,11 @@ func NewExecLauncher(cfg ExecLauncherConfig) (Launcher, error) {
 		background.ConfigureChildProcessGroup(cmd)
 		// CommandContext's default cancel sends os.Process.Kill to the LEADER only,
 		// orphaning the process group we just configured (a stuck worker's children
-		// would survive ctx cancellation). Terminate the whole group instead — the
-		// same cross-platform group terminate Kill() uses (D11).
+		// would survive ctx cancellation). Terminate the whole group instead, the
+		// same launch-time group terminate Kill() uses (D11). Cancel runs while Wait
+		// is in progress, so it must not reap.
 		cmd.Cancel = func() error {
-			if cmd.Process == nil {
-				return nil
-			}
-			return background.TerminateProcess(cmd.Process.Pid)
+			return background.TerminateCommandGroup(cmd)
 		}
 
 		stdout, err := cmd.StdoutPipe()

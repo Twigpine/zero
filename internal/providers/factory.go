@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/Gitlawb/zero/internal/config"
@@ -53,6 +54,11 @@ func New(profile config.ProviderProfile, options Options) (zeroruntime.Provider,
 		return newCodexProvider(profile, resolved, options)
 	}
 
+	sessionHeader := sessionHeaderForProfile(profile, resolved)
+	if sessionHeader != "" && strings.TrimSpace(options.UserAgent) == "" {
+		options.UserAgent = "zero"
+	}
+
 	switch resolved.providerKind {
 	case config.ProviderKindOpenAI, config.ProviderKindOpenAICompatible:
 		// prompt_cache_key is an OpenAI-only chat-completions field. Strict
@@ -74,6 +80,7 @@ func New(profile config.ProviderProfile, options Options) (zeroruntime.Provider,
 			UserAgent:             options.UserAgent,
 			ParseThinkTags:        parseThinkTagsForProfile(profile, resolved),
 			DisablePromptCacheKey: resolved.providerKind == config.ProviderKindOpenAICompatible,
+			SessionHeader:         sessionHeader,
 		})
 	case config.ProviderKindAnthropic, config.ProviderKindAnthropicCompat:
 		return anthropic.New(anthropic.Options{
@@ -88,6 +95,7 @@ func New(profile config.ProviderProfile, options Options) (zeroruntime.Provider,
 			MaxTokens:       resolved.maxOutputTokens,
 			HTTPClient:      options.HTTPClient,
 			UserAgent:       options.UserAgent,
+			SessionHeader:   sessionHeader,
 		})
 	case config.ProviderKindGoogle:
 		return gemini.New(gemini.Options{
@@ -343,6 +351,18 @@ func defaultRegistry(registry *modelregistry.Registry) (modelregistry.Registry, 
 // provider's standard error path surfaces it.
 func isCodexCatalog(profile config.ProviderProfile, _ resolvedProfile) bool {
 	return providercatalog.NormalizeID(profile.CatalogID) == "chatgpt"
+}
+
+func sessionHeaderForProfile(profile config.ProviderProfile, resolved resolvedProfile) string {
+	switch providercatalog.NormalizeID(profile.CatalogID) {
+	case "opencode", "opencode-go", "opencode-go-anthropic-compatible":
+		return "x-opencode-session"
+	}
+	endpoint, err := url.Parse(resolved.baseURL)
+	if err == nil && strings.EqualFold(endpoint.Hostname(), "opencode.ai") && (endpoint.Path == "/zen" || strings.HasPrefix(endpoint.Path, "/zen/")) {
+		return "x-opencode-session"
+	}
+	return ""
 }
 
 // newCodexProvider builds a Codex-flavored openai provider for the chatgpt

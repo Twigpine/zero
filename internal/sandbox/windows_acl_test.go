@@ -240,3 +240,117 @@ func TestDedupeWindowsACLEntriesKeepsInheritanceVariants(t *testing.T) {
 		t.Fatalf("dedupe order/shape = %#v, want first NoInherit then inheritable", out)
 	}
 }
+
+// THE PLAN HAS TO CARRY THE ANCHOR, OR THE APPLY HAS NOTHING TO ENFORCE.
+//
+// The apply-side tests hand applyWindowsACLPathGroup an anchor directly, so they
+// pass whether or not anything ever sets one. This drives the real builder and
+// checks which entries come out anchored: the carveouts derived from a write
+// root, and not the paths the operator named, which have no owned tail and whose
+// intermediates are the operator's own business.
+//
+// NATIVE PATHS, NOT WINDOWS LITERALS. The builder is cross-platform and so is
+// this test, and the anchoring decision runs through pathWithinRoot, which is
+// filepath.Rel underneath. On Linux a backslash is an ordinary character, so
+// `C:\workspace\.git\hooks` is one component and is not under `C:\workspace`;
+// the neighbouring tests get away with such literals because they only compare
+// strings they built the same way and never ask whether one contains another.
+func TestBuildWindowsACLPlanAnchorsDerivedCarveouts(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	carveout := filepath.Join(workspace, ".git", "hooks")
+	metadata := filepath.Join(workspace, ".zero")
+	named := filepath.Join(t.TempDir(), "named-by-the-operator")
+	config := WindowsSandboxCommandConfig{
+		SandboxHome:    home,
+		WorkspaceRoots: []string{workspace},
+		PermissionProfile: PermissionProfile{
+			FileSystem: FileSystemPolicy{
+				Kind: FileSystemRestricted,
+				WriteRoots: []WritableRoot{{
+					Root:                   workspace,
+					ReadOnlySubpaths:       []string{carveout},
+					ProtectedMetadataNames: []string{".zero"},
+				}},
+				DenyWrite: []string{named},
+			},
+			Network: NetworkPolicy{Mode: NetworkDeny},
+		},
+	}
+
+	plan, err := BuildWindowsACLPlan(config)
+	if err != nil {
+		t.Fatalf("BuildWindowsACLPlan: %v", err)
+	}
+
+	anchors := map[string]string{}
+	for _, entry := range plan.Entries {
+		anchors[strings.ToLower(entry.Path)] = entry.Anchor
+	}
+	for _, derived := range []string{carveout, metadata} {
+		anchor, present := anchors[strings.ToLower(derived)]
+		if !present {
+			t.Fatalf("SETUP INVALID: the plan has no entry for the derived carveout %s", derived)
+		}
+		if anchor != workspace {
+			t.Errorf("derived carveout %s carries anchor %q, want the write root it came from", derived, anchor)
+		}
+	}
+	operatorAnchor, present := anchors[strings.ToLower(named)]
+	if !present {
+		t.Fatal("SETUP INVALID: the plan has no entry for the operator-named deny path")
+	}
+	if operatorAnchor != "" {
+		t.Errorf("operator-named path carries anchor %q, want none: its intermediates are not the sandbox's to police", operatorAnchor)
+	}
+}
+
+// AND AN OUT-OF-ROOT READ-ONLY SUBPATH IS NOT ANCHORED AT ALL.
+//
+// ReadOnlySubpaths is a profile field an operator can set to any path. One
+// placed outside the write root is a configuration that works today, and
+// anchoring it to that root would turn it into a containment refusal: the
+// object is not under the root and never was. Only the paths that are actually
+// under it are held to it.
+func TestBuildWindowsACLPlanLeavesAnOutOfRootSubpathUnanchored(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	inside := filepath.Join(workspace, "vendor")
+	outside := filepath.Join(t.TempDir(), "shared")
+	plan, err := BuildWindowsACLPlan(WindowsSandboxCommandConfig{
+		SandboxHome:    home,
+		WorkspaceRoots: []string{workspace},
+		PermissionProfile: PermissionProfile{
+			FileSystem: FileSystemPolicy{
+				Kind: FileSystemRestricted,
+				WriteRoots: []WritableRoot{{
+					Root:             workspace,
+					ReadOnlySubpaths: []string{inside, outside},
+				}},
+			},
+			Network: NetworkPolicy{Mode: NetworkDeny},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildWindowsACLPlan: %v", err)
+	}
+
+	seen := map[string]string{}
+	for _, entry := range plan.Entries {
+		seen[strings.ToLower(entry.Path)] = entry.Anchor
+	}
+	insideAnchor, present := seen[strings.ToLower(inside)]
+	if !present {
+		t.Fatal("SETUP INVALID: the plan has no entry for the in-root subpath")
+	}
+	if insideAnchor != workspace {
+		t.Errorf("in-root subpath carries anchor %q, want the write root", insideAnchor)
+	}
+	outsideAnchor, present := seen[strings.ToLower(outside)]
+	if !present {
+		t.Fatal("SETUP INVALID: the plan has no entry for the out-of-root subpath")
+	}
+	if outsideAnchor != "" {
+		t.Errorf("out-of-root subpath carries anchor %q, want none: the apply would refuse a config that works today", outsideAnchor)
+	}
+}

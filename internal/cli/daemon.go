@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -147,11 +146,7 @@ func runDaemonStartDetached(paths daemon.Paths, stdout io.Writer, stderr io.Writ
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
-	if err := os.MkdirAll(filepath.Dir(paths.Socket), 0o700); err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
-	}
-	logPath := filepath.Join(filepath.Dir(paths.Socket), "daemon.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	logFile, logPath, err := daemon.OpenRuntimeLog(paths)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}

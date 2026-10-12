@@ -64,6 +64,28 @@ func TryAcquireFileLockAt(root, path string) (*FileLock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("lockutil: open lock file: %w", err)
 	}
+	return acquireOpenedFileLock(file)
+}
+
+// TryAcquireFileLockRoot attempts to lock name relative to an already-bound
+// directory root. It is intended for lifecycle owners that must not resolve the
+// root pathname again between validation and lock acquisition.
+func TryAcquireFileLockRoot(root *os.Root, name, displayPath string) (*FileLock, error) {
+	if root == nil {
+		return nil, errors.New("lockutil: lock root is nil")
+	}
+	name = filepath.Clean(name)
+	if name == "." || name == ".." || filepath.IsAbs(name) || strings.HasPrefix(name, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("lockutil: lock name %q escapes root", name)
+	}
+	file, err := openLockFileRoot(root, name, displayPath)
+	if err != nil {
+		return nil, fmt.Errorf("lockutil: open rooted lock file: %w", err)
+	}
+	return acquireOpenedFileLock(file)
+}
+
+func acquireOpenedFileLock(file *os.File) (*FileLock, error) {
 	state, contended, err := tryLockFile(file)
 	if err != nil {
 		_ = file.Close()
@@ -80,6 +102,41 @@ func TryAcquireFileLockAt(root, path string) (*FileLock, error) {
 		return nil, errors.Join(err, lock.Release())
 	}
 	return lock, nil
+}
+
+func openLockFileRoot(root *os.Root, name, displayPath string) (*os.File, error) {
+	info, err := root.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		file, createErr := root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+		if createErr != nil {
+			return nil, createErr
+		}
+		if err := validateRootLockFile(file); err != nil {
+			return nil, errors.Join(err, file.Close())
+		}
+		return file, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("refusing non-regular rooted lock file")
+	}
+	file, err := root.OpenFile(name, os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, errors.Join(err, file.Close())
+	}
+	if !os.SameFile(info, opened) {
+		return nil, errors.Join(errors.New("rooted lock file changed while opening"), file.Close())
+	}
+	if err := validateRootLockFile(file); err != nil {
+		return nil, errors.Join(err, file.Close())
+	}
+	return file, nil
 }
 
 // WriteMetadata replaces the diagnostic contents of the lock file while the

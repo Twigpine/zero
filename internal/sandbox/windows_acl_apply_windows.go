@@ -23,7 +23,10 @@ const (
 )
 
 type windowsACLPathGroup struct {
-	Path        string
+	Path string
+	// Anchor is the write root Path was derived from, empty when the operator
+	// named the path. See verifyWindowsACLHandleUnderAnchor.
+	Anchor      string
 	Entries     []WindowsACLEntry
 	Materialize bool
 }
@@ -69,6 +72,12 @@ func groupWindowsACLPlanByPath(plan WindowsACLPlan) []windowsACLPathGroup {
 		}
 		group.Entries = append(group.Entries, entry)
 		group.Materialize = group.Materialize || entry.Materialize
+		// One path is derived from at most one root, so the first anchor seen is
+		// the anchor. Taking it rather than overwriting keeps a later
+		// operator-named duplicate of the same path from clearing it.
+		if group.Anchor == "" {
+			group.Anchor = entry.Anchor
+		}
 	}
 	out := make([]windowsACLPathGroup, 0, len(byPath))
 	for _, group := range byPath {
@@ -104,6 +113,13 @@ func applyWindowsACLPathGroup(group windowsACLPathGroup) (windowsACLSnapshot, bo
 			}
 			return windowsACLSnapshot{}, false, nil
 		}
+		// Before creating anything: os.MkdirAll walks a pathname and follows every
+		// reparse point on it, so a junction on the derived tail would have this
+		// elevated setup create the directory outside the write root and only the
+		// containment check below would notice, after the fact.
+		if err := verifyWindowsACLPathUnderAnchor(group.Anchor, path); err != nil {
+			return windowsACLSnapshot{}, false, err
+		}
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			return windowsACLSnapshot{}, false, fmt.Errorf("materialize windows ACL target %s: %w", path, err)
 		}
@@ -122,6 +138,15 @@ func applyWindowsACLPathGroup(group windowsACLPathGroup) (windowsACLSnapshot, bo
 			_ = os.RemoveAll(path)
 		}
 		return windowsACLSnapshot{}, false, err
+	}
+	// THE OBJECT HAS TO BE WHERE THE PLAN SAID IT WOULD BE. The open above
+	// refuses a reparse point at the final component and resolves every one
+	// above it, which is right for a path the operator named and not enough for
+	// one this package derived from a write root: a junction on the derived tail
+	// redirects the handle out of the sandbox with nothing about the final
+	// object looking wrong.
+	if err := verifyWindowsACLHandleUnderAnchor(handle, group.Anchor, path); err != nil {
+		return fail(err)
 	}
 	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {

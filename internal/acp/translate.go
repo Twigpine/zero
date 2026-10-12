@@ -3,6 +3,7 @@ package acp
 import (
 	"encoding/json"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -17,6 +18,14 @@ import (
 
 func agentMessageChunk(delta string) ContentChunk {
 	return ContentChunk{SessionUpdate: UpdateAgentMessageChunk, Content: TextBlock(delta)}
+}
+
+func replayMessageChunk(role, messageID, text string) ContentChunk {
+	update := UpdateAgentMessageChunk
+	if role == "user" {
+		update = UpdateUserMessageChunk
+	}
+	return ContentChunk{SessionUpdate: update, MessageID: messageID, Content: TextBlock(text)}
 }
 
 func agentThoughtChunk(delta string) ContentChunk {
@@ -238,22 +247,59 @@ func toolCallResult(result agent.ToolResult) ToolCallUpdate {
 }
 
 func toolResultContent(result agent.ToolResult) []ToolCallContent {
+	content := make([]ToolCallContent, 0, 1+len(result.FileDiffs))
 	text := strings.TrimRight(result.Output, "\n")
 	if text == "" {
 		text = result.Display.Summary
 	}
 	if text == "" {
-		return nil
+		return appendToolResultDiffs(content, result.FileDiffs)
 	}
-	return []ToolCallContent{ToolContent(TextBlock(text))}
+	content = append(content, ToolContent(TextBlock(text)))
+	return appendToolResultDiffs(content, result.FileDiffs)
+}
+
+func appendToolResultDiffs(content []ToolCallContent, diffs []tools.FileDiff) []ToolCallContent {
+	for _, diff := range diffs {
+		if !filepath.IsAbs(diff.Path) || (!diff.OldExists && !diff.NewExists) {
+			continue
+		}
+		var oldText *string
+		if diff.OldExists {
+			old := diff.OldText
+			oldText = &old
+		}
+		var newText *string
+		if diff.NewExists {
+			updated := diff.NewText
+			newText = &updated
+		}
+		content = append(content, ToolCallContent{Type: "diff", Path: diff.Path, OldText: oldText, NewText: newText})
+	}
+	return content
 }
 
 func toolResultLocations(result agent.ToolResult) []ToolCallLocation {
-	locs := make([]ToolCallLocation, 0, len(result.ChangedFiles))
-	for _, f := range result.ChangedFiles {
-		if strings.TrimSpace(f) == "" {
+	locs := make([]ToolCallLocation, 0, len(result.FileDiffs)+len(result.ChangedFiles))
+	seen := make(map[string]bool, len(result.FileDiffs)+len(result.ChangedFiles))
+	for _, diff := range result.FileDiffs {
+		path := diff.Path
+		if path == "" || seen[path] {
 			continue
 		}
+		seen[path] = true
+		locs = append(locs, ToolCallLocation{Path: path})
+	}
+	// FileDiff.Path is canonical absolute path data while ChangedFiles is
+	// normally workspace-relative. Without the trusted workspace root these
+	// coordinate systems cannot be correlated safely: a suffix match would let
+	// /workspace/sub/a.go consume the fallback for a distinct root a.go. The
+	// shared seen set deduplicates only identities already exactly comparable.
+	for _, f := range result.ChangedFiles {
+		if f == "" || seen[f] {
+			continue
+		}
+		seen[f] = true
 		locs = append(locs, ToolCallLocation{Path: f})
 	}
 	return locs

@@ -3,11 +3,15 @@ package tools
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 // Format-on-write for the mutating file tools. When enabled, a successful
@@ -44,7 +48,9 @@ var formatOnWriteTimeout = 10 * time.Second
 // and finds out from a CI format check it cannot see, which is the thing this
 // feature exists to prevent.
 type formatOnWriteResult struct {
-	Content string
+	Content      string
+	ContentKnown bool
+	Info         os.FileInfo
 	// Formatter is the binary that was run, named in the notice so the user can
 	// tell a slow gofmt from a slow prettier.
 	Formatter string
@@ -117,14 +123,32 @@ func formatOnWriteEnabled() bool {
 	return value != "" && value != "0" && !strings.EqualFold(value, "false")
 }
 
-// maybeFormatWrittenFile runs the configured formatter for absolutePath (when
-// enabled and on PATH) and returns the file's content afterwards. Best-effort
-// throughout: any failure — no formatter, formatter error, timeout, unreadable
-// result — returns writtenContent so the caller's state matches the last write
-// it performed itself. Only the timeout is reported back, for the reason on
-// formatOnWriteResult.
+var runFormatOnWriteCommand = func(ctx context.Context, binaryPath string, arguments []string, directory string) error {
+	formatter := exec.CommandContext(ctx, binaryPath, arguments...)
+	formatter.Dir = directory
+	formatter.Stdin = strings.NewReader("")
+	return formatter.Run()
+}
+
+var readFormattedFile = readRootedFile
+
+// maybeFormatWrittenFile is the unscoped test-facing wrapper. Production
+// callers use maybeFormatWrittenFileScoped so a formatter cannot redirect the
+// final read or recovery write outside the configured write roots.
 func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenContent string) formatOnWriteResult {
-	unformatted := formatOnWriteResult{Content: writtenContent}
+	restoreMode := os.FileMode(0o644)
+	if info, err := os.Stat(absolutePath); err == nil {
+		restoreMode = info.Mode().Perm()
+	}
+	return maybeFormatWrittenFileScoped(ctx, filepath.Dir(absolutePath), nil, absolutePath, writtenContent, restoreMode)
+}
+
+// maybeFormatWrittenFileScoped runs the configured formatter and returns only
+// content verified through a descriptor-bound root. Formatter failures restore
+// writtenContent through that same root; if restoration or the final read
+// fails, ContentKnown is false and callers omit exact diff evidence.
+func maybeFormatWrittenFileScoped(ctx context.Context, workspaceRoot string, scope PathScope, absolutePath string, writtenContent string, restoreMode os.FileMode) formatOnWriteResult {
+	unformatted := formatOnWriteResult{Content: writtenContent, ContentKnown: true}
 	if !formatOnWriteEnabled() {
 		return unformatted
 	}
@@ -136,42 +160,90 @@ func maybeFormatWrittenFile(ctx context.Context, absolutePath string, writtenCon
 	if err != nil {
 		return unformatted
 	}
+	root, relativePath, err := openFormattedFileRoot(workspaceRoot, scope, absolutePath)
+	if err != nil {
+		unformatted.ContentKnown = false
+		return unformatted
+	}
+	defer root.Close()
+
 	formatCtx, cancel := context.WithTimeout(ctx, formatOnWriteTimeout)
 	defer cancel()
 	arguments := append(append([]string(nil), command[1:]...), absolutePath)
-	formatter := exec.CommandContext(formatCtx, binaryPath, arguments...)
-	formatter.Dir = filepath.Dir(absolutePath)
-	formatter.Stdin = strings.NewReader("")
-	if err := formatter.Run(); err != nil {
+	if err := runFormatOnWriteCommand(formatCtx, binaryPath, arguments, filepath.Dir(absolutePath)); err != nil {
 		unformatted.Formatter = command[0]
-		// THE FORMATTER EDITS IN PLACE, SO A FAILED RUN CAN LEAVE THE FILE
-		// NEITHER FORMATTED NOR AS WRITTEN. Killed by the deadline or by the
-		// caller, or exiting partway through its own rewrite, the target can hold
-		// a truncation. Returning the written bytes on top of that would leave the
-		// tracker baseline and the diff preview describing a file that is not on
-		// disk, which is a worse failure than the missing formatting: the next
-		// edit compares against content the file does not have.
-		//
-		// Written back unconditionally on this path rather than only when the
-		// bytes differ. Comparing first means reading the file to find out, and a
-		// read that fails leaves the same ambiguity this exists to remove.
-		if restoreErr := os.WriteFile(absolutePath, []byte(writtenContent), 0o644); restoreErr != nil {
+		if restoreErr := restoreFormattedFile(root, relativePath, writtenContent, restoreMode); restoreErr != nil {
 			unformatted.RestoreFailed = true
+			unformatted.ContentKnown = false
+		} else if restored, info, readErr := readFormattedFile(root, relativePath); readErr != nil {
+			unformatted.ContentKnown = false
+		} else {
+			unformatted.Content = string(restored)
+			unformatted.Info = info
 		}
-		// OUR deadline, not the caller's cancellation and not the formatter's own
-		// exit status. A cancelled tool call is already being reported as
-		// cancelled, and a formatter that ran and refused the file usually means
-		// content it could not parse, which the write itself does not promise to
-		// fix. Neither is this notice's business; the restore above is, for all
-		// three.
 		if errors.Is(formatCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
 			unformatted.TimedOut = true
 		}
 		return unformatted
 	}
-	formatted, err := os.ReadFile(absolutePath)
+
+	formatted, info, err := readFormattedFile(root, relativePath)
 	if err != nil {
+		unformatted.ContentKnown = false
 		return unformatted
 	}
-	return formatOnWriteResult{Content: string(formatted), Formatter: command[0]}
+	return formatOnWriteResult{Content: string(formatted), ContentKnown: true, Info: info, Formatter: command[0]}
+}
+
+func restoreFormattedFile(root *os.Root, relativePath string, content string, mode os.FileMode) error {
+	file, err := root.OpenFile(relativePath, os.O_WRONLY|os.O_TRUNC|os.O_CREATE, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.WriteString(file, content); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
+}
+
+// openFormattedFileRoot opens the write root before the formatter runs and
+// computes the target relative to that descriptor-bound root. Atomic in-root
+// replacement remains valid; a formatter that swaps the target to an escaping
+// symlink is rejected when readFormattedFile opens it through the root.
+func openFormattedFileRoot(workspaceRoot string, scope PathScope, absolutePath string) (*os.Root, string, error) {
+	roots, err := scopedRoots(workspaceRoot, scope)
+	if err != nil {
+		return nil, "", err
+	}
+	var firstErr error
+	for _, configuredRoot := range roots {
+		resolvedRoot, err := filepath.Abs(configuredRoot)
+		if err == nil {
+			resolvedRoot, err = filepath.EvalSymlinks(resolvedRoot)
+		}
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		candidate := sandbox.NormalizePrefixForRoot(absolutePath, resolvedRoot)
+		relativePath, err := filepath.Rel(resolvedRoot, candidate)
+		if err != nil || relativePath == ".." || strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) || filepath.IsAbs(relativePath) {
+			continue
+		}
+		root, err := os.OpenRoot(resolvedRoot)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		return root, relativePath, nil
+	}
+	if firstErr != nil {
+		return nil, "", firstErr
+	}
+	return nil, "", fmt.Errorf("%s must stay inside the configured write roots", absolutePath)
 }

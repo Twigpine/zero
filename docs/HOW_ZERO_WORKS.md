@@ -302,8 +302,9 @@ Conceptually, one requested tool goes through these phases:
    the model can inspect it and decide what to do next.
 6. **Render and persist** — the result is surfaced to the TUI, stream-JSON
    writer, or ACP client. TUI and exec record rich tool/session events for
-   resume/history; ACP currently persists conversational messages and streams
-   tool/permission updates to the client.
+   resume/history; ACP persists conversational messages and completed tool-call
+   starts/results for load replay. Live streaming details and permission
+   exchanges remain client notifications rather than durable history.
 
 Tool success and failure are both informative context. A successful `read_file`
 result gives the model file contents; a failed `edit_file` result gives the model

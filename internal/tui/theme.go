@@ -345,13 +345,6 @@ func colorChannel(value float64) int {
 	return int(value*255 + 0.5)
 }
 
-// buildSystemTheme is the dark-terminal default for package-level render helpers
-// and tests. The running TUI resolves the matching contrast direction through
-// buildSystemThemeForTerminal.
-func buildSystemTheme() tuiTheme {
-	return buildSystemThemeForTerminal(true)
-}
-
 // buildSystemThemeForTerminal preserves the terminal canvas and its foreground
 // color. It uses ANSI role colors for semantic cues and confines fixed local
 // surfaces to selected and diff rows, so those states remain visible even in

@@ -14,6 +14,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/imageinput"
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/terminalpet"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 	_ "golang.org/x/image/webp"
@@ -102,41 +103,44 @@ func stripMatchingQuotes(s string) (string, bool) {
 //     fetched it) — this carries InputModalities from models.dev, which
 //     includes "image" for vision-capable models
 //  3. Falls back to the name heuristic for unknown models
-func (m model) modelSupportsVisionTUI() bool {
-	trimmed := strings.TrimSpace(m.modelName)
+func (m model) modelSupportsVisionFor(modelID string) bool {
+	trimmed := strings.TrimSpace(modelID)
 	if trimmed == "" {
 		return false
 	}
-	// The curated catalog is authoritative only when it knows the model.
+	// Check the discovered model list for the ACTIVE provider route first.
+	if models, ok := m.discoveredModelsForActiveRoute(); ok {
+		if supported, ok := discoveredVisionSupport(models, trimmed); ok {
+			return supported
+		}
+	}
+	// The curated catalog is authoritative when active-provider discovery is absent or inconclusive.
 	if entry, known := m.modelCatalog.Resolve(trimmed); known {
 		return entry.Supports(modelregistry.ModelCapabilityVision)
 	}
-	// Check the discovered model list (from models.dev) for InputModalities
-	// containing "image". This covers custom/ollama/cloud models not in the
-	// curated catalog — models.dev knows their capabilities.
-	for _, models := range m.modelPickerLiveByProvider {
-		for _, dm := range models {
-			if strings.EqualFold(strings.TrimSpace(dm.ID), trimmed) {
-				// A provider's authenticated listing may only establish which models
-				// are available, without repeating modalities. Treat an empty list as
-				// unknown rather than as an explicit image-input denial, so the
-				// curated registry/name capability fallback remains available while
-				// models.dev metadata is temporarily unavailable.
-				if len(dm.InputModalities) == 0 {
-					continue
-				}
-				for _, modality := range dm.InputModalities {
-					if strings.EqualFold(strings.TrimSpace(modality), "image") {
-						return true
-					}
-				}
-				return false // found the model in discovered list, no image modality
+	// Fall back to curated catalog or the name heuristic.
+	return modelregistry.SupportsVision(m.modelCatalog, trimmed)
+}
+
+func discoveredVisionSupport(models []providermodeldiscovery.Model, modelID string) (bool, bool) {
+	for _, dm := range models {
+		if strings.EqualFold(strings.TrimSpace(dm.ID), modelID) {
+			if len(dm.InputModalities) == 0 {
+				return false, false
 			}
+			for _, modality := range dm.InputModalities {
+				if strings.EqualFold(strings.TrimSpace(modality), "image") {
+					return true, true
+				}
+			}
+			return false, true // found model with explicit modalities, no image modality
 		}
 	}
-	// Fall back to the name heuristic for models not in the catalog or
-	// discovered list.
-	return modelregistry.VisionCapableByName(trimmed)
+	return false, false
+}
+
+func (m model) modelSupportsVisionTUI() bool {
+	return m.modelSupportsVisionFor(m.modelName)
 }
 
 // attachClipboardImage attaches an image read from the OS clipboard (a

@@ -65,6 +65,7 @@ type Options struct {
 	// enabled; the ZERO_DISABLE_PROMPT_CACHE_KEY env kill switch still applies
 	// on top for any endpoint.
 	DisablePromptCacheKey bool
+	SessionHeader         string
 }
 
 // Provider streams completions from an OpenAI-compatible chat completions API.
@@ -85,6 +86,7 @@ type Provider struct {
 	parseThinkTags        bool
 	setRequestExtra       func(*http.Request)
 	disablePromptCacheKey bool
+	sessionHeader         providerio.SessionHeader
 }
 
 // New creates an OpenAI-compatible provider.
@@ -140,6 +142,7 @@ func New(options Options) (*Provider, error) {
 		parseThinkTags:        options.ParseThinkTags,
 		setRequestExtra:       options.SetRequestExtra,
 		disablePromptCacheKey: options.DisablePromptCacheKey,
+		sessionHeader:         providerio.NewSessionHeader(options.SessionHeader),
 	}, nil
 }
 
@@ -156,13 +159,13 @@ func (provider *Provider) StreamCompletion(
 	events := make(chan zeroruntime.StreamEvent, 16)
 	go func() {
 		defer close(events)
-		provider.stream(ctx, body, events)
+		provider.stream(ctx, body, request.PromptCacheKey, events)
 	}()
 
 	return events, nil
 }
 
-func (provider *Provider) stream(ctx context.Context, body []byte, events chan<- zeroruntime.StreamEvent) {
+func (provider *Provider) stream(ctx context.Context, body []byte, sessionID string, events chan<- zeroruntime.StreamEvent) {
 	endpoint := provider.endpoint
 
 	// streamCtx lets the idle watchdog abort an in-flight body read by cancelling
@@ -186,6 +189,7 @@ func (provider *Provider) stream(ctx context.Context, body []byte, events chan<-
 		},
 		provider.oauthResolver,
 		func(request *http.Request) {
+			provider.sessionHeader.Apply(request, sessionID)
 			request.Header.Set("Content-Type", "application/json")
 			if provider.userAgent != "" {
 				request.Header.Set("User-Agent", provider.userAgent)

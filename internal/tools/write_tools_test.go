@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -323,6 +325,10 @@ func TestEditFileToolReplacesExactStrings(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "code.go")
 	writeTestFile(t, path, "const a = 1\nconst b = 2\n")
+	path, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	result := NewScopedEditFileTool(root, nil).Run(context.Background(), map[string]any{
 		"path":       "code.go",
@@ -367,7 +373,12 @@ func TestEditFileToolReplacesCRLF(t *testing.T) {
 
 func TestEditFileToolEmitsUnifiedDiff(t *testing.T) {
 	root := t.TempDir()
-	writeTestFile(t, filepath.Join(root, "code.go"), "const a = 1\nconst b = 2\n")
+	path := filepath.Join(root, "code.go")
+	writeTestFile(t, path, "const a = 1\nconst b = 2\n")
+	path, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	res := NewScopedEditFileTool(root, nil).Run(context.Background(), map[string]any{
 		"path": "code.go", "old_string": "const a = 1", "new_string": "const a = 42",
 	})
@@ -386,6 +397,9 @@ func TestEditFileToolEmitsUnifiedDiff(t *testing.T) {
 		if !strings.Contains(res.Display.Preview, want) {
 			t.Fatalf("edit preview missing diff marker %q: %q", want, res.Display.Preview)
 		}
+	}
+	if got := res.FileDiffs; len(got) != 1 || got[0].Path != path || !got[0].OldExists || !got[0].NewExists || got[0].OldText != "const a = 1\nconst b = 2\n" || got[0].NewText != "const a = 42\nconst b = 2\n" {
+		t.Fatalf("file diffs = %#v", got)
 	}
 }
 
@@ -408,6 +422,13 @@ func TestWriteFileToolEmitsAdditionsDiff(t *testing.T) {
 	if strings.Contains(res.Display.Preview, "\n-line") {
 		t.Fatalf("a fresh-create diff must have no removed lines: %q", res.Display.Preview)
 	}
+	path, err := filepath.EvalSymlinks(filepath.Join(root, "new.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res.FileDiffs; len(got) != 1 || got[0].Path != path || got[0].OldExists || !got[0].NewExists || got[0].OldText != "" || got[0].NewText != "line one\nline two\n" {
+		t.Fatalf("file diffs = %#v", got)
+	}
 }
 
 func TestWriteFileToolOverwriteEmitsRedGreenDiff(t *testing.T) {
@@ -426,6 +447,28 @@ func TestWriteFileToolOverwriteEmitsRedGreenDiff(t *testing.T) {
 		if !strings.Contains(res.Display.Preview, want) {
 			t.Fatalf("overwrite preview missing %q: %q", want, res.Display.Preview)
 		}
+	}
+}
+
+func TestWriteFileToolOmitsDiffWhenOverwritePreimageCannotBeRead(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "private.txt")
+	writeTestFile(t, path, "before\n")
+	tool := NewScopedWriteFileTool(root, nil).(writeFileTool)
+	tool.readFile = func(string) ([]byte, error) { return nil, os.ErrPermission }
+	registry := NewRegistry()
+	registry.Register(tool)
+	result := registry.RunWithOptions(context.Background(), tool.Name(), map[string]any{
+		"path": "private.txt", "content": "after\n", "overwrite": true,
+	}, RunOptions{PermissionGranted: true})
+	if result.Status != StatusOK {
+		t.Fatalf("write = %s", result.Output)
+	}
+	if len(result.FileDiffs) != 0 {
+		t.Fatalf("unreadable preimage must not produce a create-like diff: %#v", result.FileDiffs)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "after\n" {
+		t.Fatalf("written content = %q, err = %v", got, err)
 	}
 }
 
@@ -583,6 +626,17 @@ func TestApplyPatchToolAppliesStructuredAddAndMove(t *testing.T) {
 	}
 	if got := result.ChangedFiles; strings.Join(got, ",") != "nested/new.txt,old.txt,moved.txt" {
 		t.Fatalf("ChangedFiles = %v", got)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := result.FileDiffs, []FileDiff{
+		{Path: filepath.Join(resolvedRoot, "nested", "new.txt"), OldExists: false, NewExists: true, OldText: "", NewText: "created\n"},
+		{Path: filepath.Join(resolvedRoot, "old.txt"), OldExists: true, NewExists: false, OldText: "old\n", NewText: ""},
+		{Path: filepath.Join(resolvedRoot, "moved.txt"), OldExists: false, NewExists: true, OldText: "", NewText: "moved\n"},
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("FileDiffs = %#v, want %#v", got, want)
 	}
 }
 
@@ -831,7 +885,7 @@ func TestStructuredPatchAddDoesNotOverwriteRacedDestination(t *testing.T) {
 		after: "patch content\n", mode: 0o644,
 	}
 
-	err = applyStructuredPatchChanges(workspace, []structuredPatchChange{change}, nil)
+	_, err = applyStructuredPatchChanges(workspace, ".", []structuredPatchChange{change}, nil)
 	if err == nil || !errors.Is(err, os.ErrExist) {
 		t.Fatalf("raced add destination = %v, want os.ErrExist", err)
 	}
@@ -857,7 +911,7 @@ func TestStructuredPatchFailedDeleteDoesNotRecreateMissingFile(t *testing.T) {
 		before: "removed by another writer\n", mode: 0o644,
 	}
 
-	err = applyStructuredPatchChanges(workspace, []structuredPatchChange{change}, nil)
+	_, err = applyStructuredPatchChanges(workspace, ".", []structuredPatchChange{change}, nil)
 	if err == nil {
 		t.Fatal("delete of an already removed file should fail")
 	}
@@ -894,7 +948,7 @@ func TestStructuredPatchMoveWithMissingSourceIsRefusedBeforePublishing(t *testin
 	}
 	defer func() { structuredPatchBeforeCommit = nil }()
 
-	err = applyStructuredPatchChanges(workspace, []structuredPatchChange{change}, nil)
+	_, err = applyStructuredPatchChanges(workspace, ".", []structuredPatchChange{change}, nil)
 	if !removed {
 		t.Fatal("pre-commit hook did not run")
 	}
@@ -906,6 +960,59 @@ func TestStructuredPatchMoveWithMissingSourceIsRefusedBeforePublishing(t *testin
 	}
 	if _, statErr := os.Stat(destinationPath); !os.IsNotExist(statErr) {
 		t.Fatalf("refused move must not publish the destination: %v", statErr)
+	}
+}
+
+func TestStructuredPatchUpdatePreservesCompetingWriteBeforeRename(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		competing       string
+		replaceIdentity bool
+	}{
+		{name: "content changed", competing: "competing writer\n"},
+		{name: "identity changed with same content", competing: "planned\n", replaceIdentity: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			targetPath := filepath.Join(root, "file.txt")
+			writeTestFile(t, targetPath, "planned\n")
+			patch := "*** Begin Patch\n*** Update File: file.txt\n@@\n-planned\n+patched\n*** End Patch\n"
+			hookRan := false
+			var competingInfo os.FileInfo
+			structuredPatchBeforeRename = func(change structuredPatchChange) {
+				if tc.replaceIdentity {
+					tempPath := filepath.Join(root, "competing.tmp")
+					writeTestFile(t, tempPath, tc.competing)
+					if err := os.Rename(tempPath, targetPath); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.WriteFile(targetPath, []byte(tc.competing), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				var err error
+				competingInfo, err = os.Stat(targetPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				hookRan = true
+			}
+			t.Cleanup(func() { structuredPatchBeforeRename = nil })
+
+			result := NewScopedApplyPatchTool(root, nil).Run(context.Background(), map[string]any{"patch": patch})
+			if !hookRan {
+				t.Fatal("pre-rename hook did not run")
+			}
+			if result.Status != StatusError || len(result.ChangedFiles) != 0 || len(result.FileDiffs) != 0 {
+				t.Fatalf("raced update = status=%s changed=%#v diffs=%#v output=%q", result.Status, result.ChangedFiles, result.FileDiffs, result.Output)
+			}
+			if got := mustReadTestFile(t, targetPath); got != tc.competing {
+				t.Fatalf("raced update overwrote competing content: %q", got)
+			}
+			finalInfo, err := os.Stat(targetPath)
+			if err != nil || !os.SameFile(competingInfo, finalInfo) {
+				t.Fatalf("raced update replaced the competing file identity: %v", err)
+			}
+		})
 	}
 }
 
@@ -978,6 +1085,45 @@ func TestStructuredPatchCopyFailureReportsSurvivingPartialTarget(t *testing.T) {
 	}
 }
 
+func TestIncompleteStructuredPatchNoReplaceWriteReportsOnlyVerifiedTarget(t *testing.T) {
+	for name, content := range map[string]string{
+		"complete publication": "complete content\n",
+		"partial publication":  "partial",
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			workspace, err := os.OpenRoot(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer workspace.Close()
+			targetPath := filepath.Join(root, "target.txt")
+			writeTestFile(t, targetPath, content)
+			change := structuredPatchChange{
+				kind: structuredPatchAdd,
+				to: structuredPatchTarget{
+					requested: "target.txt",
+					relative:  "target.txt",
+					absolute:  targetPath,
+				},
+				after: "complete content\n",
+				mode:  0o644,
+			}
+
+			outcome := incompleteStructuredPatchWrite(workspace, change, true)
+			if content == change.after {
+				if len(outcome.completed) != 1 || outcome.completed[0].kind != structuredPatchAdd || len(outcome.incompletePaths) != 0 {
+					t.Fatalf("verified publication outcome = %#v", outcome)
+				}
+				return
+			}
+			if len(outcome.completed) != 0 || !slices.Equal(outcome.incompletePaths, []string{"target.txt"}) {
+				t.Fatalf("partial publication outcome = %#v", outcome)
+			}
+		})
+	}
+}
+
 func TestStructuredPatchPartialFailureLeavesCompletedChangeAndClearsTrackedState(t *testing.T) {
 	root := t.TempDir()
 	trackedPath := filepath.Join(root, "tracked.txt")
@@ -1017,7 +1163,7 @@ func TestStructuredPatchPartialFailureLeavesCompletedChangeAndClearsTrackedState
 		},
 	}
 
-	err = applyStructuredPatchChanges(workspace, changes, tracker)
+	_, err = applyStructuredPatchChanges(workspace, ".", changes, tracker)
 	if err == nil || !strings.Contains(err.Error(), "partially applied") {
 		t.Fatalf("second change = %v, want partial-application error", err)
 	}

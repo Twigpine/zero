@@ -364,6 +364,10 @@ type FileConfig struct {
 	LocalControl        LocalControlConfig `json:"localControl,omitempty"`
 	STT                 STTConfig          `json:"stt,omitempty"`
 	CrossSessionInbound string             `json:"crossSessionInbound,omitempty"`
+	// maxTurnsSet records that some merge source supplied a positive maxTurns —
+	// i.e. the value is configured, not the built-in default. Unexported like
+	// Tools.deferThresholdSet: merge bookkeeping, not a config key.
+	maxTurnsSet bool
 	// Extra preserves top-level fields written by newer Zero versions or
 	// extensions so a read-modify-write through this version is non-destructive.
 	Extra map[string]json.RawMessage `json:"-"`
@@ -461,10 +465,15 @@ type Overrides struct {
 }
 
 type ResolvedConfig struct {
-	ActiveProvider      string
-	Providers           []ProviderProfile
-	Provider            ProviderProfile
-	MaxTurns            int
+	ActiveProvider string
+	Providers      []ProviderProfile
+	Provider       ProviderProfile
+	MaxTurns       int
+	// MaxTurnsSet reports whether MaxTurns came from an explicit source (a
+	// config file, a provider command, ZERO_MAX_TURNS, or CLI overrides) rather
+	// than the built-in default — callers that need a different default can
+	// tell the two apart.
+	MaxTurnsSet         bool
 	MCP                 MCPConfig
 	Sandbox             SandboxConfig
 	Notify              NotifyConfig

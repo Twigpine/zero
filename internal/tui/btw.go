@@ -218,6 +218,13 @@ func btwCommandUnavailable(command parsedCommand) bool {
 		return arg != "" && arg != "status"
 	case commandTheme:
 		return arg != "list"
+	case commandNotify:
+		// Mutations reconfigure the shared notifier pointer and write the
+		// global preference; inside a BTW side conversation that would mutate
+		// the hidden parent's live policy and the user's global file while
+		// only the side surface's display fields change. Read-only list stays
+		// available (maintainer review, PR #1001).
+		return arg != "list"
 	case commandConfig:
 		return arg != ""
 	default:
@@ -305,6 +312,10 @@ func btwMessageRunID(msg tea.Msg) (int, bool) {
 	case agentRowMsg:
 		return typed.runID, true
 	case toolCallStreamStartMsg:
+		return typed.runID, true
+	case interactiveExecStartMsg:
+		return typed.runID, true
+	case terminalAutoAttachTickMsg:
 		return typed.runID, true
 	case toolCallStreamDeltaMsg:
 		return typed.runID, true

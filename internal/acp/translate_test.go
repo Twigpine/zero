@@ -2,6 +2,7 @@ package acp
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 	"unicode"
@@ -300,26 +301,215 @@ func TestToolCallStart(t *testing.T) {
 }
 
 func TestToolCallResult(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "a.go")
 	ok := toolCallResult(agent.ToolResult{
 		ToolCallID:   "tc1",
 		Name:         "edit_file",
 		Status:       tools.StatusOK,
 		Output:       "applied\n",
 		ChangedFiles: []string{"a.go", ""},
+		FileDiffs:    []tools.FileDiff{{Path: path, OldExists: true, NewExists: true, OldText: "before\n", NewText: "after\n"}},
 	})
 	if ok.SessionUpdate != UpdateToolCallUpdate || ok.Status != ToolStatusCompleted {
 		t.Fatalf("unexpected ok result: %+v", ok)
 	}
-	if len(ok.Content) != 1 || ok.Content[0].Type != "content" || ok.Content[0].Content.Text != "applied" {
+	if len(ok.Content) != 2 || ok.Content[0].Type != "content" || ok.Content[0].Content.Text != "applied" {
 		t.Fatalf("unexpected content: %+v", ok.Content)
 	}
-	if len(ok.Locations) != 1 || ok.Locations[0].Path != "a.go" {
-		t.Fatalf("blank changed files should be dropped, got %+v", ok.Locations)
+	if diff := ok.Content[1]; diff.Type != "diff" || diff.Path != path || diff.OldText == nil || *diff.OldText != "before\n" || diff.NewText == nil || *diff.NewText != "after\n" {
+		t.Fatalf("unexpected diff content: %+v", diff)
+	}
+	if len(ok.Locations) != 2 || ok.Locations[0].Path != path || ok.Locations[1].Path != "a.go" {
+		t.Fatalf("unproven absolute/relative aliases must both remain visible, got %+v", ok.Locations)
 	}
 
 	failed := toolCallResult(agent.ToolResult{ToolCallID: "tc2", Status: tools.StatusError, Output: "boom"})
 	if failed.Status != ToolStatusFailed {
 		t.Fatalf("error result should be failed, got %q", failed.Status)
+	}
+}
+
+func TestToolCallDiffJSONDistinguishesEmptyFilesAndDeletion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "empty.txt")
+	content := appendToolResultDiffs(nil, []tools.FileDiff{
+		{Path: path, OldExists: false, NewExists: true, NewText: ""},
+		{Path: path, OldExists: true, NewExists: true, OldText: "before", NewText: ""},
+		{Path: path, OldExists: true, NewExists: false, OldText: "before"},
+	})
+	if len(content) != 3 {
+		t.Fatalf("diff content = %#v", content)
+	}
+	for index, diff := range content {
+		encoded, err := json.Marshal(diff)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wire map[string]any
+		if err := json.Unmarshal(encoded, &wire); err != nil {
+			t.Fatal(err)
+		}
+		if wire["path"] != path {
+			t.Fatalf("wire diff %d = %s", index, encoded)
+		}
+		switch index {
+		case 0:
+			oldText, present := wire["oldText"]
+			if !present || oldText != nil || wire["newText"] != "" {
+				t.Fatalf("create diff = %s, want null oldText and empty newText", encoded)
+			}
+		case 1:
+			if wire["oldText"] != "before" || wire["newText"] != "" {
+				t.Fatalf("empty replacement diff = %s", encoded)
+			}
+		case 2:
+			newText, present := wire["newText"]
+			if wire["oldText"] != "before" || !present || newText != nil {
+				t.Fatalf("deletion diff = %s, want oldText and null newText", encoded)
+			}
+		}
+	}
+}
+
+func TestToolResultLocationsPreserveDistinctPathIdentities(t *testing.T) {
+	root := t.TempDir()
+	rootPath := filepath.Join(root, "a.go")
+	nestedPath := filepath.Join(root, "sub", "a.go")
+	diff := func(path string) tools.FileDiff {
+		return tools.FileDiff{Path: path, OldExists: true, NewExists: true, OldText: "before", NewText: "after"}
+	}
+	for _, tc := range []struct {
+		name  string
+		diffs []tools.FileDiff
+		want  []string
+	}{
+		{name: "both rich", diffs: []tools.FileDiff{diff(rootPath), diff(nestedPath)}, want: []string{rootPath, nestedPath, "a.go", filepath.Join("sub", "a.go")}},
+		{name: "root rich", diffs: []tools.FileDiff{diff(rootPath)}, want: []string{rootPath, "a.go", filepath.Join("sub", "a.go")}},
+		{name: "nested rich", diffs: []tools.FileDiff{diff(nestedPath)}, want: []string{nestedPath, "a.go", filepath.Join("sub", "a.go")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			locations := toolResultLocations(agent.ToolResult{
+				ChangedFiles: []string{"a.go", filepath.Join("sub", "a.go")},
+				FileDiffs:    tc.diffs,
+			})
+			if len(locations) != len(tc.want) {
+				t.Fatalf("locations = %#v, want %#v", locations, tc.want)
+			}
+			for index := range tc.want {
+				if locations[index].Path != tc.want[index] {
+					t.Fatalf("locations = %#v, want %#v", locations, tc.want)
+				}
+			}
+		})
+	}
+}
+
+func TestToolCallResultPreservesWhitespaceInFilePaths(t *testing.T) {
+	relativePath := " report.txt "
+	absolutePath := filepath.Join(t.TempDir(), relativePath)
+	update := toolCallResult(agent.ToolResult{
+		ChangedFiles: []string{relativePath},
+		FileDiffs: []tools.FileDiff{{
+			Path: absolutePath, OldExists: true, NewExists: true, OldText: "before", NewText: "after",
+		}},
+	})
+	if len(update.Content) != 1 || update.Content[0].Path != absolutePath {
+		t.Fatalf("diff content path = %#v, want %q", update.Content, absolutePath)
+	}
+	if len(update.Locations) != 2 || update.Locations[0].Path != absolutePath || update.Locations[1].Path != relativePath {
+		t.Fatalf("locations = %#v, want exact paths %q and %q", update.Locations, absolutePath, relativePath)
+	}
+}
+
+func TestToolResultLocationsDeduplicateOnlyExactPaths(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "a.go")
+	locations := toolResultLocations(agent.ToolResult{
+		ChangedFiles: []string{path, path},
+		FileDiffs:    []tools.FileDiff{{Path: path, OldExists: true, NewExists: true, OldText: "before", NewText: "after"}},
+	})
+	if len(locations) != 1 || locations[0].Path != path {
+		t.Fatalf("exact duplicate locations = %#v", locations)
+	}
+}
+
+func TestDeletedFileEmitsDiffAndKeepsLocations(t *testing.T) {
+	relativePath := "deleted.go"
+	absolutePath := filepath.Join(t.TempDir(), relativePath)
+	update := toolCallResult(agent.ToolResult{
+		ChangedFiles: []string{relativePath},
+		FileDiffs: []tools.FileDiff{{
+			Path: absolutePath, OldExists: true, NewExists: false, OldText: "before",
+		}},
+	})
+	if len(update.Content) != 1 || update.Content[0].OldText == nil || *update.Content[0].OldText != "before" || update.Content[0].NewText != nil {
+		t.Fatalf("deleted file diff = %#v, want oldText with null newText", update.Content)
+	}
+	if len(update.Locations) != 2 || update.Locations[0].Path != absolutePath || update.Locations[1].Path != relativePath {
+		t.Fatalf("deleted file locations = %#v", update.Locations)
+	}
+}
+
+func TestToolCallResultEmitsOnlyRedactedFileDiffs(t *testing.T) {
+	secret := "sk-proj-abcdefghijklmnopqrstuvwxyz"
+	path := filepath.Join(t.TempDir(), "secret.txt")
+	scrubbed := tools.ScrubResultSecrets(tools.Result{FileDiffs: []tools.FileDiff{{
+		Path: path, OldExists: true, NewExists: true, OldText: "token=" + secret, NewText: "safe",
+	}}})
+	update := toolCallResult(agent.ToolResult{ToolCallID: "call", Status: tools.StatusError, FileDiffs: scrubbed.FileDiffs})
+	if len(update.Content) != 1 || update.Content[0].OldText == nil || strings.Contains(*update.Content[0].OldText, secret) {
+		t.Fatalf("ACP content leaked unredacted diff: %#v", update.Content)
+	}
+}
+
+func TestToolCallResultOmitsSemanticallyUnchangedRedactedDiff(t *testing.T) {
+	oldSecret := "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	newSecret := "ghp_9876543210ZYXWVUTSRQPONMLKJIHGFEDCBA"
+	scrubbed := tools.ScrubResultSecrets(tools.Result{
+		ChangedFiles: []string{"credentials.txt"},
+		FileDiffs: []tools.FileDiff{{
+			Path: filepath.Join(t.TempDir(), "credentials.txt"), OldExists: true, NewExists: true,
+			OldText: "token=" + oldSecret, NewText: "token=" + newSecret,
+		}},
+	})
+	update := toolCallResult(agent.ToolResult{
+		ToolCallID: "call", Status: tools.StatusOK,
+		ChangedFiles: scrubbed.ChangedFiles, FileDiffs: scrubbed.FileDiffs,
+	})
+	if len(update.Content) != 0 {
+		t.Fatalf("ACP emitted semantically unchanged redacted diff: %#v", update.Content)
+	}
+	if len(update.Locations) != 1 || update.Locations[0].Path != "credentials.txt" {
+		t.Fatalf("ACP path fallback = %#v", update.Locations)
+	}
+}
+
+func TestToolCallResultOmitsDefaultIgnorableSplitSecretsOnEitherSide(t *testing.T) {
+	secret := "sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGG"
+	for name, separator := range map[string]string{
+		"combining grapheme joiner": "\u034f",
+		"variation selector":        "\ufe0f",
+	} {
+		for _, side := range []string{"old", "new"} {
+			t.Run(name+" "+side, func(t *testing.T) {
+				obfuscated := secret[:20] + separator + secret[20:]
+				diff := tools.FileDiff{
+					Path: filepath.Join(t.TempDir(), "secret.txt"), OldExists: true, NewExists: true,
+					OldText: "safe old", NewText: "safe new",
+				}
+				if side == "old" {
+					diff.OldText = obfuscated
+				} else {
+					diff.NewText = obfuscated
+				}
+				scrubbed := tools.ScrubResultSecrets(tools.Result{FileDiffs: []tools.FileDiff{diff}})
+				if !scrubbed.Redacted || len(scrubbed.FileDiffs) != 0 {
+					t.Fatalf("registry boundary retained an obfuscated secret: %#v", scrubbed)
+				}
+				update := toolCallResult(agent.ToolResult{ToolCallID: "call", Status: tools.StatusOK, FileDiffs: scrubbed.FileDiffs})
+				if len(update.Content) != 0 {
+					t.Fatalf("ACP content retained an obfuscated secret: %#v", update.Content)
+				}
+			})
+		}
 	}
 }
 

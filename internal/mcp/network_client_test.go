@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -316,6 +317,50 @@ func TestNonOAuthServerIsUnaffected(t *testing.T) {
 	}
 }
 
+func TestNetworkClientRejectsServerInitiatedRequestAsResponse(t *testing.T) {
+	// A streamable-HTTP server that answers a tools/call POST with a
+	// method-bearing frame (a server-initiated request) must surface a protocol
+	// error rather than an empty, error-free result.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		message := readHTTPRPCMessage(t, r)
+		switch message.Method {
+		case "initialize":
+			writeHTTPRPCResponse(t, w, message.ID, map[string]any{"protocolVersion": "2024-11-05"})
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/call":
+			w.Header().Set("Content-Type", "application/json")
+			if _, err := w.Write([]byte(`{"jsonrpc":"2.0","id":` + string(mustRaw(message.ID)) + `,"method":"roots/list","params":{}}`)); err != nil {
+				t.Errorf("write server request: %v", err)
+			}
+		default:
+			writeHTTPRPCResponse(t, w, message.ID, map[string]any{})
+		}
+	}))
+	defer upstream.Close()
+
+	client, err := Connect(ctx, Server{Name: "plain", Type: ServerTypeHTTP, URL: upstream.URL})
+	if err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	defer func() {
+		if err := client.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+
+	result, err := client.CallTool(ctx, "lookup", map[string]any{"query": "zero"})
+	if err == nil {
+		t.Fatalf("CallTool() error = nil, result = %#v, want protocol error", result)
+	}
+	if !strings.Contains(err.Error(), `"roots/list"`) {
+		t.Fatalf("CallTool() error = %q, want it to name the unexpected method", err)
+	}
+}
+
 func TestDecodeSSERPCMessageSkipsNotifications(t *testing.T) {
 	// A leading server notification (has a method) on the POST's event stream must
 	// be skipped so the actual response (no method) is returned, instead of the
@@ -395,4 +440,81 @@ func TestDeliverEventMessageSkipsMethodPresence(t *testing.T) {
 	default:
 		t.Fatal("true response must complete pending")
 	}
+}
+
+func TestScanSSEEventsLargeImagePayload(t *testing.T) {
+	// Construct a 10 MiB image payload (~13.98 MiB in base64).
+	tenMiB := 10 * 1024 * 1024
+	imgB64 := paddedPNGBase64(tenMiB)
+	resultJSON, err := json.Marshal(map[string]any{
+		"content": []map[string]any{
+			{"type": "text", "text": "analysis screenshot"},
+			{"type": "image", "mimeType": "image/png", "data": imgB64},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rpcJSON, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"result":  json.RawMessage(resultJSON),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("Single data line with 10 MiB image", func(t *testing.T) {
+		stream := "event: message\ndata: " + string(rpcJSON) + "\n\n"
+		msg, err := decodeSSERPCMessage(strings.NewReader(stream))
+		if err != nil {
+			t.Fatalf("decodeSSERPCMessage failed on single-line 10 MiB image: %v", err)
+		}
+		if !rpcIDMatches(msg.ID, 1) {
+			t.Fatalf("expected id 1, got %#v", msg.ID)
+		}
+		var decoded CallToolResult
+		if err := json.Unmarshal(msg.Result, &decoded); err != nil {
+			t.Fatalf("unmarshal result: %v", err)
+		}
+		if len(decoded.Content) != 2 || len(decoded.Content[1].Data) != len(imgB64) {
+			t.Fatalf("image payload did not survive the SSE round trip: got %d bytes, want %d",
+				len(decoded.Content[1].Data), len(imgB64))
+		}
+	})
+
+	t.Run("Multi data lines with 10 MiB image", func(t *testing.T) {
+		stream := "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\ndata: \"result\":" + string(resultJSON) + "}\n\n"
+		msg, err := decodeSSERPCMessage(strings.NewReader(stream))
+		if err != nil {
+			t.Fatalf("decodeSSERPCMessage failed on multi-line 10 MiB image: %v", err)
+		}
+		if !rpcIDMatches(msg.ID, 1) {
+			t.Fatalf("expected id 1, got %#v", msg.ID)
+		}
+		var decoded CallToolResult
+		if err := json.Unmarshal(msg.Result, &decoded); err != nil {
+			t.Fatalf("unmarshal result: %v", err)
+		}
+		if len(decoded.Content) != 2 || len(decoded.Content[1].Data) != len(imgB64) {
+			t.Fatalf("image payload did not survive the SSE round trip: got %d bytes, want %d",
+				len(decoded.Content[1].Data), len(imgB64))
+		}
+	})
+
+	t.Run("Oversized event exceeding 32 MiB rejected cleanly", func(t *testing.T) {
+		oversizedRPC, marshalErr := json.Marshal(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"result":  map[string]any{"padding": strings.Repeat("A", 33*1024*1024)},
+		})
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		stream := "event: message\ndata: " + string(oversizedRPC) + "\n\n"
+		_, err := decodeSSERPCMessage(strings.NewReader(stream))
+		if err == nil {
+			t.Fatal("expected error for 33 MiB event, got nil")
+		}
+	})
 }

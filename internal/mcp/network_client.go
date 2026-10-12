@@ -216,6 +216,9 @@ func (client *networkClient) request(ctx context.Context, method string, params 
 	if err != nil {
 		return err
 	}
+	if message.isRequestOrNotification() {
+		return fmt.Errorf("MCP %s expected a response from server %s, got method %q instead", method, client.server.Name, message.Method)
+	}
 	if !rpcIDMatches(message.ID, id) {
 		return fmt.Errorf("MCP %s response id mismatch for server %s", method, client.server.Name)
 	}
@@ -654,11 +657,10 @@ func decodeSSERPCMessage(reader io.Reader) (rpcMessage, error) {
 	return rpcMessage{}, fmt.Errorf("missing MCP SSE response data")
 }
 
-// maxSSEEventBytes bounds a single SSE line/event. The previous 1 MiB cap made a
-// large but legitimate MCP message (e.g. a big tool result) hit bufio.ErrTooLong,
-// which failed the request permanently with no recovery. Raise it to a generous
-// bound that still protects against an unbounded remote server.
-const maxSSEEventBytes = 8 * 1024 * 1024
+// maxSSEEventBytes bounds a single SSE line/event. It accommodates multi-image
+// responses (such as 8 MiB + 4 MiB) in base64 (~16.8 MiB) plus JSON-RPC envelope,
+// metadata, and SSE framing overhead.
+const maxSSEEventBytes = 32 * 1024 * 1024
 
 func scanSSEEvents(reader io.Reader, handle func(sseEvent) bool) error {
 	scanner := bufio.NewScanner(reader)
@@ -868,7 +870,11 @@ func (source *storeTokenSource) Refresh(ctx context.Context) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("no stored OAuth token for MCP server %s", source.server.Name)
 	}
-	refreshed, err := refreshAccessToken(ctx, source.httpClient, source.config(), token, source.now)
+	cfg, client, err := refreshSettings(ctx, source.httpClient, source.server.URL, source.config(), token)
+	if err != nil {
+		return "", err
+	}
+	refreshed, err := refreshAccessToken(ctx, client, cfg, token, source.now)
 	if err != nil {
 		return "", err
 	}

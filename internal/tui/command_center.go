@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -365,17 +366,30 @@ func (defaultModelSwitchCompactionPolicy) BeforeModelSwitch(request modelSwitchC
 
 var modelSwitchCompactionGuard modelSwitchCompactionPolicy = defaultModelSwitchCompactionPolicy{}
 
-// sanitizeCardField strips the card protocol's separator bytes from
-// user-controlled values (titles can legally contain anything --session-title
-// was given), so a hostile or accidental \x1f / newline cannot shift fields
-// or leak control characters into the transcript.
+// sanitizeCardField strips the card protocol's separator byte and every
+// control rune from user-controlled values (titles can legally contain
+// anything --session-title was given, and a directory name can legally
+// contain an ESC byte on Unix). Line separators and tabs become spaces so
+// words stay apart; the remaining controls — ESC/CSI/OSC initiators, BEL, BS,
+// VT, NEL, NUL — are dropped outright, since any of them can repaint the
+// terminal or shift cells when the value lands in a rendered row.
 func sanitizeCardField(value string) string {
-	value = strings.ReplaceAll(value, sessionsCardFieldSep, " ")
-	value = strings.ReplaceAll(value, "\n", " ")
-	return strings.ReplaceAll(value, "\x00", "")
+	var out strings.Builder
+	for _, r := range value {
+		switch {
+		case r == '\x1f' || r == '\n' || r == '\r' || r == '\t':
+			out.WriteRune(' ')
+		case unicode.IsControl(r):
+		default:
+			out.WriteRune(r)
+		}
+	}
+	return out.String()
 }
 
-// relativeAge renders an RFC3339 timestamp as a short age ("2h ago"); ""
+// relativeAge renders an RFC3339 timestamp as a short age ("2h ago"), falling
+// back to the month/day this year and the bare date for sessions older than a
+// month, so deep history reads as a calendar date rather than "400d ago"; ""
 // when the timestamp does not parse, so the card simply omits it.
 func relativeAge(timestamp string, now time.Time) string {
 	parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(timestamp))
@@ -385,14 +399,19 @@ func relativeAge(timestamp string, now time.Time) string {
 	age := now.Sub(parsed)
 	switch {
 	case age < time.Minute:
-		return "just now"
+		return "now"
 	case age < time.Hour:
 		return fmt.Sprintf("%dm ago", int(age.Minutes()))
 	case age < 24*time.Hour:
 		return fmt.Sprintf("%dh ago", int(age.Hours()))
-	default:
+	case age <= 30*24*time.Hour:
 		return fmt.Sprintf("%dd ago", int(age.Hours()/24))
 	}
+	parsed, now = parsed.Local(), now.Local()
+	if parsed.Year() == now.Year() {
+		return parsed.Format("Jan _2")
+	}
+	return parsed.Format("2006-01-02")
 }
 
 // handleModelCommand applies a model switch against the ACTIVE provider (the

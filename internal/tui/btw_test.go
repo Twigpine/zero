@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -9,6 +10,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/notify"
 	"github.com/Gitlawb/zero/internal/sessions"
 )
 
@@ -241,6 +244,12 @@ func TestBTWBlocksPersistentConfigurationCommands(t *testing.T) {
 		"/mcp",
 		"/rewind",
 		"/compact",
+		// Notify mutations reconfigure the parent's notifier (shared pointer)
+		// and write the global preference; they must stay blocked in a BTW
+		// side conversation (maintainer review, PR #1001).
+		"/notify",
+		"/notify off",
+		"/notify bell always",
 	} {
 		t.Run(input, func(t *testing.T) {
 			m := newBTWTestModel(t)
@@ -265,6 +274,7 @@ func TestBTWAllowsReadOnlyConfigurationCommands(t *testing.T) {
 		"/profile status",
 		"/theme list",
 		"/config",
+		"/notify list",
 	} {
 		t.Run(input, func(t *testing.T) {
 			m := newBTWTestModel(t)
@@ -275,6 +285,58 @@ func TestBTWAllowsReadOnlyConfigurationCommands(t *testing.T) {
 				t.Fatalf("%s was blocked even though it is read-only", input)
 			}
 		})
+	}
+}
+
+// Maintainer regression (PR #1001): running notify mutations inside a BTW
+// side conversation must not touch the PARENT's live notifier or the stored
+// preference. The side surface shallow-copies the parent model and shares its
+// notifier pointer, so an unblocked mutation would reconfigure the parent and
+// write the global file while only the side's display fields change; after
+// returning, the parent could report one policy in /notify list while emitting
+// another. Checks both the parent's actual notification output and the stored
+// preference, per the review.
+func TestBTWNotifyMutationsLeaveParentAndStoredPreferenceIntact(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"notify":{"mode":"bell","focusMode":"always"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	parent := newBTWTestModel(t)
+	parent.userConfigPath = cfgPath
+	parent.notifyMode = "bell"
+	parent.notifyFocusMode = "always"
+	var buf bytes.Buffer
+	parent.notifier = notify.New(&buf, notify.Config{Mode: notify.ModeBell, FocusMode: notify.FocusAlways})
+	parent.notifier.SetFocused(true)
+
+	// Enter the side conversation and attempt a mutation.
+	side, _ := parent.handleBTWCommand("")
+	updated, _ := side.dispatchCommand(parseCommand("/notify off"))
+	got := updated.(model)
+	if got.picker != nil {
+		t.Fatal("/notify inside BTW must not open the picker")
+	}
+	if !transcriptContains(got.transcript, "unavailable in a BTW conversation") {
+		t.Fatal("expected the BTW blocked-command guidance")
+	}
+
+	// Return to the parent: the live policy still bells (actual output), and
+	// the stored preference is unchanged.
+	returned, _ := got.handleBTWCommand("")
+	parent = returned
+	parent.notifier.Notify(notify.Completion, "x")
+	if buf.String() != "\x07" {
+		t.Fatalf("parent notifier was reconfigured by the side conversation: got %q, want the original bell", buf.String())
+	}
+	stored, err := config.UserNotify(cfgPath)
+	if err != nil {
+		t.Fatalf("read stored notify: %v", err)
+	}
+	if stored.Mode != "bell" || stored.FocusMode != "always" {
+		t.Fatalf("stored preference changed from inside BTW: %+v", stored)
+	}
+	if parent.notifyMode != "bell" || parent.notifyFocusMode != "always" {
+		t.Fatalf("parent live policy changed from inside BTW: %q/%q", parent.notifyMode, parent.notifyFocusMode)
 	}
 }
 
