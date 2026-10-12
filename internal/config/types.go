@@ -177,6 +177,19 @@ const (
 	STTProviderDeepgram STTProviderKind = "deepgram"
 )
 
+// SessionsConfig holds settings for Zero's saved sessions.
+//
+// READ FROM THE USER'S OWN CONFIG ONLY. It decides what `zero sessions prune`
+// deletes, and sessions belong to the user rather than to a repository, so a
+// project's .zero/config.json has no say: the resolver does not merge it, and
+// the prune command reads it straight from the user config file.
+type SessionsConfig struct {
+	// RetentionDays is the cutoff `zero sessions prune` uses when it is given no
+	// --older-than. Unset (0) means prune needs an explicit cutoff; nothing is
+	// ever removed without one being asked for.
+	RetentionDays int `json:"retentionDays,omitempty"`
+}
+
 // STTConfig configures speech-to-text dictation. All fields are optional; empty
 // values take the documented defaults. Booleans that need a real tri-state
 // (distinguishing "unset" from "false") use *bool, matching PreferencesConfig.Recaps.
@@ -364,6 +377,7 @@ type FileConfig struct {
 	LocalControl        LocalControlConfig `json:"localControl,omitempty"`
 	STT                 STTConfig          `json:"stt,omitempty"`
 	CrossSessionInbound string             `json:"crossSessionInbound,omitempty"`
+	Sessions            SessionsConfig     `json:"sessions,omitempty"`
 	// maxTurnsSet records that some merge source supplied a positive maxTurns —
 	// i.e. the value is configured, not the built-in default. Unexported like
 	// Tools.deferThresholdSet: merge bookkeeping, not a config key.
@@ -388,6 +402,7 @@ func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 		LocalControl        *LocalControlConfig `json:"localControl,omitempty"`
 		STT                 *STTConfig          `json:"stt,omitempty"`
 		CrossSessionInbound string              `json:"crossSessionInbound,omitempty"`
+		Sessions            *SessionsConfig     `json:"sessions,omitempty"`
 	}
 	raw := rawConfig{
 		ActiveProvider:      cfg.ActiveProvider,
@@ -407,6 +422,9 @@ func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 	}
 	if !cfg.STT.Empty() {
 		raw.STT = &cfg.STT
+	}
+	if cfg.Sessions != (SessionsConfig{}) {
+		raw.Sessions = &cfg.Sessions
 	}
 	known, err := json.Marshal(raw)
 	if err != nil || len(cfg.Extra) == 0 {
@@ -546,6 +564,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 		LocalControl        LocalControlConfig         `json:"localControl"`
 		STT                 STTConfig                  `json:"stt"`
 		CrossSessionInbound string                     `json:"crossSessionInbound"`
+		Sessions            SessionsConfig             `json:"sessions"`
 		MCPServers          map[string]MCPServerConfig `json:"mcpServers"`
 		MCPServersSnake     map[string]MCPServerConfig `json:"mcp_servers"`
 	}
@@ -587,6 +606,10 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	cfg.LocalControl = raw.LocalControl
 	cfg.STT = raw.STT
 	cfg.CrossSessionInbound = raw.CrossSessionInbound
+	if raw.Sessions.RetentionDays < 0 {
+		return fmt.Errorf("invalid sessions.retentionDays %d: must be >= 0", raw.Sessions.RetentionDays)
+	}
+	cfg.Sessions = raw.Sessions
 	cfg.Extra = extra
 	if cfg.MCP.Servers == nil && (len(raw.MCPServers) > 0 || len(raw.MCPServersSnake) > 0) {
 		cfg.MCP.Servers = map[string]MCPServerConfig{}

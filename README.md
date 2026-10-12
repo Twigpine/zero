@@ -313,7 +313,7 @@ zero context          context-budget report
 zero repo-map         deterministic repository map
 zero repo-info        local repository summary
 zero search | find    search local session history
-zero sessions         inspect, resume, fork, and rewind sessions
+zero sessions         inspect, resume, fork, rewind, and prune sessions
 zero spec             manage spec-mode drafts
 zero specialist       manage specialist subagents
 zero skills           manage markdown instruction skills

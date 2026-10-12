@@ -233,7 +233,16 @@ func (store *Store) ReadRehydratedEvents(sessionID string) ([]Event, error) {
 // ReadRehydratedEventsWithPresence carries the underlying event-log presence
 // through compaction projection without changing ReadRehydratedEvents' existing
 // empty-on-missing contract.
+//
+// It is how a session is loaded to be continued (the TUI's resume, `exec
+// --resume` and --fork, ACP's session/load and session/resume), so it holds the
+// session open, and it fails with ErrPruning while prune holds it. Callers that
+// fall back to ReadEvents when rehydration fails must not fall back on that
+// error. See holdOrRefuse.
 func (store *Store) ReadRehydratedEventsWithPresence(sessionID string) ([]Event, bool, error) {
+	if err := store.holdOrRefuse(sessionID); err != nil {
+		return nil, false, err
+	}
 	events, present, err := store.ReadEventsWithPresence(sessionID)
 	if err != nil {
 		return nil, present, err

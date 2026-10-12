@@ -1093,6 +1093,15 @@ func regexpQuoteMeta(value string) string {
 	return replacer.Replace(value)
 }
 
+// ScrubSensitiveEnv removes credential-bearing variables from a child
+// environment. It is exported for callers that exec a host tool OUTSIDE the
+// platform sandbox — notably format-on-write, which runs a project's formatter
+// in-process — so that a formatter doing dynamic configuration evaluation
+// cannot read API keys and tokens out of the inherited environment.
+func ScrubSensitiveEnv(env []string) []string {
+	return scrubSensitiveEnv(env)
+}
+
 func scrubSensitiveEnv(env []string, additionalKeys ...string) []string {
 	// Secrets not covered by the provider catalog: cloud/VCS credentials and
 	// providers Zero talks to through generic OpenAI-compatible endpoints.

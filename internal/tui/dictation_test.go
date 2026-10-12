@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -172,6 +173,145 @@ func TestDictationStreamingPartialReplacesRegion(t *testing.T) {
 	m2 := m.discardDictationRegion()
 	if m2.composer.text != "note:" {
 		t.Errorf("discard should restore original text, got %q", m2.composer.text)
+	}
+}
+
+func TestDictationStreamingPartialWithCaretInsideExistingText(t *testing.T) {
+	m := model{}
+	m.setComposerState(composerState{text: "hello world", cursor: 5})
+	m.dictation.phase = dictRecording
+	m.dictation.streaming = true
+
+	m = m.handleDictationPartial(sttPartialMsg{text: "there"})
+	if m.composer.text != "hello there world" {
+		t.Fatalf("after first partial: %q", m.composer.text)
+	}
+	m = m.handleDictationPartial(sttPartialMsg{text: "there friend"})
+	m = m.handleDictationPartial(sttPartialMsg{text: "there friend again"})
+	if m.composer.text != "hello there friend again world" {
+		t.Fatalf("after third partial: %q", m.composer.text)
+	}
+}
+
+func TestDictationStreamingPartialReanchorsRegionAfterComposerShrink(t *testing.T) {
+	m := model{}
+	m.setComposerState(composerState{text: "hello world", cursor: 11})
+	m.dictation.phase = dictRecording
+	m.dictation.streaming = true
+	m = m.handleDictationPartial(sttPartialMsg{text: "there"})
+
+	// Simulate the user replacing the composer while a later partial is in
+	// flight. The old live-region bounds now exceed the new composer length.
+	m.setComposerState(composerState{text: "hi ", cursor: 3})
+	m = m.handleDictationPartial(sttPartialMsg{text: "again"})
+	if m.composer.text != "hi again" {
+		t.Fatalf("partial after composer shrink: %q", m.composer.text)
+	}
+}
+
+func TestDictationStreamingPartialDoesNotClampStaleRegionIntoUserText(t *testing.T) {
+	m := model{}
+	m.setComposerState(composerState{text: "aOLDz", cursor: 1})
+	m.dictation.phase = dictRecording
+	m.dictation.streaming = true
+	m = m.handleDictationPartial(sttPartialMsg{text: "first"})
+
+	// Replace the composer while another cumulative partial is in flight. The
+	// old region starts after the same prefix but no longer contains dictation
+	// text, so its clamped bounds must not consume the user's "b".
+	m.setComposerState(composerState{text: "ab", cursor: 2})
+	m = m.handleDictationPartial(sttPartialMsg{text: "next"})
+	if m.composer.text != "ab next" {
+		t.Fatalf("stale live region replaced user text: %q", m.composer.text)
+	}
+}
+
+func TestDictationStreamingCancelDoesNotClampStaleRegionIntoUserText(t *testing.T) {
+	m := model{}
+	m.setComposerState(composerState{text: "aOLDz", cursor: 1})
+	m.dictation.phase = dictRecording
+	m.dictation.streaming = true
+	m = m.handleDictationPartial(sttPartialMsg{text: "first"})
+
+	m.setComposerState(composerState{text: "ab", cursor: 2})
+	m = m.discardDictationRegion()
+	if m.composer.text != "ab" {
+		t.Fatalf("discarded stale live region from user text: %q", m.composer.text)
+	}
+}
+
+func TestDictationStreamingSameLengthRegionEditPreserved(t *testing.T) {
+	for _, partial := range []bool{false, true} {
+		t.Run(fmt.Sprintf("later partial=%v", partial), func(t *testing.T) {
+			m := model{}
+			m.setComposerState(composerState{text: "hello world", cursor: 11})
+			m.applyStreamingText("there")
+			// Keep the prefix and rune bounds unchanged, but replace precisely
+			// the rendered region with user text.
+			m.setComposerState(composerState{text: "hello world MINE!", cursor: 17})
+			if partial {
+				m.applyStreamingText("next")
+				if !strings.Contains(m.composer.text, " MINE!") {
+					t.Fatalf("partial deleted same-length user edit: %q", m.composer.text)
+				}
+			}
+			m = m.discardDictationRegion()
+			if m.composer.text != "hello world MINE!" {
+				t.Fatalf("cancel deleted same-length user edit: %q", m.composer.text)
+			}
+		})
+	}
+}
+
+func TestDictationStreamingBackspaceAcrossRegionPreservesUserTextOnCancel(t *testing.T) {
+	m := model{}
+	m.setComposerState(composerState{text: "hello world", cursor: 11})
+	m.dictation.phase = dictRecording
+	m.dictation.streaming = true
+	m = m.handleDictationPartial(sttPartialMsg{text: "there"})
+
+	// The user backspaces through the live transcript and into their original
+	// text while newer cumulative partials are still in flight.
+	m.setComposerState(composerState{text: "hello wor", cursor: 9})
+	m = m.handleDictationPartial(sttPartialMsg{text: "there friend"})
+	m = m.handleDictationPartial(sttPartialMsg{text: "there friend again"})
+	if m.composer.text != "hello wor there friend again" {
+		t.Fatalf("partials replaced user text after backspace: %q", m.composer.text)
+	}
+
+	m, _ = m.cancelDictation()
+	if m.composer.text != "hello wor" {
+		t.Fatalf("cancel did not restore the user's edited text: %q", m.composer.text)
+	}
+}
+
+func TestDictationStreamingInvalidRegionBoundsReanchor(t *testing.T) {
+	tests := []struct {
+		name   string
+		start  int
+		end    int
+		anchor string
+		want   string
+	}{
+		{name: "start past end", start: 40, end: 60, anchor: "a much longer previous composer", want: "ab partial text"},
+		{name: "negative start", start: -3, end: 1, anchor: "", want: "ab partial text"},
+		{name: "end past end", start: 1, end: 40, anchor: "a", want: "ab partial text"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := model{}
+			m.setComposerState(composerState{text: "ab", cursor: 2})
+			m.dictation.regionActive = true
+			m.dictation.regionStart = tt.start
+			m.dictation.regionEnd = tt.end
+			m.dictation.regionAnchor = tt.anchor
+
+			m.applyStreamingText("partial text")
+			if m.composer.text != tt.want {
+				t.Fatalf("composer = %q, want %q", m.composer.text, tt.want)
+			}
+		})
 	}
 }
 

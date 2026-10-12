@@ -218,7 +218,7 @@ zero context          上下文预算报告
 zero repo-map         确定性仓库映射
 zero repo-info        本地仓库摘要
 zero search | find    搜索本地会话历史
-zero sessions         检查、恢复、分叉和回滚会话
+zero sessions         检查、恢复、分叉、回滚和清理会话
 zero spec             管理规范模式草稿
 zero specialist       管理专业子智能体
 zero skills           管理 Markdown 指令技能

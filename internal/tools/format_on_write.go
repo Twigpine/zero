@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -38,15 +37,17 @@ var formatOnWriteTimeout = 10 * time.Second
 // formatOnWriteResult is the content after formatting, plus whether the
 // formatting that was supposed to happen actually did.
 //
-// A TIMEOUT IS NOT THE SAME KIND OF MISS AS THE OTHERS. Every other way this
-// falls back is a standing fact about the environment: the toggle is off, the
-// extension has no formatter, the binary is not installed. Those are silent on
-// purpose, because nothing is wrong and saying so on every write would be
-// noise. A deadline firing is different: formatting was configured, available
-// and expected, and the file was written unformatted anyway, on a machine that
-// was merely slow. Left silent, the caller believes it wrote canonical style
-// and finds out from a CI format check it cannot see, which is the thing this
-// feature exists to prevent.
+// A TIMEOUT IS NOT THE SAME KIND OF MISS AS THE OTHERS. The toggle being off,
+// an extension with no formatter, or a binary that is not installed are
+// standing facts about the environment. Those stay silent, because nothing is
+// wrong and saying so on every write would be noise. A deadline firing is
+// different: formatting was configured, available and expected, and the file
+// was written unformatted anyway, on a machine that was merely slow. Left
+// silent, the caller believes it wrote canonical style and finds out from a CI
+// format check it cannot see, which is the thing this feature exists to
+// prevent. A formatter binary that resolves inside a write root is also
+// reported: skipping it is a security decision, and a silent skip looks like
+// format-on-write simply stopped working.
 type formatOnWriteResult struct {
 	Content      string
 	ContentKnown bool
@@ -55,6 +56,9 @@ type formatOnWriteResult struct {
 	// tell a slow gofmt from a slow prettier.
 	Formatter string
 	TimedOut  bool
+	// Skipped is set when a formatter was found but not run. Empty when
+	// formatting was not applicable, ran, or failed for another recorded reason.
+	Skipped string
 	// RestoreFailed means the file on disk is not known to hold Content.
 	//
 	// These formatters edit in place, so one that is killed or fails partway
@@ -68,39 +72,60 @@ type formatOnWriteResult struct {
 }
 
 // notice is the line appended to the tool summary when formatting was expected
-// and did not happen, and empty in every other case.
+// and did not happen (timeout, restore failure, or a refused workspace binary),
+// and empty in every other case.
 func (result formatOnWriteResult) notice(relativePath string) string {
 	if result.RestoreFailed {
 		return "\n\nWARNING: " + relativePath + " may not hold what was written. " +
 			result.Formatter + " was interrupted while rewriting it in place and the " +
 			"content could not be written back. Re-read the file before trusting it."
 	}
-	if !result.TimedOut {
-		return ""
+	if result.TimedOut {
+		return "\n\nNote: " + relativePath + " was written but not formatted: " +
+			result.Formatter + " did not finish within " + formatOnWriteTimeout.String() +
+			". The file holds exactly what was written, so a project format check may still flag it."
 	}
-	return "\n\nNote: " + relativePath + " was written but not formatted: " +
-		result.Formatter + " did not finish within " + formatOnWriteTimeout.String() +
-		". The file holds exactly what was written, so a project format check may still flag it."
+	if result.Skipped != "" {
+		return "\n\nNote: " + relativePath + " was written but not formatted: " + result.Skipped + "."
+	}
+	return ""
 }
 
+// formatSkippedInsideWriteRoot is the formatOnWriteResult.Skipped value when
+// the resolved formatter binary lives under a granted write root.
+const formatSkippedInsideWriteRoot = "skipped, binary resolves inside the workspace"
+
 // formatterCommands maps a file extension to the formatter argv; the file path
-// is appended as the final argument. Only in-place, config-respecting,
-// community-standard formatters — a missing binary silently skips formatting.
+// is appended as the final argument. Only in-place, community-standard
+// formatters — a missing binary silently skips formatting.
+//
+// PRETTIER IS INVOKED WITH --no-config ON PURPOSE. Prettier resolves config
+// relative to the target file. Its JavaScript configs (.prettierrc.js,
+// .prettierrc.cjs, prettier.config.js) are MODULES: loading one runs arbitrary
+// code from the workspace, and a malicious dependency pulled by a plugin runs
+// too. A declarative config can still name a plugin by path, so it is not a
+// safe subset. That code would execute with Zero's full privileges, outside the
+// Landlock/seccomp confinement applied to shell commands.
+// Prettier therefore runs on its built-in defaults, and project
+// configuration is not honored: .prettierrc, .prettierrc.json, .prettierrc.yaml,
+// prettier.config.js, the prettier key in package.json, and .editorconfig are all
+// ignored by --no-config. The remaining formatters keep honoring their own
+// non-executable project config.
 var formatterCommands = map[string][]string{
 	".go":    {"gofmt", "-w"},
 	".rs":    {"rustfmt"},
 	".py":    {"ruff", "format", "--quiet"},
-	".ts":    {"prettier", "--log-level", "silent", "--write"},
-	".tsx":   {"prettier", "--log-level", "silent", "--write"},
-	".js":    {"prettier", "--log-level", "silent", "--write"},
-	".jsx":   {"prettier", "--log-level", "silent", "--write"},
-	".json":  {"prettier", "--log-level", "silent", "--write"},
-	".css":   {"prettier", "--log-level", "silent", "--write"},
-	".scss":  {"prettier", "--log-level", "silent", "--write"},
-	".html":  {"prettier", "--log-level", "silent", "--write"},
-	".md":    {"prettier", "--log-level", "silent", "--write"},
-	".yaml":  {"prettier", "--log-level", "silent", "--write"},
-	".yml":   {"prettier", "--log-level", "silent", "--write"},
+	".ts":    {"prettier", "--log-level", "silent", "--no-config", "--write"},
+	".tsx":   {"prettier", "--log-level", "silent", "--no-config", "--write"},
+	".js":    {"prettier", "--log-level", "silent", "--no-config", "--write"},
+	".jsx":   {"prettier", "--log-level", "silent", "--no-config", "--write"},
+	".json":  {"prettier", "--log-level", "silent", "--no-config", "--write"},
+	".css":   {"prettier", "--log-level", "silent", "--no-config", "--write"},
+	".scss":  {"prettier", "--log-level", "silent", "--no-config", "--write"},
+	".html":  {"prettier", "--log-level", "silent", "--no-config", "--write"},
+	".md":    {"prettier", "--log-level", "silent", "--no-config", "--write"},
+	".yaml":  {"prettier", "--log-level", "silent", "--no-config", "--write"},
+	".yml":   {"prettier", "--log-level", "silent", "--no-config", "--write"},
 	".zig":   {"zig", "fmt"},
 	".dart":  {"dart", "format"},
 	".tf":    {"terraform", "fmt"},
@@ -127,6 +152,11 @@ var runFormatOnWriteCommand = func(ctx context.Context, binaryPath string, argum
 	formatter := exec.CommandContext(ctx, binaryPath, arguments...)
 	formatter.Dir = directory
 	formatter.Stdin = strings.NewReader("")
+	// The formatter may evaluate project files (plugins, configs) as code. Do
+	// not hand it Zero's credential-bearing environment: scrub the same keys the
+	// sandbox strips from shell commands while preserving PATH, HOME, and the
+	// platform variables a formatter needs to start.
+	formatter.Env = sandbox.ScrubSensitiveEnv(os.Environ())
 	return formatter.Run()
 }
 
@@ -160,7 +190,17 @@ func maybeFormatWrittenFileScoped(ctx context.Context, workspaceRoot string, sco
 	if err != nil {
 		return unformatted
 	}
-	root, relativePath, err := openFormattedFileRoot(workspaceRoot, scope, absolutePath)
+	// A binary that resolves inside a write root is repository-controlled: npm
+	// run puts node_modules/.bin on PATH, so a cloned project can shadow
+	// prettier (or gofmt) with its own executable and have it run with Zero's
+	// privileges. Skipping formatting is the safe fallback; running an
+	// untrusted formatter is never worth canonical bytes. The skip is recorded
+	// on the result: a silent return looks like format-on-write stopped working.
+	if roots, rootsErr := scopedRoots(workspaceRoot, scope); rootsErr == nil && formatterBinaryInWriteRoots(binaryPath, roots) {
+		unformatted.Skipped = formatSkippedInsideWriteRoot
+		return unformatted
+	}
+	root, relativePath, err := openScopedWriteRoot(workspaceRoot, scope, absolutePath)
 	if err != nil {
 		unformatted.ContentKnown = false
 		return unformatted
@@ -207,43 +247,37 @@ func restoreFormattedFile(root *os.Root, relativePath string, content string, mo
 	return file.Close()
 }
 
-// openFormattedFileRoot opens the write root before the formatter runs and
-// computes the target relative to that descriptor-bound root. Atomic in-root
-// replacement remains valid; a formatter that swaps the target to an escaping
-// symlink is rejected when readFormattedFile opens it through the root.
-func openFormattedFileRoot(workspaceRoot string, scope PathScope, absolutePath string) (*os.Root, string, error) {
-	roots, err := scopedRoots(workspaceRoot, scope)
+// formatterBinaryInWriteRoots reports whether the resolved formatter binary
+// lives under one of the configured write roots (the workspace or an /add-dir
+// root). Both sides are symlink-resolved before comparison so an aliased or
+// linked path cannot hide a workspace-planted binary. A binary that cannot be
+// resolved is treated as untrusted, because trust cannot be established.
+func formatterBinaryInWriteRoots(binaryPath string, roots []string) bool {
+	resolvedBinary, err := filepath.Abs(binaryPath)
 	if err != nil {
-		return nil, "", err
+		return false
 	}
-	var firstErr error
-	for _, configuredRoot := range roots {
-		resolvedRoot, err := filepath.Abs(configuredRoot)
-		if err == nil {
-			resolvedRoot, err = filepath.EvalSymlinks(resolvedRoot)
-		}
+	if evaluatedBinary, err := filepath.EvalSymlinks(resolvedBinary); err == nil {
+		resolvedBinary = evaluatedBinary
+	}
+	for _, root := range roots {
+		resolvedRoot, err := filepath.Abs(root)
 		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
 			continue
 		}
-		candidate := sandbox.NormalizePrefixForRoot(absolutePath, resolvedRoot)
-		relativePath, err := filepath.Rel(resolvedRoot, candidate)
-		if err != nil || relativePath == ".." || strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) || filepath.IsAbs(relativePath) {
-			continue
+		if evaluated, err := filepath.EvalSymlinks(resolvedRoot); err == nil {
+			resolvedRoot = evaluated
 		}
-		root, err := os.OpenRoot(resolvedRoot)
+		relative, err := filepath.Rel(resolvedRoot, resolvedBinary)
 		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
 			continue
 		}
-		return root, relativePath, nil
+		if relative == "." {
+			return true
+		}
+		if relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative) {
+			return true
+		}
 	}
-	if firstErr != nil {
-		return nil, "", firstErr
-	}
-	return nil, "", fmt.Errorf("%s must stay inside the configured write roots", absolutePath)
+	return false
 }
