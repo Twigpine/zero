@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -112,7 +113,22 @@ func TestMouseWheelOnClippedFooterStatusDoesNotMoveComposerCursor(t *testing.T) 
 }
 
 func TestAltScreenTranscriptScrollKeepsFooterFixed(t *testing.T) {
-	m := newModel(context.Background(), Options{AltScreen: true, ProviderName: "openai", ModelName: "gpt-4.1"})
+	// Cwd is pinned because an empty Options.Cwd makes newModel take the real
+	// working directory, which at test time is this package inside whoever's
+	// checkout, and the branch assertion below is not a monotonic function of
+	// that path's length. The title bar picks the widest candidate that fits:
+	// workspace carries branch AND path, cwdOnly carries only the path, and
+	// compactLeft carries only the branch. At width 90 with this branch, a cwd
+	// of up to 52 bytes keeps branch and path, 53 to 74 falls to path-only and
+	// loses the branch, and 75 or more falls again to branch-only and gets it
+	// back. So this failed from a checkout 74 bytes deep and passed from one 80
+	// bytes deep, while CI sits at 40 and never sees it.
+	m := newModel(context.Background(), Options{
+		AltScreen:    true,
+		ProviderName: "openai",
+		ModelName:    "gpt-4.1",
+		Cwd:          filepath.Join(string(filepath.Separator), "workspace", "zero"),
+	})
 	m.width = 90
 	m.height = 10
 	m.gitBranch = "feat/pinned-header"

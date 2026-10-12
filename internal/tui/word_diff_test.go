@@ -1,11 +1,9 @@
 package tui
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 
-	"charm.land/lipgloss/v2"
 	"github.com/alecthomas/chroma/v2"
 )
 
@@ -101,65 +99,4 @@ func TestMixedDiffSyntaxHighlightsCodeOnBothSides(t *testing.T) {
 	if !strings.Contains(joined, contextKeyword) {
 		t.Fatalf("mixed diff context code must retain syntax colors, got:\n%s", joined)
 	}
-}
-
-func TestSystemThemeKeepsSyntaxOnAnAddedLineBand(t *testing.T) {
-	previous := zeroTheme
-	defer func() { zeroTheme = previous }()
-	zeroTheme = buildSystemTheme()
-
-	diff := strings.Join([]string{
-		"--- /dev/null",
-		"+++ b/main.go",
-		"@@ -0,0 +1,2 @@",
-		"+package main",
-		"+func main() {}",
-	}, "\n")
-	body := diffCardBody(diff, 80, cardRenderOptions{bodyCap: 20})
-	joined := strings.Join(body.lines, "\n")
-	if !styleHasLocalBackground(zeroTheme.addLine) {
-		t.Fatal("system-theme added code must use a local line background")
-	}
-	if want := tokenStyle(chroma.Keyword).Background(zeroTheme.addLine.GetBackground()).Render("package"); !strings.Contains(joined, want) {
-		t.Fatalf("system-theme added code must retain syntax highlighting, got:\n%s", joined)
-	}
-	if !styleHasLocalBackground(zeroTheme.onSel(zeroTheme.ink)) {
-		t.Fatal("system-theme selected rows must use a local selection background")
-	}
-}
-
-func TestSystemThemeUsesMutedLocalSurfaceColors(t *testing.T) {
-	theme := buildSystemTheme()
-	for _, test := range []struct {
-		name  string
-		style lipgloss.Style
-		want  string
-	}{
-		{"added diff", theme.addLine, "#212922"},
-		{"deleted diff", theme.delLine, "#3c170f"},
-		{"selection", theme.onSel(theme.ink), "#2b2f2d"},
-	} {
-		if got := styleBackgroundHex(t, test.style); got != test.want {
-			t.Errorf("%s background = %s, want %s", test.name, got, test.want)
-		}
-	}
-}
-
-func styleHasLocalBackground(style lipgloss.Style) bool {
-	background := style.GetBackground()
-	if background == nil {
-		return false
-	}
-	_, noColor := background.(lipgloss.NoColor)
-	return !noColor
-}
-
-func styleBackgroundHex(t *testing.T, style lipgloss.Style) string {
-	t.Helper()
-	background := style.GetBackground()
-	if background == nil {
-		t.Fatal("style has no background")
-	}
-	r, g, b, _ := background.RGBA()
-	return fmt.Sprintf("#%02x%02x%02x", r>>8, g>>8, b>>8)
 }

@@ -26,6 +26,30 @@ type modelSummary = zerocommands.ModelSnapshot
 type providerCatalogSummary = zerocommands.ProviderCatalogSnapshot
 
 func runConfig(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	// The first non-flag argument is a subcommand. With no positional argument
+	// (or only flag arguments), the read-only summary path runs — this keeps
+	// `zero config` and `zero config --json` working unchanged.
+	command := "summary"
+	rest := args
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		command = strings.ToLower(strings.TrimSpace(args[0]))
+		rest = args[1:]
+	}
+	switch command {
+	case "summary":
+		return runConfigSummary(rest, stdout, stderr, deps)
+	case "notify":
+		return runConfigNotify(rest, stdout, stderr, deps)
+	case "help":
+		if err := writeConfigHelp(stdout); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	return writeExecUsageError(stderr, fmt.Sprintf("unknown config command %q", command))
+}
+
+func runConfigSummary(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	options, help, err := parseCommandCenterArgs(args, false, false)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
@@ -466,8 +490,12 @@ func formatProviderCatalogValue(value string, fallback string) string {
 func writeConfigHelp(w io.Writer) error {
 	_, err := fmt.Fprint(w, `Usage:
   zero config [flags]
+  zero config notify [flags]
 
-Inspects resolved Go configuration without printing secrets.
+Inspects resolved Go configuration without printing secrets. The notify
+subcommand reads or updates the stored global notification preference,
+which controls both the completion and needs-input alerts —
+run "zero config notify --help" for details.
 
 Flags:
       --json      Print JSON summary

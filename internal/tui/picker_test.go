@@ -1351,6 +1351,127 @@ func TestModelPickerListsAllSavedProviders(t *testing.T) {
 	}
 }
 
+// A Recent or Favorites row's owner label must name the provider Enter actually
+// uses. A history owner that was renamed or removed no longer resolves, so
+// selection falls back to the active provider; the label must follow it rather
+// than show the stale name.
+func TestModelPickerOwnerLabelMatchesSelectedProvider(t *testing.T) {
+	const staleModel = "anthropic/claude-sonnet-4.5"
+	for _, group := range []string{"Recent", "Favorites"} {
+		t.Run(group, func(t *testing.T) {
+			active := config.ProviderProfile{
+				Name:         "openrouter",
+				CatalogID:    "openrouter",
+				ProviderKind: config.ProviderKindOpenAICompatible,
+				Model:        "google/gemini-2.5-pro",
+				APIKeyEnv:    "OPENROUTER_API_KEY",
+				BaseURL:      "https://openrouter.ai/api/v1",
+				APIFormat:    "chat-completions",
+			}
+			options := Options{
+				ProviderName:    "openrouter",
+				ModelName:       "google/gemini-2.5-pro",
+				Provider:        &fakeProvider{},
+				ProviderProfile: active,
+				SavedProviders:  []config.ProviderProfile{active, {Name: "xai", CatalogID: "xai", Model: "grok-4"}},
+				// "chatgpt" was removed after this model was used from it.
+				RecentModels: []config.RecentModelEntry{
+					{Provider: "chatgpt", Model: staleModel},
+					{Provider: "xai", Model: "grok-4"},
+				},
+				NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+					return &fakeProvider{}, nil
+				},
+			}
+			if group == "Favorites" {
+				options.FavoriteModels = []string{staleModel}
+			}
+			m := newModel(context.Background(), options)
+			m.picker = m.newModelPicker()
+			if m.picker == nil {
+				t.Fatal("expected model picker")
+			}
+			target := -1
+			for index, item := range m.picker.items {
+				if item.Group == group && item.Value == staleModel {
+					target = index
+				}
+				if item.Group == "Recent" && item.Value == "grok-4" && item.OwnerLabel != "xai" {
+					t.Fatalf("resolvable owner label = %q, want xai", item.OwnerLabel)
+				}
+			}
+			if target < 0 {
+				t.Fatalf("expected %s row for %s, got %#v", group, staleModel, m.picker.items)
+			}
+			if got := m.picker.items[target].OwnerLabel; got != "openrouter" {
+				t.Fatalf("stale owner label = %q, want the active provider", got)
+			}
+			row := plainRender(t, renderModelPickerRow(60, false, m.picker.items[target]))
+			assertContains(t, row, "openrouter · ")
+			assertNotContains(t, row, "chatgpt")
+
+			m.picker.selected = target
+			updated, _ := m.Update(testKey(tea.KeyEnter))
+			m = updated.(model)
+			if m.providerName != "openrouter" || m.modelName != staleModel {
+				t.Fatalf("selection used %s/%s, want the labeled provider openrouter/%s", m.providerName, m.modelName, staleModel)
+			}
+		})
+	}
+}
+
+func TestModelPickerAbbreviatedOwnersMatchSelection(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "")
+	home := t.TempDir()
+	for _, variable := range []string{"HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "APPDATA", "LOCALAPPDATA"} {
+		t.Setenv(variable, home)
+	}
+	for _, names := range [][]string{
+		{"work-subscription-provider-east", "work-subscription-provider-west"},
+		{"east-subscription-provider-shared", "west-subscription-provider-shared"},
+		{"東-subscription-provider-shared", "西-subscription-provider-shared"},
+	} {
+		for _, favorite := range []bool{false, true} {
+			for _, terminalWidth := range []int{76, 30} {
+				rows := map[string]bool{}
+				for selectedOwner, name := range names {
+					profiles := []config.ProviderProfile{}
+					for _, owner := range names {
+						profiles = append(profiles, config.ProviderProfile{Name: owner, CatalogID: "openrouter", ProviderKind: config.ProviderKindOpenAICompatible, Model: "gpt-5.6", APIKey: "test-key", BaseURL: "https://openrouter.ai/api/v1", APIFormat: "chat-completions"})
+					}
+					m := newModel(context.Background(), Options{ProviderName: names[0], ProviderProfile: profiles[0], ModelName: "gpt-5.6", Provider: &fakeProvider{}, SavedProviders: profiles,
+						NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) { return &fakeProvider{}, nil },
+					})
+					m.favoriteModels = map[string]bool{"gpt-5.6": favorite}
+					// Put each owner first in turn: Favorites retains only one row per model.
+					recent := []pickerItem{{Label: "GPT-5.6", Value: "gpt-5.6", OwnerProvider: name}, {Label: "GPT-5.6", Value: "gpt-5.6", OwnerProvider: names[1-selectedOwner]}}
+					items := m.assembleModelPickerItems(recent, nil)
+					m.picker = &commandPicker{kind: pickerModel, title: "Choose a model", items: items, allItems: items}
+					width := modelPickerOverlayWidth(terminalWidth, m.picker)
+					for _, selected := range []bool{false, true} {
+						row := plainRender(t, renderModelPickerRow(width-4, selected, items[0]))
+						assertContains(t, row, "GPT-5.6")
+						if selected {
+							if rows[row] {
+								t.Fatalf("different destinations have identical rows: %q", row)
+							}
+							rows[row] = true
+						}
+					}
+					overlay := plainRender(t, m.modelPickerOverlay(terminalWidth))
+					joined := strings.NewReplacer(" ", "", "\n", "", "│", "").Replace(overlay)
+					assertContains(t, joined, fmt.Sprintf("[%d]%s", selectedOwner+1, name))
+					updated, _ := m.Update(testKey(tea.KeyEnter))
+					got := updated.(model)
+					if got.providerName != name || got.modelName != "gpt-5.6" {
+						t.Fatalf("selection = %s/%s, want %s/gpt-5.6", got.providerName, got.modelName, name)
+					}
+				}
+			}
+		}
+	}
+}
+
 func pickerGroups(items []pickerItem) []string {
 	groups := []string{}
 	seen := map[string]bool{}

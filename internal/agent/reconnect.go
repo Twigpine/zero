@@ -144,12 +144,101 @@ func shouldReconnect(ctx context.Context, err error) bool {
 		"i/o timeout",
 		"server closed",
 		"unexpected end",
+		// Windows mid-stream aborts (WSAECONNABORTED / wsarecv) — host or AV
+		// forcibly closes an established socket during CollectStream.
+		// "software caused connection abort" is the Unix/macOS ECONNABORTED
+		// text; it also appears in midStreamAbortNeedles, which must stay a
+		// subset of this list.
+		"wsarecv",
+		"connection was aborted",
+		"software caused connection abort",
+		"forcibly closed",
 	} {
 		if strings.Contains(msg, needle) {
 			return true
 		}
 	}
 	return false
+}
+
+// midStreamAbortNeedles are the transport-abort classes retried AFTER connect
+// succeeded and the stream body has started. This is a subset of shouldReconnect:
+// connect-phase signals (timeout, connection refused, "temporarily unavailable")
+// stay on the connect retry path, because matching them here would re-prefill a
+// healthy-but-slow server (ollama cloud header timeouts) and tell the user the
+// connection was lost. Issue #973 names WSAECONNABORTED / connection reset /
+// unexpected stream EOF.
+var midStreamAbortNeedles = []string{
+	"unexpected end",
+	"connection reset",
+	"broken pipe",
+	"connection closed",
+	"server closed",
+	"wsarecv",
+	"connection was aborted",
+	"software caused connection abort",
+	"forcibly closed",
+}
+
+var classifiedNonTransportPrefixes = []string{
+	"provider request error:",
+	"provider error:",
+	"auth error:",
+	"rate limit error:",
+}
+
+// isMidStreamTransportAbort reports whether a collected stream error string is a
+// retryable mid-stream transport abort. It does NOT delegate to shouldReconnect:
+// that list is a connect-phase argument ("no response was received"). The stream
+// body has already started here, so only abort/reset/EOF/close classes retry.
+//
+// Used for failures DURING the stream body AFTER a successful connect and BEFORE
+// tool dispatch — the incomplete turn committed no answer text and executed no
+// tools, so a bounded re-issue is safe (same safety rules as the stall path).
+func isMidStreamTransportAbort(message string) bool {
+	lowered := strings.ToLower(strings.TrimSpace(message))
+	if lowered == "" || isContextLimitError(lowered) {
+		return false
+	}
+	for _, prefix := range classifiedNonTransportPrefixes {
+		if strings.Contains(lowered, prefix) {
+			return false
+		}
+	}
+	if errhint.HasStatusCode(lowered, "500", "502", "503", "504") {
+		return false
+	}
+	if containsWordBoundary(lowered, "eof") {
+		return true
+	}
+	for _, needle := range midStreamAbortNeedles {
+		if strings.Contains(lowered, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsWordBoundary(text, word string) bool {
+	start := 0
+	for {
+		idx := strings.Index(text[start:], word)
+		if idx < 0 {
+			return false
+		}
+		pos := start + idx
+		endPos := pos + len(word)
+		leftBoundary := pos == 0 || !isAlphaNumByte(text[pos-1])
+		rightBoundary := endPos == len(text) || !isAlphaNumByte(text[endPos])
+		if leftBoundary && rightBoundary {
+			return true
+		}
+		start = pos + 1
+	}
+}
+
+func isAlphaNumByte(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
 }
 
 // backoffFor is the deterministic exponential base delay for a 1-based attempt,

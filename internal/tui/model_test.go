@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -3200,6 +3201,31 @@ func TestScrimViewportLine(t *testing.T) {
 	}
 }
 
+func TestEffectiveTUINotifyMode(t *testing.T) {
+	cases := []struct {
+		in   string
+		want notify.Mode
+	}{
+		// Empty input falls through to the TUI's own effective default
+		// ("both": bell + OSC-9 desktop notification) so the needs-input
+		// alert works for users who never configured notify. The default
+		// lives here, NOT in config.Resolve — headless runs stay silent
+		// when unconfigured (maintainer review, PR #1001).
+		{"", notify.ModeBoth},
+		{"   ", notify.ModeBoth},
+		{"off", notify.ModeOff},
+		{"bell", notify.ModeBell},
+		{"notify", notify.ModeNotify},
+		{"both", notify.ModeBoth},
+		{" bell ", notify.ModeBell},
+	}
+	for _, c := range cases {
+		if got := effectiveTUINotifyMode(c.in); got != c.want {
+			t.Errorf("effectiveTUINotifyMode(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestOverlayViewportLinesCompositesAndPreservesBackdropText(t *testing.T) {
 	width := 40
 	lines := make([]string, 9)
@@ -3367,5 +3393,31 @@ func TestMultilineBurstSubmits(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal("multiline burst got nil cmd")
+	}
+}
+
+// Maintainer regression (PR #1001, rebase review): main's pickerTheme case ends
+// by appending the handler's text to the transcript, so a theme choice whose
+// preference cannot be saved still reports "could not save theme preference
+// (...)". A rebase accidentally dropped that line, leaving a failed save
+// completely silent when the theme was picked from the picker (the /theme text
+// path kept its line, so no test caught it). This pins the picker's failure
+// path: the config path sits under a regular file so the write must fail.
+func TestThemePickerAppendNoteOnFailedSave(t *testing.T) {
+	defer applyTheme(themeDark, true)
+	cfg := filepath.Join(t.TempDir(), "blocked", "zero.json")
+	if err := os.WriteFile(filepath.Dir(cfg), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), Options{UserConfigPath: cfg})
+	m.picker = &commandPicker{kind: pickerTheme, items: []pickerItem{{Label: "dracula", Value: "dracula"}}}
+	updated, _ := m.Update(testKey(tea.KeyEnter)) // choosePicker
+	next := updated.(model)
+	row, ok := findTranscriptRow(next.transcript, rowSystem)
+	if !ok {
+		t.Fatalf("picker theme save failure should append a transcript note, got rows %#v", next.transcript)
+	}
+	if !strings.Contains(row.text, "could not save theme preference") {
+		t.Fatalf("transcript note = %q, want the could-not-save note", row.text)
 	}
 }

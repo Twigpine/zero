@@ -165,6 +165,11 @@ func TestCompletionTreeCoversAliasesNestingAndCommonFlags(t *testing.T) {
 	assertCandidates(t, byPath["completions"], "bash", "zsh", "fish", "powershell", "elvish")
 	assertCandidates(t, byPath["plugins"], "list", "add", "info", "remove", "rm")
 	assertCandidates(t, byPath["plugin"], "list", "add", "info", "remove", "rm")
+	// `config` gained the notify subcommand; the completion tree must expose
+	// it (and its flags) so shell completion cannot go stale for new CLI
+	// surfaces (maintainer review, PR #1001).
+	assertCandidates(t, byPath["config"], "notify", "--json", "--help")
+	assertCandidates(t, byPath["config notify"], "--mode", "--focus", "--reset", "--json", "--help")
 }
 
 func assertCandidates(t *testing.T, got []string, wants ...string) {

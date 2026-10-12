@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/notify"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 )
 
@@ -753,6 +754,146 @@ func SetTheme(path string, theme string) (result FileConfig, err error) {
 	if err := writeConfigFile(path, cfg); err != nil {
 		return FileConfig{}, err
 	}
+	return cfg, nil
+}
+
+// UserNotify returns the notify block stored in the user's own config file at
+// path, trimmed. A missing file or missing/empty block returns the zero value:
+// callers that need to preserve "whatever the user already chose" on a partial
+// update must seed from THIS value, not from the resolved view — the resolver
+// merges project config and the TUI applies its own defaults, so seeding from
+// resolved copies choices the user never made into their global file (a
+// project's mode: off, or a pinned default) and across every other project.
+func UserNotify(path string) (NotifyConfig, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return NotifyConfig{}, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return NotifyConfig{}, nil
+		}
+		return NotifyConfig{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+	var cfg FileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return NotifyConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+	}
+	cfg.Notify.Mode = strings.TrimSpace(cfg.Notify.Mode)
+	cfg.Notify.FocusMode = strings.TrimSpace(cfg.Notify.FocusMode)
+	return cfg.Notify, nil
+}
+
+// validateNotify trims both fields and checks them against the accepted vocab
+// (mode in {off,bell,notify,both}; focusMode in {unfocused,always,focused}) so
+// a bad caller cannot write a value the resolver would later reject at
+// startup. An empty Mode or FocusMode is stored as-is — blank means "use the
+// built-in defaults" (the TUI's effectiveTUINotifyMode maps an empty mode to
+// both; the notify package treats an empty focusMode as unfocused), not "off".
+func validateNotify(value NotifyConfig) (NotifyConfig, error) {
+	value.Mode = strings.TrimSpace(value.Mode)
+	value.FocusMode = strings.TrimSpace(value.FocusMode)
+	if mode := value.Mode; mode != "" {
+		switch notify.Mode(mode) {
+		case notify.ModeOff, notify.ModeBell, notify.ModeNotify, notify.ModeBoth:
+		default:
+			return NotifyConfig{}, fmt.Errorf("invalid notify.mode %q: expected off, bell, notify, or both", mode)
+		}
+	}
+	if focus := value.FocusMode; focus != "" {
+		switch notify.FocusMode(focus) {
+		case notify.FocusUnfocused, notify.FocusAlways, notify.FocusFocused:
+		default:
+			return NotifyConfig{}, fmt.Errorf("invalid notify.focusMode %q: expected unfocused, always, or focused", focus)
+		}
+	}
+	return value, nil
+}
+
+// UpdateNotify runs one SERIALIZED read-modify-write transaction on the user's
+// notify block. merge receives the currently stored block and returns the
+// block to store; it must preserve any field the caller is not explicitly
+// changing. The lock covers reading the stored block, applying merge, and
+// replacing the file, so two concurrent partial updates (for example
+// `--mode off` and `--focus always` from two terminals) cannot interleave
+// their reads and writes and silently undo each other's explicit change
+// (maintainer review, PR #1001 reproduced a 50/50 lost-update without it).
+//
+// The write replaces ONLY the notify member's bytes (setNotifyJSONObject),
+// preserving every unrelated value and its explicit presence — including
+// explicit zeros/falses like tools.deferThreshold: 0 or an MCP server's
+// disabled: false, which the typed serializer's omitempty cannot round-trip —
+// through the existing temp-file-and-rename atomic publish. Locking only the
+// final write would leave the stale-field merge outside the transaction, so
+// the whole sequence runs under one lock — the SAME lockConfigFileFn authority
+// every other config mutator uses (provider/theme/credential/MCP writes), not
+// a private lock: two authorities over the same file would not contend
+// (maintainer review, PR #1001). The release error is joined into the
+// result like every other writer: a failed unlock would leave the advisory
+// lock held and later updates blocked while the caller is told success.
+func UpdateNotify(path string, merge func(current NotifyConfig) NotifyConfig) (result NotifyConfig, err error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return NotifyConfig{}, fmt.Errorf("config path is required")
+	}
+	if merge == nil {
+		return NotifyConfig{}, fmt.Errorf("merge function is required")
+	}
+	release, err := lockConfigFileFn(path)
+	if err != nil {
+		return NotifyConfig{}, err
+	}
+	// Joined, not chosen between: a release failure annotates the result
+	// instead of masking the mutation error that actually explains what went
+	// wrong. Reporting success after a failed release would claim a state the
+	// next update cannot reproduce.
+	defer func() { err = errors.Join(err, release()) }()
+
+	current, err := UserNotify(path)
+	if err != nil {
+		return NotifyConfig{}, err
+	}
+	next, err := validateNotify(merge(current))
+	if err != nil {
+		return NotifyConfig{}, err
+	}
+
+	// Read the raw file and edit only the notify member. A missing file starts
+	// from an empty object so a first-time write does not need a pre-seeded
+	// config.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return NotifyConfig{}, fmt.Errorf("read config %s: %w", path, err)
+		}
+		data = []byte("{}")
+	}
+	updated, err := setNotifyJSONObject(data, next)
+	if err != nil {
+		return NotifyConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+	}
+	if err := writeConfigData(path, updated); err != nil {
+		return NotifyConfig{}, err
+	}
+	return next, nil
+}
+
+// SetNotify replaces the stored notification preference with value. It is a
+// thin wrapper over the transactional UpdateNotify so existing callers keep
+// their replace semantics under the same lock and byte-preserving write.
+func SetNotify(path string, value NotifyConfig) (FileConfig, error) {
+	next, err := UpdateNotify(path, func(NotifyConfig) NotifyConfig { return value })
+	if err != nil {
+		return FileConfig{}, err
+	}
+	// Re-read the full config so callers that inspect unrelated fields (and
+	// existing tests) keep their FileConfig-shaped result.
+	cfg, err := loadConfigFile(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	cfg.Notify = next
 	return cfg, nil
 }
 

@@ -11,6 +11,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/alecthomas/chroma/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Gitlawb/zero/internal/agent"
 )
@@ -24,6 +25,10 @@ const (
 	pickerOverlayMinWidth       = 56
 	modelPickerOverlayMaxWidth  = 76
 	modelPickerOverlayMinWidth  = 58
+	// modelPickerOwnerMaxWidth caps the owner prefix on Recent/Favorites rows so
+	// even a favorite ("* ") at the maximum overlay width keeps over 40 cells for
+	// the model name.
+	modelPickerOwnerMaxWidth = 20
 )
 
 // layoutTier buckets the terminal width into the spec's adaptive tiers. It
@@ -1023,22 +1028,44 @@ func joinThemePickerColumns(left, right []string, leftWidth, rightWidth int) []s
 }
 
 func (m model) modelPickerOverlay(width int) string {
+	overlay, _, _ := m.modelPickerOverlayLayout(width)
+	return overlay
+}
+
+// Share the fitted item window with mouse hit-testing. Rows and the selected
+// owner key can span multiple lines, so an item count alone cannot bound height.
+func (m model) modelPickerOverlayLayout(width int) (string, int, int) {
 	if m.picker == nil {
-		return ""
+		return "", 0, 0
 	}
 	if m.modelPickerLoading {
-		return m.modelPickerLoadingOverlay(width)
+		return m.modelPickerLoadingOverlay(width), 0, 0
 	}
-	overlayWidth := modelPickerOverlayWidth(width, m.picker)
-	innerWidth := maxInt(1, overlayWidth-4)
-	maxVisible := minInt(pickerOverlayMaxVisible, len(m.picker.items))
-	start := 0
-	visible := []pickerItem{}
+	height := normalizedStartupHeight(m.height)
+	if m.altScreen && m.height > 0 {
+		height = m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width)).bodyHeight
+	}
 	if len(m.picker.items) > 0 {
 		m.picker.selected = clampInt(m.picker.selected, 0, len(m.picker.items)-1)
-		start = selectableListStart(len(m.picker.items), maxVisible, m.picker.selected)
-		visible = m.picker.items[start : start+maxVisible]
 	}
+	count := minInt(pickerOverlayMaxVisible, len(m.picker.items))
+	for {
+		start := selectableListStart(len(m.picker.items), count, m.picker.selected)
+		if count > 0 {
+			start = maxInt(start, m.picker.selected-count+1)
+		}
+		overlay := m.renderModelPickerOverlay(width, start, count)
+		if len(viewLines(overlay)) <= height || count <= 1 {
+			return overlay, start, count
+		}
+		count--
+	}
+}
+
+func (m model) renderModelPickerOverlay(width, start, count int) string {
+	overlayWidth := modelPickerOverlayWidth(width, m.picker)
+	innerWidth := maxInt(1, overlayWidth-4)
+	visible := m.picker.items[start : start+count]
 
 	lines := make([]string, 0, len(visible)+6)
 	searchInset := lipgloss.Width("❯ ")
@@ -1054,12 +1081,20 @@ func (m model) modelPickerOverlay(width int) string {
 			lines = append(lines, fillPaletteLine(zeroTheme.accent.Bold(true).Render(item.Group), innerWidth, transparentSurface))
 			lastGroup = item.Group
 		}
-		lines = append(lines, renderModelPickerRow(innerWidth, start+index == m.picker.selected, item))
+		lines = append(lines, strings.Split(renderModelPickerRow(innerWidth, start+index == m.picker.selected, item), "\n")...)
 	}
 	if len(visible) == 0 {
 		lines = append(lines, fillPaletteLine(searchPrefix+zeroTheme.faint.Render("no matching models"), innerWidth, transparentSurface))
 	}
 	if item, ok := m.picker.current(); ok {
+		if item.OwnerNumber > 0 && !strings.Contains(ansi.Strip(renderModelPickerRow(innerWidth, true, item)), item.OwnerLabel) {
+			// Give abbreviated cues a full-name key before Enter, including on
+			// narrow terminals where the distinguishing part may not fit in a row.
+			owner := fmt.Sprintf("[%d] %s", item.OwnerNumber, item.OwnerLabel)
+			for _, line := range strings.Split(ansi.Hardwrap(owner, maxInt(1, innerWidth-searchInset), false), "\n") {
+				lines = append(lines, fillPaletteLine(searchPrefix+zeroTheme.faint.Render(line), innerWidth, transparentSurface))
+			}
+		}
 		if detail := modelPickerItemDetail(item); detail != "" {
 			lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
 			lines = append(lines, fillPaletteLine(searchPrefix+zeroTheme.faint.Render(detail), innerWidth, transparentSurface))
@@ -1120,10 +1155,7 @@ func modelPickerOverlayWidth(terminalWidth int, picker *commandPicker) int {
 	target = maxInt(target, lipgloss.Width("  Using built-in model list"))
 	if picker != nil {
 		for _, item := range picker.items {
-			labelWidth := lipgloss.Width(item.Label)
-			if item.Favorite {
-				labelWidth += lipgloss.Width("* ")
-			}
+			labelWidth := lipgloss.Width(modelPickerRowLabel(item, maxInt(0, available-6)))
 			target = maxInt(target, lipgloss.Width("❯ ")+labelWidth)
 			if detail := modelPickerItemDetail(item); detail != "" {
 				target = maxInt(target, lipgloss.Width("  "+detail))
@@ -1158,18 +1190,48 @@ func renderModelPickerRow(width int, selected bool, item pickerItem) string {
 		surface = zeroTheme.onSel
 		marker = surface(zeroTheme.accent).Render("❯ ")
 	}
+	lines := strings.Split(modelPickerRowLabel(item, maxInt(0, width-2)), "\n")
+	for i, line := range lines {
+		lines[i] = fillPaletteLine(marker+surface(zeroTheme.ink).Render(line), width, surface)
+		marker = surface(zeroTheme.ink).Render("  ")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func modelPickerRowLabel(item pickerItem, width int) string {
 	label := strings.TrimSpace(item.Label)
 	if label == "" {
 		label = strings.TrimSpace(item.Value)
 	}
-	prefix := ""
 	if item.Favorite {
-		prefix = "* "
+		width -= 2
 	}
-	left := marker + surface(zeroTheme.ink).Render(prefix+label)
-	// The provider is shown as a section header above each group, so rows no longer
-	// repeat it as a right-aligned tag (matches a grouped provider+model list).
-	return fillPaletteLine(left, width, surface)
+	// Reserve the model's cells against the actual terminal width, not just the
+	// overlay cap. If both cannot fit, give the owner its own line.
+	if owner := strings.TrimSpace(item.OwnerLabel); owner != "" {
+		budget := minInt(modelPickerOwnerMaxWidth, width-3-lipgloss.Width(label))
+		separateLine := budget < minInt(6, lipgloss.Width(owner))
+		if separateLine {
+			budget = maxInt(1, minInt(modelPickerOwnerMaxWidth, width))
+		}
+		if lipgloss.Width(owner) > budget {
+			prefix := ""
+			if item.OwnerNumber > 0 {
+				prefix = fmt.Sprintf("[%d]", item.OwnerNumber)
+			}
+			remove := lipgloss.Width(owner) - maxInt(1, budget-lipgloss.Width(prefix)) + 1
+			owner = prefix + ansi.TruncateLeft(owner, remove, "…")
+		}
+		if separateLine {
+			label += "\n" + owner
+		} else {
+			label = owner + " · " + label
+		}
+	}
+	if item.Favorite {
+		label = "* " + label
+	}
+	return label
 }
 
 func modelPickerItemDetail(item pickerItem) string {

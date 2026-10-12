@@ -4,6 +4,7 @@ package background
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 
 	"github.com/Gitlawb/zero/internal/execution"
@@ -46,7 +47,13 @@ func terminateOwnedProcess(cmd *exec.Cmd) (bool, error) {
 		terminateErr = terminateProcessForTest(cmd.Process.Pid)
 	})
 	if err != nil {
-		return false, fmt.Errorf("pin process %d for termination: %w", cmd.Process.Pid, err)
+		// WithHandle refuses only a process that has already been waited or
+		// released, so it has finished. Say so in the form exec.Cmd understands:
+		// a Cancel error wrapping os.ErrProcessDone is "nothing to cancel", where
+		// the unexported "already released" error it would otherwise carry made
+		// Wait report a spurious cancel failure. A dead root has no tree left to
+		// find either way.
+		return true, fmt.Errorf("pin process %d for termination: %w: %w", cmd.Process.Pid, os.ErrProcessDone, err)
 	}
 	return alreadyExited, terminateErr
 }
