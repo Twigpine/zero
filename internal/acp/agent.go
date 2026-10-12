@@ -15,6 +15,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/providermodelcatalog"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
@@ -106,6 +107,14 @@ type acpSession struct {
 	restrictModels bool
 	cancel         context.CancelFunc
 	history        []turnRecord
+
+	// readOnly marks a session published by session/load for a kind that is
+	// not resumable (a child, side or spec sub-run). Load still replays its
+	// transcript, which is the render-only use a client needs, but a prompt
+	// would continue the sub-run as a standalone conversation, which every
+	// other resume path refuses (sessions.IsResumableKind). Set once when the
+	// session is first registered and never changed, so it is read without mu.
+	readOnly bool
 }
 
 // NewAgent builds the ACP server and registers its method handlers on conn.
@@ -204,7 +213,7 @@ func (a *Agent) handleSessionNew(ctx context.Context, params json.RawMessage) (a
 	if err != nil {
 		return nil, RPCError(codeInternalError, "create session: "+err.Error())
 	}
-	sess, _ := a.registerSession(meta.SessionID, root, nil, model, models, restrictModels)
+	sess, _ := a.registerSession(meta.SessionID, root, nil, model, models, restrictModels, false)
 	return NewSessionResult{
 		SessionID:     sess.id,
 		ConfigOptions: a.configOptions(sess),
@@ -317,7 +326,10 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 			models = append(models, SessionConfigOptionValue{Value: persistedModel, Name: persistedModel})
 		}
 	}
-	sess, existed := a.registerSession(meta.SessionID, root, history, model, models, restrictModels)
+	// Resume has already refused a non-resumable kind above, so only load can
+	// reach here with one, and it publishes that session for viewing only.
+	readOnly := !sessions.IsResumableKind(meta.SessionKind)
+	sess, existed := a.registerSession(meta.SessionID, root, history, model, models, restrictModels, readOnly)
 	if existed {
 		_, messages, historyWarning, historyErr = a.refreshSessionHistory(sess, requireHistoryLog)
 		if operation == persistedSessionResume && historyErr != nil {
@@ -439,6 +451,9 @@ func (a *Agent) handleSessionPrompt(ctx context.Context, params json.RawMessage)
 	if sess == nil {
 		return nil, RPCError(codeInvalidParams, "unknown session: "+p.SessionID)
 	}
+	if sess.readOnly {
+		return nil, RPCError(codeInvalidParams, "session is not resumable, so it was loaded for viewing only and cannot be prompted: "+p.SessionID)
+	}
 
 	// Serialize turns for this session so two prompts can't interleave history or
 	// fight over the single cancel slot. session/cancel still works concurrently
@@ -514,6 +529,30 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 	}
 	queue(messageEvent("user", userText))
 
+	visionCache := make(map[string]bool)
+	var visionCacheMu sync.Mutex
+	supportsVision := func(modelID string) bool {
+		modelID = strings.TrimSpace(modelID)
+		if modelID == "" {
+			return false
+		}
+		visionCacheMu.Lock()
+		defer visionCacheMu.Unlock()
+		if cached, ok := visionCache[modelID]; ok {
+			return cached
+		}
+		supported := a.modelSupportsVision(ctx, resolved.Provider, modelID)
+		visionCache[modelID] = supported
+		return supported
+	}
+	effectivePrompt := userText
+	if len(images) > 0 && !supportsVision(resolved.Provider.Model) {
+		msg := fmt.Sprintf("Model %s does not support image input; ignoring %d prompt image(s).", resolved.Provider.Model, len(images))
+		note.text("[zero] " + msg + "\n\n")
+		effectivePrompt = fmt.Sprintf("[Note: %s]\n\n%s", msg, userText)
+		images = nil
+	}
+
 	opts := agent.Options{
 		Cwd:            sess.cwd,
 		SessionID:      sess.id,
@@ -525,6 +564,7 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 		DeferThreshold: workspace.DeferThreshold,
 		MaxTurns:       resolved.MaxTurns,
 		Images:         images,
+		SupportsVision: supportsVision,
 		OnText:         note.text,
 		OnReasoning:    note.thought,
 		OnToolCall: func(call agent.ToolCall) {
@@ -543,7 +583,7 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 		},
 	}
 
-	agentPrompt := buildPrompt(sess.snapshotHistory(), userText)
+	agentPrompt := buildPrompt(sess.snapshotHistory(), effectivePrompt)
 	result, runErr := a.deps.RunAgent(ctx, agentPrompt, provider, opts)
 	if result.FinalAnswer != "" {
 		queue(messageEvent("assistant", result.FinalAnswer))
@@ -1171,13 +1211,13 @@ func promptImages(blocks []ContentBlock) []zeroruntime.ImageBlock {
 // The bool reports that case so persisted activation can re-read and apply disk
 // history under turnMu. history is set BEFORE first publication so no concurrent
 // prompt can read a half-initialized session.
-func (a *Agent) registerSession(id, cwd string, history []turnRecord, model string, models []SessionConfigOptionValue, restrictModels bool) (*acpSession, bool) {
+func (a *Agent) registerSession(id, cwd string, history []turnRecord, model string, models []SessionConfigOptionValue, restrictModels bool, readOnly bool) (*acpSession, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if existing := a.sessions[id]; existing != nil {
 		return existing, true
 	}
-	sess := &acpSession{id: id, cwd: cwd, mode: agent.PermissionModeAuto, model: model, models: models, restrictModels: restrictModels, history: history}
+	sess := &acpSession{id: id, cwd: cwd, mode: agent.PermissionModeAuto, model: model, models: models, restrictModels: restrictModels, history: history, readOnly: readOnly}
 	a.sessions[id] = sess
 	return sess, false
 }
@@ -1321,4 +1361,33 @@ func sameWorkspace(left, right string) bool {
 		return false
 	}
 	return os.SameFile(leftInfo, rightInfo)
+}
+
+func (a *Agent) modelSupportsVision(ctx context.Context, profile config.ProviderProfile, modelID string) bool {
+	trimmed := strings.TrimSpace(modelID)
+	if trimmed == "" {
+		return false
+	}
+	if a.deps.DiscoverModels != nil {
+		if discovered, err := a.deps.DiscoverModels(ctx, profile); err == nil {
+			for _, dm := range discovered {
+				if strings.EqualFold(strings.TrimSpace(dm.ID), trimmed) {
+					if len(dm.InputModalities) > 0 {
+						for _, mod := range dm.InputModalities {
+							if strings.EqualFold(strings.TrimSpace(mod), "image") {
+								return true
+							}
+						}
+						return false
+					}
+					break
+				}
+			}
+		}
+	}
+	reg, _ := modelregistry.DefaultRegistry()
+	if entry, known := reg.Resolve(trimmed); known {
+		return entry.Supports(modelregistry.ModelCapabilityVision)
+	}
+	return modelregistry.SupportsVision(reg, trimmed)
 }

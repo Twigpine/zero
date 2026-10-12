@@ -96,6 +96,69 @@ var textSecretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
 }
 
+// anchoredSecretPatterns mirrors textSecretPatterns with the leading \b
+// replaced by \A, so each shape can be tested at an exact byte offset. A
+// credential that starts exactly where a redacted span ends (two AWS keys
+// glued end to end, e.g. AKIA...AKIA...) has no word boundary on its left,
+// so the plain pattern misses it; the anchored variant catches it.
+var anchoredSecretPatterns = func() []*regexp.Regexp {
+	out := make([]*regexp.Regexp, len(textSecretPatterns))
+	for i, p := range textSecretPatterns {
+		src := p.String()
+		if strings.HasPrefix(src, `\b`) {
+			src = `\A(?:` + src[len(`\b`):] + `)`
+		}
+		out[i] = regexp.MustCompile(src)
+	}
+	return out
+}()
+
+// redactAdjacent redacts every match of pattern, plus any match of anchored
+// that begins exactly where a redacted span ends. This catches credentials
+// glued end to end (AKIA...AKIA...) without weakening the leading-boundary
+// rule elsewhere: a mid-word occurrence that does not abut a redacted span
+// still does not match. Chained runs (three or more glued credentials) are
+// followed to the end.
+func redactAdjacent(s string, pattern, anchored *regexp.Regexp, replacement string) string {
+	spans := pattern.FindAllStringIndex(s, -1)
+	// Bound the outer loop to the original match count. The inner loop
+	// appends chained spans to the same slice; re-reading len(spans) would
+	// re-chain every appended span, growing the span count (and the
+	// FindStringIndex calls) exponentially on long glued runs.
+	n := len(spans)
+	for i := 0; i < n; i++ {
+		end := spans[i][1]
+		for end < len(s) {
+			loc := anchored.FindStringIndex(s[end:])
+			if loc == nil || loc[0] != 0 || loc[1] <= 0 {
+				break
+			}
+			newEnd := end + loc[1]
+			spans = append(spans, []int{end, newEnd})
+			end = newEnd
+		}
+	}
+	if len(spans) == 0 {
+		return s
+	}
+	sort.Slice(spans, func(i, j int) bool { return spans[i][0] < spans[j][0] })
+	var out strings.Builder
+	pos := 0
+	for _, sp := range spans {
+		if sp[0] < pos {
+			continue // overlapping span, already covered
+		}
+		out.WriteString(s[pos:sp[0]])
+		// s[sp[0]:sp[1]] is a match (anchored spans match at \b when taken
+		// alone), so ReplaceAllString expands $ references exactly as the
+		// plain loop below would.
+		out.WriteString(pattern.ReplaceAllString(s[sp[0]:sp[1]], replacement))
+		pos = sp[1]
+	}
+	out.WriteString(s[pos:])
+	return out.String()
+}
+
 var (
 	privateKeyPattern = regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----`)
 	jsonStringPattern = regexp.MustCompile(`("([^"\\]*(?:\\.[^"\\]*)*)"\s*:\s*)"([^"\\]*(?:\\.[^"\\]*)*)"`)
@@ -227,15 +290,19 @@ func RedactString(value string, options Options) string {
 	// openai keys first so the filter can drop kebab-case false positives
 	// before any other pattern rewrites nearby text.
 	redacted = openaiKeyPattern.ReplaceAllStringFunc(redacted, func(match string) string {
-		if !knownOpenAIKeyPrefix(match) && !secretMatchHasDigit(match) &&
-			strings.Contains(strings.TrimPrefix(match, "sk-"), "-") {
+		if !openAIShapeIsSecret(match) {
 			return match
 		}
 		return replacement
 	})
-	for _, pattern := range textSecretPatterns {
-		redacted = pattern.ReplaceAllString(redacted, replacement)
+	for i, pattern := range textSecretPatterns {
+		redacted = redactAdjacent(redacted, pattern, anchoredSecretPatterns[i], replacement)
 	}
+	// Credentials broken up by invisible characters last, over what the
+	// contiguous matchers left: a whole credential is already claimed by its own
+	// strict match, so this pass cannot reach out of one and into the next. It is
+	// a no-op for text with no such character, which is nearly all text.
+	redacted = redactControlSplitSecrets(redacted, replacement)
 	return redacted
 }
 

@@ -1,6 +1,13 @@
 package modelregistry
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
+
+// Match explicit multimodal local families, including common Ollama spellings.
+// Gemma 3 requires a vision-capable size: 270M and 1B are text-only.
+var localVisionFamily = regexp.MustCompile(`^(gemma-?3[-:](4b|12b|27b)|llama-?4|mistral-small-?3\.1|phi-?4-multimodal)($|[-:_.])`)
 
 // SupportsVision reports whether the model identified by modelID accepts image
 // input. A model in the curated catalog is authoritative (its declared
@@ -36,6 +43,8 @@ func VisionCapableByName(modelID string) bool {
 		id = id[slash+1:] // drop a "provider/" prefix
 	}
 	switch {
+	case localVisionFamily.MatchString(id):
+		return true
 	case strings.Contains(id, "gemini"):
 		return true // every Gemini model is multimodal
 	case strings.Contains(id, "claude-3"), strings.Contains(id, "claude-4"),

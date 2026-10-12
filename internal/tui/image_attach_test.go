@@ -10,6 +10,10 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
+	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/providercatalog"
+	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -570,5 +574,358 @@ func TestRetryResendsAttachments(t *testing.T) {
 	}
 	if !strings.Contains(last.Content, "describe both") {
 		t.Fatalf("retried prompt should include the remembered user text, got:\n%s", last.Content)
+	}
+}
+
+func TestModelSupportsVision_ActiveProviderPrecedence(t *testing.T) {
+	m := newModel(t.Context(), Options{ModelName: "gpt-4.1", ProviderName: "openai"})
+	// gpt-4.1 is in curated catalog as supporting vision.
+	// Override active provider to explicitly report it as text-only.
+	m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{
+		"openai": {
+			{
+				ID:              "gpt-4.1",
+				InputModalities: []string{"text"},
+			},
+		},
+		"other-provider": {
+			{
+				ID:              "custom-text-model",
+				InputModalities: []string{"image", "text"},
+			},
+		},
+	}
+	// Active provider explicit modalities must win over catalog.
+	if m.modelSupportsVisionFor("gpt-4.1") {
+		t.Fatal("expected active provider text-only explicit modality to override catalog vision support")
+	}
+
+	// Foreign provider discovery record must NOT decide capabilities for active provider.
+	if m.modelSupportsVisionFor("custom-text-model") {
+		t.Fatal("expected foreign provider discovery record to be ignored for active provider")
+	}
+}
+
+func TestRunAgentWithOptions_DiscoverySnapshotRace(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	m := newModel(ctx, Options{ModelName: "gpt-4.1", ProviderName: "openai"})
+	m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{
+		"openai": {{ID: "gpt-4.1", InputModalities: []string{"text"}}},
+	}
+
+	// Schedule the command on the main thread (synchronously snapshotting discovered models)
+	_ = m.runAgentWithOptions(1, ctx, "hello", nil, tuiAgentRunOptions{})
+
+	// Concurrently simulate discovery resolution via applyModelPickerModelsDiscovered
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		localM := m
+		for i := 0; i < 200; i++ {
+			localM = localM.applyModelPickerModelsDiscovered(modelPickerModelsDiscoveredMsg{
+				providerID: fmt.Sprintf("provider-%d", i%10),
+				models: []providermodeldiscovery.Model{
+					{ID: "discovered-model", InputModalities: []string{"image"}},
+				},
+			})
+		}
+	}()
+
+	for i := 0; i < 50; i++ {
+		cmd := m.runAgentWithOptions(i+2, ctx, "hello", nil, tuiAgentRunOptions{})
+		if cmd == nil {
+			t.Fatal("expected non-nil cmd")
+		}
+	}
+	<-done
+}
+
+func TestModelSupportsVision_CustomEndpointScoping(t *testing.T) {
+	desc, ok := providercatalog.Get("custom-openai-compatible")
+	if !ok {
+		t.Fatal("custom-openai-compatible descriptor missing from catalog")
+	}
+
+	profileA := config.ProviderProfile{
+		Name:      "custom-endpoint-a",
+		CatalogID: desc.ID,
+		BaseURL:   "https://a.example.com/v1",
+	}
+	profileB := config.ProviderProfile{
+		Name:      "custom-endpoint-b",
+		CatalogID: desc.ID,
+		BaseURL:   "https://b.example.com/v1",
+	}
+
+	// Discovery returns gpt-4.1 as text-only on endpoint A, but multimodal on endpoint B.
+	endpointAModels := []providermodeldiscovery.Model{
+		{ID: "gpt-4.1", InputModalities: []string{"text"}},
+		{ID: "endpoint-a-model", InputModalities: []string{"text"}},
+	}
+	endpointBModels := []providermodeldiscovery.Model{
+		{ID: "gpt-4.1", InputModalities: []string{"text", "image"}},
+		{ID: "endpoint-b-model", InputModalities: []string{"text", "image"}},
+	}
+
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{{Type: zeroruntime.StreamEventDone}}}
+
+	// Case 1: Endpoint B is active.
+	m := newModel(t.Context(), Options{
+		ProviderName:    profileB.Name,
+		ModelName:       "gpt-4.1",
+		ProviderProfile: profileB,
+		Provider:        provider,
+		SavedProviders:  []config.ProviderProfile{profileA, profileB},
+	})
+	// Simulate discovery delivery for both endpoints.
+	m = m.applyModelPickerModelsDiscovered(modelPickerModelsDiscoveredMsg{
+		providerID:  desc.ID,
+		endpointKey: providerEndpointKey(profileA, desc),
+		models:      endpointAModels,
+	})
+	m = m.applyModelPickerModelsDiscovered(modelPickerModelsDiscoveredMsg{
+		providerID:  desc.ID,
+		endpointKey: providerEndpointKey(profileB, desc),
+		models:      endpointBModels,
+	})
+
+	// Synchronous gate on active endpoint B must see B's multimodal discovery,
+	// ignoring endpoint A's text-only result.
+	if !m.modelSupportsVisionFor("gpt-4.1") {
+		t.Fatal("expected gpt-4.1 to support vision on endpoint B")
+	}
+	if !m.modelSupportsVisionFor("endpoint-b-model") {
+		t.Fatal("expected endpoint-b-model to support vision on endpoint B")
+	}
+	if m.modelSupportsVisionFor("endpoint-a-model") {
+		t.Fatal("endpoint A model must not be recognized on active endpoint B")
+	}
+
+	// Assert options.SupportsVision wired in runAgentWithOptions also reports true for endpoint B.
+	var capturedVision func(string) bool
+	m.captureRunSupportsVision = func(fn func(string) bool) {
+		capturedVision = fn
+	}
+	_ = execCmd(m.runAgentWithOptions(1, t.Context(), "test", nil, tuiAgentRunOptions{}))
+	if capturedVision == nil {
+		t.Fatal("expected captureRunSupportsVision to be called")
+	}
+	if !capturedVision("gpt-4.1") {
+		t.Fatal("expected run agent options.SupportsVision to report true for gpt-4.1 on endpoint B")
+	}
+	if !capturedVision("endpoint-b-model") {
+		t.Fatal("expected run agent options.SupportsVision to report true for endpoint-b-model on endpoint B")
+	}
+	if capturedVision("endpoint-a-model") {
+		t.Fatal("run agent options.SupportsVision must not inherit endpoint A model capabilities")
+	}
+
+	// Case 2: Switch to Endpoint A.
+	m.providerProfile = profileA
+	m.providerName = profileA.Name
+
+	// Synchronous gate on active endpoint A must restrict gpt-4.1 to text-only.
+	if m.modelSupportsVisionFor("gpt-4.1") {
+		t.Fatal("expected gpt-4.1 to be text-only on endpoint A")
+	}
+	if m.modelSupportsVisionFor("endpoint-b-model") {
+		t.Fatal("endpoint B model must not be recognized on active endpoint A")
+	}
+
+	capturedVision = nil
+	_ = execCmd(m.runAgentWithOptions(2, t.Context(), "test", nil, tuiAgentRunOptions{}))
+	if capturedVision == nil {
+		t.Fatal("expected captureRunSupportsVision to be called")
+	}
+	if capturedVision("gpt-4.1") {
+		t.Fatal("expected run agent options.SupportsVision to report false for gpt-4.1 on endpoint A")
+	}
+}
+
+func TestModelSupportsVision_UnnamedEndpointScoping(t *testing.T) {
+	desc, ok := providercatalog.Get("custom-openai-compatible")
+	if !ok {
+		t.Fatal("custom-openai-compatible descriptor missing from catalog")
+	}
+
+	profile1 := config.ProviderProfile{
+		CatalogID: desc.ID,
+		BaseURL:   "https://host-one.example.com/v1",
+	}
+	profile2 := config.ProviderProfile{
+		CatalogID: desc.ID,
+		BaseURL:   "https://host-two.example.com/v1",
+	}
+
+	key1 := providerEndpointKey(profile1, desc)
+	key2 := providerEndpointKey(profile2, desc)
+	if key1 == key2 || key1 == "" || key2 == "" {
+		t.Fatalf("unnamed custom profiles must have distinct non-empty endpoint keys, got %q vs %q", key1, key2)
+	}
+
+	m := newModel(t.Context(), Options{
+		ModelName:       "gpt-4.1",
+		ProviderProfile: profile1,
+	})
+	m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{
+		key1: {{ID: "unnamed-model-1", InputModalities: []string{"image"}}},
+		key2: {{ID: "unnamed-model-2", InputModalities: []string{"image"}}},
+	}
+
+	if !m.modelSupportsVisionFor("unnamed-model-1") {
+		t.Fatal("active endpoint 1 should support unnamed-model-1")
+	}
+	if m.modelSupportsVisionFor("unnamed-model-2") {
+		t.Fatal("active endpoint 1 should NOT support unnamed-model-2 from endpoint 2")
+	}
+}
+
+func TestModelPickerDiscoveryCmds_OrderIndependence(t *testing.T) {
+	desc, ok := providercatalog.Get("custom-openai-compatible")
+	if !ok {
+		t.Fatal("custom-openai-compatible descriptor missing from catalog")
+	}
+	profileA := config.ProviderProfile{
+		Name:      "custom-a",
+		CatalogID: desc.ID,
+		BaseURL:   "https://a.example.com/v1",
+	}
+	profileB := config.ProviderProfile{
+		Name:      "custom-b",
+		CatalogID: desc.ID,
+		BaseURL:   "https://b.example.com/v1",
+	}
+
+	for _, order := range [][]config.ProviderProfile{
+		{profileA, profileB},
+		{profileB, profileA},
+	} {
+		m := newModel(t.Context(), Options{
+			SavedProviders: order,
+		})
+		cmd := m.modelPickerDiscoveryCmds()
+		if cmd == nil {
+			t.Fatalf("expected discovery commands for order %v", order)
+		}
+		msg := cmd()
+		batch, ok := msg.(tea.BatchMsg)
+		if !ok {
+			t.Fatalf("expected tea.BatchMsg, got %T", msg)
+		}
+		if len(batch) != 2 {
+			t.Fatalf("expected 2 discovery commands (one per custom endpoint), got %d", len(batch))
+		}
+	}
+}
+
+func TestModelSupportsVision_DelayedDiscoveryAfterProfileSwitch(t *testing.T) {
+	desc, ok := providercatalog.Get("custom-openai-compatible")
+	if !ok {
+		t.Fatal("custom-openai-compatible descriptor missing from catalog")
+	}
+	profileA := config.ProviderProfile{
+		Name:      "endpoint-a",
+		CatalogID: desc.ID,
+		BaseURL:   "https://a.example.com/v1",
+	}
+	profileB := config.ProviderProfile{
+		Name:      "endpoint-b",
+		CatalogID: desc.ID,
+		BaseURL:   "https://b.example.com/v1",
+	}
+
+	// Start with endpoint A active.
+	m := newModel(t.Context(), Options{
+		ProviderName:    profileA.Name,
+		ModelName:       "gpt-4.1",
+		ProviderProfile: profileA,
+		SavedProviders:  []config.ProviderProfile{profileA, profileB},
+	})
+
+	// User switches active provider to endpoint B before discovery completes.
+	m.providerProfile = profileB
+	m.providerName = profileB.Name
+
+	// Now delayed discovery for endpoint A arrives with text-only gpt-4.1.
+	m = m.applyModelPickerModelsDiscovered(modelPickerModelsDiscoveredMsg{
+		providerID:  desc.ID,
+		endpointKey: providerEndpointKey(profileA, desc),
+		models: []providermodeldiscovery.Model{
+			{ID: "gpt-4.1", InputModalities: []string{"text"}},
+		},
+	})
+
+	// Active endpoint B has not discovered yet, so it should fall back to catalog authority
+	// (where gpt-4.1 supports vision), NOT get contaminated by endpoint A's text-only result.
+	if !m.modelSupportsVisionFor("gpt-4.1") {
+		t.Fatal("expected active endpoint B to fall back to catalog vision support, not contaminated by endpoint A")
+	}
+
+	// Generic descriptor key must NOT have been populated with endpoint A's discovery.
+	if _, genericFound := m.modelPickerLiveByProvider[desc.ID]; genericFound {
+		t.Fatalf("generic provider ID %q must not be stored in discovery map when endpointKey is set", desc.ID)
+	}
+}
+
+func TestRunAgentWithOptions_SnapshotIsolation(t *testing.T) {
+	desc, ok := providercatalog.Get("custom-openai-compatible")
+	if !ok {
+		t.Fatal("custom-openai-compatible descriptor missing from catalog")
+	}
+	profileB := config.ProviderProfile{
+		Name:      "endpoint-b",
+		CatalogID: desc.ID,
+		BaseURL:   "https://b.example.com/v1",
+	}
+
+	provider := &fakeProvider{events: []zeroruntime.StreamEvent{{Type: zeroruntime.StreamEventDone}}}
+	m := newModel(t.Context(), Options{
+		ProviderName:    profileB.Name,
+		ModelName:       "gpt-4.1",
+		ProviderProfile: profileB,
+		Provider:        provider,
+	})
+
+	// Launch run 1 when endpoint B has NO discovery yet.
+	var capturedVisionRun1 func(string) bool
+	m.captureRunSupportsVision = func(fn func(string) bool) {
+		capturedVisionRun1 = fn
+	}
+	_ = execCmd(m.runAgentWithOptions(1, t.Context(), "run1", nil, tuiAgentRunOptions{}))
+	if capturedVisionRun1 == nil {
+		t.Fatal("expected captureRunSupportsVision for run 1")
+	}
+	// Before discovery: catalog authority confirms gpt-4.1 vision support.
+	if !capturedVisionRun1("gpt-4.1") {
+		t.Fatal("run 1 should support vision via catalog fallback")
+	}
+
+	// Discovery arrives for endpoint B reporting gpt-4.1 as text-only.
+	m = m.applyModelPickerModelsDiscovered(modelPickerModelsDiscoveredMsg{
+		providerID:  desc.ID,
+		endpointKey: providerEndpointKey(profileB, desc),
+		models: []providermodeldiscovery.Model{
+			{ID: "gpt-4.1", InputModalities: []string{"text"}},
+		},
+	})
+
+	// Newly launched run 2 must see text-only discovery.
+	var capturedVisionRun2 func(string) bool
+	m.captureRunSupportsVision = func(fn func(string) bool) {
+		capturedVisionRun2 = fn
+	}
+	_ = execCmd(m.runAgentWithOptions(2, t.Context(), "run2", nil, tuiAgentRunOptions{}))
+	if capturedVisionRun2 == nil {
+		t.Fatal("expected captureRunSupportsVision for run 2")
+	}
+	if capturedVisionRun2("gpt-4.1") {
+		t.Fatal("run 2 must report false for gpt-4.1 due to live text-only discovery")
+	}
+
+	// CRITICAL: Run 1's captured predicate MUST STILL report true (snapshot isolation!).
+	if !capturedVisionRun1("gpt-4.1") {
+		t.Fatal("run 1 must retain its snapshot and still report true for gpt-4.1")
 	}
 }

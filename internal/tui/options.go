@@ -99,6 +99,11 @@ type Options struct {
 	// KeyBindingsConfig means "use built-in defaults" for each action.
 	KeyBindings config.KeyBindingsConfig
 
+	// StartupNotices are shown as system notices when the session opens: facts
+	// about the session the user should see before the first prompt, decided by
+	// the caller that built it. Blank entries are skipped.
+	StartupNotices []string
+
 	// STT configures speech-to-text dictation (§ docs/dictation.md).
 	STT config.STTConfig
 	// BuildDictationTranscriber constructs the transcriber for the current STT

@@ -73,6 +73,29 @@ func TerminateCommand(cmd *exec.Cmd) error {
 	return nil
 }
 
+// TerminateCommandGroup stops a started command's process group on POSIX, or its
+// process tree on Windows, WITHOUT reaping it.
+//
+// It is TerminateCommand without the Wait, for a caller whose Wait already runs
+// somewhere else: a worker pool waiting on the command in its own goroutine, or
+// the command's own Cancel hook, which exec.Cmd invokes while its Wait is in
+// progress. TerminateCommand would be a second Wait there. Both used to pass
+// cmd.Process.Pid to TerminateProcess, which rediscovers the group at signal time
+// with Getpgid, and once the leader has exited that lookup fails, so only the dead
+// leader was signalled and its descendants kept running. When cmd was configured
+// by ConfigureChildProcessGroup the group now comes from that launch-time
+// configuration instead. On Windows it is the tree kill TerminateProcess performs,
+// with the process handle pinned while it runs so the PID cannot be recycled
+// underneath it; once the command has been waited that pin fails with an error
+// wrapping os.ErrProcessDone.
+func TerminateCommandGroup(cmd *exec.Cmd) error {
+	if cmd == nil || cmd.Process == nil {
+		return nil
+	}
+	_, err := terminateOwnedProcess(cmd)
+	return err
+}
+
 // classifyWaitError treats a non-zero exit status as success: a process being
 // terminated is expected to report one (or a signal), so the only interesting
 // failure is Wait itself not working.

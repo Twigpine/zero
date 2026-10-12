@@ -1420,7 +1420,7 @@ func TestWriterLoopExitsOnRepeatedClose(t *testing.T) {
 			reader: newMessageReader(inReader),
 			writer: newMessageWriter(outWriter),
 		}
-		client.ensureWriter()
+		_ = client.startWriter()
 		if err := client.writeMessage(context.Background(), rpcMessage{Method: "notifications/ping"}); err != nil {
 			t.Fatalf("writeMessage: %v", err)
 		}

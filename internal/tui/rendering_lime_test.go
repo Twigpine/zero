@@ -1894,10 +1894,100 @@ func TestModelPickerRowsCarryCapabilityMeta(t *testing.T) {
 	}
 }
 
+func TestModelPickerRowShowsOwnerInMixedGroups(t *testing.T) {
+	for _, group := range []string{"Recent", "Favorites"} {
+		for _, owner := range []string{"chatgpt", "openai", "work-openai"} {
+			for _, selected := range []bool{false, true} {
+				item := pickerItem{Group: group, Label: "GPT-5.6", Value: "gpt-5.6", Provider: "openai", OwnerProvider: owner, OwnerLabel: owner, Favorite: group == "Favorites"}
+				want := owner + " · GPT-5.6"
+				if item.Favorite {
+					want = "* " + want
+				}
+				got := plainRender(t, renderModelPickerRow(60, selected, item))
+				if !strings.Contains(got, want) {
+					t.Errorf("group=%s selected=%v: row = %q, want %q", group, selected, got, want)
+				}
+			}
+		}
+	}
+	item := pickerItem{Group: "Recent", Value: "custom-model"}
+	if got := strings.TrimSpace(plainRender(t, renderModelPickerRow(60, false, item))); got != "custom-model" {
+		t.Fatalf("ownerless fallback row = %q", got)
+	}
+}
+
+func TestModelPickerWidthIncludesOwner(t *testing.T) {
+	item := pickerItem{Group: "Recent", Label: strings.Repeat("m", 40), OwnerProvider: "subscription-profile", OwnerLabel: "subscription-profile", Favorite: true}
+	picker := &commandPicker{items: []pickerItem{item}}
+	width := modelPickerOverlayWidth(120, picker)
+	got := plainRender(t, renderModelPickerRow(width-4, false, item))
+	if want := "* subscription-profile · " + item.Label; !strings.Contains(got, want) {
+		t.Fatalf("row clipped at overlay width %d: %q, want %q", width, got, want)
+	}
+}
+
+// Profile names are unbounded; a long owner must not consume the model name
+// once the overlay reaches its maximum width.
+func TestModelPickerLongOwnerKeepsModelVisible(t *testing.T) {
+	owner := strings.Repeat("o", 70)
+	for _, group := range []string{"Recent", "Favorites"} {
+		for _, label := range []string{"GPT-5.6", strings.Repeat("m", 40)} {
+			item := pickerItem{Group: group, Label: label, Value: label, OwnerProvider: owner, OwnerLabel: owner, Favorite: group == "Favorites"}
+			wide := pickerItem{Group: "Recent", Label: strings.Repeat("w", 100)}
+			width := modelPickerOverlayWidth(200, &commandPicker{items: []pickerItem{item, wide}})
+			if width != modelPickerOverlayMaxWidth {
+				t.Fatalf("overlay width = %d, want the %d cap", width, modelPickerOverlayMaxWidth)
+			}
+			got := plainRender(t, renderModelPickerRow(width-4, false, item))
+			want := "…" + strings.Repeat("o", 19) + " · " + label
+			if !strings.Contains(got, want) || !strings.Contains(want, "…") {
+				t.Fatalf("group=%s: row = %q, want %q with the owner capped", group, got, want)
+			}
+		}
+	}
+}
+
+func TestModelPickerNarrowOwnerKeepsModelVisible(t *testing.T) {
+	for _, favorite := range []bool{false, true} {
+		for _, selected := range []bool{false, true} {
+			item := pickerItem{Label: "GPT-5.6", OwnerLabel: "subscription-profile", Favorite: favorite}
+			width := modelPickerOverlayWidth(30, &commandPicker{items: []pickerItem{item}})
+			got := plainRender(t, renderModelPickerRow(width-4, selected, item))
+			assertContains(t, got, "GPT-5.6")
+			assertContains(t, got, "profile · ")
+		}
+	}
+}
+
+func TestModelPickerNarrowLongModelKeepsSuffix(t *testing.T) {
+	for _, favorite := range []bool{false, true} {
+		for _, selected := range []bool{false, true} {
+			for _, label := range []string{"model-subscription-one", "model-subscription-two"} {
+				item := pickerItem{Label: label, OwnerLabel: "subscription-profile", OwnerNumber: 1, Favorite: favorite}
+				got := plainRender(t, renderModelPickerRow(26, selected, item))
+				assertContains(t, got, label)
+				assertContains(t, got, "subscription-profile")
+				if len(strings.Split(got, "\n")) != 2 {
+					t.Fatalf("expected separate model and owner lines: %q", got)
+				}
+			}
+		}
+	}
+}
+
+func TestModelPickerClippedModelCannotHideOwnerKey(t *testing.T) {
+	m := limeTestModel()
+	item := pickerItem{Group: "Recent", Label: strings.Repeat("model-", 10) + "work-subscription-profile", OwnerLabel: "work-subscription-profile", OwnerNumber: 1}
+	m.picker = &commandPicker{kind: pickerModel, items: []pickerItem{item}}
+	got := plainRender(t, m.modelPickerOverlay(30))
+	joined := strings.NewReplacer(" ", "", "\n", "", "│", "").Replace(got)
+	assertContains(t, joined, "[1]work-subscription-profile")
+}
+
 func TestModelPickerRowOmitsProviderTag(t *testing.T) {
 	// The provider is shown as a section header above each group, so a row renders
 	// just the model label — no repeated right-aligned provider tag.
-	item := pickerItem{Label: "Claude Sonnet 4.6", Value: "claude-sonnet-4-6", Provider: "anthropic", Remote: true}
+	item := pickerItem{Group: "anthropic", Label: "Claude Sonnet 4.6", Value: "claude-sonnet-4-6", Provider: "anthropic", OwnerProvider: "anthropic", Remote: true}
 	got := plainRender(t, renderModelPickerRow(60, false, item))
 	if !strings.Contains(got, "Claude Sonnet 4.6") {
 		t.Fatalf("row = %q, missing model label", got)

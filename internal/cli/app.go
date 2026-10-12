@@ -695,7 +695,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// Refresh the models.dev pricing/limits cache in the background when stale;
 	// the overlay is read at registry construction from the cache file, so this
 	// benefits the next run and never blocks or fails this one.
-	go func() { _ = modelregistry.RefreshModelsDevCache(context.Background()) }()
+	modelregistry.StartModelsDevRefresh()
 
 	workspaceRoot, err := deps.getwd()
 	if err != nil {
@@ -727,7 +727,13 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			resolved.Provider = usable
 			resolved.ActiveProvider = usable.Name
 		} else {
-			resolved = config.ResolvedConfig{}
+			// Fresh-onboarding reset, but the user's notification preference is
+			// NOT config-to-redo: clearing it here would surface as an empty
+			// Options.Notify, and the TUI's unconfigured default (both/unfocused)
+			// would then resurrect alerts a user explicitly turned off while the
+			// setup wizard runs (maintainer review, PR #1001). Carry the stored
+			// block through; other wizard-visible state starts clean as before.
+			resolved = config.ResolvedConfig{Notify: resolved.Notify}
 			forceSetup = true
 		}
 	}
@@ -959,6 +965,9 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// notice when project hooks/plugins were dropped for an untrusted workspace.
 	hookDispatcher, hookSkip := newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks, trustRoot, executionRunner)
 	emitTrustNotice(stderr, hookSkip, pluginActivation.trustSkip, mcpSkip)
+	// From the engine the session's commands run through, so the notice
+	// describes the sandbox they actually get.
+	startupNotices := []string{sandboxEngine.DegradedNotice()}
 	return deps.runTUI(context.Background(), tui.Options{
 		Cwd:                  workspaceRoot,
 		Version:              version,
@@ -1046,6 +1055,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		PermissionMode:            permissionMode,
 		Notify:                    resolved.Notify,
 		KeyBindings:               resolved.KeyBindings,
+		StartupNotices:            startupNotices,
 		STT:                       resolved.STT,
 		BuildDictationTranscriber: newDictationTranscriberFactory(resolved, userConfigPath, sttServerManager),
 		ShutdownDictationServer:   sttServerManager.Shutdown,

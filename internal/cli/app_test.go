@@ -377,6 +377,73 @@ func TestRunNoArgsFallsBackToUsableProviderWhenNoneMarkedActive(t *testing.T) {
 	}
 }
 
+// Maintainer regression (PR #1001): a stored explicit notify opt-out must
+// survive the provider-recovery startup path. With a stale activeProvider and
+// another usable saved provider, Resolve returns the partial config alongside
+// ErrNoActiveProvider and the recovery branch forwards it — dropping the
+// notify policy there would surface an empty Options.Notify, and the TUI's
+// unconfigured default (both) would resurrect alerts the user explicitly
+// turned off. The same recovery branch that clears the resolved config for
+// the setup wizard carries the stored notify block through.
+func TestRunNoArgsPreservesNotifyOptOutThroughProviderRecovery(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cwd := t.TempDir()
+	setCLIUserConfigRoot(t)
+	userConfigPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	var launchedOptions tui.Options
+	launched := false
+
+	usable := config.ProviderProfile{
+		Name:         "work",
+		ProviderKind: config.ProviderKindOpenAI,
+		BaseURL:      config.OpenAIBaseURL,
+		APIKey:       "sk-test",
+		Model:        "gpt-test",
+	}
+
+	exitCode := runWithDeps([]string{}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			// Stale activeProvider + usable saved provider, and the user's
+			// config.json explicitly opts out of notifications. The fixed
+			// resolver carries the parsed notify block through the error path.
+			return config.ResolvedConfig{
+				Providers: []config.ProviderProfile{usable},
+				Notify:    config.NotifyConfig{Mode: "off", FocusMode: "always"},
+			}, fmt.Errorf("%w: active provider %q not found", config.ErrNoActiveProvider, "ghost")
+		},
+		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &cliFakeProvider{}, nil
+		},
+		userConfigPath: func() (string, error) {
+			return userConfigPath, nil
+		},
+		registerMCPTools: func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error) {
+			return noopMCPRuntime{}, nil
+		},
+		runTUI: func(ctx context.Context, options tui.Options) int {
+			launched = true
+			launchedOptions = options
+			return 0
+		},
+	})
+
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0, stderr=%q", exitCode, stderr.String())
+	}
+	if !launched {
+		t.Fatal("TUI was not launched")
+	}
+	// The explicit opt-out reaches the TUI intact — NOT the both/unfocused
+	// unconfigured default.
+	if launchedOptions.Notify.Mode != "off" || launchedOptions.Notify.FocusMode != "always" {
+		t.Fatalf("Options.Notify = %+v, want the stored off/always opt-out preserved through recovery", launchedOptions.Notify)
+	}
+}
+
 func TestRunNoArgsFailsWhenResolveErrorIsNotProviderRelated(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

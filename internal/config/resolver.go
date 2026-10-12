@@ -157,8 +157,26 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		// On ErrNoActiveProvider, providers may still hold the successfully
 		// normalized (but active-less) profile list — keep it so a caller can fall
 		// back to an already-configured usable provider instead of treating this
-		// like a config with nothing set up at all.
-		return ResolvedConfig{Providers: providers}, err
+		// like a config with nothing set up at all. The non-provider fields parsed
+		// before the failure (notify, sandbox, tools, preferences, ...) are kept
+		// too: the TUI's provider-recovery path forwards this partial config, and
+		// dropping them would let the TUI's unconfigured notify default overwrite
+		// a stored explicit opt-out on startup (maintainer review, PR #1001).
+		partial := ResolvedConfig{
+			Providers:           providers,
+			MaxTurns:            cfg.MaxTurns,
+			MCP:                 cfg.MCP,
+			Sandbox:             cfg.Sandbox,
+			Notify:              cfg.Notify,
+			Tools:               cfg.Tools,
+			Swarm:               cfg.Swarm,
+			Preferences:         cfg.Preferences,
+			KeyBindings:         cfg.KeyBindings,
+			LocalControl:        cfg.LocalControl,
+			STT:                 cfg.STT,
+			CrossSessionInbound: cfg.CrossSessionInbound,
+		}
+		return partial, err
 	}
 
 	return ResolvedConfig{

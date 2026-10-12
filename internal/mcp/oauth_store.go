@@ -29,6 +29,15 @@ type StoredToken struct {
 	TokenType    string    `json:"token_type,omitempty"`
 	Scopes       []string  `json:"scopes,omitempty"`
 	ExpiresAt    time.Time `json:"expires_at,omitempty"`
+	// TokenEndpoint, ClientID and ClientSecret hold what Login discovered or
+	// dynamically registered, so Refresh works for the standard `auth: oauth`
+	// setup whose config carries none of them. ClientSecret is sensitive.
+	// ProtectedTokenEndpoint is set when the endpoint came from server-advertised
+	// discovery and must pass the public-network policy again before use.
+	TokenEndpoint          string `json:"token_endpoint,omitempty"`
+	ProtectedTokenEndpoint bool   `json:"protected_token_endpoint,omitempty"`
+	ClientID               string `json:"client_id,omitempty"`
+	ClientSecret           string `json:"client_secret,omitempty"`
 }
 
 // TokenStatus is a redaction-safe summary of a stored token. It deliberately
@@ -393,6 +402,11 @@ func storedToOAuth(s StoredToken) oauth.Token {
 		TokenType:    s.TokenType,
 		Scopes:       s.Scopes,
 		ExpiresAt:    s.ExpiresAt,
+
+		TokenEndpoint:          s.TokenEndpoint,
+		ProtectedTokenEndpoint: s.ProtectedTokenEndpoint,
+		ClientID:               s.ClientID,
+		ClientSecret:           s.ClientSecret,
 	}
 }
 

@@ -79,7 +79,11 @@ func OpenRouterLogin(ctx context.Context, opts OpenRouterOptions) (string, error
 
 	codeCh := make(chan string, 1)
 	errCh := make(chan error, 1)
-	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// The shared callback server bounds header reads, force-closes a client
+	// still connected when shutdown runs out of time, and waits for Serve to
+	// return. The bare http.Server this used to build did none of that, so a
+	// client stalled mid-header outlived the login (#1028).
+	server := oauth.StartCallbackServer(listener, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/callback" {
 			http.NotFound(w, r)
 			return
@@ -98,13 +102,8 @@ func OpenRouterLogin(ctx context.Context, opts OpenRouterOptions) (string, error
 		case errCh <- errors.New("provideroauth: callback missing authorization code"):
 		default:
 		}
-	})}
-	go func() { _ = server.Serve(listener) }()
-	defer func() {
-		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
-		defer cancelShutdown()
-		_ = server.Shutdown(shutdownCtx)
-	}()
+	}))
+	defer server.Close()
 
 	authURL := base + openRouterAuthPath + "?" + url.Values{
 		"callback_url":          {callbackURL},

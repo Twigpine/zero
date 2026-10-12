@@ -331,23 +331,56 @@ func (tool registryTool) Run(ctx context.Context, args map[string]any) tools.Res
 		status = tools.StatusError
 	}
 	output := TextContent(result.Content)
-	// Say what was thrown away. Without this an image-only result reads as
-	// "(empty MCP tool result)", the model concludes the call produced nothing
-	// and retries, and the user never learns an image came back (#823). The note
-	// is appended only when something was actually dropped, so a text-only
-	// result is byte-for-byte what it was before.
+	images, disp, limitReason := forwardImages(result.Content)
+	// Image blocks with valid data ride Result.Images, the same channel capture
+	// tools already use. Everything else non-text is still named rather than
+	// silently dropped, because Zero still has nowhere to put audio, embedded
+	// resources, or a block whose payload could not be decoded (#823).
 	//
-	// It says retrying cannot RECOVER the payload rather than that a retry
-	// returns the same thing. Each retry is a fresh call, so the server may well
-	// answer differently; what cannot change is that Zero still has nowhere to
-	// put a non-text block. Claiming the response would be identical would be a
-	// promise this code is in no position to make.
-	if dropped := DroppedContentSummary(result.Content); dropped != "" {
-		note := "[zero] this server also returned " + dropped + ", which Zero cannot forward yet. Retrying cannot recover this payload."
-		if output == "" {
-			note = "[zero] this server returned " + dropped + ", which Zero cannot forward yet. Retrying cannot recover this payload."
+	// Conversion happens once: the drop note is built from the same pass's
+	// per-item disposition, so a valid image is not decoded again just to
+	// decide whether it was forwarded.
+	//
+	// Image-only success has no text block, so a one-line placeholder keeps
+	// the tool_result self-describing. ModelOutput and finalizeToolOutcome
+	// copy Output through verbatim; an empty string would hand the model an
+	// empty body next to the image.
+	//
+	// Notes are appended only when something was actually dropped, so a
+	// text-only result is byte-for-byte what it was before, and a successfully
+	// forwarded image is not described as unforwardable.
+	//
+	// Unforwardable blocks (audio, resource, failed decode) say retrying
+	// cannot RECOVER the payload: Zero still has nowhere to put them.
+	// Budget-skipped images are different — Zero can forward them, and a
+	// retry with fewer images can recover the payload — so they get their
+	// own sentence.
+	if output == "" && len(images) > 0 {
+		output = "[image returned by tool]"
+	}
+	if exceeded := droppedContentNote(result.Content, disp, dispBudgetExceeded); exceeded != "" {
+		output = appendServerNote(output, exceeded,
+			", which exceeded this result's remaining image budget. Retrying with fewer images can recover this payload.")
+	}
+	if uninspected := droppedContentNote(result.Content, disp, dispUninspected); uninspected != "" {
+		verb := ", which were not inspected"
+		if dispCount(disp, dispUninspected) == 1 {
+			verb = ", which was not inspected"
 		}
-		output = strings.TrimSpace(output + "\n\n" + note)
+		var cause string
+		switch limitReason {
+		case imageLimitForwardCount:
+			cause = " because the maximum forwarded image count was reached."
+		case imageLimitInspectionCount:
+			cause = " because the maximum image inspection limit was reached."
+		default:
+			cause = " because the aggregate image budget was reached."
+		}
+		output = appendServerNote(output, uninspected, verb+cause)
+	}
+	if dropped := droppedContentNote(result.Content, disp, dispDropped); dropped != "" {
+		output = appendServerNote(output, dropped,
+			", which Zero cannot forward yet. Retrying cannot recover this payload.")
 	}
 	if output == "" {
 		output = "(empty MCP tool result)"
@@ -355,6 +388,7 @@ func (tool registryTool) Run(ctx context.Context, args map[string]any) tools.Res
 	return tools.Result{
 		Status: status,
 		Output: output,
+		Images: images,
 		Meta:   tool.meta(),
 	}
 }
@@ -398,4 +432,14 @@ func isPersistentlyApproved(store *PermissionStore, server Server, toolName stri
 		RequestedAutonomy: autonomy,
 	})
 	return err == nil && approved
+}
+
+// appendServerNote joins a [zero] note to output, choosing "returned" or
+// "also returned" based on whether anything precedes it.
+func appendServerNote(output, subject, tail string) string {
+	verb := "this server also returned "
+	if output == "" {
+		verb = "this server returned "
+	}
+	return strings.TrimSpace(output + "\n\n[zero] " + verb + subject + tail)
 }

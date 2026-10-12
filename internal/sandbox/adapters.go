@@ -207,6 +207,21 @@ func (backend Backend) EnforcementLevel(policy Policy) EnforcementLevel {
 	return EnforcementDegraded
 }
 
+// DegradedNotice is one line saying the plan's enforcement is degraded and why,
+// or "" at any other level. Only degraded: a disabled sandbox is the user's own
+// choice, and the unelevated Windows tier still enforces the write jail and
+// says what it lacks through `zero sandbox policy`.
+func (plan BackendPlan) DegradedNotice() string {
+	if plan.EnforcementLevel != EnforcementDegraded {
+		return ""
+	}
+	reason := strings.TrimRight(strings.TrimSpace(plan.DowngradeReason), ".")
+	if reason == "" {
+		reason = "no native sandbox is available"
+	}
+	return "Sandbox enforcement is degraded: " + reason + ". See `zero sandbox policy --effective`."
+}
+
 func (backend Backend) DowngradeReason(policy Policy) string {
 	if policy.Mode == "" {
 		policy = DefaultPolicy()

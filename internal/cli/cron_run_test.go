@@ -53,7 +53,7 @@ func TestCronRunOnceFiresDueJobs(t *testing.T) {
 	if d.FireCount != 1 || !d.NextRunAt.After(now) {
 		t.Fatalf("due job not advanced: %+v", d)
 	}
-	runs, _ := store.Runs(due.ID)
+	runs, _ := store.Runs(due.ID, 0)
 	if len(runs) != 1 {
 		t.Fatalf("expected 1 run record, got %d", len(runs))
 	}
@@ -146,7 +146,7 @@ func TestCronRunPausesUnadvanceableJob(t *testing.T) {
 	if d.Status != cron.StatusPaused {
 		t.Fatalf("unadvanceable job must be paused, got status=%q", d.Status)
 	}
-	runs, _ := store.Runs(job.ID)
+	runs, _ := store.Runs(job.ID, 0)
 	if len(runs) != 1 || runs[0].Error == "" {
 		t.Fatalf("expected one run record with an error, got %+v", runs)
 	}

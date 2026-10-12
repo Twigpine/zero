@@ -341,6 +341,11 @@ type Options struct {
 	// nil for text-only runs (the seeded message then carries no images, exactly
 	// as before).
 	Images []zeroruntime.ImageBlock
+	// SupportsVision, when set, reports whether the effective model accepts
+	// image input. Tool-produced images are dropped at the shared delivery
+	// boundary when this is false. nil uses the curated catalog plus the
+	// name heuristic via modelregistry.SupportsVision.
+	SupportsVision func(modelID string) bool
 	// ContextWindow is the model's maximum input token budget. When > 0 the agent
 	// loop compacts long conversations once the estimated size crosses a fraction
 	// of this window. 0 DISABLES compaction entirely (every existing caller/test

@@ -181,7 +181,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// Refresh the models.dev pricing/limits cache in the background when stale;
 	// the overlay is read at registry construction from the cache file, so this
 	// benefits the next run and never blocks or fails this one.
-	go func() { _ = modelregistry.RefreshModelsDevCache(context.Background()) }()
+	modelregistry.StartModelsDevRefresh()
 
 	// A mode seeds model/effort/max-turns/tool filters as a preset. Expand it up
 	// front — before tool-filter validation and the --list-tools branch — so a
@@ -346,6 +346,17 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", "migrate sandbox grants: "+err.Error())
 	} else if notice != "" {
 		_, _ = fmt.Fprintln(stderr, "[zero] "+notice)
+	}
+	// Before any tool runs, and before the MCP servers and plugins below start
+	// through the same sandbox, so a run that goes ahead with reduced isolation
+	// says so where its output starts, not only when someone runs `zero doctor`.
+	// A notice that cannot be written stops the run, as the image and effort
+	// notices further down do: going ahead would mean reduced isolation and no
+	// warning delivered.
+	if notice := sandboxEngine.DegradedNotice(); notice != "" {
+		if _, err := fmt.Fprintln(stderr, "[zero] "+notice); err != nil {
+			return exitCrash
+		}
 	}
 	executionRunner.SetPreparer(sandboxEngine)
 	if permissionMode != agent.PermissionModePlan {
@@ -659,6 +670,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		Summarizer:           summarizerFactory(resolved, deps.newProvider),
 		ContextWindowFor: func(modelID string) int {
 			return modelregistry.AgentContextWindow(modelContextWindow(modelRegistry, modelID))
+		},
+		SupportsVision: func(modelID string) bool {
+			return modelregistry.SupportsVision(modelRegistry, modelID)
 		},
 		ReasoningEffort: forwardEffort,
 		Trace:           traceRecorder,
