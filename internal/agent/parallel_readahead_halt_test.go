@@ -136,6 +136,61 @@ func TestParallelSiblingsAreFinalizedWhenTheGuardHalts(t *testing.T) {
 	}
 }
 
+// imageReadTool is readAheadTool with an image on one named call, so a drained
+// sibling's image can be followed from execution to the transcript.
+type imageReadTool struct {
+	readAheadTool
+	imageFor string
+}
+
+func (t *imageReadTool) Run(ctx context.Context, args map[string]any) tools.Result {
+	result := t.readAheadTool.Run(ctx, args)
+	if id, _ := args["id"].(string); id == t.imageFor {
+		result.Images = []zeroruntime.ImageBlock{{MediaType: "image/png", Data: []byte("\x89PNG")}}
+	}
+	return result
+}
+
+// The drained sibling's image is part of what ran, so it follows the tool
+// results like any other call's image. Images reach the transcript through the
+// turn's deferred builder, which the halt path calls after closing out the
+// siblings; a drain that skipped the sibling's image would lose it silently.
+func TestParallelSiblingImageSurvivesTheGuardHalt(t *testing.T) {
+	tool := &imageReadTool{imageFor: "pB"}
+	registry := tools.NewRegistry()
+	registry.Register(tool)
+
+	var turns [][]zeroruntime.StreamEvent
+	for i := 0; i < toolFailureAnyErrorStopAt-1; i++ {
+		id := "s" + strconv.Itoa(i)
+		turns = append(turns, append(readCall(id), zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}))
+	}
+	pair := append(readCall("pA"), readCall("pB")...)
+	turns = append(turns, append(pair, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}))
+
+	result, err := Run(context.Background(), "read things", &mockProvider{turns: turns}, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAuto,
+		MaxTurns:       len(turns) + 5,
+		SupportsVision: func(string) bool { return true },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(result.FinalAnswer, "Agent stopped:") {
+		t.Fatalf("the guard did not halt this run: %q", result.FinalAnswer)
+	}
+	images := 0
+	for _, message := range result.Messages {
+		if message.Role == zeroruntime.MessageRoleUser {
+			images += len(message.Images)
+		}
+	}
+	if images != 1 {
+		t.Errorf("the drained sibling's image reached the transcript %d times, want once", images)
+	}
+}
+
 // A call that genuinely never ran still gets an aborted placeholder, so the fix
 // did not simply stop aborting anything.
 func TestUnstartedCallsStillGetAbortedPlaceholders(t *testing.T) {
