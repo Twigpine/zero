@@ -5,6 +5,12 @@
 <p align="center"><strong>A terminal coding agent you own.</strong></p>
 
 <p align="center">
+  <a href="https://trendshift.io/repositories/70679?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-70679" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/70679/daily?language=Go" alt="Twigpine/zero | Trendshift" width="250" height="55"/></a>
+  <a href="https://trendshift.io/repositories/70679?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-70679" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/70679/weekly?language=Go" alt="Twigpine/zero | Trendshift" width="250" height="55"/></a>
+  <a href="https://trendshift.io/repositories/70679?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-70679" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/70679" alt="Twigpine/zero | Trendshift" width="250" height="55"/></a>
+</p>
+
+<p align="center">
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
   <img alt="Go 1.26.9+" src="https://img.shields.io/badge/Go-1.26.9+-00ADD8?logo=go&logoColor=white">
   <img alt="25+ providers" src="https://img.shields.io/badge/providers-25+-34E2EA">
@@ -22,6 +28,57 @@ zero
 zero exec "fix the failing test in ./pkg"
 zero exec --output-format stream-json < turns.jsonl
 ```
+
+## Partners
+
+<table align="center">
+  <tr>
+    <td align="center" width="150" height="80">
+      <a href="https://twigpine.com">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="https://twigpine.com/logo-dark.png">
+          <img src="https://twigpine.com/logo.png" alt="Twigpine logo" width="72">
+        </picture>
+      </a>
+    </td>
+    <td align="center" width="150" height="80">
+      <a href="https://mimo.mi.com">
+        <img src="https://mimo.xiaomi.com/mimo-v2-pro/assets/logo.svg" alt="Xiaomi MiMo logo" width="136">
+      </a>
+    </td>
+    <td align="center" width="150" height="80">
+      <a href="https://novita.ai/">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/assets/novita-logo-dark.svg">
+          <img src="docs/assets/novita-logo.svg" alt="Novita AI logo" width="136">
+        </picture>
+      </a>
+    </td>
+    <td align="center" width="150" height="80">
+      <a href="https://concentrate.ai/">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/assets/concentrate-logo-dark.svg">
+          <img src="docs/assets/concentrate-logo.svg" alt="Concentrate logo" width="64">
+        </picture>
+      </a>
+    </td>
+    <td align="center" width="150" height="80">
+      <a href="https://exa.ai/">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/assets/exa-logo-dark.svg">
+          <img src="docs/assets/exa-logo.svg" alt="Exa logo" width="110">
+        </picture>
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center"><a href="https://twigpine.com"><strong>Twigpine</strong></a></td>
+    <td align="center"><a href="https://mimo.mi.com"><strong>Xiaomi MiMo</strong></a></td>
+    <td align="center"><a href="https://novita.ai/"><strong>Novita AI</strong></a></td>
+    <td align="center"><a href="https://concentrate.ai/"><strong>Concentrate</strong></a></td>
+    <td align="center"><a href="https://exa.ai/"><strong>Exa</strong></a></td>
+  </tr>
+</table>
 
 ## Why Zero
 
