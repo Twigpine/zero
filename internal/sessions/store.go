@@ -97,6 +97,7 @@ type Metadata struct {
 	Title               string      `json:"title,omitempty"`
 	Cwd                 string      `json:"cwd,omitempty"`
 	ModelID             string      `json:"modelId,omitempty"`
+	PermissionMode      string      `json:"permissionMode,omitempty"`
 	Provider            string      `json:"provider,omitempty"`
 	Tag                 string      `json:"tag,omitempty"`
 	Depth               int         `json:"depth,omitempty"`
@@ -822,6 +823,35 @@ func (store *Store) UpdateModel(sessionID string, modelID string) (Metadata, err
 		return session, nil
 	}
 	session.ModelID = modelID
+	if err := store.writeMetadata(session); err != nil {
+		return Metadata{}, err
+	}
+	return session, nil
+}
+
+// UpdateMode replaces a session's permission mode without changing its activity
+// timestamp or event counters. An empty mode clears the session override; the
+// stored value is not validated here because the reader that turns it back into
+// a live mode is the boundary that decides what a stored string may become.
+func (store *Store) UpdateMode(sessionID string, mode string) (Metadata, error) {
+	if !ValidSessionID(sessionID) {
+		return Metadata{}, fmt.Errorf("invalid zero session id %q", sessionID)
+	}
+	mode = strings.TrimSpace(mode)
+	unlock, err := store.lockSession(sessionID)
+	if err != nil {
+		return Metadata{}, err
+	}
+	defer unlock()
+
+	session, err := store.readMetadata(sessionID)
+	if err != nil {
+		return Metadata{}, err
+	}
+	if session.PermissionMode == mode {
+		return session, nil
+	}
+	session.PermissionMode = mode
 	if err := store.writeMetadata(session); err != nil {
 		return Metadata{}, err
 	}
