@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/gitsafe"
 )
 
 type scratchFileBaseline map[string]bool
@@ -78,7 +80,13 @@ func gitUntrackedFiles(workspaceRoot string) ([]string, bool) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, "git", "-C", workspaceRoot, "status", "--porcelain", "-z", "--untracked-files=all").Output()
+	// gitsafe keeps the workspace's own git config from running a program, and
+	// --ignore-submodules=dirty keeps git out of submodule work trees.
+	command, err := gitsafe.Command(ctx, workspaceRoot, "status", "--porcelain", "-z", "--untracked-files=all", "--ignore-submodules=dirty")
+	if err != nil {
+		return nil, false
+	}
+	output, err := command.Output()
 	if err != nil {
 		// Not a git repo (or git failed for some other reason) — nothing
 		// reliable to report against, so stay silent rather than guess.

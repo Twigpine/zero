@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
+
+	"github.com/Gitlawb/zero/internal/gitsafe"
 )
 
 type PrStatus string
@@ -243,7 +245,7 @@ func getLocalDiffStats(ctx context.Context, cwd string, baseBranch string, run p
 	if err != nil {
 		mergeBase = originBase
 	}
-	output, err := run(ctx, cwd, "git", "diff", "--numstat", strings.TrimSpace(mergeBase))
+	output, err := run(ctx, cwd, "git", "diff", "--numstat", "--ignore-submodules=dirty", strings.TrimSpace(mergeBase))
 	if err != nil {
 		return 0, 0, err
 	}
@@ -290,9 +292,21 @@ func jsonScalarString(raw json.RawMessage) string {
 }
 
 func defaultPRCommandRunner(ctx context.Context, cwd string, name string, args ...string) (string, error) {
-	command := exec.CommandContext(ctx, name, args...)
-	if strings.TrimSpace(cwd) != "" {
-		command.Dir = cwd
+	var command *exec.Cmd
+	if name == "git" {
+		// Every git call the TUI makes on its own comes through here (the files
+		// sweep and the pull request diffstat), so the repository being shown
+		// cannot make them run a program.
+		safe, err := gitsafe.Command(ctx, cwd, args...)
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", name, err)
+		}
+		command = safe
+	} else {
+		command = exec.CommandContext(ctx, name, args...)
+		if strings.TrimSpace(cwd) != "" {
+			command.Dir = cwd
+		}
 	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
