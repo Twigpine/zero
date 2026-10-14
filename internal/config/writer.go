@@ -879,24 +879,6 @@ func UpdateNotify(path string, merge func(current NotifyConfig) NotifyConfig) (r
 	return next, nil
 }
 
-// SetNotify replaces the stored notification preference with value. It is a
-// thin wrapper over the transactional UpdateNotify so existing callers keep
-// their replace semantics under the same lock and byte-preserving write.
-func SetNotify(path string, value NotifyConfig) (FileConfig, error) {
-	next, err := UpdateNotify(path, func(NotifyConfig) NotifyConfig { return value })
-	if err != nil {
-		return FileConfig{}, err
-	}
-	// Re-read the full config so callers that inspect unrelated fields (and
-	// existing tests) keep their FileConfig-shaped result.
-	cfg, err := loadConfigFile(path)
-	if err != nil {
-		return FileConfig{}, err
-	}
-	cfg.Notify = next
-	return cfg, nil
-}
-
 // SetPet persists only the terminal-pet preference while preserving every
 // unrelated user setting through the config writer's atomic replace path.
 func SetPet(path string, pet string) (result FileConfig, err error) {

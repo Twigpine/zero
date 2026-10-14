@@ -10,12 +10,12 @@ import (
 
 // runConfigNotify implements `zero config notify`: with no flags it prints the
 // stored mode/focusMode; --mode/--focus update them via the same
-// config.SetNotify writer the TUI /notify command uses, so all surfaces stay
+// config.UpdateNotify writer the TUI /notify command uses, so all surfaces stay
 // in lockstep; --reset blanks both fields so the TUI's effective default
 // applies again (an unconfigured headless run stays silent).
 //
 // The command manages a user preference, so it talks ONLY to the user's own
-// config file (config.UserNotify / config.SetNotify) and never runs the full
+// config file (config.UserNotify / config.UpdateNotify) and never runs the full
 // config resolution: resolving providers would fail with ErrNoActiveProvider
 // for a brand-new user, locking them out of setting notifications before they
 // have even configured a provider (CodeRabbit review, PR #1001). The display
