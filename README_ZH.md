@@ -76,6 +76,19 @@ zero exec --output-format stream-json < turns.jsonl
     <td align="center"><a href="https://concentrate.ai/"><strong>Concentrate</strong></a></td>
     <td align="center"><a href="https://exa.ai/"><strong>Exa</strong></a></td>
   </tr>
+  <tr>
+    <td align="center" width="150" height="80">
+      <a href="https://www.gmicloud.ai/">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/assets/gmi-cloud-logo-dark.svg">
+          <img src="docs/assets/gmi-cloud-logo.svg" alt="GMI Cloud logo" width="120">
+        </picture>
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center"><a href="https://www.gmicloud.ai/"><strong>GMI Cloud</strong></a></td>
+  </tr>
 </table>
 
 ## 为什么选择 Zero
@@ -163,12 +176,19 @@ export OPENAI_API_KEY=sk-...
 export ANTHROPIC_API_KEY=...
 export GEMINI_API_KEY=...
 export LONGCAT_API_KEY=...
+export GMI_API_KEY=...
 ```
 
 要直接配置美团 LongCat（LongCat-2.0），运行：
 
 ```bash
 zero providers setup longcat --set-active
+```
+
+要直接配置 GMI Cloud，运行：
+
+```bash
+zero providers setup gmicloud --set-active
 ```
 
 对于本地模型，运行 Ollama、LM Studio 或 [Atomic Chat](https://atomic.chat) 桌面应用，

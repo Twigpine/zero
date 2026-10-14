@@ -78,6 +78,19 @@ zero exec --output-format stream-json < turns.jsonl
     <td align="center"><a href="https://concentrate.ai/"><strong>Concentrate</strong></a></td>
     <td align="center"><a href="https://exa.ai/"><strong>Exa</strong></a></td>
   </tr>
+  <tr>
+    <td align="center" width="150" height="80">
+      <a href="https://www.gmicloud.ai/">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/assets/gmi-cloud-logo-dark.svg">
+          <img src="docs/assets/gmi-cloud-logo.svg" alt="GMI Cloud logo" width="120">
+        </picture>
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center"><a href="https://www.gmicloud.ai/"><strong>GMI Cloud</strong></a></td>
+  </tr>
 </table>
 
 ## Why Zero
@@ -190,6 +203,7 @@ export GEMINI_API_KEY=...
 export AIMLAPI_API_KEY=...
 export LONGCAT_API_KEY=...
 export FIREWORKS_API_KEY=...
+export GMI_API_KEY=...
 export MINIMAX_API_KEY=...
 export MINIMAXI_API_KEY=...
 ```
@@ -210,6 +224,12 @@ To configure Fireworks AI directly, run:
 
 ```bash
 zero providers setup fireworks --set-active
+```
+
+To configure GMI Cloud directly, run:
+
+```bash
+zero providers setup gmicloud --set-active
 ```
 
 MiniMax presets use the Anthropic-compatible endpoints for the global and China
