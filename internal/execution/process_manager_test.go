@@ -3,6 +3,7 @@ package execution
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -20,6 +21,145 @@ func processManagerRequest(root string, command *exec.Cmd) Request {
 		Command:          Command{Name: command.Path, Args: command.Args[1:]},
 		WorkingDirectory: root, WorkspaceRoots: []string{root},
 		Approval: ApprovalContext{PolicyVersion: PolicyVersion},
+	}
+}
+
+func TestProcessManagerReservesCapacityBeforeTransport(t *testing.T) {
+	root := t.TempDir()
+	manager := NewProcessManager(ProcessManagerOptions{MaxProcesses: 1})
+	entered := make(chan struct{}, 20)
+	release := make(chan struct{})
+	launchErr := errors.New("transport failed")
+	manager.startTransport = func(*exec.Cmd, io.Writer, bool) (io.WriteCloser, bool, func(), error) {
+		entered <- struct{}{}
+		<-release
+		return nil, false, nil, launchErr
+	}
+	start := func() error {
+		command := exec.Command(os.Args[0])
+		cleaned := false
+		_, err := manager.Start(context.Background(), ProcessStart{
+			Prepared: PreparedCommand{Command: command, Cleanup: func() { cleaned = true }},
+			Request:  processManagerRequest(root, command),
+		}, 0)
+		if !cleaned {
+			t.Error("failed admission or launch did not clean prepared resources")
+		}
+		return err
+	}
+	first := make(chan error, 1)
+	go func() { first <- start() }()
+	<-entered
+	results := make(chan error, 16)
+	for range 16 {
+		go func() { results <- start() }()
+	}
+	// Release blocked transports even when testing the unfixed implementation.
+	select {
+	case <-entered:
+		close(release)
+		<-first
+		for range 16 {
+			<-results
+		}
+		t.Fatal("additional transport launched while the only slot was reserved")
+	case err := <-results:
+		if err == nil || errors.Is(err, launchErr) {
+			t.Errorf("full manager returned %v, want capacity error", err)
+		}
+	}
+	for range 15 {
+		if err := <-results; err == nil || errors.Is(err, launchErr) {
+			t.Errorf("full manager returned %v, want capacity error", err)
+		}
+	}
+	close(release)
+	if err := <-first; !errors.Is(err, launchErr) {
+		t.Fatalf("first launch = %v", err)
+	}
+	if err := start(); !errors.Is(err, launchErr) {
+		t.Fatalf("failed launch did not release reservation: %v", err)
+	}
+}
+
+func TestProcessManagerCapacityDoesNotEvictLiveProcesses(t *testing.T) {
+	for _, limit := range []int{1, 9} {
+		t.Run(fmt.Sprint(limit), func(t *testing.T) {
+			root := t.TempDir()
+			manager := NewProcessManager(ProcessManagerOptions{MaxProcesses: limit})
+			kills := 0
+			for id := range limit {
+				manager.processes[id] = &managedProcess{
+					id: id, command: &exec.Cmd{Process: &os.Process{Pid: 123}},
+					done: make(chan struct{}), output: newProcessOutputBuffer(),
+					kill: func(int) error { kills++; return errors.New("kill failed") },
+				}
+			}
+			manager.Stop(0)   // A failed kill must not free capacity.
+			manager.Remove(0) // Nor may removing a live identity bypass the limit.
+			launches := 0
+			launchErr := errors.New("unexpected launch")
+			manager.startTransport = func(*exec.Cmd, io.Writer, bool) (io.WriteCloser, bool, func(), error) {
+				launches++
+				return nil, false, nil, launchErr
+			}
+			command := exec.Command(os.Args[0])
+			input := ProcessStart{Prepared: PreparedCommand{Command: command}, Request: processManagerRequest(root, command)}
+			if _, err := manager.Start(context.Background(), input, 0); err == nil || errors.Is(err, launchErr) {
+				t.Fatalf("full manager returned %v, want capacity error before launch", err)
+			}
+			if launches != 0 || kills != 1 || manager.Len() != limit {
+				t.Fatalf("launches=%d kills=%d retained=%d", launches, kills, manager.Len())
+			}
+			manager.processes[0].markDone(nil, 0, AdapterReport{}, nil, nil)
+			if _, err := manager.Start(context.Background(), input, 0); !errors.Is(err, launchErr) {
+				t.Fatalf("completed history did not free capacity: %v", err)
+			}
+			if launches != 1 || manager.Len() != limit-1 {
+				t.Fatalf("launches=%d retained=%d after completion", launches, manager.Len())
+			}
+		})
+	}
+}
+
+func TestProcessManagerCapacityHelper(t *testing.T) {
+	if os.Getenv("ZERO_PROCESS_CAPACITY_HELPER") != "1" {
+		return
+	}
+	time.Sleep(time.Minute)
+	os.Exit(0)
+}
+
+func TestProcessManagerCapacityWithRunningProcess(t *testing.T) {
+	root := t.TempDir()
+	manager := NewProcessManager(ProcessManagerOptions{MaxProcesses: 1})
+	t.Cleanup(func() { manager.StopAll() })
+	start := func() (ProcessResult, *exec.Cmd, error) {
+		command := exec.Command(os.Args[0], "-test.run=^TestProcessManagerCapacityHelper$")
+		command.Env = append(os.Environ(), "ZERO_PROCESS_CAPACITY_HELPER=1")
+		result, err := manager.Start(context.Background(), ProcessStart{
+			Prepared: PreparedCommand{Command: command}, Request: processManagerRequest(root, command),
+		}, 0)
+		return result, command, err
+	}
+	first, _, err := start()
+	if err != nil || first.Exited {
+		t.Fatalf("first start = %+v, %v", first, err)
+	}
+	if _, command, err := start(); err == nil || command.Process != nil {
+		t.Fatalf("second start = %v, process=%v; want rejection before OS launch", err, command.Process)
+	}
+	if got := len(manager.List()); got != 1 {
+		t.Fatalf("live processes = %d, want 1", got)
+	}
+	stopped, err := manager.Continue(context.Background(), ProcessContinue{
+		ProcessID: first.ProcessID, Interrupt: true, Wait: 10 * time.Second,
+	})
+	if err != nil || !stopped.Exited {
+		t.Fatalf("stop = %+v, %v", stopped, err)
+	}
+	if next, _, err := start(); err != nil || next.Exited {
+		t.Fatalf("start after completion = %+v, %v", next, err)
 	}
 }
 

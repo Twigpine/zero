@@ -149,6 +149,12 @@ var curatedModels = map[string][]Model{
 		{ID: "qwen/qwen3.5-flash", Description: "catalog default"},
 		{ID: "deepseek-ai/deepseek-v4-pro", Description: "reasoning model"},
 	},
+	"gmicloud": {
+		{ID: "Qwen/Qwen3.8-Max", Description: "catalog default"},
+		{ID: "Qwen/Qwen3.8-Flash", Description: "fast model"},
+		{ID: "deepseek-ai/DeepSeek-V4-Pro", Description: "reasoning model"},
+		{ID: "deepseek-ai/DeepSeek-V4-Flash", Description: "fast coding model"},
+	},
 	"nvidia-nim": {
 		{ID: "nvidia/llama-3.1-nemotron-70b-instruct", Description: "catalog default"},
 		{ID: "meta/llama-3.1-70b-instruct", Description: "general model"},

@@ -475,20 +475,20 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// escalation so post-switch turns are attributed to the escalated model.
 	currentModel := resolved.Provider.Model
 	// Optimized OpenAI turn sessions (ZERO_OPENAI_TURN_SESSION, default off). nil
-	// when gated off or the profile is ineligible: agent.Run then wraps the
-	// provider in its default adapter. This is the run's STARTING session provider
-	// and is used whether or not escalation is enabled.
-	turnSessions, _ := providers.OptimizedTurnSessions(resolved.Provider, provider, providers.Options{})
+	// when gated off or ineligible, unless a configured RPM limiter needs to
+	// wrap the default adapter. The limiter is shared across model switches.
+	sessionOptions := providers.Options{ModelRPM: zeroruntime.NewModelRPMLimiter(resolved.ModelRPM)}
+	turnSessions, _ := providers.ConfiguredTurnSessions(resolved.Provider, provider, sessionOptions)
 	// Both switchers come from one shared builder so exec and the interactive TUI
 	// cannot drift on the nil contracts the agent loop depends on. The session
-	// switcher is nil unless this run STARTED optimized, which is what keeps a
-	// default-adapter run on the default adapter.
+	// switcher preserves the starting transport and shares the RPM limiter.
 	var modelSwitcher func(context.Context, string) (agent.Provider, error)
 	var modelSessionSwitcher func(context.Context, string) (zeroruntime.TurnSessionProvider, error)
 	if options.allowEscalation {
 		modelSwitcher, modelSessionSwitcher = providers.EscalationSwitchers(
 			resolved.Provider, provider, deps.newProvider,
 			func(modelID string) { currentModel = modelID },
+			sessionOptions,
 		)
 	}
 

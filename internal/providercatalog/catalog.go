@@ -143,6 +143,10 @@ var descriptors = []Descriptor{
 	openAICompat("dashscope", "DashScope", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "qwen-plus", []string{"DASHSCOPE_API_KEY", "QWEN_API_KEY"}, "qwen"),
 	openAICompat("moonshot", "Moonshot AI", "https://api.moonshot.ai/v1", "kimi-k2-0905-preview", []string{"MOONSHOT_API_KEY"}, "kimi"),
 	openAICompat("atlascloud", "Atlas Cloud", "https://api.atlascloud.ai/v1", "qwen/qwen3.5-flash", []string{"ATLASCLOUD_API_KEY"}, "atlas cloud", "atlas"),
+	// GMI Cloud — OpenAI-compatible inference. The id matches the models.dev
+	// provider id so the remote catalog resolves without a mapping; GMI's own
+	// docs name the key GMI_API_KEY, models.dev names it GMICLOUD_API_KEY.
+	openAICompat("gmicloud", "GMI Cloud", "https://api.gmi-serving.com/v1", "Qwen/Qwen3.8-Max", []string{"GMI_API_KEY", "GMICLOUD_API_KEY"}, "gmi cloud", "gmi"),
 	openAICompat("longcat", "LongCat", "https://api.longcat.chat/openai", "LongCat-2.0", []string{"LONGCAT_API_KEY"}, "meituan longcat", "meituan", "longcat-2.0"),
 	openAICompat("nvidia-nim", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1", "nvidia/llama-3.1-nemotron-70b-instruct", []string{"NVIDIA_API_KEY"}, "nvidia nim"),
 	anthropicCompat("minimax", "MiniMax", "https://api.minimax.io/anthropic", "MiniMax-M3", []string{"MINIMAX_API_KEY"}, "mini-max", "mini_max"),

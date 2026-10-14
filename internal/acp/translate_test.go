@@ -224,6 +224,9 @@ func TestBrowserPermissionTitlesMirrorSafeToolArguments(t *testing.T) {
 
 func TestBrowserOpenTitlesRejectDecodedUnicodePresentationControls(t *testing.T) {
 	for _, rawURL := range []string{
+		"https://safe.example%C2%A0evil.test/path",
+		"https://safe.example%E2%80%83evil.test/path",
+		"https://safe.example%E3%80%80evil.test/path",
 		"https://safe.example%E2%80%AEevil.test/path",
 		"https://safe.example%E2%81%A6evil.test/path",
 		"https://safe.example%C2%85evil.test/path",
@@ -242,6 +245,9 @@ func TestBrowserOpenTitlesRejectDecodedUnicodePresentationControls(t *testing.T)
 			args, err := json.Marshal(map[string]any{"url": rawURL})
 			if err != nil {
 				t.Fatal(err)
+			}
+			if title := browserToolTitle("open", string(args)); title != "browser open" {
+				t.Errorf("unsafe origin accepted before permission translation: %q", title)
 			}
 			updates := []ToolCallUpdate{
 				toolCallStart(agent.ToolCall{ID: "start", Name: "browser_open", Arguments: string(args)}),

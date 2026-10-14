@@ -3,7 +3,6 @@ package config
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -72,10 +71,12 @@ var lockConfigFileFn = lockConfigFile
 
 func lockConfigFile(path string) (func() error, error) {
 	lockPath := path + ".lock"
-	if dir := filepath.Dir(lockPath); dir != "." && dir != "" {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return nil, fmt.Errorf("create config directory %s: %w", dir, err)
-		}
+	// Every mutator locks before it writes, so this is where the config
+	// directory is normally created. ensureConfigDir also syncs each new entry
+	// into its parent before the lock file exists; writeConfigData would find
+	// nothing missing by then and could not run that barrier itself.
+	if err := ensureConfigDir(filepath.Dir(lockPath)); err != nil {
+		return nil, err
 	}
 	deadline := time.Now().Add(configLockTimeout)
 	for {

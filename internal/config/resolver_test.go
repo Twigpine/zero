@@ -1109,6 +1109,34 @@ func TestResolveProviderCommandOverridesEnvProviderFields(t *testing.T) {
 	}
 }
 
+func TestResolveProviderCommandCannotRelaxUserModelRPM(t *testing.T) {
+	userPath := writeConfig(t, `{
+		"modelRPM": {
+			"gpt-command": 5
+		}
+	}`)
+
+	command := writeCommand(t, commandScript{
+		Stdout: `{"activeProvider":"cmd","providers":[{"name":"cmd","provider":"openai","apiKey":"sk-command","model":"gpt-command"}],"modelRPM":{"gpt-command":10}}`,
+	})
+
+	resolved, err := Resolve(ResolveOptions{
+		UserConfigPath:  userPath,
+		ProviderCommand: command,
+		Env:             map[string]string{},
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+
+	if got := resolved.ModelRPM["gpt-command"]; got != 5 {
+		t.Fatalf(
+			"ModelRPM[gpt-command] = %d, want user cap 5 preserved against provider-command relaxation",
+			got,
+		)
+	}
+}
+
 func TestResolveAllowsNoConfiguredProviders(t *testing.T) {
 	resolved, err := Resolve(ResolveOptions{Env: map[string]string{}})
 	if err != nil {
@@ -1166,10 +1194,13 @@ func TestResolveKeepsNormalizedProvidersWhenNoneMarkedActive(t *testing.T) {
 	// activeProvider is blank/stale — a caller like the interactive TUI still
 	// needs the normalized list to fall back to an already-usable provider
 	// instead of forcing a full re-onboarding wizard.
-	path := writeConfig(t, `{"providers":[
-		{"name":"work","provider_kind":"openai","apiKey":"sk-test","model":"gpt-test"},
-		{"name":"other","provider_kind":"openai","apiKey":"sk-other","model":"gpt-test"}
-	]}`)
+	path := writeConfig(t, `{
+    "modelRPM":{"gpt-test":1},
+    "providers":[
+        {"name":"work","provider_kind":"openai","apiKey":"sk-test","model":"gpt-test"},
+        {"name":"other","provider_kind":"openai","apiKey":"sk-other","model":"gpt-test"}
+    ]
+}`)
 
 	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
 	if !errors.Is(err, ErrNoActiveProvider) {
@@ -1177,6 +1208,9 @@ func TestResolveKeepsNormalizedProvidersWhenNoneMarkedActive(t *testing.T) {
 	}
 	if len(resolved.Providers) != 2 {
 		t.Fatalf("Providers = %#v, want the 2 normalized profiles preserved despite the error", resolved.Providers)
+	}
+	if got := resolved.ModelRPM["gpt-test"]; got != 1 {
+		t.Fatalf("ModelRPM[gpt-test] = %d, want 1 preserved despite ErrNoActiveProvider", got)
 	}
 }
 

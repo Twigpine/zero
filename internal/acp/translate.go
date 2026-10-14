@@ -139,7 +139,7 @@ func browserToolTitle(command, rawArgs string) string {
 }
 
 // browserTitleTextSafe validates text after URL parsing has decoded escaped
-// UTF-8 in the host. Valid UTF-8 alone is not presentation-safe: control,
+// UTF-8 in the host. Valid UTF-8 alone is not presentation-safe: whitespace, control,
 // format/bidi, and line/paragraph separator runes can reorder or split the
 // permission label shown to a user. The execution URL remains unchanged.
 func browserTitleTextSafe(text string) bool {
@@ -147,7 +147,7 @@ func browserTitleTextSafe(text string) bool {
 		return false
 	}
 	for _, r := range text {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
+		if unicode.IsSpace(r) || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
 			return false
 		}
 	}

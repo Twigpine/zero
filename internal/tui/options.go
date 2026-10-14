@@ -22,6 +22,7 @@ import (
 
 // Options configures the reusable Zero terminal UI shell.
 type Options struct {
+	ModelRPM             *zeroruntime.ModelRPMLimiter
 	Cwd                  string
 	Version              string // CLI build version, shown on the home screen; empty hides it
 	UserConfigPath       string

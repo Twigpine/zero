@@ -21,6 +21,7 @@ import (
 
 // Options configures provider construction.
 type Options struct {
+	ModelRPM      *zeroruntime.ModelRPMLimiter
 	UserAgent     string
 	HTTPClient    *http.Client
 	ModelRegistry *modelregistry.Registry

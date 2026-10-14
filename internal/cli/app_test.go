@@ -343,8 +343,10 @@ func TestRunNoArgsFallsBackToUsableProviderWhenNoneMarkedActive(t *testing.T) {
 			// config.json has providers configured but none marked active (e.g. a
 			// blank/stale activeProvider field) — Resolve returns the successfully
 			// normalized providers list alongside ErrNoActiveProvider.
-			return config.ResolvedConfig{Providers: []config.ProviderProfile{usable}},
-				fmt.Errorf("%w: active provider %q not found", config.ErrNoActiveProvider, "")
+			return config.ResolvedConfig{
+				Providers: []config.ProviderProfile{usable},
+				ModelRPM:  map[string]int{"gpt-test": 1},
+			}, fmt.Errorf("%w: active provider %q not found", config.ErrNoActiveProvider, "")
 		},
 		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
 			providerProfile = profile
@@ -374,6 +376,10 @@ func TestRunNoArgsFallsBackToUsableProviderWhenNoneMarkedActive(t *testing.T) {
 	}
 	if providerProfile.Name != "work" {
 		t.Fatalf("provider used = %q, want fallback to the usable saved provider %q", providerProfile.Name, "work")
+
+	}
+	if launchedOptions.ModelRPM == nil {
+		t.Fatal("ModelRPM = nil, want limiter preserved through provider fallback")
 	}
 }
 

@@ -340,6 +340,10 @@ func TestStreamTimeoutMessage(t *testing.T) {
 // response-header wait + shorter idle-conn reuse) that defeats the macOS stale-
 // pooled-connection hang; an explicit client is returned untouched.
 func TestHTTPClientReturnsStallHardenedSharedClient(t *testing.T) {
+	// Package init must not bake the timeout. An ambient
+	// ZERO_RESPONSE_HEADER_TIMEOUT would otherwise make this assertion
+	// depend on whatever the process inherited.
+	t.Setenv("ZERO_RESPONSE_HEADER_TIMEOUT", "")
 	got := HTTPClient(nil)
 	if got == nil {
 		t.Fatal("HTTPClient(nil) returned nil")
@@ -371,6 +375,66 @@ func TestHTTPClientReturnsStallHardenedSharedClient(t *testing.T) {
 	custom := &http.Client{}
 	if HTTPClient(custom) != custom {
 		t.Fatal("an explicit client must be returned unchanged")
+	}
+}
+
+// The shared transport must enforce the timeout ResolveResponseHeaderTimeout
+// returns. Checking the resolver alone stays green if the client still carries
+// the value captured at init.
+func TestHTTPClientTransportUsesResolvedHeaderTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		delay, err := time.ParseDuration(r.URL.Query().Get("delay"))
+		if err != nil {
+			http.Error(w, "bad delay", http.StatusBadRequest)
+			return
+		}
+		time.Sleep(delay)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	t.Setenv("ZERO_RESPONSE_HEADER_TIMEOUT", "200ms")
+	short := HTTPClient(nil)
+	tr, ok := short.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", short.Transport)
+	}
+	if tr.ResponseHeaderTimeout != ResolveResponseHeaderTimeout() || tr.ResponseHeaderTimeout != 200*time.Millisecond {
+		t.Fatalf("ResponseHeaderTimeout = %v, resolver = %v, want 200ms", tr.ResponseHeaderTimeout, ResolveResponseHeaderTimeout())
+	}
+	started := time.Now()
+	resp, err := short.Get(srv.URL + "?delay=1s")
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if err == nil {
+		t.Fatal("slow header succeeded; the transport did not apply the 200ms timeout")
+	}
+	if !strings.Contains(err.Error(), "timeout awaiting response headers") {
+		t.Fatalf("error = %v, want the transport's response-header timeout", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 800*time.Millisecond {
+		t.Fatalf("header wait took %v; the transport waited on the handler instead of the resolved timeout", elapsed)
+	}
+
+	t.Setenv("ZERO_RESPONSE_HEADER_TIMEOUT", "2s")
+	long := HTTPClient(nil)
+	if long == short {
+		t.Fatal("a new resolved timeout reused the transport that still has the previous timeout")
+	}
+	if got := long.Transport.(*http.Transport).ResponseHeaderTimeout; got != 2*time.Second {
+		t.Fatalf("ResponseHeaderTimeout = %v, want 2s", got)
+	}
+	resp, err = long.Get(srv.URL + "?delay=50ms")
+	if err != nil {
+		t.Fatalf("header within the resolved timeout failed: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", resp.StatusCode)
+	}
+	if again := HTTPClient(nil); again != long {
+		t.Fatal("the same resolved timeout must keep one shared client")
 	}
 }
 

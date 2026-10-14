@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -14,6 +15,295 @@ import (
 	"sync"
 	"testing"
 )
+
+func TestWriteConfigDataSync(t *testing.T) {
+	failure := errors.New("injected sync failure")
+	for _, stage := range []string{"success", "file", "directory"} {
+		t.Run(stage, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.json")
+			oldData, newData := "{\"old\":true}\n", "{\"new\":true}\n"
+			if err := os.WriteFile(path, []byte(oldData), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			checkData := func(path, want string) {
+				t.Helper()
+				got, err := os.ReadFile(path)
+				if err != nil || string(got) != want {
+					t.Fatalf("read %s = %q, %v; want %q", path, got, err, want)
+				}
+			}
+			fileSync, dirSync := syncConfigFileFn, syncConfigDirFn
+			t.Cleanup(func() { syncConfigFileFn, syncConfigDirFn = fileSync, dirSync })
+			var tmp *os.File
+			var calls []string
+			syncConfigFileFn = func(f *os.File) error {
+				tmp = f
+				calls = append(calls, "file")
+				checkData(f.Name(), newData)
+				checkData(path, oldData)
+				if stage == "file" {
+					return failure
+				}
+				return fileSync(f)
+			}
+			syncConfigDirFn = func(got string) error {
+				calls = append(calls, "directory")
+				if got != dir || tmp == nil {
+					t.Fatalf("directory sync = %q, temp = %v", got, tmp)
+				}
+				if _, err := tmp.Seek(0, io.SeekCurrent); !errors.Is(err, os.ErrClosed) {
+					t.Fatalf("temp must be closed before directory sync: %v", err)
+				}
+				checkData(path, newData)
+				if stage == "directory" {
+					return failure
+				}
+				return dirSync(got)
+			}
+			err := writeConfigData(path, []byte(strings.TrimSuffix(newData, "\n")))
+			if stage == "success" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if !errors.Is(err, failure) {
+				t.Fatalf("error = %v, want injected sync failure", err)
+			}
+			wantCalls := []string{"file", "directory"}
+			wantData := newData
+			if stage == "file" {
+				wantCalls, wantData = []string{"file"}, oldData
+			}
+			if !reflect.DeepEqual(calls, wantCalls) {
+				t.Fatalf("sync calls = %v, want %v", calls, wantCalls)
+			}
+			checkData(path, wantData)
+			if _, err := tmp.Seek(0, io.SeekCurrent); !errors.Is(err, os.ErrClosed) {
+				t.Fatalf("temp must be closed on return: %v", err)
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil || len(entries) != 1 || entries[0].Name() != "config.json" {
+				t.Fatalf("temporary file not cleaned up: %v, %v", entries, err)
+			}
+		})
+	}
+}
+
+func TestWriteConfigDataSyncsCreatedDirectories(t *testing.T) {
+	root := t.TempDir()
+	outer := filepath.Join(root, "a")
+	dir := filepath.Join(outer, "b")
+	path := filepath.Join(dir, "config.json")
+	failure := errors.New("injected sync failure")
+	dirSync := syncConfigDirFn
+	t.Cleanup(func() { syncConfigDirFn = dirSync })
+
+	for _, fail := range []bool{false, true} {
+		var calls []string
+		syncConfigDirFn = func(got string) error {
+			calls = append(calls, got)
+			if fail && got == root {
+				return failure
+			}
+			return dirSync(got)
+		}
+		if err := os.RemoveAll(outer); err != nil {
+			t.Fatal(err)
+		}
+		err := writeConfigData(path, []byte(`{}`))
+		if fail {
+			if !errors.Is(err, failure) {
+				t.Fatalf("error = %v, want injected sync failure", err)
+			}
+			if want := []string{outer, root}; !reflect.DeepEqual(calls, want) {
+				t.Fatalf("sync calls = %v, want %v", calls, want)
+			}
+			if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("config must not be written after a failed directory sync: %v", err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Each new directory's entry is synced into its parent, then the
+		// config's own directory after the rename.
+		if want := []string{outer, root, dir}; !reflect.DeepEqual(calls, want) {
+			t.Fatalf("sync calls = %v, want %v", calls, want)
+		}
+	}
+}
+
+func TestLockingMutatorSyncsCreatedDirectories(t *testing.T) {
+	root := t.TempDir()
+	outer := filepath.Join(root, "a")
+	dir := filepath.Join(outer, "b")
+	path := filepath.Join(dir, "config.json")
+	failure := errors.New("injected sync failure")
+	dirSync := syncConfigDirFn
+	t.Cleanup(func() { syncConfigDirFn = dirSync })
+
+	exists := func(p string) bool {
+		t.Helper()
+		_, err := os.Lstat(p)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		return err == nil
+	}
+
+	// Every exported mutator acquires the config lock before it writes, and
+	// the lock file is a sibling of the config, so the lock path is what first
+	// creates the config directory. The barrier for those new entries has to
+	// run there, before the lock file exists: by the time writeConfigData
+	// looks, nothing is missing any more.
+	for _, fail := range []bool{true, false} {
+		var calls []string
+		syncConfigDirFn = func(got string) error {
+			calls = append(calls, got)
+			if got == outer || got == root {
+				if exists(path+".lock") || exists(path) {
+					t.Fatalf("parent sync of %s ran after the lock file or config was created", got)
+				}
+			}
+			if fail && got == root {
+				return failure
+			}
+			return dirSync(got)
+		}
+		_, err := UpdateNotify(path, func(NotifyConfig) NotifyConfig {
+			return NotifyConfig{Mode: "off"}
+		})
+		if fail {
+			if !errors.Is(err, failure) {
+				t.Fatalf("error = %v, want injected sync failure", err)
+			}
+			if want := []string{outer, root}; !reflect.DeepEqual(calls, want) {
+				t.Fatalf("sync calls = %v, want %v", calls, want)
+			}
+			// The directories this attempt created are gone again, so the
+			// retry below re-creates them and re-runs the barrier instead of
+			// finding them present and reporting a durability it never had.
+			if exists(outer) {
+				t.Fatalf("%s must be rolled back after a failed parent sync", outer)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{outer, root, dir}; !reflect.DeepEqual(calls, want) {
+			t.Fatalf("sync calls = %v, want %v", calls, want)
+		}
+		got, err := UserNotify(path)
+		if err != nil || got.Mode != "off" {
+			t.Fatalf("UserNotify = %+v, %v; want mode off", got, err)
+		}
+	}
+}
+
+func TestWriteConfigDataRollsBackOnlyCreatedDirectories(t *testing.T) {
+	root := t.TempDir()
+	existing := filepath.Join(root, "existing")
+	if err := os.Mkdir(existing, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	keep := filepath.Join(existing, "keep")
+	if err := os.WriteFile(keep, []byte("keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outer := filepath.Join(existing, "a")
+	dir := filepath.Join(outer, "b")
+	path := filepath.Join(dir, "config.json")
+	failure := errors.New("injected sync failure")
+	dirSync := syncConfigDirFn
+	t.Cleanup(func() { syncConfigDirFn = dirSync })
+	stat := func(p string) error {
+		_, err := os.Lstat(p)
+		return err
+	}
+
+	// The barrier for "a" fails: both directories this call created go, the
+	// pre-existing directory and its file stay.
+	syncConfigDirFn = func(got string) error {
+		if got == existing {
+			return failure
+		}
+		return dirSync(got)
+	}
+	if err := writeConfigData(path, []byte(`{}`)); !errors.Is(err, failure) {
+		t.Fatalf("error = %v, want injected sync failure", err)
+	}
+	for _, p := range []string{dir, outer} {
+		if err := stat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s must be removed after a failed parent sync: %v", p, err)
+		}
+	}
+	for _, p := range []string{existing, keep} {
+		if err := stat(p); err != nil {
+			t.Fatalf("pre-existing %s must survive the rollback: %v", p, err)
+		}
+	}
+
+	// A directory another process populated in the meantime is not ours to
+	// remove: it stays, the failed rollback is reported with the barrier
+	// failure, and the write still does not acknowledge the save.
+	intruder := filepath.Join(dir, "other.lock")
+	syncConfigDirFn = func(got string) error {
+		if got == existing {
+			if err := os.WriteFile(intruder, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return failure
+		}
+		return dirSync(got)
+	}
+	err := writeConfigData(path, []byte(`{}`))
+	if !errors.Is(err, failure) {
+		t.Fatalf("error = %v, want injected sync failure", err)
+	}
+	if err := stat(intruder); err != nil {
+		t.Fatalf("a populated directory must not be removed: %v", err)
+	}
+	if !strings.Contains(err.Error(), "roll back config directory") {
+		t.Fatalf("error must report the failed rollback: %v", err)
+	}
+	if err := stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("config must not be written after a failed directory sync: %v", err)
+	}
+}
+
+func TestSyncConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := syncConfigDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	err := syncConfigDir(filepath.Join(dir, "missing"))
+	if runtime.GOOS == "windows" {
+		// Directory handles cannot be synced on Windows, so every call is a
+		// no-op there, including one for a directory that does not exist.
+		if err != nil {
+			t.Fatalf("syncConfigDir must be a no-op on windows: %v", err)
+		}
+		return
+	}
+	// A directory that is gone means the persistence barrier was never
+	// reached, so the caller must not acknowledge the save.
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing directory: error = %v, want %v", err, os.ErrNotExist)
+	}
+	// A directory the user can write but not read cannot be opened for
+	// syncing; that is best effort, as in the sessions store, because the
+	// write it follows has already succeeded.
+	unreadable := filepath.Join(dir, "unreadable")
+	if err := os.Mkdir(unreadable, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(unreadable, 0o700) })
+	if err := syncConfigDir(unreadable); err != nil {
+		t.Fatalf("write-only directory must be best effort: %v", err)
+	}
+}
 
 func TestSetActiveProviderSwitchesConfiguredProvider(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "zero.json")
@@ -428,6 +718,23 @@ func TestSetThemePreservesUnknownTopLevelFields(t *testing.T) {
 	}
 }
 
+// setNotify replaces the stored notify block with value through UpdateNotify
+// and returns the re-read config, so the tests below can assert on a
+// FileConfig-shaped result. Every product surface uses UpdateNotify's merge
+// form directly; this replace form exists only for these tests.
+func setNotify(path string, value NotifyConfig) (FileConfig, error) {
+	next, err := UpdateNotify(path, func(NotifyConfig) NotifyConfig { return value })
+	if err != nil {
+		return FileConfig{}, err
+	}
+	cfg, err := loadConfigFile(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	cfg.Notify = next
+	return cfg, nil
+}
+
 func TestSetNotifyPersistsValidValues(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "zero.json")
 	writeConfigFixture(t, path, FileConfig{
@@ -437,9 +744,9 @@ func TestSetNotifyPersistsValidValues(t *testing.T) {
 		},
 	}, 0o600)
 
-	cfg, err := SetNotify(path, NotifyConfig{Mode: "  both  ", FocusMode: "  unfocused  "})
+	cfg, err := setNotify(path, NotifyConfig{Mode: "  both  ", FocusMode: "  unfocused  "})
 	if err != nil {
-		t.Fatalf("SetNotify() error = %v", err)
+		t.Fatalf("setNotify() error = %v", err)
 	}
 	if cfg.Notify.Mode != "both" || cfg.Notify.FocusMode != "unfocused" {
 		t.Fatalf("Notify = %+v, want mode=both focusMode=unfocused (trimmed)", cfg.Notify)
@@ -449,14 +756,14 @@ func TestSetNotifyPersistsValidValues(t *testing.T) {
 		t.Fatalf("persisted Notify = %+v, want mode=both focusMode=unfocused", persisted.Notify)
 	}
 	if persisted.ActiveProvider != "openai" || len(persisted.Providers) != 1 {
-		t.Fatalf("provider config was not preserved by SetNotify: %#v", persisted)
+		t.Fatalf("provider config was not preserved by setNotify: %#v", persisted)
 	}
 }
 
 func TestSetNotifyRejectsInvalidMode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "zero.json")
 	writeConfigFixture(t, path, FileConfig{ActiveProvider: "openai"}, 0o600)
-	if _, err := SetNotify(path, NotifyConfig{Mode: "loud", FocusMode: "unfocused"}); err == nil {
+	if _, err := setNotify(path, NotifyConfig{Mode: "loud", FocusMode: "unfocused"}); err == nil {
 		t.Fatal("expected error for invalid notify.mode")
 	}
 }
@@ -464,25 +771,25 @@ func TestSetNotifyRejectsInvalidMode(t *testing.T) {
 func TestSetNotifyRejectsInvalidFocusMode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "zero.json")
 	writeConfigFixture(t, path, FileConfig{ActiveProvider: "openai"}, 0o600)
-	if _, err := SetNotify(path, NotifyConfig{Mode: "off", FocusMode: "sideways"}); err == nil {
+	if _, err := setNotify(path, NotifyConfig{Mode: "off", FocusMode: "sideways"}); err == nil {
 		t.Fatal("expected error for invalid notify.focusMode")
 	}
 }
 
 func TestSetNotifyRejectsEmptyConfigPath(t *testing.T) {
-	if _, err := SetNotify("", NotifyConfig{Mode: "off"}); err == nil {
+	if _, err := setNotify("", NotifyConfig{Mode: "off"}); err == nil {
 		t.Fatal("expected error for empty config path")
 	}
 }
 
 func TestSetNotifyBlankValuesPreservedAsDefaults(t *testing.T) {
 	// An empty mode/focusMode stored on disk is a valid "use the built-in
-	// defaults" signal — SetNotify must not reject blanks, and they must round
+	// defaults" signal — setNotify must not reject blanks, and they must round
 	// trip unchanged.
 	path := filepath.Join(t.TempDir(), "zero.json")
 	writeConfigFixture(t, path, FileConfig{ActiveProvider: "openai"}, 0o600)
-	if _, err := SetNotify(path, NotifyConfig{}); err != nil {
-		t.Fatalf("SetNotify({}) should accept blank values, got error: %v", err)
+	if _, err := setNotify(path, NotifyConfig{}); err != nil {
+		t.Fatalf("setNotify({}) should accept blank values, got error: %v", err)
 	}
 	persisted := readConfigFixture(t, path)
 	if persisted.Notify.Mode != "" || persisted.Notify.FocusMode != "" {
@@ -494,7 +801,7 @@ func TestSetNotifyBlankValuesPreservedAsDefaults(t *testing.T) {
 // values whose EXPLICIT presence matters. The typed serializer's omitempty
 // cannot round-trip tools.deferThreshold: 0 (explicit "never defer" vs unset
 // "use default 3") or an MCP server's disabled: false (explicitly enabled), so
-// SetNotify/UpdateNotify edit only the notify member's bytes instead. The
+// UpdateNotify edits only the notify member's bytes instead. The
 // assertions run against the RAW file, because reading through FileConfig
 // would hide exactly the presence loss being tested.
 func TestSetNotifyPreservesExplicitUnrelatedValues(t *testing.T) {
@@ -517,8 +824,8 @@ func TestSetNotifyPreservesExplicitUnrelatedValues(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if _, err := SetNotify(path, NotifyConfig{Mode: "off", FocusMode: "always"}); err != nil {
-				t.Fatalf("SetNotify: %v", err)
+			if _, err := setNotify(path, NotifyConfig{Mode: "off", FocusMode: "always"}); err != nil {
+				t.Fatalf("setNotify: %v", err)
 			}
 
 			raw, err := os.ReadFile(path)
@@ -561,8 +868,8 @@ func TestSetNotifyResetRemovesEveryDuplicateNotifyMember(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := SetNotify(path, NotifyConfig{}); err != nil {
-		t.Fatalf("SetNotify({}) reset: %v", err)
+	if _, err := setNotify(path, NotifyConfig{}); err != nil {
+		t.Fatalf("setNotify({}) reset: %v", err)
 	}
 
 	raw, err := os.ReadFile(path)
@@ -586,8 +893,8 @@ func TestSetNotifyResetRemovesEveryDuplicateNotifyMember(t *testing.T) {
 	if err := os.WriteFile(path, []byte(duplicated), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := SetNotify(path, NotifyConfig{Mode: "off", FocusMode: "always"}); err != nil {
-		t.Fatalf("SetNotify replace: %v", err)
+	if _, err := setNotify(path, NotifyConfig{Mode: "off", FocusMode: "always"}); err != nil {
+		t.Fatalf("setNotify replace: %v", err)
 	}
 	raw, err = os.ReadFile(path)
 	if err != nil {
@@ -1394,7 +1701,7 @@ func TestUpdateNotifyRacesExistingConfigMutatorWithoutLoss(t *testing.T) {
 // fields of duplicate JSON members into one struct, so a full replacement that
 // omits a field could inherit it from an earlier duplicate —
 // {"notify":{"mode":"off"},"notify":{"focusMode":"focused"}} +
-// SetNotify({FocusMode:"always"}) must yield blank/always, not off/always.
+// setNotify({FocusMode:"always"}) must yield blank/always, not off/always.
 // The editor removes every duplicate and inserts the replacement fresh.
 func TestSetNotifyReplacementInheritsNoFieldFromEarlierDuplicate(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "zero.json")
@@ -1403,8 +1710,8 @@ func TestSetNotifyReplacementInheritsNoFieldFromEarlierDuplicate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := SetNotify(path, NotifyConfig{FocusMode: "always"}); err != nil {
-		t.Fatalf("SetNotify: %v", err)
+	if _, err := setNotify(path, NotifyConfig{FocusMode: "always"}); err != nil {
+		t.Fatalf("setNotify: %v", err)
 	}
 	stored, err := UserNotify(path)
 	if err != nil {
@@ -1437,8 +1744,8 @@ func TestSetNotifySingleMemberReplacedInPlace(t *testing.T) {
 	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := SetNotify(path, NotifyConfig{Mode: "off", FocusMode: "always"}); err != nil {
-		t.Fatalf("SetNotify: %v", err)
+	if _, err := setNotify(path, NotifyConfig{Mode: "off", FocusMode: "always"}); err != nil {
+		t.Fatalf("setNotify: %v", err)
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {

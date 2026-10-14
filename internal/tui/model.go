@@ -89,6 +89,7 @@ type model struct {
 	// allowEscalation mirrors Options.AllowEscalation: it gates the per-run model
 	// switchers, and the caller gates the escalate_model tool on the same flag.
 	allowEscalation             bool
+	modelRPM                    *zeroruntime.ModelRPMLimiter
 	newProvider                 func(config.ProviderProfile) (zeroruntime.Provider, error)
 	newTurnSessionProvider      func(config.ProviderProfile, zeroruntime.Provider) zeroruntime.TurnSessionProvider
 	probeProviderHealth         func(context.Context, providerhealth.Options) providerhealth.Result
@@ -1055,6 +1056,7 @@ func newModel(ctx context.Context, options Options) model {
 		sandboxSetupCommand:         options.SandboxSetupCommand,
 		agentOptions:                options.AgentOptions,
 		allowEscalation:             options.AllowEscalation,
+		modelRPM:                    options.ModelRPM,
 		sessionCompactor:            options.SessionCompactor,
 		runtimeMessageSink:          options.RuntimeMessageSink,
 		permissionMode:              permissionMode,
@@ -5681,6 +5683,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				// currentModel: every usage event after a real escalation is billed
 				// to the escalated model, not the one the run started on.
 				func(modelID string) { usageModelID = modelID },
+				providers.Options{ModelRPM: m.modelRPM},
 			)
 		}
 		options.SupportsVision = func(modelID string) bool {

@@ -423,11 +423,18 @@ func effectiveProgram(args []*syntax.Word) (string, []*syntax.Word) {
 	return "", nil
 }
 
-// dashCPayload returns the literal text of the word following `-c` in an AST arg
-// list (the command a shell launcher will run), or "" when there is none.
+// dashCPayload returns the literal text of the word following the shell's
+// command flag in an AST arg list (the command a shell launcher will run), or ""
+// when there is none. shellCommandFlag recognizes both a bare `-c`/`--command`
+// and a POSIX short-option cluster such as `-ec`, `-lc`, or `-xc`.
 func dashCPayload(args []*syntax.Word) string {
 	for index := 0; index < len(args); index++ {
-		if wordText(args[index]) == "-c" && index+1 < len(args) {
+		// `--` ends option processing: the remaining words are positional
+		// operands, so a later `-ec`/`-c` is not the shell's command flag.
+		if wordText(args[index]) == "--" {
+			break
+		}
+		if shellCommandFlag(wordText(args[index])) && index+1 < len(args) {
 			return wordText(args[index+1])
 		}
 	}

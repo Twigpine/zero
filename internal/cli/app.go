@@ -981,11 +981,13 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// From the engine the session's commands run through, so the notice
 	// describes the sandbox they actually get.
 	startupNotices := []string{sandboxEngine.DegradedNotice()}
+	modelRPM := zeroruntime.NewModelRPMLimiter(resolved.ModelRPM)
 	// The terminal stops being ours on the next line. Stop and join the disclosure
 	// pump first: anything already queued is printed here, on this goroutine, and a
 	// launch that resolves later is dropped rather than written raw over the TUI.
 	stopMCPDisclosures()
 	return deps.runTUI(context.Background(), tui.Options{
+		ModelRPM:             modelRPM,
 		Cwd:                  workspaceRoot,
 		Version:              version,
 		Theme:                theme,
@@ -1008,7 +1010,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			if provider == nil {
 				return nil
 			}
-			if optimized, ok := providers.OptimizedTurnSessions(profile, provider, providers.Options{}); ok {
+			if optimized, ok := providers.ConfiguredTurnSessions(profile, provider, providers.Options{ModelRPM: modelRPM}); ok {
 				return optimized
 			}
 			return providers.DefaultTurnSessions(profile, provider, providers.Options{})

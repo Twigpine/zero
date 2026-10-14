@@ -22,20 +22,25 @@ import (
 // An error is reported to the loop, which records a note and continues on the
 // current model.
 //
-// The session switcher comes back nil unless the run STARTED optimized. A run
-// that began on the default adapter stays on it, so escalation cannot quietly
-// change the transport underneath a session.
+// The session switcher is installed for an optimized start or configured RPM
+// limits. Default-adapter starts retain that transport after escalation.
+// The same limiter wraps switched sessions so switching cannot reset a cap.
 func EscalationSwitchers(
 	profile config.ProviderProfile,
 	provider zeroruntime.Provider,
 	newProvider func(config.ProviderProfile) (zeroruntime.Provider, error),
 	onSwitch func(modelID string),
+	sessionOptions ...Options,
 ) (
 	func(context.Context, string) (zeroruntime.Provider, error),
 	func(context.Context, string) (zeroruntime.TurnSessionProvider, error),
 ) {
 	if newProvider == nil {
 		return nil, nil
+	}
+	options := Options{}
+	if len(sessionOptions) > 0 {
+		options = sessionOptions[0]
 	}
 	// The escalated profile is the run's profile with the model replaced, so the
 	// credential, base URL and headers travel with it. Callers pass a newProvider
@@ -62,8 +67,8 @@ func EscalationSwitchers(
 		return switchedProvider, nil
 	}
 
-	turnSessions, _ := OptimizedTurnSessions(profile, provider, Options{})
-	if turnSessions == nil {
+	turnSessions, _ := OptimizedTurnSessions(profile, provider, options)
+	if turnSessions == nil && options.ModelRPM == nil {
 		return modelSwitcher, nil
 	}
 
@@ -78,12 +83,14 @@ func EscalationSwitchers(
 		if onSwitch != nil {
 			onSwitch(modelID)
 		}
-		if optimized, ok := OptimizedTurnSessions(switchedProfile, switchedProvider, Options{}); ok {
-			return optimized, nil
+		if turnSessions != nil {
+			if optimized, ok := OptimizedTurnSessions(switchedProfile, switchedProvider, options); ok {
+				return limitTurnSessions(switchedProfile, optimized, options), nil
+			}
 		}
 		// Ineligible target: the default adapter, but carrying the switched
 		// model's own capability projection rather than the original's.
-		return DefaultTurnSessions(switchedProfile, switchedProvider, Options{}), nil
+		return limitTurnSessions(switchedProfile, DefaultTurnSessions(switchedProfile, switchedProvider, options), options), nil
 	}
 	return modelSwitcher, sessionSwitcher
 }

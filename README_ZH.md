@@ -5,6 +5,12 @@
 <p align="center"><strong>一个独属于你的终端编码智能体。</strong></p>
 
 <p align="center">
+  <a href="https://trendshift.io/repositories/70679?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-70679" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/70679/daily?language=Go" alt="Twigpine/zero | Trendshift" width="250" height="55"/></a>
+  <a href="https://trendshift.io/repositories/70679?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-70679" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/70679/weekly?language=Go" alt="Twigpine/zero | Trendshift" width="250" height="55"/></a>
+  <a href="https://trendshift.io/repositories/70679?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-70679" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/70679" alt="Twigpine/zero | Trendshift" width="250" height="55"/></a>
+</p>
+
+<p align="center">
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
   <img alt="Go 1.26.9+" src="https://img.shields.io/badge/Go-1.26.9+-00ADD8?logo=go&logoColor=white">
   <img alt="25+ providers" src="https://img.shields.io/badge/providers-25+-34E2EA">
@@ -20,6 +26,70 @@ zero
 zero exec "修复 ./pkg 中失败的测试"
 zero exec --output-format stream-json < turns.jsonl
 ```
+
+## 合作伙伴
+
+<table align="center">
+  <tr>
+    <td align="center" width="150" height="80">
+      <a href="https://twigpine.com">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="https://twigpine.com/logo-dark.png">
+          <img src="https://twigpine.com/logo.png" alt="Twigpine logo" width="72">
+        </picture>
+      </a>
+    </td>
+    <td align="center" width="150" height="80">
+      <a href="https://mimo.mi.com">
+        <img src="https://mimo.xiaomi.com/mimo-v2-pro/assets/logo.svg" alt="Xiaomi MiMo logo" width="136">
+      </a>
+    </td>
+    <td align="center" width="150" height="80">
+      <a href="https://novita.ai/">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/assets/novita-logo-dark.svg">
+          <img src="docs/assets/novita-logo.svg" alt="Novita AI logo" width="136">
+        </picture>
+      </a>
+    </td>
+    <td align="center" width="150" height="80">
+      <a href="https://concentrate.ai/">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/assets/concentrate-logo-dark.svg">
+          <img src="docs/assets/concentrate-logo.svg" alt="Concentrate logo" width="64">
+        </picture>
+      </a>
+    </td>
+    <td align="center" width="150" height="80">
+      <a href="https://exa.ai/">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/assets/exa-logo-dark.svg">
+          <img src="docs/assets/exa-logo.svg" alt="Exa logo" width="110">
+        </picture>
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center"><a href="https://twigpine.com"><strong>Twigpine</strong></a></td>
+    <td align="center"><a href="https://mimo.mi.com"><strong>Xiaomi MiMo</strong></a></td>
+    <td align="center"><a href="https://novita.ai/"><strong>Novita AI</strong></a></td>
+    <td align="center"><a href="https://concentrate.ai/"><strong>Concentrate</strong></a></td>
+    <td align="center"><a href="https://exa.ai/"><strong>Exa</strong></a></td>
+  </tr>
+  <tr>
+    <td align="center" width="150" height="80">
+      <a href="https://www.gmicloud.ai/">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/assets/gmi-cloud-logo-dark.svg">
+          <img src="docs/assets/gmi-cloud-logo.svg" alt="GMI Cloud logo" width="120">
+        </picture>
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center"><a href="https://www.gmicloud.ai/"><strong>GMI Cloud</strong></a></td>
+  </tr>
+</table>
 
 ## 为什么选择 Zero
 
@@ -106,12 +176,19 @@ export OPENAI_API_KEY=sk-...
 export ANTHROPIC_API_KEY=...
 export GEMINI_API_KEY=...
 export LONGCAT_API_KEY=...
+export GMI_API_KEY=...
 ```
 
 要直接配置美团 LongCat（LongCat-2.0），运行：
 
 ```bash
 zero providers setup longcat --set-active
+```
+
+要直接配置 GMI Cloud，运行：
+
+```bash
+zero providers setup gmicloud --set-active
 ```
 
 对于本地模型，运行 Ollama、LM Studio 或 [Atomic Chat](https://atomic.chat) 桌面应用，
@@ -218,7 +295,7 @@ zero context          上下文预算报告
 zero repo-map         确定性仓库映射
 zero repo-info        本地仓库摘要
 zero search | find    搜索本地会话历史
-zero sessions         检查、恢复、分叉和回滚会话
+zero sessions         检查、恢复、分叉、回滚和清理会话
 zero spec             管理规范模式草稿
 zero specialist       管理专业子智能体
 zero skills           管理 Markdown 指令技能

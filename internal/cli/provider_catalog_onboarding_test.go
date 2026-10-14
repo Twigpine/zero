@@ -20,6 +20,7 @@ func TestProviderCatalogRuntimeProvidersShowOnboardingSetupHints(t *testing.T) {
 		{id: "groq", name: "Groq", transport: "openai-compatible", defaultModel: "llama-3.3-70b-versatile"},
 		{id: "longcat", name: "LongCat", transport: "openai-compatible", defaultModel: "LongCat-2.0"},
 		{id: "fireworks", name: "Fireworks AI", transport: "openai-compatible", defaultModel: "accounts/fireworks/models/kimi-k2p7-code"},
+		{id: "gmicloud", name: "GMI Cloud", transport: "openai-compatible", defaultModel: "Qwen/Qwen3.8-Max"},
 		{id: "ollama-cloud", name: "Ollama Cloud", transport: "openai-compatible", defaultModel: "qwen3-coder:480b"},
 		{id: "ollama", name: "Ollama Local", transport: "openai-compatible", defaultModel: "llama3.1"},
 	}
