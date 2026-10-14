@@ -51,9 +51,10 @@ func TestLocalAdoptionSavesAndReloadsEligibleModel(t *testing.T) {
 	defer server.Close()
 	// A test-sized probe deadline. DetectLocalRuntimes defaults to 400ms and
 	// treats a timeout as "runtime not running", so under -race on a busy runner
-	// one slow loopback round trip can silently drop the candidate. The
-	// production default stays covered by
-	// TestDetectLocalRuntimesAppliesDefaultTimeout in provideronboarding.
+	// one slow loopback round trip can silently drop the candidate. Timeout
+	// enforcement is covered separately in provideronboarding:
+	// TestDetectLocalRuntimesAppliesDefaultTimeout pins it with an explicit
+	// 20ms deadline.
 	detected := provideronboarding.DetectLocalRuntimes(context.Background(), provideronboarding.LocalDetectOptions{
 		HTTPClient: server.Client(),
 		Timeout:    5 * time.Second,
