@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once the first release is
 tagged. Until then, source builds report the version `dev`.
 
+## [0.11.0](https://github.com/Twigpine/zero/compare/v0.10.0...v0.11.0) (2026-10-15)
+
+
+### Features
+
+* **providers:** add Concentrate provider preset ([#1147](https://github.com/Twigpine/zero/issues/1147)) ([61b0936](https://github.com/Twigpine/zero/commit/61b09364f0f45b0fa8aebaf0a6c3d1c55dbe01c3))
+
+
+### Bug Fixes
+
+* **cli:** let providers subcommands run with no active provider ([#1143](https://github.com/Twigpine/zero/issues/1143)) ([d1a0d04](https://github.com/Twigpine/zero/commit/d1a0d048ee2c1e7cbfb75160ec4c9f099f3c4472))
+* **npm:** wait for npm to apply each publish, and drop the one-time @gitlawb/zero steps ([#1145](https://github.com/Twigpine/zero/issues/1145)) ([8e363fc](https://github.com/Twigpine/zero/commit/8e363fcaa5d51bf5b5b244692dc61bf8d4ae8799))
+* **tui,cli:** stop a repository's git config from running programs in Zero's own git calls ([#1133](https://github.com/Twigpine/zero/issues/1133)) ([640d936](https://github.com/Twigpine/zero/commit/640d936bfbe00c4cd3017ca35fb7b5c15d91a1c5))
+* **workspaceindex:** skip git-ignored and build-cache dirs in Scan only ([#1117](https://github.com/Twigpine/zero/issues/1117)) ([c88c77b](https://github.com/Twigpine/zero/commit/c88c77bf701039dca01d9786bf5648d779c949b3))
+
+
+### Performance Improvements
+
+* **redaction:** add fast-path byte checks to eliminate regex allocations on clean strings ([#945](https://github.com/Twigpine/zero/issues/945)) ([ce2fcff](https://github.com/Twigpine/zero/commit/ce2fcffaf10d8e8c8c5a13e06fd7809f09fc9867))
+
 ## [0.10.0](https://github.com/Twigpine/zero/compare/v0.9.0...v0.10.0) (2026-10-15)
 
 
