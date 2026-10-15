@@ -48,8 +48,24 @@ manifest_field() {
 name="$(manifest_field "$wrapper_dir" name)"
 version="$(manifest_field "$wrapper_dir" version)"
 [ -n "$name" ] && [ -n "$version" ] || fail "${wrapper_dir}/package.json has no name or version"
-delay="${ZERO_NPM_PUBLISH_RETRY_DELAY:-5}"
-wait_timeout="${ZERO_NPM_PUBLISH_WAIT_TIMEOUT:-1800}"
+# whole_seconds <variable> <value> <max>: the value as a decimal number of
+# seconds. Checked here, before anything is published: Bash arithmetic reads a
+# leading zero as octal (0600 would wait 384 seconds, and 08 is an error), a
+# negative timeout would end the wait before it starts, and a bad delay would
+# only fail at the first sleep, possibly after the platform payloads went out.
+whole_seconds() {
+  case "$2" in
+    '' | *[!0-9]*) fail "$1 must be a whole number of seconds, got '$2'" ;;
+  esac
+  # Bounded before the conversion so it cannot overflow.
+  [ "${#2}" -le 18 ] || fail "$1 must be at most $3 seconds, got '$2'"
+  local seconds=$((10#$2))
+  [ "$seconds" -le "$3" ] || fail "$1 must be at most $3 seconds, got '$2'"
+  echo "$seconds"
+}
+
+delay="$(whole_seconds ZERO_NPM_PUBLISH_RETRY_DELAY "${ZERO_NPM_PUBLISH_RETRY_DELAY:-5}" 600)"
+wait_timeout="$(whole_seconds ZERO_NPM_PUBLISH_WAIT_TIMEOUT "${ZERO_NPM_PUBLISH_WAIT_TIMEOUT:-1800}" 86400)"
 
 # The wrapper pins every platform version exactly, so a wrapper whose aliases
 # do not match the payloads beside it would install aliases that 404. Check

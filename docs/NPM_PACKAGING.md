@@ -186,10 +186,11 @@ bridge:
 - Updating from 0.9.0 installs that bridge build, so npm also shows the
   deprecation message.
 
-`@gitlawb/zero` is deprecated on every version and has no trusted publisher,
-so nothing can publish under it again. Its versions stay on the registry:
-existing installs resolve their platform payload through them, so they must
-never be unpublished.
+`@gitlawb/zero` is deprecated on every version and no longer has a trusted
+publisher, so this release workflow cannot publish it again; another version
+would take a maintainer publishing by hand. Its versions stay on the
+registry: existing installs resolve their platform payload through them, so
+they must never be unpublished.
 
 ## Runbook: bumping the vendored helpers
 

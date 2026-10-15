@@ -384,3 +384,50 @@ func TestPublishPackagesGivesUpWhenNpmNeverAppliesAPublish(t *testing.T) {
 		t.Fatalf("stderr does not say what npm never showed: %s", run.stderr)
 	}
 }
+
+// Bash arithmetic reads a leading zero as octal and rejects 08 outright, so
+// the timeout has to be converted explicitly rather than used as typed. The
+// rejection does not stop a script: it prints an error, leaves the deadline
+// unset and carries on, so the failure only shows once the script has to wait,
+// after the platform payloads are out. npm applying late makes it wait here.
+func TestPublishPackagesReadsTheWaitTimeoutAsDecimal(t *testing.T) {
+	platforms := []string{"linux-x64"}
+	npmDir := writePublishFixture(t, platforms, platforms)
+	run := runPublishPackages(t, npmDir, fakeRegistryState{Name: publishFixtureName},
+		"ZERO_NPM_PUBLISH_WAIT_TIMEOUT=08", "FAKE_NPM_APPLY_AFTER=3")
+	if run.exitCode != 0 {
+		t.Fatalf("exit = %d with ZERO_NPM_PUBLISH_WAIT_TIMEOUT=08; stdout=%s stderr=%s", run.exitCode, run.stdout, run.stderr)
+	}
+	if got := strings.Join(run.publishedDirs(), ","); got != "zero-linux-x64,wrapper" {
+		t.Fatalf("published %s, want zero-linux-x64,wrapper", got)
+	}
+}
+
+// A setting the script cannot use must stop it before anything is published:
+// a negative timeout would otherwise end the wait before it starts, and a bad
+// delay would only fail at the first sleep, after the platform payloads.
+func TestPublishPackagesRejectsAnInvalidWaitSetting(t *testing.T) {
+	for _, tc := range []struct{ variable, value string }{
+		{"ZERO_NPM_PUBLISH_WAIT_TIMEOUT", "-5"},
+		{"ZERO_NPM_PUBLISH_WAIT_TIMEOUT", "abc"},
+		{"ZERO_NPM_PUBLISH_WAIT_TIMEOUT", "1e3"},
+		{"ZERO_NPM_PUBLISH_WAIT_TIMEOUT", "86401"},
+		{"ZERO_NPM_PUBLISH_WAIT_TIMEOUT", "9999999999999999999999"},
+		{"ZERO_NPM_PUBLISH_RETRY_DELAY", "soon"},
+	} {
+		t.Run(tc.variable+"="+tc.value, func(t *testing.T) {
+			platforms := []string{"linux-x64"}
+			npmDir := writePublishFixture(t, platforms, platforms)
+			run := runPublishPackages(t, npmDir, fakeRegistryState{Name: publishFixtureName}, tc.variable+"="+tc.value)
+			if run.exitCode == 0 {
+				t.Fatalf("exit = 0 with %s=%s; stdout=%s", tc.variable, tc.value, run.stdout)
+			}
+			if len(run.publishes) != 0 {
+				t.Fatalf("published %v before rejecting %s=%s, want nothing", run.publishedDirs(), tc.variable, tc.value)
+			}
+			if !strings.Contains(run.stderr, tc.variable) {
+				t.Fatalf("stderr does not name %s: %s", tc.variable, run.stderr)
+			}
+		})
+	}
+}
