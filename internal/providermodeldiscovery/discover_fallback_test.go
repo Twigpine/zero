@@ -38,3 +38,46 @@ func TestDiscoverCatalogFallsBackWhenLiveIDsMismatch(t *testing.T) {
 		t.Fatalf("models = %q, want curated catalog fallback (gpt-4.1) instead of an empty list", got)
 	}
 }
+
+// Concentrate's /v1/models lists dated snapshots as ids and keeps rolling names
+// such as deepseek-v4-flash only in "aliases", which discovery does not read.
+// Onboarding keeps the default selected only when it matches a live id, so the
+// preset's default must be an id, or setup lands on whatever model sorts first.
+func TestDiscoverCatalogConcentrateKeepsDefaultModelInLiveList(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api.json":
+			_, _ = w.Write([]byte(`{}`))
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"object":"list","data":[
+				{"id":"claude-fable-5","slug":"claude-fable-5","max_input_tokens":1000000},
+				{"id":"deepseek-v4-flash-0731","slug":"deepseek-v4-flash-0731","aliases":["deepseek-v4-flash"],"max_input_tokens":1048576},
+				{"id":"deepseek-v4-pro","slug":"deepseek-v4-pro","max_input_tokens":1048576},
+				{"id":"kimi-k3","slug":"kimi-k3","max_input_tokens":1048576},
+				{"id":"glm-5.3","slug":"glm-5.3","max_input_tokens":1048576}
+			]}`))
+		default:
+			t.Fatalf("unexpected request path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	provider, ok := providercatalog.Get("concentrate")
+	if !ok {
+		t.Fatal("provider concentrate missing from catalog")
+	}
+	provider.DefaultBaseURL = server.URL + "/v1"
+	models, err := DiscoverCatalog(context.Background(), provider, config.ProviderProfile{
+		CatalogID: "concentrate", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: server.URL + "/v1", APIKey: "sk-test",
+	}, Options{HTTPClient: server.Client(), ModelsDevURL: server.URL + "/api.json"})
+	if err != nil {
+		t.Fatalf("DiscoverCatalog returned error: %v", err)
+	}
+	ids := modelIDs(models)
+	for _, id := range ids {
+		if id == provider.DefaultModel {
+			return
+		}
+	}
+	t.Fatalf("default model %q missing from discovered models %q", provider.DefaultModel, strings.Join(ids, ","))
+}

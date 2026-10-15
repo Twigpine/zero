@@ -186,6 +186,7 @@ export ANTHROPIC_API_KEY=...
 export GEMINI_API_KEY=...
 export LONGCAT_API_KEY=...
 export GMI_API_KEY=...
+export CONCENTRATE_API_KEY=...
 ```
 
 要直接配置美团 LongCat（LongCat-2.0），运行：
@@ -198,6 +199,12 @@ zero providers setup longcat --set-active
 
 ```bash
 zero providers setup gmicloud --set-active
+```
+
+要直接配置 Concentrate，运行：
+
+```bash
+zero providers setup concentrate --set-active
 ```
 
 对于本地模型，运行 Ollama、LM Studio 或 [Atomic Chat](https://atomic.chat) 桌面应用，

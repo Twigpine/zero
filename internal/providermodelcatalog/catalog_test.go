@@ -54,6 +54,11 @@ func TestModelsAreProviderScoped(t *testing.T) {
 			notWant:  []string{"gpt-4.1", "claude-sonnet-4.5", "deepseek-ai/deepseek-v4-pro"},
 		},
 		{
+			provider: "concentrate",
+			want:     []string{"deepseek-v4-flash-0731", "deepseek-v4-pro", "kimi-k3", "glm-5.3"},
+			notWant:  []string{"gpt-4.1", "claude-sonnet-4.5", "deepseek-ai/DeepSeek-V4-Pro"},
+		},
+		{
 			provider: "mistral",
 			want:     []string{"mistral-large-latest", "codestral-latest"},
 			notWant:  []string{"gpt-4.1", "claude-sonnet-4.5"},
@@ -180,6 +185,28 @@ func TestMiniMaxModelsExposeCurrentCapabilities(t *testing.T) {
 	if !reflect.DeepEqual(m27.InputModalities, []string{"text"}) ||
 		!reflect.DeepEqual(m27.OutputModalities, []string{"text"}) {
 		t.Fatalf("MiniMax-M2.7 modalities = input:%#v output:%#v", m27.InputModalities, m27.OutputModalities)
+	}
+}
+
+func TestConcentrateModelsExposeCatalogLimits(t *testing.T) {
+	descriptor, ok := providercatalog.Get("concentrate")
+	if !ok {
+		t.Fatal("provider concentrate missing from catalog")
+	}
+	models := Models(descriptor)
+	if got, want := modelIDs(models), []string{"deepseek-v4-flash-0731", "deepseek-v4-pro", "kimi-k3", "glm-5.3"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Concentrate models = %#v, want %#v", got, want)
+	}
+	if models[0].Description != "catalog default" {
+		t.Fatalf("first Concentrate model description = %q, want catalog default", models[0].Description)
+	}
+	for _, model := range models {
+		if model.ContextWindow != 1_048_576 || !model.ToolCall || !model.Reasoning {
+			t.Fatalf("%s capabilities = %#v, want 1,048,576 context with tools and reasoning", model.ID, model)
+		}
+		if model.Source != concentrateModelSource {
+			t.Fatalf("%s source = %q, want %q", model.ID, model.Source, concentrateModelSource)
+		}
 	}
 }
 

@@ -147,6 +147,14 @@ var descriptors = []Descriptor{
 	// provider id so the remote catalog resolves without a mapping; GMI's own
 	// docs name the key GMI_API_KEY, models.dev names it GMICLOUD_API_KEY.
 	openAICompat("gmicloud", "GMI Cloud", "https://api.gmi-serving.com/v1", "Qwen/Qwen3.8-Max", []string{"GMI_API_KEY", "GMICLOUD_API_KEY"}, "gmi cloud", "gmi"),
+	// Concentrate AI — OpenAI-compatible gateway to models from many labs.
+	// models.dev has no Concentrate provider, so the id and key name match
+	// OpenClaude's Concentrate integration. The default is the dated id
+	// deepseek-v4-flash-0731: Concentrate's /v1/models keeps the rolling name
+	// deepseek-v4-flash only as an alias, and onboarding matches the default
+	// against live ids. "concentrate ai" also covers "concentrate.ai" and
+	// "concentrate-ai" once normalized.
+	openAICompat("concentrate", "Concentrate", "https://api.concentrate.ai/v1", "deepseek-v4-flash-0731", []string{"CONCENTRATE_API_KEY"}, "concentrate ai"),
 	openAICompat("longcat", "LongCat", "https://api.longcat.chat/openai", "LongCat-2.0", []string{"LONGCAT_API_KEY"}, "meituan longcat", "meituan", "longcat-2.0"),
 	openAICompat("nvidia-nim", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1", "nvidia/llama-3.1-nemotron-70b-instruct", []string{"NVIDIA_API_KEY"}, "nvidia nim"),
 	anthropicCompat("minimax", "MiniMax", "https://api.minimax.io/anthropic", "MiniMax-M3", []string{"MINIMAX_API_KEY"}, "mini-max", "mini_max"),
