@@ -233,14 +233,16 @@ func resolveCommandCenterConfig(stderr io.Writer, deps appDeps) (config.Resolved
 		// providers (or one key plus one base URL) made every subcommand exit
 		// with `no active provider configured: active provider "" not found`
 		// (issue #1130). It still returns the successfully normalized list
-		// alongside the error, so adopt a usable entry from it the way the
-		// interactive TUI does in runInteractiveTUIWithSetup.
+		// alongside the error, so hand that partial config back WITHOUT
+		// electing an active provider: these commands report what is
+		// configured, not what a run would use. Adopting firstUsableProvider
+		// here made `providers current`/`list` present a provider that `zero
+		// exec` would still refuse to run with, and made a base-URL-only
+		// profile (no API key) fail `providers list` because the election
+		// demands a credential. Electing a provider to RUN with stays in the
+		// interactive TUI's recovery path (app.go), which is about execution.
 		if errors.Is(err, config.ErrNoActiveProvider) {
-			if usable, ok := firstUsableProvider(resolved.Providers); ok {
-				resolved.Provider = usable
-				resolved.ActiveProvider = usable.Name
-				return resolved, exitSuccess
-			}
+			return resolved, exitSuccess
 		}
 		return config.ResolvedConfig{}, writeAppError(stderr, err.Error(), exitProvider)
 	}

@@ -344,6 +344,130 @@ func TestRunProvidersListShowsEveryEnvDerivedProvider(t *testing.T) {
 	}
 }
 
+// The provider-management commands report what is CONFIGURED, not what a run
+// would use: with env-derived providers and no saved active provider they must
+// not present any provider as selected. Electing firstUsableProvider in
+// resolveCommandCenterConfig made `providers current` claim `openai` while
+// `zero exec` in the same environment still exited 3 with `no active provider
+// configured` — and it read the OAuth store on this path (maintainer review of
+// this PR).
+func TestRunProvidersSubcommandsElectNoActiveProvider(t *testing.T) {
+	env := map[string]string{
+		"OPENAI_API_KEY": "sk-env",
+		"GEMINI_API_KEY": "gem-env",
+	}
+	deps := func(t *testing.T) appDeps {
+		configPath := filepath.Join(t.TempDir(), "config.json")
+		writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
+		return providerEnvSetupDeps(t, configPath, env)
+	}
+
+	t.Run("current shows nothing selected", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+
+		exitCode := runWithDeps([]string{"providers", "current"}, &stdout, &stderr, deps(t))
+
+		if exitCode != exitSuccess {
+			t.Fatalf("exit code = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "(none)") {
+			t.Fatalf("stdout = %q, want an empty selection", stdout.String())
+		}
+		if strings.Contains(stdout.String(), "openai") {
+			t.Fatalf("stdout = %q, want no provider elected as current", stdout.String())
+		}
+	})
+
+	t.Run("list marks nothing active", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+
+		exitCode := runWithDeps([]string{"providers", "list", "--json"}, &stdout, &stderr, deps(t))
+
+		if exitCode != exitSuccess {
+			t.Fatalf("exit code = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+		}
+		var payload struct {
+			Providers []struct {
+				Name   string `json:"name"`
+				Active bool   `json:"active"`
+			} `json:"providers"`
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+			t.Fatalf("decode JSON: %v\n%s", err, stdout.String())
+		}
+		if len(payload.Providers) < 2 {
+			t.Fatalf("providers = %+v, want both env-derived profiles listed", payload.Providers)
+		}
+		for _, provider := range payload.Providers {
+			if provider.Active {
+				t.Fatalf("provider %q marked active, want nothing active", provider.Name)
+			}
+		}
+	})
+
+	t.Run("use json leaves activeProvider empty", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+
+		exitCode := runWithDeps([]string{"providers", "use", "openai", "--json"}, &stdout, &stderr, deps(t))
+
+		if exitCode != exitSuccess {
+			t.Fatalf("exit code = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+		}
+		var payload struct {
+			ActiveProvider string `json:"activeProvider"`
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+			t.Fatalf("decode JSON: %v\n%s", err, stdout.String())
+		}
+		if payload.ActiveProvider != "" {
+			t.Fatalf("activeProvider = %q, want it empty for an unpersisted selection", payload.ActiveProvider)
+		}
+	})
+}
+
+// A base-URL-only environment (OPENAI_BASE_URL / GEMINI_BASE_URL set, no API
+// keys) is the other half of issue #1130: electing firstUsableProvider made
+// `providers list` exit 3 because the election demands a credential. The list
+// must succeed and still mark nothing active. The resolver itself keeps only
+// the keyless openai-compatible profile here (a google profile without a
+// credential is dropped during normalization), so `openai` is the expected
+// entry — pinning that as-is keeps this test about the COMMAND, not the
+// resolver.
+func TestRunProvidersListWithBaseURLOnlyProviders(t *testing.T) {
+	env := map[string]string{
+		"OPENAI_BASE_URL": "https://openai.proxy.example.com/v1",
+		"GEMINI_BASE_URL": "https://gemini.proxy.example.com",
+	}
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
+	var stdout, stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"providers", "list", "--json"}, &stdout, &stderr, providerEnvSetupDeps(t, configPath, env))
+
+	if exitCode != exitSuccess {
+		t.Fatalf("exit code = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+	}
+	var payload struct {
+		Providers []struct {
+			Name   string `json:"name"`
+			Active bool   `json:"active"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode JSON: %v\n%s", err, stdout.String())
+	}
+	names := make(map[string]bool, len(payload.Providers))
+	for _, provider := range payload.Providers {
+		if provider.Active {
+			t.Fatalf("provider %q marked active, want nothing active", provider.Name)
+		}
+		names[provider.Name] = true
+	}
+	if !names["openai"] {
+		t.Fatalf("providers = %v, want the base-URL-only openai profile listed", names)
+	}
+}
+
 func TestRunProvidersUseRejectsUsageErrors(t *testing.T) {
 	cases := []struct {
 		name string
