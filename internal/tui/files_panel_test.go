@@ -6,6 +6,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/dictation"
 	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/tools"
 )
@@ -296,6 +298,24 @@ func TestSidebarFileLinesOverflowExcludesLiveRow(t *testing.T) {
 
 // TestSidebarHasContentForLiveWrite: the sidebar counts an in-flight first
 // write as content, so the FILES pulse is visible before any result row lands.
+func TestSidebarFileHitsDistinguishSuffixPaths(t *testing.T) {
+	m := sidebarTestModel()
+	m.transcript = append(m.transcript,
+		transcriptRow{kind: rowToolResult, tool: "edit_file", id: "a", status: tools.StatusOK, changedFiles: []string{"a.go"}},
+		transcriptRow{kind: rowToolResult, tool: "edit_file", id: "b", status: tools.StatusOK, changedFiles: []string{"dir/a.go"}},
+	)
+	_, hits := m.sidebarFileLines(80)
+	if len(hits) < 2 {
+		t.Fatalf("want two fileHit rows, got %#v", hits)
+	}
+	if hits[0].path == hits[1].path {
+		t.Fatal("fileHit paths must stay distinct")
+	}
+	if hits[0].lineOffset == hits[1].lineOffset {
+		t.Fatal("fileHit rows must not share a line offset")
+	}
+}
+
 func TestSidebarHasContentForLiveWrite(t *testing.T) {
 	m := sidebarTestModel()
 	m.plan.steps = nil // drop the helper's seeded plan: no agents/plan/files now
@@ -308,4 +328,176 @@ func TestSidebarHasContentForLiveWrite(t *testing.T) {
 	if !m.sidebarHasContent() {
 		t.Fatal("a live in-flight write must count as sidebar content")
 	}
+}
+
+func TestRunDetailsFileMouseSelectionEndToEnd(t *testing.T) {
+	m := filesPanelTestModel()
+	m.width = 80
+	m.height = 24
+	m.altScreen = true
+	m.runDetailsOpen = true
+
+	overlay := m.runDetailsOverlay(m.width)
+	if overlay == "" {
+		t.Fatal("expected non-empty runDetailsOverlay")
+	}
+
+	inner := m.runDetailsInnerWidth()
+	layout := m.runDetailsLayout(inner)
+	if len(layout.fileHits) == 0 || layout.fileStart < 0 {
+		t.Fatalf("expected file hits in layout, got: %+v", layout)
+	}
+
+	targetHit := layout.fileHits[0] // "internal/tui/sidebar.go"
+	overlayLines := viewLines(overlay)
+	left, trimmedLines, overlayWidth := normalizeOverlayBlock(overlayLines, m.width)
+	if overlayWidth <= 0 || len(trimmedLines) == 0 {
+		t.Fatalf("invalid overlay block normalization: left=%d, width=%d", left, overlayWidth)
+	}
+
+	rect := m.overlayMouseRect(len(trimmedLines), m.width)
+	// Click on the target file row: top border is row 0 of the overlay, content starts at row 1
+	clickY := rect.y + 1 + layout.fileStart + targetHit.lineOffset
+	clickX := left + 4 // inside the border and padding
+
+	clickMsg := testMouseClick(tea.MouseLeft, clickX, clickY)
+
+	path, ok := m.runDetailsFileAtMouse(clickMsg)
+	if !ok || path != targetHit.path {
+		t.Fatalf("runDetailsFileAtMouse failed: ok=%v, got=%q, want=%q", ok, path, targetHit.path)
+	}
+
+	// Route the click through m.Update to verify end-to-end selection
+	updated, _ := m.Update(clickMsg)
+	m = updated.(model)
+
+	if m.selectedFile != targetHit.path {
+		t.Fatalf("expected selectedFile %q after mouse click, got %q", targetHit.path, m.selectedFile)
+	}
+}
+
+func TestRunDetailsFileMouseBlockedBehindHigherPriorityOverlays(t *testing.T) {
+	baseModel := func(t *testing.T) (model, tea.MouseClickMsg, string) {
+		t.Helper()
+		m := filesPanelTestModel()
+		m.width = 80
+		m.height = 24
+		m.altScreen = true
+		m.runDetailsOpen = true
+
+		overlay := m.runDetailsOverlay(m.width)
+		if overlay == "" {
+			t.Fatal("expected non-empty runDetailsOverlay")
+		}
+		inner := m.runDetailsInnerWidth()
+		layout := m.runDetailsLayout(inner)
+		if len(layout.fileHits) == 0 || layout.fileStart < 0 {
+			t.Fatalf("expected file hits in layout, got: %+v", layout)
+		}
+		targetHit := layout.fileHits[0]
+		overlayLines := viewLines(overlay)
+		left, trimmedLines, overlayWidth := normalizeOverlayBlock(overlayLines, m.width)
+		if overlayWidth <= 0 || len(trimmedLines) == 0 {
+			t.Fatalf("invalid overlay block normalization: left=%d, width=%d", left, overlayWidth)
+		}
+		rect := m.overlayMouseRect(len(trimmedLines), m.width)
+		clickY := rect.y + 1 + layout.fileStart + targetHit.lineOffset
+		clickX := left + 4
+		clickMsg := testMouseClick(tea.MouseLeft, clickX, clickY)
+		if path, ok := m.runDetailsFileAtMouse(clickMsg); !ok || path != targetHit.path {
+			t.Fatalf("precondition failed: visible Run details click should hit %q, got ok=%v path=%q", targetHit.path, ok, path)
+		}
+		return m, clickMsg, targetHit.path
+	}
+
+	t.Run("speech_api_key_prompt_blocks_hidden_run_details_click", func(t *testing.T) {
+		m, clickMsg, wantPath := baseModel(t)
+		m.dictation.cfg = config.STTConfig{Provider: config.STTProviderGroq, Model: "whisper-large-v3-turbo"}
+		m.dictation.saveKey = func(string, string) error { return nil }
+		m.dictation.phase = dictTranscribing
+
+		// Asynchronous dictation auth error opens the speech API-key prompt while Run details stays open.
+		updated, _ := m.Update(dictationTranscribedMsg{
+			sessionID: m.dictation.sessionID,
+			err:       &dictation.AuthError{Provider: "groq", Message: "auth error: your API key is missing or invalid"},
+		})
+		m = updated.(model)
+		if !m.runDetailsOpen || m.sttKeyPrompt == nil {
+			t.Fatalf("expected runDetailsOpen=true and sttKeyPrompt!=nil, got runDetailsOpen=%v sttKeyPrompt=%v", m.runDetailsOpen, m.sttKeyPrompt)
+		}
+		if m.runDetailsVisible() {
+			t.Fatal("Run details must not report visible while the speech API-key prompt owns the viewport")
+		}
+		if path, ok := m.runDetailsFileAtMouse(clickMsg); ok || path != "" {
+			t.Fatalf("runDetailsFileAtMouse must reject clicks behind speech prompt, got ok=%v path=%q", ok, path)
+		}
+
+		// First and second clicks at the shared coordinate must neither select the file nor open fileView.
+		for i := 0; i < 2; i++ {
+			var cmd tea.Cmd
+			updated, cmd = m.Update(clickMsg)
+			m = updated.(model)
+			if cmd != nil {
+				t.Fatalf("click %d behind speech prompt should not return a command", i+1)
+			}
+			if m.selectedFile != "" || m.fileView.active {
+				t.Fatalf("click %d behind speech prompt leaked to Run details: selectedFile=%q fileView.active=%v", i+1, m.selectedFile, m.fileView.active)
+			}
+		}
+
+		// Dismissing the speech prompt restores Run details to the foreground so the click works again.
+		updated, _ = m.Update(testKey(tea.KeyEsc))
+		m = updated.(model)
+		if m.sttKeyPrompt != nil || !m.runDetailsVisible() {
+			t.Fatal("Run details should be visible again after dismissing the speech prompt")
+		}
+		updated, _ = m.Update(clickMsg)
+		m = updated.(model)
+		if m.selectedFile != wantPath {
+			t.Fatalf("expected selectedFile %q after speech prompt closed, got %q", wantPath, m.selectedFile)
+		}
+	})
+
+	t.Run("leader_help_overlay_blocks_hidden_run_details_click", func(t *testing.T) {
+		m, clickMsg, wantPath := baseModel(t)
+
+		// Ctrl+X then ? opens the leader help overlay in front of Run details.
+		updated, _ := m.Update(testKeyCtrl('x'))
+		m = updated.(model)
+		updated, _ = m.Update(tea.KeyPressMsg{Code: '?', Text: "?"})
+		m = updated.(model)
+		if !m.runDetailsOpen || !m.leaderHelpOverlay {
+			t.Fatalf("expected runDetailsOpen=true and leaderHelpOverlay=true, got runDetailsOpen=%v leaderHelpOverlay=%v", m.runDetailsOpen, m.leaderHelpOverlay)
+		}
+		if m.runDetailsVisible() {
+			t.Fatal("Run details must not report visible while leader help owns the viewport")
+		}
+		if path, ok := m.runDetailsFileAtMouse(clickMsg); ok || path != "" {
+			t.Fatalf("runDetailsFileAtMouse must reject clicks behind leader help, got ok=%v path=%q", ok, path)
+		}
+
+		for i := 0; i < 2; i++ {
+			var cmd tea.Cmd
+			updated, cmd = m.Update(clickMsg)
+			m = updated.(model)
+			if cmd != nil {
+				t.Fatalf("click %d behind leader help should not return a command", i+1)
+			}
+			if m.selectedFile != "" || m.fileView.active {
+				t.Fatalf("click %d behind leader help leaked to Run details: selectedFile=%q fileView.active=%v", i+1, m.selectedFile, m.fileView.active)
+			}
+		}
+
+		// Dismissing leader help with Esc restores Run details to the foreground.
+		updated, _ = m.Update(testKey(tea.KeyEsc))
+		m = updated.(model)
+		if m.leaderHelpOverlay || !m.runDetailsVisible() {
+			t.Fatal("Run details should be visible again after dismissing leader help")
+		}
+		updated, _ = m.Update(clickMsg)
+		m = updated.(model)
+		if m.selectedFile != wantPath {
+			t.Fatalf("expected selectedFile %q after leader help closed, got %q", wantPath, m.selectedFile)
+		}
+	})
 }

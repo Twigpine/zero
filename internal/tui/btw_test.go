@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -533,5 +534,71 @@ func TestBTWCtrlCDuringRunDoesNotClearDraft(t *testing.T) {
 	}
 	if !transcriptContains(got.transcript, "BTW response is still running") {
 		t.Fatalf("missing in-flight return guidance: %#v", got.transcript)
+	}
+}
+
+// TestBTWLeaveRevokesSideFileLoad verifies that leaving BTW revokes the side
+// surface's file-view lifetime so a still-queued side load cannot run or land
+// after the view closes, without cancelling the restored parent's own load.
+func TestBTWLeaveRevokesSideFileLoad(t *testing.T) {
+	resetFileViewCacheForTest()
+	m := newBTWTestModel(t)
+	dir := t.TempDir()
+	m.cwd = dir
+	name := "side_view.go"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("package side\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Open a full view so the side surface inherits an active file view.
+	m, parentLoadCmd := m.openFileView(name)
+	if parentLoadCmd == nil {
+		t.Fatal("expected a pending parent load command")
+	}
+	parentLiveSeq := m.fileView.liveSeq
+	if parentLiveSeq == nil {
+		t.Fatal("parent load token missing")
+	}
+	parentSeq := parentLiveSeq.Load()
+
+	// Enter BTW: the side surface detaches and schedules its own load.
+	side, sideLoadCmd := m.handleBTWCommand("")
+	if !side.btw.active || side.btw.parent == nil {
+		t.Fatal("expected an active BTW conversation")
+	}
+	if sideLoadCmd == nil {
+		t.Fatal("side surface should schedule its own file load")
+	}
+	sideLiveSeq := side.fileView.liveSeq
+	if sideLiveSeq == nil || sideLiveSeq == parentLiveSeq {
+		t.Fatal("side load must own a detached lifetime token")
+	}
+	sideSeq := sideLiveSeq.Load()
+
+	// Return while the side load is still queued.
+	parent, _ := side.leaveBTW()
+	if sideLiveSeq.Load() == sideSeq {
+		t.Fatal("leaveBTW must revoke the side file-view request")
+	}
+	if parentLiveSeq.Load() != parentSeq || parentLiveSeq == sideLiveSeq {
+		t.Fatal("leaveBTW must not revoke the restored parent's request")
+	}
+
+	// The held side command must now be a superseded no-op.
+	held := sideLoadCmd()
+	loaded, ok := held.(fileViewLoadedMsg)
+	if !ok {
+		t.Fatalf("held side command produced %T, want fileViewLoadedMsg", held)
+	}
+	if !errors.Is(loaded.err, errFileViewSuperseded) {
+		t.Fatalf("queued side load must be superseded after leaving BTW, got %v", loaded.err)
+	}
+
+	// The parent's own load still completes and settles its snapshot.
+	parent = deliverCommandMessages(t, parent, parentLoadCmd)
+	if parent.fileView.loading {
+		t.Fatal("parent load must remain valid after the side revocation")
+	}
+	if !strings.Contains(plainRender(t, parent.renderFileViewFull(80)), "package side") {
+		t.Fatal("restored parent must keep its snapshot")
 	}
 }
