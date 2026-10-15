@@ -592,6 +592,30 @@ func TestFormatNpmCustomSourceExplainsInstallSource(t *testing.T) {
 	}
 }
 
+// A legacy install is told to switch whether or not an update is out: up to
+// date today, the next release will not reach it, and `zero upgrade` refuses.
+func TestFormatTellsALegacyNpmInstallToSwitch(t *testing.T) {
+	asset := assetCheckForTest(t, "v0.11.0", runtime.GOOS, runtime.GOARCH)
+	for name, result := range map[string]Result{
+		"up to date": {
+			CurrentVersion: "0.10.0", LatestVersion: "0.10.0", ReleaseURL: "https://example.test/release",
+			ReleaseAsset: asset, installMethod: InstallMethodNpmLegacy,
+		},
+		"update available": {
+			CurrentVersion: "0.10.0", LatestVersion: "0.11.0", ReleaseURL: "https://example.test/release",
+			ReleaseAsset: asset, UpdateAvailable: true, installMethod: InstallMethodNpmLegacy,
+		},
+	} {
+		output := Format(result)
+		if !strings.Contains(output, "npm uninstall -g @gitlawb/zero") || !strings.Contains(output, "npm install -g @twigpine/zero") {
+			t.Errorf("%s: output does not give the switch steps: %q", name, output)
+		}
+		if strings.Contains(output, "Run `zero upgrade`") {
+			t.Errorf("%s: output recommends `zero upgrade`, which refuses a legacy install: %q", name, output)
+		}
+	}
+}
+
 func TestFormatCrossTargetCustomSourceKeepsAccurateGuidance(t *testing.T) {
 	goos, goarch := "linux", "amd64"
 	if runtime.GOOS == goos && runtime.GOARCH == goarch {

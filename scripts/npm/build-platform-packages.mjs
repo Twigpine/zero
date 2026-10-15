@@ -3,7 +3,7 @@
 // from the per-platform archives built by `zero-release package`.
 //
 // Layout written under --out-dir (default dist/npm), where <name> is the
-// package.json name:
+// package.json name, or --package-name when given:
 //   wrapper/                        <name>@X.Y.Z — bin/zero.js, the
 //                                   first-run fallback downloader, and a
 //                                   package.json with NO scripts and NO
@@ -25,9 +25,15 @@
 // CI must always assemble the full matrix, and the wrapper's
 // optionalDependencies always reference the full matrix regardless).
 //
+// --package-name assembles the same artifacts under another name. It exists
+// for the one final release under the pre-rename name @gitlawb/zero (see
+// docs/NPM_PACKAGING.md); everything in the payloads that names the package
+// follows it, so the binary and wrapper know which name they were installed as.
+//
 // Usage:
 //   node scripts/npm/build-platform-packages.mjs \
-//     --artifacts-dir dist/artifacts [--out-dir dist/npm] [--only linux-x64,...]
+//     --artifacts-dir dist/artifacts [--out-dir dist/npm] [--only linux-x64,...] \
+//     [--package-name @scope/name]
 
 import {
   chmodSync,
@@ -72,7 +78,7 @@ function fail(message) {
 }
 
 function parseArgs(argv) {
-  const args = { artifactsDir: '', outDir: join(repoRoot, 'dist', 'npm'), only: null };
+  const args = { artifactsDir: '', outDir: join(repoRoot, 'dist', 'npm'), only: null, packageName: '' };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     const next = () => {
@@ -89,6 +95,14 @@ function parseArgs(argv) {
         break;
       case '--only':
         args.only = new Set(next().split(',').map((entry) => entry.trim()).filter(Boolean));
+        break;
+      case '--package-name':
+        args.packageName = next();
+        // A scoped or unscoped npm name; anything else would also become a
+        // path segment in the alias npm installs.
+        if (!/^(@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/.test(args.packageName)) {
+          fail(`--package-name ${JSON.stringify(args.packageName)} is not an npm package name`);
+        }
         break;
       default:
         fail(`unknown argument ${arg}`);
@@ -346,7 +360,9 @@ function buildWrapperPackage(packageName, version, outDir) {
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
-  const { name: packageName, version } = readWrapperPackage();
+  const wrapperPkg = readWrapperPackage();
+  const packageName = args.packageName || wrapperPkg.name;
+  const { version } = wrapperPkg;
 
   const selected = MATRIX.filter(
     (entry) => !args.only || args.only.has(`${entry.platform}-${entry.arch}`),

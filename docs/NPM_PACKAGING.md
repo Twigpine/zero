@@ -151,6 +151,63 @@ registry.
 `package.json` named `@twigpine/zero` next to the running binary — true inside
 a platform payload too — and updates via `npm install -g @twigpine/zero@latest`.
 
+## The move from `@gitlawb/zero`
+
+Zero was published as `@gitlawb/zero` up to 0.9.0 and as `@twigpine/zero`
+from 0.10.0. There is no in-place migration: both packages own the `zero`
+bin, so npm refuses to install one over the other (`EEXIST`), and forcing it
+lets a later uninstall of the old package delete the shared bin. The user
+has to uninstall the old package and install the new one, in that order.
+
+Deprecating the old package alone does not reach existing users. 0.9.0's
+`zero upgrade` runs `npm install -g @gitlawb/zero@latest`; with nothing newer
+under that name, npm reinstalls nothing, prints no deprecation warning (it
+only warns when it installs something), and Zero reports the update as done.
+So 0.10.0 is published once more under the old name, as a bridge:
+
+- The publish job assembles the same verified artifacts a second time with
+  `build-platform-packages.mjs --package-name @gitlawb/zero` and publishes
+  them with the same script, after the `@twigpine/zero` publish. A gate runs
+  it only while the old name's `latest` is still 0.9.0 (or is this version,
+  on a re-run), so it cannot happen twice.
+- The bridge build knows its name from the `package.json` beside it. The Go
+  binary reports it as `InstallMethodNpmLegacy`: `zero upgrade` refuses
+  with the switch steps instead of reinstalling it, and `zero update --check`
+  adds them. `bin/zero.js` prints the same steps after `zero` exits, on a
+  terminal only.
+- Updating from 0.9.0 now installs a real version, so npm also shows the
+  deprecation message.
+
+### Runbook
+
+Before the first release under the new name:
+
+1. Create the package, since npm only attaches a trusted publisher to a
+   package that exists: publish an empty `@twigpine/zero@0.0.0` by hand with
+   `npm publish --access public --tag bootstrap`, then
+   `npm deprecate @twigpine/zero@0.0.0 "Placeholder; install @twigpine/zero@latest"`.
+2. Trust this workflow for it:
+   `npm trust github @twigpine/zero --repo Twigpine/zero --file release-artifacts.yml --env npm-publish --allow-publish`.
+3. Point the old package's trusted publisher at this repository too, for the
+   bridge publish: `npm trust list @gitlawb/zero`, revoke the existing entry
+   with `npm trust revoke @gitlawb/zero --id <id>`, then run the same
+   `npm trust github` command for `@gitlawb/zero`.
+4. Confirm Settings → Environments → `npm-publish` has a required reviewer.
+   The environment exists either way; without a reviewer the job does not
+   wait for approval.
+
+After the release, once both packages show 0.10.0 as `latest`:
+
+1. `npm deprecate @gitlawb/zero "Zero moved to @twigpine/zero. Switch with: npm uninstall -g @gitlawb/zero && npm install -g @twigpine/zero"`
+   (no version range, so every version, including the platform payloads,
+   carries it). Never unpublish: existing installs resolve their platform
+   payload through these versions.
+2. Revoke the old package's trusted publisher (`npm trust revoke`), so
+   nothing can publish under that name again.
+3. Delete the two `@gitlawb/zero` steps from `release-artifacts.yml`. The Go
+   and wrapper handling of the old name can stay; it only activates in a
+   build installed under that name.
+
 ## Runbook: bumping the vendored helpers
 
 The vendored helper versions are pinned by the repo `package.json`

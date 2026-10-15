@@ -371,6 +371,64 @@ func TestNodeWrapperResolvesPlatformPackageUnderItsOwnName(t *testing.T) {
 	}
 }
 
+// The bridge release published under the old name runs normally and, once
+// zero exits, says where the package went and how to switch, in the one order
+// npm accepts.
+func TestNodeWrapperLegacyBuildTellsUsersToSwitchAfterExit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock executable fixture uses a POSIX shell script")
+	}
+	wrapperPath := copyWrapperFixture(t)
+	root := filepath.Dir(filepath.Dir(wrapperPath))
+	writeFixtureFile(t, filepath.Join(root, "package.json"), `{"type":"module","name":"@gitlawb/zero"}`, 0o644)
+	writePlatformPackageFixture(t, root, "@gitlawb/zero", "legacy-zero")
+
+	stdout, stderr, exitCode := runWrapperFixtureWithEnv(t, wrapperPath, []string{"ZERO_WRAPPER_SIMULATE_TTY=1"}, "--version")
+	if exitCode != wrapperExitSuccess {
+		t.Fatalf("wrapper exit = %d; stdout=%s stderr=%s", exitCode, stdout, stderr)
+	}
+	if got := strings.TrimSpace(stdout); got != "legacy-zero --version" {
+		t.Fatalf("stdout = %q, want the legacy build to run normally with the notice kept off stdout", got)
+	}
+	uninstall := strings.Index(stderr, "npm uninstall -g @gitlawb/zero")
+	install := strings.Index(stderr, "npm install -g @twigpine/zero")
+	if uninstall < 0 || install < 0 || uninstall > install {
+		t.Fatalf("stderr does not give the switch steps, uninstall first: %q", stderr)
+	}
+}
+
+func TestNodeWrapperLegacyNoticeStaysOutOfTheWay(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock executable fixture uses a POSIX shell script")
+	}
+	for _, tc := range []struct {
+		name, packageName string
+		env               []string
+		args              []string
+	}{
+		// Scripts capturing stderr must not see a new line in it.
+		{name: "not a terminal", packageName: "@gitlawb/zero", args: []string{"--version"}},
+		// The Go side prints the same note for these; once is enough.
+		{name: "zero upgrade", packageName: "@gitlawb/zero", env: []string{"ZERO_WRAPPER_SIMULATE_TTY=1"}, args: []string{"upgrade"}},
+		{name: "zero update", packageName: "@gitlawb/zero", env: []string{"ZERO_WRAPPER_SIMULATE_TTY=1"}, args: []string{"update", "--check"}},
+		{name: "current package", packageName: "@twigpine/zero", env: []string{"ZERO_WRAPPER_SIMULATE_TTY=1"}, args: []string{"--version"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wrapperPath := copyWrapperFixture(t)
+			root := filepath.Dir(filepath.Dir(wrapperPath))
+			writeFixtureFile(t, filepath.Join(root, "package.json"), `{"type":"module","name":"`+tc.packageName+`"}`, 0o644)
+			writePlatformPackageFixture(t, root, tc.packageName, "zero")
+			stdout, stderr, exitCode := runWrapperFixtureWithEnv(t, wrapperPath, tc.env, tc.args...)
+			if exitCode != wrapperExitSuccess {
+				t.Fatalf("wrapper exit = %d; stdout=%s stderr=%s", exitCode, stdout, stderr)
+			}
+			if strings.TrimSpace(stderr) != "" {
+				t.Fatalf("stderr = %q, want nothing", stderr)
+			}
+		})
+	}
+}
+
 // writePlatformPackageFixture installs a fake platform payload where npm puts
 // the wrapper's optionalDependency alias <packageName>-<platform>-<arch>; its
 // zero binary prints label followed by its arguments.

@@ -53,11 +53,6 @@ var (
 // `npm install -g` for npm-managed installs, or by downloading, verifying,
 // and atomically replacing the binary for standalone installs.
 func Apply(ctx context.Context, options Options) (ApplyResult, error) {
-	checkResult, err := Check(ctx, options)
-	if err != nil {
-		return ApplyResult{}, err
-	}
-
 	executablePath, err := currentExecutable()
 	if err != nil {
 		return ApplyResult{}, fmt.Errorf("resolve current executable: %w", err)
@@ -66,6 +61,18 @@ func Apply(ctx context.Context, options Options) (ApplyResult, error) {
 		executablePath = resolved
 	}
 	method := DetectInstallMethod(executablePath)
+	if method == InstallMethodNpmLegacy {
+		// Nothing newer is ever published under the old name, so npm would
+		// reinstall this same build and the update would report success. Refused
+		// before the release check because the answer does not depend on it, and
+		// it has to reach someone who is offline too.
+		return ApplyResult{}, errors.New(legacyPackageSwitchMessage())
+	}
+
+	checkResult, err := Check(ctx, options)
+	if err != nil {
+		return ApplyResult{}, err
+	}
 	// Only the standalone path rewrites the binary in place, so only it needs the
 	// recovery state. npm and Homebrew hand the work to the package manager.
 	if method == InstallMethodStandalone {

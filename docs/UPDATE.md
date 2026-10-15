@@ -28,7 +28,11 @@ them explicitly; `zero upgrade` is `zero update` with `--apply` implied.
 
 `--apply` installs the update in place:
 
-- npm installs delegate to `npm install -g @twigpine/zero@latest`.
+- npm installs delegate to `npm install -g @twigpine/zero@latest`. An install
+  of the old `@gitlawb/zero` package refuses, without a release check, and
+  prints the steps to switch to `@twigpine/zero` (see
+  [INSTALL.md](INSTALL.md#moving-from-gitlawbzero)); `--check` prints them
+  too.
 - Standalone installs download the release archive, verify its checksum,
   extract it, and atomically replace the running binary plus any installed
   optional sandbox helpers.

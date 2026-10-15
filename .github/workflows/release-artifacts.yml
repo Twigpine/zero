@@ -211,3 +211,50 @@ jobs:
       - name: Publish npm packages
         shell: bash
         run: scripts/npm/publish-packages.sh dist/npm
+
+      # One final release under the pre-rename name @gitlawb/zero. Zero 0.9.0's
+      # `zero upgrade` runs `npm install -g @gitlawb/zero@latest`, and people
+      # reinstall the old name from shell history and old tutorials, so this
+      # release is published once more under it: the same verified artifacts,
+      # assembled as @gitlawb/zero, which the binary and wrapper recognise and
+      # answer with the switch steps (docs/NPM_PACKAGING.md). Runs after the
+      # @twigpine/zero publish, so the package it points at already exists.
+      #
+      # The gate keeps this to a single release: it is owed only while the old
+      # name's latest is still the last pre-rename version, or is this version
+      # (a re-run after it went out). After this release, `npm deprecate` the
+      # old package and delete these two steps.
+      - name: Check whether the final @gitlawb/zero release is owed
+        id: legacy-name
+        shell: bash
+        env:
+          LAST_PRE_RENAME_VERSION: 0.9.0
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          latest=""
+          for attempt in 1 2 3; do
+            latest="$(npm view @gitlawb/zero dist-tags.latest 2>/dev/null || true)"
+            if [ -n "$latest" ]; then
+              break
+            fi
+            sleep 10
+          done
+          if [ -z "$latest" ]; then
+            echo "::error::could not read the latest dist-tag of @gitlawb/zero from the registry" >&2
+            exit 1
+          fi
+          if [ "$latest" = "$LAST_PRE_RENAME_VERSION" ] || [ "$latest" = "$version" ]; then
+            owed=true
+          else
+            owed=false
+          fi
+          echo "@gitlawb/zero latest is ${latest}; final release under the old name owed: ${owed}"
+          echo "owed=${owed}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the final @gitlawb/zero release
+        if: ${{ steps.legacy-name.outputs.owed == 'true' }}
+        shell: bash
+        run: |
+          node scripts/npm/build-platform-packages.mjs \
+            --artifacts-dir dist/artifacts --out-dir dist/npm-legacy --package-name @gitlawb/zero
+          scripts/npm/publish-packages.sh dist/npm-legacy

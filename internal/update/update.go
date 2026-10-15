@@ -233,6 +233,10 @@ func Format(result Result) string {
 		"Latest release: " + result.ReleaseURL,
 	}
 	lines = appendAssetLines(lines, result.ReleaseAsset)
+	if result.installMethod == InstallMethodNpmLegacy {
+		// Up to date today, but the next release will not reach this install.
+		lines = append(lines, legacyPackageSwitchMessage())
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -321,6 +325,11 @@ func upgradeGuidance(asset AssetCheck, sourceFlag string, installMethod InstallM
 		// about a different target the answer belongs to that other machine, and
 		// `brew upgrade zero` would change this one instead.
 		return "This Homebrew-managed installation is updated with `brew upgrade zero`. `zero upgrade` refuses here, because replacing the keg binary would leave Homebrew's records describing a version that is no longer installed."
+	}
+	if installMethod == InstallMethodNpmLegacy {
+		// Placed like the Homebrew answer above, and for the same reason: it is a
+		// property of the install on this machine, and `zero upgrade` refuses it.
+		return legacyPackageSwitchMessage()
 	}
 	if sourceFlag != "" {
 		if installMethod == InstallMethodNpm {

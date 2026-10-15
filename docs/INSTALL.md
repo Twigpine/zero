@@ -86,6 +86,11 @@ yarn global remove @gitlawb/zero && yarn global add @twigpine/zero
 Config, sessions, logins, and plugins live in your user config and home
 directories, not in the package, so they carry over unchanged.
 
+0.10.0 was also published once as `@gitlawb/zero`, so an old install that
+updates lands on a working build. That build prints these steps when `zero`
+exits in a terminal, and `zero upgrade` and `zero update --check` print them
+too.
+
 ## Linux And macOS Script
 
 Install the latest release:
@@ -329,7 +334,10 @@ See the [update guide](UPDATE.md) for update modes, flags, and platform details.
 overwriting a binary a package manager owns leaves that manager describing a
 version that is no longer there:
 
-- **npm**: runs `npm install -g @twigpine/zero@latest` for you.
+- **npm**: runs `npm install -g @twigpine/zero@latest` for you. An install of
+  the old `@gitlawb/zero` package refuses instead and prints the steps in
+  [Moving from @gitlawb/zero](#moving-from-gitlawbzero): that name gets no
+  further releases, so npm would only reinstall the same version.
 - **Homebrew**: refuses, and tells you to run `brew upgrade zero`. Replacing the
   keg binary directly would be reverted by the next `brew upgrade` or
   `brew reinstall`.
