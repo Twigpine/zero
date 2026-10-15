@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Gitlawb/zero/internal/config"
@@ -44,11 +45,13 @@ func TestDiscoverCatalogFallsBackWhenLiveIDsMismatch(t *testing.T) {
 // Onboarding keeps the default selected only when it matches a live id, so the
 // preset's default must be an id, or setup lands on whatever model sorts first.
 func TestDiscoverCatalogConcentrateKeepsDefaultModelInLiveList(t *testing.T) {
+	var liveHits atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api.json":
 			_, _ = w.Write([]byte(`{}`))
 		case "/v1/models":
+			liveHits.Add(1)
 			_, _ = w.Write([]byte(`{"object":"list","data":[
 				{"id":"claude-fable-5","slug":"claude-fable-5","max_input_tokens":1000000},
 				{"id":"deepseek-v4-flash-0731","slug":"deepseek-v4-flash-0731","aliases":["deepseek-v4-flash"],"max_input_tokens":1048576},
@@ -73,11 +76,17 @@ func TestDiscoverCatalogConcentrateKeepsDefaultModelInLiveList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DiscoverCatalog returned error: %v", err)
 	}
-	ids := modelIDs(models)
-	for _, id := range ids {
-		if id == provider.DefaultModel {
-			return
-		}
+	if liveHits.Load() == 0 {
+		t.Fatal("DiscoverCatalog never requested /v1/models")
 	}
-	t.Fatalf("default model %q missing from discovered models %q", provider.DefaultModel, strings.Join(ids, ","))
+	// claude-fable-5 is only in the live response, never in the curated list:
+	// finding it proves the result is the live list, not the curated fallback
+	// (which also contains the default and would pass on its own).
+	got := "," + strings.Join(modelIDs(models), ",") + ","
+	if !strings.Contains(got, ",claude-fable-5,") {
+		t.Fatalf("models = %q, want the live Concentrate list (with live-only claude-fable-5), not the curated fallback", strings.Trim(got, ","))
+	}
+	if !strings.Contains(got, ","+provider.DefaultModel+",") {
+		t.Fatalf("default model %q missing from discovered models %q", provider.DefaultModel, strings.Trim(got, ","))
+	}
 }
