@@ -549,3 +549,54 @@ func TestRedactString_QueryGateIsolatedFromAssignAndTextSecrets(t *testing.T) {
 		t.Fatalf("query gate did not insert marker: %q", got)
 	}
 }
+
+func TestRedactString_UnicodeFoldedHeaderNames(t *testing.T) {
+	tests := []struct {
+		name   string
+		in     string
+		leaked string
+	}{
+		{
+			name:   "x-api-key with kelvin sign U+212A",
+			in:     "X-API-\u212aey: opaque-header-secret-1",
+			leaked: "opaque-header-secret-1",
+		},
+		{
+			name:   "set-cookie with long s U+017F",
+			in:     "\u017fet-cookie: session=opaque-cookie-secret-2",
+			leaked: "opaque-cookie-secret-2",
+		},
+		{
+			name:   "containsCaseInsensitive kelvin sign U+212A",
+			in:     "Authori\u212aation",
+			leaked: "",
+		},
+		{
+			name:   "containsCaseInsensitive long s U+017F",
+			in:     "\u017fet-cookie",
+			leaked: "",
+		},
+	}
+
+	if !containsCaseInsensitive("Authori\u212aation", "authorikation") {
+		t.Fatal("containsCaseInsensitive failed to fold U+212A KELVIN SIGN to 'k'")
+	}
+	if !containsCaseInsensitive("\u017fet-cookie", "set-cookie") {
+		t.Fatal("containsCaseInsensitive failed to fold U+017F LONG S to 's'")
+	}
+
+	for _, tc := range tests {
+		if tc.leaked == "" {
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			got := RedactString(tc.in, Options{})
+			if strings.Contains(got, tc.leaked) {
+				t.Fatalf("leaked %q in %q", tc.leaked, got)
+			}
+			if !strings.Contains(got, RedactedSecret) {
+				t.Fatalf("expected %q in %q", RedactedSecret, got)
+			}
+		})
+	}
+}

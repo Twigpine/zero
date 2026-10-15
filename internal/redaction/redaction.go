@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -354,20 +355,50 @@ func containsCaseInsensitive(s, substr string) bool {
 		return false
 	}
 	for i := 0; i <= len(s)-len(substr); i++ {
-		match := true
-		for j := 0; j < len(substr); j++ {
-			c1 := s[i+j]
-			c2 := substr[j]
-			if c1 != c2 && toLowerASCII(c1) != toLowerASCII(c2) {
-				match = false
-				break
-			}
-		}
-		if match {
+		if hasFoldedASCIIPrefix(s[i:], substr) {
 			return true
 		}
 	}
 	return false
+}
+
+// hasFoldedASCIIPrefix reports whether s starts with substr under Unicode
+// simple case folding (assuming substr is lowercase ASCII). This ensures that
+// non-ASCII runes that fold to ASCII in (?i) regular expressions (U+017F 'ſ' ->
+// 's' and U+212A 'K' -> 'k') pass the fast-path gate with zero allocations.
+func hasFoldedASCIIPrefix(s, substr string) bool {
+	si := 0
+	for j := 0; j < len(substr); j++ {
+		if si >= len(s) {
+			return false
+		}
+		c2 := toLowerASCII(substr[j])
+		c1 := s[si]
+		if c1 < utf8.RuneSelf {
+			if c1 != c2 && toLowerASCII(c1) != c2 {
+				return false
+			}
+			si++
+			continue
+		}
+		r, width := utf8.DecodeRuneInString(s[si:])
+		if foldRuneToLowerASCII(r) != c2 {
+			return false
+		}
+		si += width
+	}
+	return true
+}
+
+func foldRuneToLowerASCII(r rune) byte {
+	switch r {
+	case '\u017f': // LATIN SMALL LETTER LONG S
+		return 's'
+	case '\u212a': // KELVIN SIGN
+		return 'k'
+	default:
+		return 0
+	}
 }
 
 func toLowerASCII(c byte) byte {
