@@ -235,9 +235,10 @@ type Store struct {
 	sessionLocks map[string]*sync.Mutex
 	idCounter    atomic.Uint64
 
-	// leases are the sessions this Store holds open. See Hold.
+	// leases are the sessions this Store holds open, with the path of each
+	// lease file. The files themselves belong to the process. See Hold.
 	leasesMu sync.Mutex
-	leases   map[string]*os.File
+	leases   map[string]string
 }
 
 var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)

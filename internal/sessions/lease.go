@@ -143,21 +143,15 @@ func (store *Store) hold(sessionID string) (busy bool) {
 	if _, held := store.leases[sessionID]; held {
 		return false
 	}
-	// Creates the lease file, never the directory: a session that is gone stays
-	// gone.
-	file, err := openLeaseFile(store.leasePath(sessionID))
-	if err != nil {
-		return false
-	}
-	locked, err := tryLockLease(file, false)
-	if err != nil || !locked {
-		_ = file.Close()
-		return err == nil
+	path := store.leasePath(sessionID)
+	held, busy := takeProcessLease(path)
+	if !held {
+		return busy
 	}
 	if store.leases == nil {
-		store.leases = map[string]*os.File{}
+		store.leases = map[string]string{}
 	}
-	store.leases[sessionID] = file
+	store.leases[sessionID] = path
 	return false
 }
 
@@ -165,17 +159,80 @@ func (store *Store) hold(sessionID string) (busy bool) {
 // yet: a process holds every session it has touched until it exits, which
 // releases every lease with it, and tests use Release to stand in for that
 // exit. A long-lived process that switches sessions, like the TUI on /new, could
-// call it for the session it leaves.
+// call it for the session it leaves. The lease itself goes once no other Store
+// in the process holds it either.
 func (store *Store) Release(sessionID string) {
 	store.leasesMu.Lock()
 	defer store.leasesMu.Unlock()
-	file, held := store.leases[sessionID]
+	path, held := store.leases[sessionID]
 	if !held {
 		return
 	}
 	delete(store.leases, sessionID)
-	unlockLease(file)
-	_ = file.Close()
+	giveBackProcessLease(path)
+}
+
+// processLeases are the lease files this process holds, by path.
+//
+// A LEASE IS THE PROCESS'S, NOT THE STORE'S. A Store can go out of scope while
+// the process goes on using what it holds: PrepareExec opens one for an exec run,
+// takes the calling or forked session's lease on it, and the run never touches
+// that Store again. Had the file stayed with the Store, the garbage collector
+// would close it once the Store was unreachable, which drops the lock, and prune
+// could remove a session the run still uses. So every Store holding a session
+// shares one file here, and the file is closed only when the last of them
+// releases it.
+var processLeases = struct {
+	sync.Mutex
+	files map[string]*processLease
+}{files: map[string]*processLease{}}
+
+type processLease struct {
+	file    *os.File
+	holders int
+}
+
+// takeProcessLease adds a holder to the process's lease on path, taking the lease
+// first when nothing in the process holds it. It reports busy when the lease
+// could not be taken because prune holds it exclusively right now.
+func takeProcessLease(path string) (held bool, busy bool) {
+	processLeases.Lock()
+	defer processLeases.Unlock()
+	if lease := processLeases.files[path]; lease != nil {
+		lease.holders++
+		return true, false
+	}
+	// Creates the lease file, never the directory: a session that is gone stays
+	// gone.
+	file, err := openLeaseFile(path)
+	if err != nil {
+		return false, false
+	}
+	locked, err := tryLockLease(file, false)
+	if err != nil || !locked {
+		_ = file.Close()
+		return false, err == nil
+	}
+	processLeases.files[path] = &processLease{file: file, holders: 1}
+	return true, false
+}
+
+// giveBackProcessLease removes a holder from the process's lease on path, and
+// unlocks and closes the file once no holder is left.
+func giveBackProcessLease(path string) {
+	processLeases.Lock()
+	defer processLeases.Unlock()
+	lease := processLeases.files[path]
+	if lease == nil {
+		return
+	}
+	lease.holders--
+	if lease.holders > 0 {
+		return
+	}
+	delete(processLeases.files, path)
+	unlockLease(lease.file)
+	_ = lease.file.Close()
 }
 
 // HoldExclusive takes sessionID's lease exclusively without waiting, which is how
