@@ -253,13 +253,27 @@ func TestCommandAgainstRealGit(t *testing.T) {
 	outside := t.TempDir()
 	// Both share a parent; stop git from finding an enclosing repository there.
 	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(repo))
+	// Run as if from a hook in another repository. The setup below has to reach
+	// repo, as Command does, and never the repository these name.
+	decoy := t.TempDir()
+	t.Setenv("GIT_DIR", filepath.Join(decoy, ".git"))
+	t.Setenv("GIT_WORK_TREE", decoy)
+	decoyUntouched := func(step string) {
+		t.Helper()
+		if _, err := os.Stat(filepath.Join(decoy, ".git")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s reached the repository GIT_DIR names instead of repo: %v", step, err)
+		}
+	}
 	git := func(args ...string) {
 		t.Helper()
-		if output, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+		command := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		command.Env = environment()
+		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, output)
 		}
 	}
 	git("init", "-q")
+	decoyUntouched("git init")
 	gitRead := readConfig
 	var read []string
 	readConfig = func(ctx context.Context, dir string, env []string, scope string, pattern string) ([]configEntry, error) {
@@ -283,6 +297,7 @@ func TestCommandAgainstRealGit(t *testing.T) {
 		t.Log("skipping the per-worktree case: it needs git 2.20 for extensions.worktreeConfig")
 	} else {
 		git("config", "extensions.worktreeConfig", "true")
+		decoyUntouched("git config")
 		read = nil
 		if _, err := Command(context.Background(), repo, "status"); err != nil {
 			t.Fatalf("Command with per-worktree config on: %v", err)
