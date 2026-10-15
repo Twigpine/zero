@@ -880,6 +880,30 @@ func providerSetupDeps(configPath string) appDeps {
 	}
 }
 
+// providerEnvSetupDeps is providerSetupDeps plus a REAL resolver pinned to a
+// temporary user config and a fixed environment. providerSetupDeps only
+// redirects WRITES, so without this the `providers` subcommands resolve against
+// the developer's own config.json and ambient provider variables: a test that
+// exports OPENAI_API_KEY passes on a machine whose real config has an active
+// provider and fails on one that also has GEMINI_API_KEY exported (issue
+// #1130). Passing Env makes resolution fully hermetic — config.envValue prefers
+// the map over os.Getenv whenever it is non-nil.
+func providerEnvSetupDeps(t *testing.T, configPath string, env map[string]string) appDeps {
+	t.Helper()
+
+	cwd := t.TempDir()
+	deps := providerSetupDeps(configPath)
+	deps.getwd = func() (string, error) { return cwd, nil }
+	deps.resolveConfig = func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+		return config.Resolve(config.ResolveOptions{
+			UserConfigPath: configPath,
+			Env:            env,
+			Overrides:      overrides,
+		})
+	}
+	return deps
+}
+
 func readFileConfig(t *testing.T, path string) config.FileConfig {
 	t.Helper()
 

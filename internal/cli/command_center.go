@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -223,6 +224,24 @@ func resolveCommandCenterConfig(stderr io.Writer, deps appDeps) (config.Resolved
 	}
 	resolved, err := deps.resolveConfig(workspaceRoot, config.Overrides{})
 	if err != nil {
+		// A missing active provider must not stop the `providers` subcommands.
+		// Several of them only need the provider LIST: `list`, `use`, `remove`
+		// and `rename` all answer for profiles that come from the environment
+		// (OPENAI_API_KEY, GEMINI_API_KEY, ...), and an env-derived profile is
+		// never marked active in config.json. The resolver picks the active
+		// provider by itself only when there is exactly one, so two env
+		// providers (or one key plus one base URL) made every subcommand exit
+		// with `no active provider configured: active provider "" not found`
+		// (issue #1130). It still returns the successfully normalized list
+		// alongside the error, so adopt a usable entry from it the way the
+		// interactive TUI does in runInteractiveTUIWithSetup.
+		if errors.Is(err, config.ErrNoActiveProvider) {
+			if usable, ok := firstUsableProvider(resolved.Providers); ok {
+				resolved.Provider = usable
+				resolved.ActiveProvider = usable.Name
+				return resolved, exitSuccess
+			}
+		}
 		return config.ResolvedConfig{}, writeAppError(stderr, err.Error(), exitProvider)
 	}
 	return resolved, exitSuccess

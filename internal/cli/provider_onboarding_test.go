@@ -189,12 +189,11 @@ func TestRunProvidersUseSurfacesMalformedConfig(t *testing.T) {
 }
 
 func TestRunProvidersUseEnvDerivedJSONIncludesConfigPath(t *testing.T) {
-	t.Setenv("OPENAI_API_KEY", "sk-env")
 	var stdout, stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
 
-	exitCode := runWithDeps([]string{"providers", "use", "openai", "--json"}, &stdout, &stderr, providerSetupDeps(configPath))
+	exitCode := runWithDeps([]string{"providers", "use", "openai", "--json"}, &stdout, &stderr, providerEnvSetupDeps(t, configPath, map[string]string{"OPENAI_API_KEY": "sk-env"}))
 
 	if exitCode != exitSuccess {
 		t.Fatalf("exit code = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
@@ -212,12 +211,11 @@ func TestRunProvidersUseEnvDerivedJSONIncludesConfigPath(t *testing.T) {
 }
 
 func TestRunProvidersRemoveEnvDerivedJSONKeepsSchema(t *testing.T) {
-	t.Setenv("OPENAI_API_KEY", "sk-env")
 	var stdout, stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
 
-	exitCode := runWithDeps([]string{"providers", "remove", "openai", "--json"}, &stdout, &stderr, providerSetupDeps(configPath))
+	exitCode := runWithDeps([]string{"providers", "remove", "openai", "--json"}, &stdout, &stderr, providerEnvSetupDeps(t, configPath, map[string]string{"OPENAI_API_KEY": "sk-env"}))
 
 	if exitCode != exitSuccess {
 		t.Fatalf("exit code = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
@@ -237,12 +235,11 @@ func TestRunProvidersRemoveEnvDerivedJSONKeepsSchema(t *testing.T) {
 }
 
 func TestRunProvidersRenameEnvDerivedExplainsNoSavedProfile(t *testing.T) {
-	t.Setenv("OPENAI_API_KEY", "sk-env")
 	var stdout, stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
 
-	exitCode := runWithDeps([]string{"providers", "rename", "openai", "renamed"}, &stdout, &stderr, providerSetupDeps(configPath))
+	exitCode := runWithDeps([]string{"providers", "rename", "openai", "renamed"}, &stdout, &stderr, providerEnvSetupDeps(t, configPath, map[string]string{"OPENAI_API_KEY": "sk-env"}))
 
 	if exitCode != exitSuccess {
 		t.Fatalf("exit code = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
@@ -253,12 +250,11 @@ func TestRunProvidersRenameEnvDerivedExplainsNoSavedProfile(t *testing.T) {
 }
 
 func TestRunProvidersRenameEnvDerivedJSONKeepsSchema(t *testing.T) {
-	t.Setenv("OPENAI_API_KEY", "sk-env")
 	var stdout, stderr bytes.Buffer
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
 
-	exitCode := runWithDeps([]string{"providers", "rename", "openai", "renamed", "--json"}, &stdout, &stderr, providerSetupDeps(configPath))
+	exitCode := runWithDeps([]string{"providers", "rename", "openai", "renamed", "--json"}, &stdout, &stderr, providerEnvSetupDeps(t, configPath, map[string]string{"OPENAI_API_KEY": "sk-env"}))
 
 	if exitCode != exitSuccess {
 		t.Fatalf("exit code = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
@@ -273,6 +269,78 @@ func TestRunProvidersRenameEnvDerivedJSONKeepsSchema(t *testing.T) {
 	}
 	if payload.Renamed != nil || payload.ConfigPath != configPath || payload.Persisted {
 		t.Fatalf("unexpected payload: %+v", payload)
+	}
+}
+
+// Two env-derived providers and no saved active provider is the case issue
+// #1130 reports: the resolver only elects an active provider by itself when
+// there is exactly one, so `providers list/use/remove/rename` used to exit 3
+// with `active provider "" not found` before doing anything.
+func TestRunProvidersSubcommandsWithMultipleEnvDerivedProviders(t *testing.T) {
+	env := map[string]string{
+		"OPENAI_API_KEY": "sk-env",
+		"GEMINI_API_KEY": "gem-env",
+	}
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "list", args: []string{"providers", "list"}, want: "openai"},
+		{name: "list json", args: []string{"providers", "list", "--json"}, want: `"name": "openai"`},
+		{name: "use", args: []string{"providers", "use", "openai"}, want: "is not saved in config.json"},
+		{name: "remove", args: []string{"providers", "remove", "openai"}, want: "nothing to remove there"},
+		{name: "rename", args: []string{"providers", "rename", "openai", "renamed"}, want: "no saved profile to rename"},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config.json")
+			writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
+			var stdout, stderr bytes.Buffer
+
+			exitCode := runWithDeps(tt.args, &stdout, &stderr, providerEnvSetupDeps(t, configPath, env))
+
+			if exitCode != exitSuccess {
+				t.Fatalf("exit code = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), tt.want) {
+				t.Fatalf("stdout = %q, want it to contain %q", stdout.String(), tt.want)
+			}
+		})
+	}
+}
+
+func TestRunProvidersListShowsEveryEnvDerivedProvider(t *testing.T) {
+	env := map[string]string{
+		"OPENAI_API_KEY": "sk-env",
+		"GEMINI_API_KEY": "gem-env",
+	}
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
+	var stdout, stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"providers", "list", "--json"}, &stdout, &stderr, providerEnvSetupDeps(t, configPath, env))
+
+	if exitCode != exitSuccess {
+		t.Fatalf("exit code = %d, want %d: %s", exitCode, exitSuccess, stderr.String())
+	}
+	var payload struct {
+		Providers []struct {
+			Name string `json:"name"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode JSON: %v\n%s", err, stdout.String())
+	}
+	names := make(map[string]bool, len(payload.Providers))
+	for _, provider := range payload.Providers {
+		names[provider.Name] = true
+	}
+	for _, want := range []string{"openai", "google"} {
+		if !names[want] {
+			t.Fatalf("providers = %v, want %q listed", names, want)
+		}
 	}
 }
 
