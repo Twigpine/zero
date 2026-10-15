@@ -17,11 +17,11 @@ import (
 const npmPackageName = "@twigpine/zero"
 
 // legacyNpmPackageName is the name zero was published under on npm up to
-// 0.9.0. The 0.10.0 release is published once more under it (the legacy step
-// in .github/workflows/release-artifacts.yml), so that 0.9.0's `zero upgrade`
-// and anyone still installing the old name land on a build that says where
-// the package went. Nothing is published under it after that, which is why an
-// install of it is told to switch instead of offered an update.
+// 0.9.0. The 0.10.0 release was published once more under it, so that 0.9.0's
+// `zero upgrade` and anyone still installing the old name land on a build that
+// says where the package went (docs/NPM_PACKAGING.md). Nothing is published
+// under it after that, which is why an install of it is told to switch instead
+// of offered an update.
 const legacyNpmPackageName = "@gitlawb/zero"
 
 // InstallMethod identifies how the running zero binary was installed.

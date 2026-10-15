@@ -25,10 +25,11 @@
 // CI must always assemble the full matrix, and the wrapper's
 // optionalDependencies always reference the full matrix regardless).
 //
-// --package-name assembles the same artifacts under another name. It exists
-// for the one final release under the pre-rename name @gitlawb/zero (see
-// docs/NPM_PACKAGING.md); everything in the payloads that names the package
-// follows it, so the binary and wrapper know which name they were installed as.
+// --package-name assembles the same artifacts under another name. It was
+// added for the one release (0.10.0) also published under the pre-rename name
+// @gitlawb/zero (see docs/NPM_PACKAGING.md); everything in the payloads that
+// names the package follows it, so the binary and wrapper know which name they
+// were installed as.
 //
 // Usage:
 //   node scripts/npm/build-platform-packages.mjs \

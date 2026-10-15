@@ -4,8 +4,15 @@
 # with the dist-tags docs/NPM_PACKAGING.md requires:
 #
 #   1. every platform payload, under the `platform` dist-tag, never `latest`;
-#   2. check that `latest` was not moved onto a platform version;
-#   3. the wrapper, which takes `latest`, then confirm `latest` is its version.
+#   2. wait until npm shows every platform version, then check that `latest`
+#      was not moved onto one;
+#   3. the wrapper, which takes `latest`, then wait until `latest` is its
+#      version.
+#
+# The waits exist because npm applies a publish asynchronously: `npm publish`
+# returns once the upload is accepted, and the version can appear minutes
+# later (ten minutes for a platform payload of 0.10.0). Ordering the uploads
+# alone would still let the wrapper appear first, with aliases that 404.
 #
 # The package name comes from the assembled wrapper's package.json, so the
 # same script publishes whatever name the payloads were built under.
@@ -19,7 +26,9 @@
 # Usage: scripts/npm/publish-packages.sh <npm-dir>
 #
 # Auth comes from the environment (npm OIDC trusted publishing in CI).
-# ZERO_NPM_PUBLISH_RETRY_DELAY overrides the seconds between dist-tag lookups.
+# ZERO_NPM_PUBLISH_RETRY_DELAY overrides the seconds between registry lookups,
+# and ZERO_NPM_PUBLISH_WAIT_TIMEOUT the seconds to wait for npm to apply the
+# publishes (default 1800).
 set -euo pipefail
 
 fail() {
@@ -40,6 +49,7 @@ name="$(manifest_field "$wrapper_dir" name)"
 version="$(manifest_field "$wrapper_dir" version)"
 [ -n "$name" ] && [ -n "$version" ] || fail "${wrapper_dir}/package.json has no name or version"
 delay="${ZERO_NPM_PUBLISH_RETRY_DELAY:-5}"
+wait_timeout="${ZERO_NPM_PUBLISH_WAIT_TIMEOUT:-1800}"
 
 # The wrapper pins every platform version exactly, so a wrapper whose aliases
 # do not match the payloads beside it would install aliases that 404. Check
@@ -105,16 +115,49 @@ publish() {
   (cd "$dir" && npm publish --access public --ignore-scripts "$@")
 }
 
+# Unlike already_published, these lookups may fail without stopping the job:
+# while npm has not applied a publish, an error or an E404 both mean "not
+# yet", and the deadline bounds the wait.
+version_visible() {
+  [ "$(npm view "${name}@$1" version 2>/dev/null || true)" = "$1" ]
+}
+
+latest_is() {
+  [ "$(npm view "$name" dist-tags.latest 2>/dev/null || true)" = "$1" ]
+}
+
+# One deadline covers every wait in this run, so the job cannot wait
+# wait_timeout once per version.
+deadline=$((SECONDS + wait_timeout))
+
+# wait_until <what we are waiting for> <command...>
+wait_until() {
+  local what="$1"
+  shift
+  until "$@"; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      fail "npm accepted the upload but still does not show ${what} after ${wait_timeout}s. Re-run once it does: versions already on the registry are skipped."
+    fi
+    sleep "$delay"
+  done
+}
+
 for dir in "${platform_dirs[@]}"; do
   dir="${dir%/}"
   publish "$dir" "$(manifest_field "$dir" version)" --tag platform
 done
 
+for dir in "${platform_dirs[@]}"; do
+  platform_version="$(manifest_field "${dir%/}" version)"
+  wait_until "${name}@${platform_version}" version_visible "$platform_version"
+  echo "${name}@${platform_version} is on the registry."
+done
+
 # Platform versions are semver prereleases of the wrapper version, so a
 # platform publish that took `latest` would make a plain install deliver a
 # payload with no bin. Stop before the wrapper goes out. A failed lookup is
-# tolerated (registry lag, or no `latest` yet on a package's first release):
-# failing here would strand the platform payloads without their wrapper.
+# tolerated (no `latest` yet on a package's first release): failing here would
+# strand the platform payloads without their wrapper.
 latest="$(npm view "$name" dist-tags.latest || true)"
 case "$latest" in
   "${version}-"*)
@@ -125,13 +168,5 @@ echo "dist-tag latest is ${latest:-unset} (unchanged by the platform publishes).
 
 publish "$wrapper_dir" "$version"
 
-# Registry metadata can lag a publish by a few seconds.
-for _ in 1 2 3 4 5; do
-  latest="$(npm view "$name" dist-tags.latest || true)"
-  if [ "$latest" = "$version" ]; then
-    echo "dist-tag latest is ${version}."
-    exit 0
-  fi
-  sleep "$delay"
-done
-fail "dist-tag latest of ${name} is ${latest:-unset}, expected ${version} after the wrapper publish."
+wait_until "${name}@${version} as the latest dist-tag" latest_is "$version"
+echo "dist-tag latest is ${version}."
