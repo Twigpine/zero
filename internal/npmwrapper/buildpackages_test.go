@@ -36,7 +36,7 @@ func TestBuildPlatformPackagesAssemblesPublishPayloads(t *testing.T) {
 	writeFixtureFile(t, filepath.Join(staging, "zero-linux-sandbox"), "#!/usr/bin/env sh\n", 0o755)
 	writeFixtureFile(t, filepath.Join(staging, "zero-seccomp"), "#!/usr/bin/env sh\n", 0o755)
 	// Wrapper-owned files the platform package must exclude.
-	writeFixtureFile(t, filepath.Join(staging, "package.json"), `{"name":"@gitlawb/zero"}`, 0o644)
+	writeFixtureFile(t, filepath.Join(staging, "package.json"), `{"name":"@twigpine/zero"}`, 0o644)
 	writeFixtureFile(t, filepath.Join(staging, "README.md"), "readme\n", 0o644)
 	writeFixtureFile(t, filepath.Join(staging, "VERSION"), version+"\n", 0o644)
 	writeFixtureFile(t, filepath.Join(staging, "bin", "zero.js"), "#!/usr/bin/env node\n", 0o755)
@@ -101,8 +101,8 @@ func TestBuildPlatformPackagesAssemblesPublishPayloads(t *testing.T) {
 		Scripts map[string]string
 	}
 	unmarshalJSONFile(t, filepath.Join(platformDir, "package.json"), &platformPkg)
-	if platformPkg.Name != "@gitlawb/zero" {
-		t.Fatalf("platform package name = %q, want @gitlawb/zero (same-name suffixed versions share one trusted publisher)", platformPkg.Name)
+	if platformPkg.Name != "@twigpine/zero" {
+		t.Fatalf("platform package name = %q, want @twigpine/zero (same-name suffixed versions share one trusted publisher)", platformPkg.Name)
 	}
 	if want := version + "-linux-x64"; platformPkg.Version != want {
 		t.Fatalf("platform package version = %q, want %q", platformPkg.Version, want)
@@ -198,11 +198,11 @@ func TestBuildPlatformPackagesAssemblesPublishPayloads(t *testing.T) {
 		t.Fatalf("published wrapper has dependencies: %v (helpers are vendored in the platform payloads)", wrapperPkg.Dependencies)
 	}
 	wantAliases := map[string]string{
-		"@gitlawb/zero-darwin-arm64": "npm:@gitlawb/zero@" + version + "-darwin-arm64",
-		"@gitlawb/zero-darwin-x64":   "npm:@gitlawb/zero@" + version + "-darwin-x64",
-		"@gitlawb/zero-linux-arm64":  "npm:@gitlawb/zero@" + version + "-linux-arm64",
-		"@gitlawb/zero-linux-x64":    "npm:@gitlawb/zero@" + version + "-linux-x64",
-		"@gitlawb/zero-win32-x64":    "npm:@gitlawb/zero@" + version + "-win32-x64",
+		"@twigpine/zero-darwin-arm64": "npm:@twigpine/zero@" + version + "-darwin-arm64",
+		"@twigpine/zero-darwin-x64":   "npm:@twigpine/zero@" + version + "-darwin-x64",
+		"@twigpine/zero-linux-arm64":  "npm:@twigpine/zero@" + version + "-linux-arm64",
+		"@twigpine/zero-linux-x64":    "npm:@twigpine/zero@" + version + "-linux-x64",
+		"@twigpine/zero-win32-x64":    "npm:@twigpine/zero@" + version + "-win32-x64",
 	}
 	if len(wrapperPkg.Optional) != len(wantAliases) {
 		t.Fatalf("wrapper optionalDependencies = %v, want %v", wrapperPkg.Optional, wantAliases)

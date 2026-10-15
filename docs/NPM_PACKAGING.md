@@ -1,6 +1,6 @@
 # npm packaging
 
-How `@gitlawb/zero` is put together on npm, why it is shaped this way, and the
+How `@twigpine/zero` is put together on npm, why it is shaped this way, and the
 rules the release pipeline must follow. Read this before touching
 `package.json`, `bin/zero.js`, `scripts/postinstall.mjs`,
 `scripts/npm/build-platform-packages.mjs`, or the npm-publish steps of
@@ -8,7 +8,7 @@ rules the release pipeline must follow. Read this before touching
 
 ## Goals
 
-A `npm install -g @gitlawb/zero` must be **silent and self-contained**:
+A `npm install -g @twigpine/zero` must be **silent and self-contained**:
 
 - No `EBADENGINE` warnings — ours or from any package in the dependency tree.
 - No install scripts anywhere in the tree, so npm's `allow-scripts` gating,
@@ -25,15 +25,15 @@ The model is the one used by Codex, esbuild, and Biome: a tiny wrapper package
 plus per-platform payloads carrying the native binaries.
 
 ```
-@gitlawb/zero                    <- wrapper: bin/zero.js + optionalDependencies
-├─ @gitlawb/zero-darwin-arm64 -> npm:@gitlawb/zero@{version}-darwin-arm64
-├─ @gitlawb/zero-darwin-x64   -> npm:@gitlawb/zero@{version}-darwin-x64
-├─ @gitlawb/zero-linux-arm64  -> npm:@gitlawb/zero@{version}-linux-arm64
-├─ @gitlawb/zero-linux-x64    -> npm:@gitlawb/zero@{version}-linux-x64
-└─ @gitlawb/zero-win32-x64    -> npm:@gitlawb/zero@{version}-win32-x64
+@twigpine/zero                    <- wrapper: bin/zero.js + optionalDependencies
+├─ @twigpine/zero-darwin-arm64 -> npm:@twigpine/zero@{version}-darwin-arm64
+├─ @twigpine/zero-darwin-x64   -> npm:@twigpine/zero@{version}-darwin-x64
+├─ @twigpine/zero-linux-arm64  -> npm:@twigpine/zero@{version}-linux-arm64
+├─ @twigpine/zero-linux-x64    -> npm:@twigpine/zero@{version}-linux-x64
+└─ @twigpine/zero-win32-x64    -> npm:@twigpine/zero@{version}-win32-x64
 ```
 
-- The platform "packages" are **versions of the same `@gitlawb/zero` package**,
+- The platform "packages" are **versions of the same `@twigpine/zero` package**,
   published at suffixed versions (`0.4.0-linux-x64`) and referenced through
   `npm:` aliases in `optionalDependencies`. One package name means one npm
   trusted-publisher configuration — no new publish credentials per platform.
@@ -56,7 +56,7 @@ plus per-platform payloads carrying the native binaries.
 
 ### Binary resolution in `bin/zero.js`
 
-1. Resolve `@gitlawb/zero-<platform>-<arch>` and exec the `zero` binary from
+1. Resolve `@twigpine/zero-<platform>-<arch>` and exec the `zero` binary from
    it. This wins over any previously downloaded copy — the platform version is
    pinned to the wrapper release.
 2. Fall back to a binary previously downloaded next to the wrapper.
@@ -103,10 +103,22 @@ dependencies of the wrapper:
   platform binary (plus the musl variant on linux, which its launcher detects
   at runtime) — about 65 MB saved per platform package.
 
+### One package name
+
+The npm name lives in `package.json` and nothing else repeats it:
+`scripts/npm/build-platform-packages.mjs` names the wrapper, the platform
+versions, the alias names, and the alias targets from it, and `bin/zero.js`
+reads its own `package.json` to derive the alias it resolves. The Go side
+needs the name as a constant (`npmPackageName` in
+`internal/update/installmethod.go`), and a test holds it equal to
+`package.json`.
+
 ## Publishing rules (release pipeline)
 
 These are the invariants `release-artifacts.yml` must hold. Breaking the first
-one is user-visible immediately.
+one is user-visible immediately. `scripts/npm/publish-packages.sh` implements
+them, and `internal/npmwrapper/publish_test.go` runs it against a fake
+registry.
 
 1. **Platform versions must never become `latest`.** `0.4.0-linux-x64` is a
    semver *prerelease* of `0.4.0`; publishing it without an explicit
@@ -123,15 +135,21 @@ one is user-visible immediately.
    first would create a window where installs resolve aliases that 404.
 3. **Exact-version pinning.** The wrapper at `X.Y.Z` references platform
    versions `X.Y.Z-<platform>-<arch>` exactly — never ranges — so a wrapper
-   and its binaries can never skew.
+   and its binaries can never skew. The publish script refuses to start when
+   the wrapper's aliases do not match the platform payloads beside it.
 4. All publishes go through the existing npm OIDC trusted-publishing flow and
    the `npm-publish` environment gate; no tokens. Because the platform
    payloads are versions of the same package, they reuse the single
-   trusted-publisher configuration.
+   trusted-publisher configuration. npm checks provenance against
+   `package.json` `repository`, so it must name the repository the workflow
+   runs in.
+5. **Re-runs are safe.** A version already on the registry is skipped rather
+   than republished, so re-running a job that failed between the platform and
+   wrapper publishes finishes the release.
 
 `zero update` keeps working unchanged: it detects an npm install by finding a
-`package.json` named `@gitlawb/zero` next to the running binary — true inside
-a platform payload too — and updates via `npm install -g @gitlawb/zero@latest`.
+`package.json` named `@twigpine/zero` next to the running binary — true inside
+a platform payload too — and updates via `npm install -g @twigpine/zero@latest`.
 
 ## Runbook: bumping the vendored helpers
 

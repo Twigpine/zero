@@ -9,11 +9,12 @@ import (
 )
 
 // npmPackageName is the published package name for the npm distribution of
-// zero (see package.json). scripts/postinstall.mjs downloads the native
-// binary into the same directory as package.json and leaves a
-// ".zero-binary-version" marker file next to it — both are reliable signals
-// that a given executable came from an npm install.
-const npmPackageName = "@gitlawb/zero"
+// zero, and must equal the name in the repository's package.json
+// (TestNpmPackageNameMatchesPackageJSON holds the two together).
+// scripts/postinstall.mjs downloads the native binary into the same directory
+// as package.json and leaves a ".zero-binary-version" marker file next to it —
+// both are reliable signals that a given executable came from an npm install.
+const npmPackageName = "@twigpine/zero"
 
 // InstallMethod identifies how the running zero binary was installed.
 type InstallMethod string

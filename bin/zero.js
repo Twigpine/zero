@@ -1,10 +1,30 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+
+// Used only when the wrapper's own package.json cannot be read.
+const DEFAULT_PACKAGE_NAME = '@twigpine/zero';
+
+// The npm name this wrapper was published under, read from its own
+// package.json so the name lives in one place. The platform payload alias and
+// every reinstall hint below derive from it.
+function readPackageName(root) {
+  try {
+    const { name } = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+    if (typeof name === 'string' && name !== '') return name;
+  } catch {
+    // An unreadable manifest must not stop the CLI from launching.
+  }
+  return DEFAULT_PACKAGE_NAME;
+}
+
+const packageName = readPackageName(packageRoot);
 
 function zeroBinaryName(platform = process.platform) {
   return platform === 'win32' ? 'zero.exe' : 'zero';
@@ -81,10 +101,10 @@ function bunRecoveryParagraph() {
   return (
     'You installed with Bun, which does not run dependency lifecycle scripts\n' +
     'by default. Trust the package to run the blocked postinstall:\n' +
-    '  bun pm trust @gitlawb/zero       (project install)\n' +
-    '  bun pm -g trust @gitlawb/zero    (global install)\n' +
+    `  bun pm trust ${packageName}       (project install)\n` +
+    `  bun pm -g trust ${packageName}    (global install)\n` +
     'On Bun versions without `bun pm trust`, add\n' +
-    '  "trustedDependencies": ["@gitlawb/zero"]\n' +
+    `  "trustedDependencies": ["${packageName}"]\n` +
     'to your project package.json and reinstall.\n' +
     '\n'
   );
@@ -93,14 +113,14 @@ function bunRecoveryParagraph() {
 function buildFromSourceParagraph() {
   return (
     'If this platform has no prebuilt binary, build from source:\n' +
-    'https://github.com/Gitlawb/zero (go run ./cmd/zero, requires Go 1.26+).'
+    'https://github.com/Twigpine/zero (go run ./cmd/zero, requires Go 1.26+).'
   );
 }
 
 function missingBinaryContextParagraph() {
   return (
-    'Normally npm installs it as an optional dependency of @gitlawb/zero\n' +
-    `(@gitlawb/zero-${process.platform}-${process.arch}), and the wrapper can\n` +
+    `Normally npm installs it as an optional dependency of ${packageName}\n` +
+    `(${packageName}-${process.platform}-${process.arch}), and the wrapper can\n` +
     'also download it from the GitHub Release when it is missing.'
   );
 }
@@ -113,7 +133,7 @@ function missingNativeRecoveryParagraphs(postinstallScript) {
     '\n' +
     'Things to try:\n' +
     '  - reinstall without omitting optional dependencies:\n' +
-    '      npm install -g @gitlawb/zero\n' +
+    `      npm install -g ${packageName}\n` +
     '  - run the downloader manually (needs write access to the package dir):\n' +
     `      node "${postinstallScript}"\n` +
     '\n' +
@@ -182,12 +202,12 @@ function missingNativeDoctorTextReport(postinstallScript) {
   );
 }
 
-// The platform payload is a version of @gitlawb/zero itself, installed under
-// an npm: alias (see docs/NPM_PACKAGING.md). The alias name is derived from
+// The platform payload is a version of this same package, installed under an
+// npm: alias (see docs/NPM_PACKAGING.md). The alias name is derived from
 // process.platform/process.arch, so an unsupported platform simply fails to
 // resolve and we fall through to the downloader.
 function platformPackageBinary() {
-  const aliasedName = `@gitlawb/zero-${process.platform}-${process.arch}`;
+  const aliasedName = `${packageName}-${process.platform}-${process.arch}`;
   let manifestPath;
   try {
     manifestPath = createRequire(import.meta.url).resolve(`${aliasedName}/package.json`);
@@ -226,8 +246,6 @@ function downloadMissingBinary(packageRoot) {
     stdio: ['ignore', 'inherit', 'inherit'],
   });
 }
-
-const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
 function resolveNativeBinary() {
   const fromPlatformPackage = platformPackageBinary();

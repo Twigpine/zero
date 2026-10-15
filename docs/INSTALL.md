@@ -5,11 +5,11 @@ blessed one.
 
 | Method | Command | Self-update |
 | --- | --- | --- |
-| Install script (Linux, macOS) | `curl -fsSL https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.sh \| bash` | `zero upgrade` |
-| Install script (Windows) | `irm https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.ps1 \| iex` | `zero upgrade` |
-| npm | `npm install -g @gitlawb/zero` | `zero upgrade` (runs npm) |
-| Release archive | download from [Releases](https://github.com/Gitlawb/zero/releases) | `zero upgrade` |
-| mise | `mise use -g ubi:Gitlawb/zero` | `mise upgrade` |
+| Install script (Linux, macOS) | `curl -fsSL https://raw.githubusercontent.com/Twigpine/zero/main/scripts/install.sh \| bash` | `zero upgrade` |
+| Install script (Windows) | `irm https://raw.githubusercontent.com/Twigpine/zero/main/scripts/install.ps1 \| iex` | `zero upgrade` |
+| npm | `npm install -g @twigpine/zero` | `zero upgrade` (runs npm) |
+| Release archive | download from [Releases](https://github.com/Twigpine/zero/releases) | `zero upgrade` |
+| mise | `mise use -g ubi:Twigpine/zero` | `mise upgrade` |
 | `go install` | `go install github.com/Gitlawb/zero/cmd/zero@latest` | rerun the command |
 | Source | `go build -o zero ./cmd/zero` | rebuild |
 
@@ -29,7 +29,7 @@ Release and verify its checksum.
 ## npm
 
 ```bash
-npm install -g @gitlawb/zero
+npm install -g @twigpine/zero
 zero
 ```
 
@@ -56,15 +56,42 @@ cannot write to keeps failing — rerun the install or the command below with
 sufficient permissions). To trigger the fetch manually:
 
 ```bash
-node "$(npm root -g)/@gitlawb/zero/scripts/postinstall.mjs"
+node "$(npm root -g)/@twigpine/zero/scripts/postinstall.mjs"
 ```
+
+### Moving from @gitlawb/zero
+
+Zero was published as `@gitlawb/zero` up to 0.9.0. From 0.10.0 it is
+`@twigpine/zero`, and the old name gets no further releases.
+
+Both packages provide the `zero` command, so npm refuses to install the new
+one while the old one is installed (`EEXIST`). Forcing it is worse: a later
+uninstall of the old package removes the shared `zero` command. Quit any
+running `zero` (on Windows a running `zero.exe` cannot be removed), then
+uninstall the old package before installing the new one:
+
+```bash
+npm uninstall -g @gitlawb/zero
+npm install -g @twigpine/zero
+```
+
+With another package manager, the same two steps:
+
+```bash
+bun remove -g @gitlawb/zero && bun add -g @twigpine/zero
+pnpm remove -g @gitlawb/zero && pnpm add -g @twigpine/zero
+yarn global remove @gitlawb/zero && yarn global add @twigpine/zero
+```
+
+Config, sessions, logins, and plugins live in your user config and home
+directories, not in the package, so they carry over unchanged.
 
 ## Linux And macOS Script
 
 Install the latest release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Twigpine/zero/main/scripts/install.sh | bash
 ```
 
 From a checkout:
@@ -89,7 +116,7 @@ scripts/install.sh --install-dir "$HOME/bin"
 
 Defaults:
 
-- Repository: `Gitlawb/zero`
+- Repository: `Twigpine/zero`
 - Version: latest GitHub release
 - Install path: `~/.local/bin/zero`
 
@@ -100,7 +127,7 @@ Requirements: Bash, `curl` or `wget`, `tar`, and `shasum` or `sha256sum`.
 Install the latest release:
 
 ```powershell
-irm https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/Twigpine/zero/main/scripts/install.ps1 | iex
 ```
 
 From a checkout:
@@ -123,7 +150,7 @@ powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -InstallDir "$env:U
 
 Defaults:
 
-- Repository: `Gitlawb/zero`
+- Repository: `Twigpine/zero`
 - Version: latest GitHub release
 - Install path: `%LOCALAPPDATA%\zero\bin\zero.exe`
 
@@ -134,13 +161,13 @@ archives through its `ubi` backend, so there is nothing extra to publish and no
 registry in the middle:
 
 ```bash
-mise use -g ubi:Gitlawb/zero
+mise use -g ubi:Twigpine/zero
 ```
 
 Pin a version the same way you would any other tool:
 
 ```bash
-mise use -g ubi:Gitlawb/zero@0.7.1
+mise use -g ubi:Twigpine/zero@0.7.1
 ```
 
 Updates come from `mise upgrade`. `zero upgrade` also works, because a
@@ -169,7 +196,7 @@ macOS and Windows need no extra helper.
 ## From Source
 
 ```bash
-git clone https://github.com/Gitlawb/zero.git
+git clone https://github.com/Twigpine/zero.git
 cd zero
 go run ./cmd/zero
 ```
@@ -213,7 +240,7 @@ seccomp filter on Android:
 pkg install golang
 
 # Build Zero for Android
-git clone https://github.com/Gitlawb/zero.git
+git clone https://github.com/Twigpine/zero.git
 cd zero
 CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -ldflags="-s -w" -o zero ./cmd/zero
 
@@ -302,7 +329,7 @@ See the [update guide](UPDATE.md) for update modes, flags, and platform details.
 overwriting a binary a package manager owns leaves that manager describing a
 version that is no longer there:
 
-- **npm**: runs `npm install -g @gitlawb/zero@latest` for you.
+- **npm**: runs `npm install -g @twigpine/zero@latest` for you.
 - **Homebrew**: refuses, and tells you to run `brew upgrade zero`. Replacing the
   keg binary directly would be reverted by the next `brew upgrade` or
   `brew reinstall`.

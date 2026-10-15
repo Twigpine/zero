@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Gitlawb/zero@v1
+      - uses: Twigpine/zero@v1
         with:
           prompt: ${{ inputs.task }}
           provider: openai
@@ -66,7 +66,7 @@ jobs:
 | `github-token` | no | `${{ github.token }}` | Token used to post a PR comment. Requires `pull-requests: write`. |
 | `working-directory` | no | `${{ github.workspace }}` | Directory to run ZERO in. |
 | `zero-version` | no | (action ref → `latest`) | ZERO release version/tag to install, e.g. `v1.2.3` or `latest`. |
-| `zero-repo` | no | `Gitlawb/zero` | Repository to install the ZERO release from. |
+| `zero-repo` | no | `Twigpine/zero` | Repository to install the ZERO release from. |
 
 ## Outputs
 
@@ -101,7 +101,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Gitlawb/zero@v1
+      - uses: Twigpine/zero@v1
         with:
           prompt: |
             Investigate this issue and propose a fix.
@@ -134,7 +134,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Gitlawb/zero@v1
+      - uses: Twigpine/zero@v1
         id: zero
         with:
           prompt-file: .github/zero/upgrade-deps.md
@@ -176,7 +176,7 @@ jobs:
 - **Least-privilege tokens.** Grant only the permissions the workflow needs
   (`contents: write` to edit files, `pull-requests: write` to comment). The
   default `GITHUB_TOKEN` is scoped to the repository.
-- **Pin the action.** Reference a tag (`Gitlawb/zero@v1`) or a commit SHA so a
+- **Pin the action.** Reference a tag (`Twigpine/zero@v1`) or a commit SHA so a
   workflow run uses a known ZERO version. `zero-version` lets you pin the
   installed binary independently of the action ref.
 - **Linux and macOS runners** are supported; Windows runners are rejected with a
