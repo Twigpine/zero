@@ -901,6 +901,16 @@ func providerEnvSetupDeps(t *testing.T, configPath string, env map[string]string
 			Overrides:      overrides,
 		})
 	}
+	// summarizeConfig reads OAuth LOGIN state through the default store, which
+	// resolves the developer's own ZERO_OAUTH_TOKENS_PATH (or XDG keyring root)
+	// — a machine with a stored ChatGPT login would make `providers list`
+	// assertions flip. Pin the file and the backend per the coding guideline
+	// that no test may read the developer's real config, cache or state dirs:
+	// forcing "file" also prevents an ambient ZERO_OAUTH_STORAGE=keyring from
+	// pulling the OS keychain into these tests.
+	tokensPath := filepath.Join(t.TempDir(), "oauth-tokens.json")
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", tokensPath)
+	t.Setenv("ZERO_OAUTH_STORAGE", "file")
 	return deps
 }
 

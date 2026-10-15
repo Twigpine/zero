@@ -468,6 +468,33 @@ func TestRunProvidersListWithBaseURLOnlyProviders(t *testing.T) {
 	}
 }
 
+// `zero config` is NOT one of the provider-management commands: it reports the
+// resolved configuration, so a missing active provider has to stay actionable
+// (the headless contract the resolver documents for `zero config` / `zero
+// exec`). Only the interactive TUI recovers from that state.
+func TestRunConfigSummaryStillFailsWithNoActiveProvider(t *testing.T) {
+	env := map[string]string{
+		"OPENAI_API_KEY": "sk-env",
+		"GEMINI_API_KEY": "gem-env",
+	}
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{})
+	var stdout, stderr bytes.Buffer
+
+	exitCode := runWithDeps([]string{"config"}, &stdout, &stderr, providerEnvSetupDeps(t, configPath, env))
+
+	if exitCode == exitSuccess {
+		t.Fatalf("exit code = %d, want the actionable resolve error: %s", exitCode, stdout.String())
+	}
+	message := stderr.String()
+	if message == "" {
+		message = stdout.String()
+	}
+	if !strings.Contains(message, "no active provider configured") {
+		t.Fatalf("output = %q / %q, want the actionable resolve error", stdout.String(), stderr.String())
+	}
+}
+
 func TestRunProvidersUseRejectsUsageErrors(t *testing.T) {
 	cases := []struct {
 		name string
