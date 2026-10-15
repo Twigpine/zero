@@ -145,7 +145,9 @@ registry.
    runs in.
 5. **Re-runs are safe.** A version already on the registry is skipped rather
    than republished, so re-running a job that failed between the platform and
-   wrapper publishes finishes the release.
+   wrapper publishes finishes the release. Only npm's E404 counts as "not
+   published"; a lookup that fails any other way is retried and then stops the
+   job before anything is published.
 
 `zero update` keeps working unchanged: it detects an npm install by finding a
 `package.json` named `@twigpine/zero` next to the running binary — true inside

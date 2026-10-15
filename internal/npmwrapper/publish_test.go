@@ -14,26 +14,41 @@ import (
 )
 
 // fakeNpm stands in for npm on PATH when scripts/npm/publish-packages.sh runs.
-// It keeps one package's registry state in FAKE_NPM_STATE and refuses what the
-// real registry refuses: a version published twice, and any lookup or publish
-// for a package name other than the one it holds. Every call is appended to
-// FAKE_NPM_STATE.log. FAKE_NPM_CLOBBER_LATEST=1 makes every publish take
-// `latest`, the failure the script must stop on.
+// It keeps one package's registry state in FAKE_NPM_STATE and answers the way
+// npm 11 does: a lookup of a missing package or a missing version fails with
+// E404, and it refuses a version published twice or any lookup or publish for
+// a package name other than the one it holds. Every call is appended to
+// FAKE_NPM_STATE.log.
+//
+// FAKE_NPM_CLOBBER_LATEST=1 makes every publish take `latest`, the failure the
+// script must stop on. FAKE_NPM_VERSION_LOOKUP_ERRORS=<n> fails the first n
+// version lookups with a network error instead of answering them.
 const fakeNpm = `#!/usr/bin/env node
 const fs = require('fs');
 const stateFile = process.env.FAKE_NPM_STATE;
 const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
 const args = process.argv.slice(2);
 fs.appendFileSync(stateFile + '.log', JSON.stringify({ args, cwd: process.cwd() }) + '\n');
-const notFound = () => { process.stderr.write('npm error code E404\n'); process.exit(1); };
+const save = () => fs.writeFileSync(stateFile, JSON.stringify(state));
+const notFound = (detail) => { process.stderr.write('npm error code E404\nnpm error 404 ' + detail + '\n'); process.exit(1); };
 if (args[0] === 'view') {
   const [spec, field] = args.slice(1);
   const at = spec.lastIndexOf('@');
   const name = at > 0 ? spec.slice(0, at) : spec;
-  if (name !== state.name || state.versions.length === 0) notFound();
+  if (field === 'version') {
+    const failures = Number(process.env.FAKE_NPM_VERSION_LOOKUP_ERRORS || 0);
+    state.versionLookups = (state.versionLookups || 0) + 1;
+    save();
+    if (state.versionLookups <= failures) {
+      process.stderr.write('npm error code ECONNRESET\nnpm error network aborted\n');
+      process.exit(1);
+    }
+  }
+  if (name !== state.name || state.versions.length === 0) notFound('Not Found - GET ' + name);
   if (field === 'version') {
     const version = spec.slice(at + 1);
-    if (state.versions.includes(version)) process.stdout.write(version + '\n');
+    if (!state.versions.includes(version)) notFound('No match found for version ' + version);
+    process.stdout.write(version + '\n');
     process.exit(0);
   }
   if (field === 'dist-tags.latest') {
@@ -55,7 +70,7 @@ if (args[0] === 'publish') {
   state.versions.push(pkg.version);
   state.distTags[tagIndex === -1 ? 'latest' : args[tagIndex + 1]] = pkg.version;
   if (process.env.FAKE_NPM_CLOBBER_LATEST === '1') state.distTags.latest = pkg.version;
-  fs.writeFileSync(stateFile, JSON.stringify(state));
+  save();
   process.exit(0);
 }
 process.stderr.write('fake npm: unsupported command ' + args.join(' ') + '\n');
@@ -71,6 +86,8 @@ type fakeRegistryState struct {
 	Name     string            `json:"name"`
 	Versions []string          `json:"versions"`
 	DistTags map[string]string `json:"distTags"`
+	// VersionLookups counts `npm view <name>@<version> version` calls.
+	VersionLookups int `json:"versionLookups,omitempty"`
 }
 
 type npmCall struct {
@@ -270,5 +287,41 @@ func TestPublishPackagesRefusesAWrapperWhoseAliasesDoNotMatchThePayloads(t *test
 	}
 	if !strings.Contains(run.stderr, "do not match the platform payloads") {
 		t.Fatalf("stderr does not explain the failure: %s", run.stderr)
+	}
+}
+
+// A lookup that fails for a reason other than E404 must not read as "not
+// published": on the re-run this skip exists for, the version is usually out
+// already, and publishing it again fails with EPUBLISHCONFLICT.
+func TestPublishPackagesRetriesAFailedLookupInsteadOfPublishing(t *testing.T) {
+	platforms := []string{"linux-x64"}
+	npmDir := writePublishFixture(t, platforms, platforms)
+	run := runPublishPackages(t, npmDir, fakeRegistryState{
+		Name:     publishFixtureName,
+		Versions: []string{publishFixtureVersion + "-linux-x64"},
+		DistTags: map[string]string{"platform": publishFixtureVersion + "-linux-x64"},
+	}, "FAKE_NPM_VERSION_LOOKUP_ERRORS=2")
+	if run.exitCode != 0 {
+		t.Fatalf("exit = %d after two transient lookup failures; stdout=%s stderr=%s", run.exitCode, run.stdout, run.stderr)
+	}
+	if got := strings.Join(run.publishedDirs(), ","); got != "wrapper" {
+		t.Fatalf("published %s, want only the wrapper (the platform version was already out)", got)
+	}
+}
+
+// When the registry cannot answer at all, nothing may be published: the
+// script cannot tell which versions are already out.
+func TestPublishPackagesFailsWhenTheRegistryCannotBeReached(t *testing.T) {
+	platforms := []string{"linux-x64"}
+	npmDir := writePublishFixture(t, platforms, platforms)
+	run := runPublishPackages(t, npmDir, fakeRegistryState{Name: publishFixtureName}, "FAKE_NPM_VERSION_LOOKUP_ERRORS=1000")
+	if run.exitCode == 0 {
+		t.Fatalf("exit = 0 with the registry unreachable; stdout=%s", run.stdout)
+	}
+	if len(run.publishes) != 0 {
+		t.Fatalf("published %v without being able to look anything up, want nothing", run.publishedDirs())
+	}
+	if !strings.Contains(run.stderr, "could not look up") || !strings.Contains(run.stderr, "ECONNRESET") {
+		t.Fatalf("stderr does not explain the failure or show npm's error: %s", run.stderr)
 	}
 }

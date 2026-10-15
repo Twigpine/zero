@@ -232,7 +232,7 @@ jobs:
         run: |
           version="$(node -p "require('./package.json').version")"
           latest=""
-          for attempt in 1 2 3; do
+          for _ in 1 2 3; do
             latest="$(npm view @gitlawb/zero dist-tags.latest 2>/dev/null || true)"
             if [ -n "$latest" ]; then
               break

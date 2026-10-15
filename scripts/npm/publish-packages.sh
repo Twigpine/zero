@@ -66,8 +66,31 @@ if [ "$actual_platforms" != "$expected_platforms" ]; then
   fail "the wrapper's optionalDependencies do not match the platform payloads under ${npm_dir%/}/platforms (wrapper: $(echo "$expected_platforms" | tr '\n' ' '); payloads: $(echo "$actual_platforms" | tr '\n' ' '))"
 fi
 
+# npm reports every kind of "not on the registry" (no such package, no such
+# version) as E404. Any other lookup failure (network, auth, a registry
+# outage) is retried and then fails the job: reading it as "not published"
+# would publish a version that may already be out, and npm would reject that
+# with EPUBLISHCONFLICT on the very re-run this skip exists for.
 already_published() {
-  [ "$(npm view "${name}@$1" version 2>/dev/null || true)" = "$1" ]
+  local output status errors
+  errors="$(mktemp)"
+  for _ in 1 2 3; do
+    status=0
+    output="$(npm view "${name}@$1" version 2>"$errors")" || status=$?
+    if [ "$status" -eq 0 ]; then
+      rm -f "$errors"
+      [ "$output" = "$1" ]
+      return
+    fi
+    if grep -q 'code E404' "$errors"; then
+      rm -f "$errors"
+      return 1
+    fi
+    sleep "$delay"
+  done
+  cat "$errors" >&2
+  rm -f "$errors"
+  fail "could not look up ${name}@$1 on the registry, so cannot tell whether it is already published"
 }
 
 # publish <dir> <version> [npm publish flags...]
