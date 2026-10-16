@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once the first release is
 tagged. Until then, source builds report the version `dev`.
 
+## Unreleased
+
+### Features
+
+* **providers:** add `zero providers repair-config [--name <name>]` to recover a single legacy unnamed provider profile while preserving the legacy effective provider and active reference; identity-changing repairs of stored-key profiles refuse before writing, so they cannot point at another credential
+
+### Bug Fixes
+
+* **oauth:** validate provider configuration before authorization and immediately before token replacement across CLI, TUI, setup, and device flows, preserving existing credentials when validation fails
+
 ## [0.11.0](https://github.com/Twigpine/zero/compare/v0.10.0...v0.11.0) (2026-10-15)
 
 
@@ -145,7 +155,6 @@ tagged. Until then, source builds report the version `dev`.
 * **modelregistry:** expose reasoning effort for DeepSeek V4 models ([#931](https://github.com/Gitlawb/zero/issues/931)) ([90dcfd1](https://github.com/Gitlawb/zero/commit/90dcfd127e8a6d9902ec9f4e72f6d03fef1a0fc6))
 * **providers:** discover ChatGPT capabilities ([#890](https://github.com/Gitlawb/zero/issues/890)) ([2d2450e](https://github.com/Gitlawb/zero/commit/2d2450e9a744349f0d01b1d4e9ba29c24ba5650d))
 * **sandbox:** normalize launcher names before the command-prefix denylist ([#934](https://github.com/Gitlawb/zero/issues/934)) ([6edf9a8](https://github.com/Gitlawb/zero/commit/6edf9a8b78dc030dc44598919db1c7fa9d4f809a))
-
 ## [0.7.0](https://github.com/Gitlawb/zero/compare/v0.6.0...v0.7.0) (2026-08-10)
 
 

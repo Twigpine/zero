@@ -481,6 +481,34 @@ func TestRunDoctorReportsConfigValidationForMalformedFile(t *testing.T) {
 	}
 }
 
+func TestRunDoctorForwardsPersistedProviderNameValidation(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":""},{"name":"work"},{"name":"WORK"}]}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cwd := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"doctor"}, &stdout, &stderr, appDeps{
+		getwd:          func() (string, error) { return cwd, nil },
+		userConfigPath: func() (string, error) { return configPath, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.Resolve(config.ResolveOptions{UserConfigPath: configPath})
+		},
+		now: fixedCLITime("2026-06-08T11:00:00Z"),
+	})
+
+	if exitCode != exitProvider {
+		t.Fatalf("exit = %d, want provider failure %d; stderr = %q", exitCode, exitProvider, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "zero providers repair-config") {
+		t.Fatalf("doctor output = %q, want provider-name repair guidance", stdout.String())
+	}
+}
+
 func fixedCLITime(value string) func() time.Time {
 	parsed, err := time.Parse(time.RFC3339, value)
 	if err != nil {

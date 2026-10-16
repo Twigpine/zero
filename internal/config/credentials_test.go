@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -125,6 +126,30 @@ func TestMigrateLeavesKeyWhenStoreSetFails(t *testing.T) {
 	}
 }
 
+func TestMigratePlaintextProviderKeysValidatesBeforeStoreWrites(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	before := []byte(`{"providers":[{"name":"","apiKey":"sk-implicit"},{"name":"openai","apiKey":"sk-openai"}]}`)
+	if err := os.WriteFile(path, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := &fakeKeySetter{keys: map[string]string{}}
+
+	n, err := MigratePlaintextProviderKeys(path, store)
+	if err == nil || !strings.Contains(err.Error(), "persisted provider name cannot be empty") {
+		t.Fatalf("migrate = %d,%v; want validation error", n, err)
+	}
+	if n != 0 || len(store.keys) != 0 {
+		t.Fatalf("invalid config mutated credential store: migrated=%d keyCount=%d", n, len(store.keys))
+	}
+	after, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("invalid config was rewritten: beforeBytes=%d afterBytes=%d", len(before), len(after))
+	}
+}
+
 func TestClearProviderKeyStored(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
@@ -156,6 +181,16 @@ func TestClearProviderKeyStored(t *testing.T) {
 	// Unknown provider: no change.
 	if cleared, _ := ClearProviderKeyStored(path, "nope"); cleared {
 		t.Fatal("unknown provider should report no change")
+	}
+	if err := os.WriteFile(path, []byte(`{"providers":[{"name":"work","apiKeyStored":true}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cleared, err := ClearProviderKeyStored(path, "WORK"); err != nil || cleared {
+		t.Fatalf("case-variant clear = %v,%v; want false,nil", cleared, err)
+	}
+	cfg = readConfigFixture(t, path)
+	if !cfg.Providers[0].APIKeyStored {
+		t.Fatalf("clear must require exact provider identity: %+v", cfg.Providers)
 	}
 }
 
@@ -330,5 +365,185 @@ func TestProviderProfileMissingCredentialEnv(t *testing.T) {
 				t.Fatalf("MissingCredentialEnv() = (%q, %v), want (%q, %v)", gotEnv, got, c.wantEnv, c.want)
 			}
 		})
+	}
+}
+
+func TestClearProviderKeyStoredCaseVariantsPreservesDistinctUnicodeIdentity(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"providers":[{"name":"s","apiKeyStored":true},{"name":"ſ","apiKeyStored":true}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cleared, err := ClearProviderKeyStoredCaseVariants(path, "s")
+	if err != nil || !cleared {
+		t.Fatalf("clear = %v,%v; want true,nil", cleared, err)
+	}
+	cfg := readConfigFixture(t, path)
+	if cfg.Providers[0].APIKeyStored {
+		t.Fatal("s marker should be cleared")
+	}
+	if !cfg.Providers[1].APIKeyStored {
+		t.Fatal("long-s marker belongs to a distinct credential-store identity and must remain set")
+	}
+}
+
+// Preflight rejection leaves an existing credential unchanged; this fixture
+// never reaches marker publication or rollback.
+func TestPublishProviderCredentialPreflightPreservesPreviousKey(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	// Legacy duplicate rows are rejected before credential capture.
+	original := []byte(`{"providers":[{"name":"openrouter","apiKeyStored":true},{"name":"OPENROUTER","apiKeyStored":true}]}`)
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("openrouter", "sk-working"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := PublishProviderCredential(path, "openrouter", "sk-new"); err == nil {
+		t.Fatal("publication must be rejected for an ambiguous persisted config")
+	}
+
+	key, ok, err := store.Get("openrouter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || key != "sk-working" {
+		t.Fatalf("stored key does not match the previous value (present=%v, len=%d), want sk-working preserved", ok, len(key))
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(original) {
+		t.Fatalf("config was rewritten by a rejected publication:\n%s", after)
+	}
+}
+
+// Preflight rejection must not create a credential when no entry exists.
+func TestPublishProviderCredentialPreflightDoesNotCreateEntry(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"providers":[{"name":"work"},{"name":"WORK"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := PublishProviderCredential(path, "work", "sk-new"); err == nil {
+		t.Fatal("publication must be rejected for an ambiguous persisted config")
+	}
+	store, err := ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := store.Get("work"); err != nil {
+		t.Fatal(err)
+	} else if ok {
+		t.Fatal("rejected publication left an orphaned secret in the store")
+	}
+}
+
+func TestPublishProviderCredentialStoresAndMarks(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"providers":[{"name":"openrouter","apiKeyEnv":"OPENROUTER_API_KEY"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := PublishProviderCredential(path, "openrouter", "sk-new"); err != nil {
+		t.Fatal(err)
+	}
+	store, err := ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, ok, err := store.Get("openrouter")
+	if err != nil || !ok || key != "sk-new" {
+		t.Fatalf("stored key does not match (present=%v, len=%d, err=%v), want sk-new", ok, len(key), err)
+	}
+	var cfg FileConfig
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Providers[0].APIKeyStored || strings.TrimSpace(cfg.Providers[0].APIKeyEnv) != "" {
+		t.Fatalf("marker not published: apiKeyStored=%v apiKeyEnv=%q", cfg.Providers[0].APIKeyStored, cfg.Providers[0].APIKeyEnv)
+	}
+}
+
+func TestRepairUnnamedProviderStoredIdentity(t *testing.T) {
+	for _, shared := range []bool{false, true} {
+		for _, destination := range []bool{false, true} {
+			t.Run(fmt.Sprintf("shared=%t/destination=%t", shared, destination), func(t *testing.T) {
+				home := t.TempDir()
+				t.Setenv("HOME", home)
+				t.Setenv("APPDATA", home)
+				t.Setenv("LOCALAPPDATA", home)
+				t.Setenv("XDG_CONFIG_HOME", home)
+				t.Setenv("XDG_CACHE_HOME", home)
+				t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+				store, err := ProviderKeyStore()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := store.Set("legacy", "original-key"); err != nil {
+					t.Fatal(err)
+				}
+				if destination {
+					if err := store.Set("work", "destination-key"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				rows := []ProviderProfile{{ProviderKind: ProviderKindOpenAI, Model: "gpt-4o", APIKeyStored: true}}
+				if shared {
+					rows = append(rows, ProviderProfile{Name: "legacy", Model: "gpt-4o", APIKeyStored: true})
+				}
+				cfg := FileConfig{ActiveProvider: "legacy", Providers: rows}
+				data, err := json.Marshal(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				path := filepath.Join(t.TempDir(), "config.json")
+				if err := os.WriteFile(path, data, 0600); err != nil {
+					t.Fatal(err)
+				}
+				if _, _, err := RepairUnnamedProvider(path, "work"); err == nil || !strings.Contains(err.Error(), "stored credential") {
+					t.Fatalf("identity-changing repair must refuse: %v", err)
+				}
+				after, err := os.ReadFile(path)
+				if err != nil || string(after) != string(data) {
+					t.Fatal("refusal changed config")
+				}
+				key, ok, err := store.Get("legacy")
+				if err != nil || !ok || key != "original-key" {
+					t.Fatal("old credential changed")
+				}
+				key, ok, err = store.Get("work")
+				if err != nil || ok != destination || (ok && key != "destination-key") {
+					t.Fatal("destination credential changed")
+				}
+				// Bare repair preserves the old identity, including the shared-owner merge.
+				if _, _, err := RepairUnnamedProvider(path, ""); err != nil {
+					t.Fatal(err)
+				}
+				resolved, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				profile := ApplyStoredAPIKey(resolved.Provider, store)
+				if profile.Name != "legacy" || profile.APIKey != "original-key" {
+					t.Fatal("repaired marker no longer retrieves the legacy credential")
+				}
+			})
+		}
 	}
 }

@@ -32,6 +32,10 @@ type Manager struct {
 	now      func() time.Time
 	buffer   time.Duration
 	out      io.Writer
+	// beforeSave revalidates caller-owned state immediately before a completed
+	// login replaces a token. Interactive OAuth can take minutes, so validating
+	// only before it starts leaves a race where config becomes invalid mid-flow.
+	beforeSave func() error
 	// openBrowser is invoked with the authorization URL for loopback logins.
 	// Tests inject a function that drives the loopback redirect.
 	openBrowser func(authURL string) error
@@ -59,6 +63,10 @@ type ManagerOptions struct {
 	RefreshBuffer time.Duration
 	Out           io.Writer
 	OpenBrowser   func(authURL string) error
+	// BeforeSave runs after authorization succeeds but before the token store is
+	// mutated. Login-only callers use it to fail closed when related config state
+	// changed during an interactive browser or device flow.
+	BeforeSave func() error
 }
 
 // NewManager builds a Manager, filling defaults.
@@ -96,7 +104,7 @@ func NewManager(opts ManagerOptions) (*Manager, error) {
 	}
 	return &Manager{
 		store: opts.Store, registry: registry, client: client,
-		env: env, now: now, buffer: buffer, out: out, openBrowser: open,
+		env: env, now: now, buffer: buffer, out: out, openBrowser: open, beforeSave: opts.BeforeSave,
 	}, nil
 }
 
@@ -143,6 +151,11 @@ func (m *Manager) Login(ctx context.Context, opts LoginOptions) (Status, error) 
 	}
 
 	key := ProviderKey(opts.Provider)
+	if m.beforeSave != nil {
+		if err := m.beforeSave(); err != nil {
+			return Status{}, err
+		}
+	}
 	if err := m.store.Save(key, token); err != nil {
 		return Status{}, err
 	}
@@ -199,6 +212,11 @@ func (m *Manager) CompleteDeviceLogin(ctx context.Context, provider string, cfg 
 		return Status{}, err
 	}
 	key := ProviderKey(provider)
+	if m.beforeSave != nil {
+		if err := m.beforeSave(); err != nil {
+			return Status{}, err
+		}
+	}
 	if err := m.store.Save(key, token); err != nil {
 		return Status{}, err
 	}

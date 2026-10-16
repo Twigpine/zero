@@ -264,8 +264,13 @@ func saveSetupProvider(deps appDeps, selection tui.SetupSelection, options setup
 	if err != nil {
 		return tui.SetupResult{}, err
 	}
+	if err := config.PreflightProviderWrite(configPath, profile.Name); err != nil {
+		return tui.SetupResult{}, err
+	}
 	// Persist with the key moved into the encrypted credential store (capture flip);
 	// the returned profile keeps the key for this run's immediate use.
+	// Fail-soft capture with no rollback on a failed config write — see the
+	// matching note in provider_setup.go; atomicity is #894.
 	if _, err := config.UpsertProvider(configPath, config.SecureProviderProfile(profile, configPath), true); err != nil {
 		return tui.SetupResult{}, err
 	}

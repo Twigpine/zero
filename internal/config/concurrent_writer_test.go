@@ -394,3 +394,61 @@ func TestMutationErrorSurvivesUnlockFailure(t *testing.T) {
 		t.Fatalf("err = %v, want it to still name the missing provider", err)
 	}
 }
+
+func TestProviderIdentityMutationsHonorConfigLock(t *testing.T) {
+	for _, operation := range []struct {
+		name string
+		seed string
+		run  func(string) error
+	}{
+		{"repair", `{"activeProvider":"work","providers":[{"model":"gpt-4o"}]}`, func(path string) error {
+			_, _, err := RepairUnnamedProvider(path, "")
+			return err
+		}},
+		{"clear exact marker", `{"providers":[{"name":"work","apiKeyStored":true}]}`, func(path string) error {
+			_, err := ClearProviderKeyStored(path, "work")
+			return err
+		}},
+		{"clear identity marker", `{"providers":[{"name":"work","apiKeyStored":true}]}`, func(path string) error {
+			_, err := ClearProviderKeyStoredCaseVariants(path, "WORK")
+			return err
+		}},
+	} {
+		t.Run(operation.name, func(t *testing.T) {
+			for _, releaseFailure := range []bool{false, true} {
+				t.Run(fmt.Sprintf("release=%t", releaseFailure), func(t *testing.T) {
+					path := filepath.Join(t.TempDir(), "config.json")
+					if err := os.WriteFile(path, []byte(operation.seed), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					original := lockConfigFileFn
+					t.Cleanup(func() { lockConfigFileFn = original })
+					lockErr := errors.New("injected config lock failure")
+					lockConfigFileFn = func(p string) (func() error, error) {
+						if !releaseFailure {
+							return nil, lockErr
+						}
+						unlock, err := original(p)
+						if err != nil {
+							return nil, err
+						}
+						return func() error { return errors.Join(unlock(), lockErr) }, nil
+					}
+					if err := operation.run(path); !errors.Is(err, lockErr) {
+						t.Fatalf("mutation error = %v, want lock failure", err)
+					}
+					after, err := os.ReadFile(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !releaseFailure && string(after) != operation.seed {
+						t.Fatal("mutation wrote despite acquisition failure")
+					}
+					if releaseFailure && string(after) == operation.seed {
+						t.Fatal("mutation did not publish before release failure")
+					}
+				})
+			}
+		})
+	}
+}

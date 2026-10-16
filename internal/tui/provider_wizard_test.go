@@ -719,6 +719,66 @@ func TestProviderWizardPersistsPastedKeyToUserConfig(t *testing.T) {
 	}
 }
 
+func TestProviderWizardRejectsCaseVariantBeforeCredentialCapture(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"activeProvider":"work","providers":[{"name":"work","apiKeyStored":true}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "OLD"); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newModel(context.Background(), Options{
+		UserConfigPath: configPath,
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+	m = openProviderWizardForTest(t, m)
+	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "ollama-cloud")
+	m.providerWizard.profileName = "WORK"
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	updated, _ = next.Update(testPaste("NEW"))
+	next = updated.(model)
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	next = finishProviderWizardModelDiscoveryForTest(t, next)
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+
+	if next.providerWizard == nil {
+		t.Fatal("rejected wizard unexpectedly closed")
+	}
+	if !strings.Contains(next.providerWizard.err, `provider "WORK" already exists as "work"`) {
+		t.Fatalf("wizard error = %q, want case-variant collision", next.providerWizard.err)
+	}
+	after, readErr := os.ReadFile(configPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("rejected wizard rewrote config\nbefore: %s\nafter: %s", before, after)
+	}
+	if key, ok, getErr := store.Get("work"); getErr != nil || !ok || key != "OLD" {
+		t.Fatalf("existing credential = %q,%v,%v; want OLD,true,nil", key, ok, getErr)
+	}
+}
+
 func TestProviderWizardUsesAPIKeyEnvForCurrentSessionWithoutPersistingSecret(t *testing.T) {
 	const secret = "ollama-env-secret"
 	t.Setenv("OLLAMA_API_KEY", secret)
@@ -1119,45 +1179,134 @@ func providerWizardModelIDs(models []providerWizardModel) []string {
 func TestWizardProviderStoredKey(t *testing.T) {
 	m := model{savedProviders: []config.ProviderProfile{
 		{Name: "acme", CatalogID: "acme-cloud", APIKeyStored: true},
-		{Name: "nokey"},
+		{Name: "nokey", CatalogID: "nokey"},
 	}}
-	if name, ok := m.wizardProviderStoredKey(providercatalog.Descriptor{Name: "acme"}); !ok || name != "acme" {
-		t.Fatalf("match by name = %q,%v", name, ok)
+	if name, ok, err := m.wizardProviderStoredKey(providercatalog.Descriptor{ID: "acme-cloud"}); err != nil || !ok || name != "acme" {
+		t.Fatalf("match by catalog id = %q,%v,%v", name, ok, err)
 	}
-	if name, ok := m.wizardProviderStoredKey(providercatalog.Descriptor{ID: "acme-cloud"}); !ok || name != "acme" {
-		t.Fatalf("match by catalog id = %q,%v", name, ok)
+	if _, ok, err := m.wizardProviderStoredKey(providercatalog.Descriptor{ID: "nokey"}); err != nil || ok {
+		t.Fatalf("provider without a stored key matched: ok=%v err=%v", ok, err)
 	}
-	if _, ok := m.wizardProviderStoredKey(providercatalog.Descriptor{Name: "nokey"}); ok {
-		t.Fatal("provider without a stored key must not match")
+	if _, _, err := (model{savedProviders: []config.ProviderProfile{{Name: "OpenRouter", CatalogID: "custom-openai-compatible", APIKeyStored: true}}}).wizardProviderStoredKey(providercatalog.Descriptor{ID: "openrouter", Name: "OpenRouter"}); err == nil {
+		t.Fatal("a matching display name must report that it does not own the catalog provider")
+	}
+	if _, ok, err := (model{savedProviders: []config.ProviderProfile{{Name: "s", APIKeyStored: true}}}).wizardProviderStoredKey(providercatalog.Descriptor{ID: "ſ", Name: "ſ"}); err != nil || ok {
+		t.Fatal("Unicode long-s must not reuse the distinct s profile's key")
+	}
+
+	exact := model{savedProviders: []config.ProviderProfile{
+		{Name: "work-xai", CatalogID: "xai", APIKeyStored: true},
+		{Name: "xai", CatalogID: "xai", APIKeyStored: true},
+	}}
+	if name, ok, err := exact.wizardProviderStoredKey(providercatalog.Descriptor{ID: "xai"}); err != nil || !ok || name != "xai" {
+		t.Fatalf("exact catalog owner must win: name=%q ok=%v err=%v", name, ok, err)
+	}
+	caseSibling := model{savedProviders: []config.ProviderProfile{
+		{Name: "ChatGPT"},
+		{Name: "chatgpt", APIKeyStored: true},
+	}}
+	if name, ok, err := caseSibling.wizardProviderStoredKey(providercatalog.Descriptor{ID: "chatgpt"}); err != nil || !ok || name != "chatgpt" {
+		t.Fatalf("later exact-name owner must beat an earlier legacy case sibling: name=%q ok=%v err=%v", name, ok, err)
+	}
+	ambiguous := model{savedProviders: []config.ProviderProfile{
+		{Name: "work-xai", CatalogID: "xai", APIKeyStored: true},
+		{Name: "personal-xai", CatalogID: "xai", APIKeyStored: true},
+	}}
+	if _, _, err := ambiguous.wizardProviderStoredKey(providercatalog.Descriptor{ID: "xai"}); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("shared catalog owners error = %v, want ambiguity", err)
 	}
 }
 
 func TestProviderWizardManageKeyRemove(t *testing.T) {
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
-	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
-	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"acme","apiKeyStored":true}]}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Set("acme", "sk-secret"); err != nil {
-		t.Fatal(err)
+	t.Run("only the persisted row key is removed and memory is refreshed", func(t *testing.T) {
+		userRoot := t.TempDir()
+		t.Setenv("HOME", userRoot)
+		t.Setenv("APPDATA", userRoot)
+		t.Setenv("LOCALAPPDATA", userRoot)
+		t.Setenv("XDG_CONFIG_HOME", userRoot)
+		configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+		if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		profile := config.ProviderProfile{Name: "acme", CatalogID: "acme-cloud", APIKeyStored: true}
+		if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"acme","catalogId":"acme-cloud","apiKeyStored":true}]}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Set("acme", "sk-secret"); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Set("acme-cloud", "unrelated-secret"); err != nil {
+			t.Fatal(err)
+		}
+
+		m := newModel(context.Background(), Options{UserConfigPath: configPath, SavedProviders: []config.ProviderProfile{profile}})
+		m.providerWizard = &providerWizardState{step: providerWizardStepManageKey, manageProviderName: "ACME", manageKeyCursor: 2}
+		next, _ := m.applyManageKeyChoice()
+		if next.providerWizard != nil {
+			t.Fatal("remove should close the wizard")
+		}
+		if _, ok, _ := store.Get("acme"); ok {
+			t.Fatal("remove should delete the persisted row key from the credential store")
+		}
+		if key, ok, err := store.Get("acme-cloud"); err != nil || !ok || key != "unrelated-secret" {
+			t.Fatalf("catalog-id key = %q, %v, %v; want it preserved", key, ok, err)
+		}
+		if cfg := readProviderWizardConfigFixture(t, configPath); cfg.Providers[0].APIKeyStored {
+			t.Fatal("case-variant removal left apiKeyStored set")
+		}
+		if len(next.savedProviders) != 1 || next.savedProviders[0].APIKeyStored {
+			t.Fatalf("saved provider marker was not refreshed: %+v", next.savedProviders)
+		}
+	})
+}
+
+func TestProviderWizardManageKeyRemoveReportsCleanupFailures(t *testing.T) {
+	newRemovalModel := func(t *testing.T) model {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte(`{"providers":[{"name":"work","apiKeyStored":true}]}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		m := newModel(context.Background(), Options{UserConfigPath: path})
+		m.providerWizard = &providerWizardState{step: providerWizardStepManageKey, manageProviderName: "work", manageKeyCursor: 2}
+		return m
 	}
 
-	m := newModel(context.Background(), Options{UserConfigPath: configPath})
-	m.providerWizard = &providerWizardState{step: providerWizardStepManageKey, manageProviderName: "acme", manageKeyCursor: 2}
-	next, _ := m.applyManageKeyChoice()
-	if next.providerWizard != nil {
-		t.Fatal("remove should close the wizard")
-	}
-	if _, ok, _ := store.Get("acme"); ok {
-		t.Fatal("remove should delete the key from the credential store")
-	}
+	t.Run("stored key deletion", func(t *testing.T) {
+		m := newRemovalModel(t)
+		m.deleteProviderKey = func(string, string) (bool, error) {
+			return false, errors.New("injected delete failure")
+		}
+		next, _ := m.applyManageKeyChoice()
+		if next.providerWizard == nil || !strings.Contains(next.providerWizard.err, "Stored key removal failed") {
+			t.Fatalf("wizard did not remain open with deletion error: %+v", next.providerWizard)
+		}
+		// Marker first, secret second: a failed delete leaves an orphaned secret
+		// that nothing reads, never a marker claiming a key that is gone.
+		if cfg := readProviderWizardConfigFixture(t, next.userConfigPath); cfg.Providers[0].APIKeyStored {
+			t.Fatal("marker must be cleared before the secret delete is attempted")
+		}
+	})
+
+	t.Run("persisted marker cleanup", func(t *testing.T) {
+		m := newRemovalModel(t)
+		m.deleteProviderKey = func(string, string) (bool, error) { return true, nil }
+		m.clearProviderKeyStored = func(string, string) (bool, error) {
+			return false, errors.New("injected marker failure")
+		}
+		next, _ := m.applyManageKeyChoice()
+		if next.providerWizard == nil || !strings.Contains(next.providerWizard.err, "Stored key marker cleanup failed") {
+			t.Fatalf("wizard did not remain open with marker error: %+v", next.providerWizard)
+		}
+		if cfg := readProviderWizardConfigFixture(t, next.userConfigPath); !cfg.Providers[0].APIKeyStored {
+			t.Fatal("injected marker failure unexpectedly changed config")
+		}
+	})
 }
 
 func TestProviderWizardManageKeyReplaceAndKeep(t *testing.T) {
@@ -1597,6 +1746,72 @@ func TestApplyProviderWizardExportsActiveProviderEnv(t *testing.T) {
 	}
 }
 
+func TestApplyProviderWizardReplacesRemovedLiveRowIdentity(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "work")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"providers":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), Options{
+		ProviderName:    "work",
+		ProviderProfile: config.ProviderProfile{Name: "work"},
+		UserConfigPath:  configPath,
+	})
+	m.removedLiveRow = "work"
+	m.newProvider = func(config.ProviderProfile) (zeroruntime.Provider, error) {
+		return &fakeProvider{}, nil
+	}
+	m.providerWizard = &providerWizardState{
+		step:        providerWizardStepModel,
+		profileName: "openai",
+		providers: []providercatalog.Descriptor{{
+			ID:             "openai",
+			Name:           "OpenAI",
+			Transport:      providercatalog.TransportOpenAICompatible,
+			DefaultBaseURL: "https://api.openai.com/v1",
+			DefaultModel:   "gpt-4.1",
+		}},
+		models: []providerWizardModel{{ID: "gpt-4.1"}},
+	}
+
+	updated, _ := m.applyProviderWizard()
+	next := updated
+	if next.removedLiveRow != "" {
+		t.Fatalf("removedLiveRow = %q, want cleared after wizard commits a new live provider", next.removedLiveRow)
+	}
+	next, _ = next.openProviderManager()
+	if got := next.providerWizard.manageActiveName; got != "openai" {
+		t.Fatalf("manageActiveName = %q, want wizard-committed provider openai", got)
+	}
+
+	for index, row := range next.providerWizard.manageRows {
+		if row.profile.Name == "openai" {
+			next.providerWizard.manageCursor = index
+			break
+		}
+	}
+	profile, ok := next.providerWizard.currentManagerRow()
+	if !ok || profile.profile.Name != "openai" {
+		t.Fatalf("wizard-committed provider missing from manager rows: %+v", next.providerWizard.manageRows)
+	}
+	next.providerWizard.beginProviderEdit(profile.profile, profile.owner)
+	next.providerWizard.editDraft.Name = "renamed-openai"
+	next, _ = next.saveManagerEdit()
+	if next.providerName != "renamed-openai" {
+		t.Fatalf("providerName = %q after rename, want renamed-openai", next.providerName)
+	}
+	if got := os.Getenv(config.ActiveProviderEnv); got != "renamed-openai" {
+		t.Fatalf("%s = %q after rename, want renamed-openai", config.ActiveProviderEnv, got)
+	}
+
+	next.providerWizard.manageCursor = 0
+	next, _ = next.deleteManagerSelection()
+	if next.removedLiveRow != "renamed-openai" {
+		t.Fatalf("removedLiveRow = %q after delete, want renamed live row", next.removedLiveRow)
+	}
+}
+
 // On a config PERSIST failure, applyProviderWizard must leave live state fully
 // unchanged — the chat must NOT already be running on the new provider while the
 // status line and the ZERO_PROVIDER export (which pins spawned children) still
@@ -1823,5 +2038,85 @@ func TestProviderWizardModelRowsStayDistinctWithProseDescriptions(t *testing.T) 
 	// the prose blurb must not be a row label
 	if strings.Contains(view, "❯ Open-weight GPT model") {
 		t.Errorf("prose blurb still used as a row label:\n%s", view)
+	}
+}
+
+// The disk write is only half the removal: the live session still holds
+// APIKeyStored:true until it is reconciled, so /providers and a re-entered
+// wizard would keep offering keep/replace for a key that is gone.
+func TestProviderWizardManageKeyRemoveSyncsSessionState(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"work","apiKeyStored":true}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "sk-secret"); err != nil {
+		t.Fatal(err)
+	}
+	profile := config.ProviderProfile{Name: "work", APIKeyStored: true}
+	m := newModel(context.Background(), Options{
+		UserConfigPath:  configPath,
+		ProviderName:    "work",
+		ProviderProfile: profile,
+		SavedProviders:  []config.ProviderProfile{profile},
+	})
+	m.providerWizard = &providerWizardState{step: providerWizardStepManageKey, manageProviderName: "WORK", manageKeyCursor: 2}
+
+	next, _ := m.applyManageKeyChoice()
+
+	if next.providerProfile.APIKeyStored {
+		t.Fatal("live profile still claims a stored key after removal")
+	}
+	if len(next.savedProviders) != 1 || next.savedProviders[0].APIKeyStored {
+		t.Fatalf("saved providers not reconciled: %+v", next.savedProviders)
+	}
+	// The caller's copy must be untouched: savedProviders is mutated by copy.
+	if !m.savedProviders[0].APIKeyStored {
+		t.Fatal("session sync mutated the pre-removal model's slice in place")
+	}
+}
+
+// wizardProviderStoredKey answers a credential question, so it must use the
+// store's normalization: strings.EqualFold folds "s" and Unicode long-s into
+// one identity that the store keeps apart.
+func TestWizardProviderStoredKeyDistinguishesUnicodeIdentities(t *testing.T) {
+	m := model{savedProviders: []config.ProviderProfile{
+		{Name: "ſ", APIKeyStored: true},
+	}}
+	if name, ok, err := m.wizardProviderStoredKey(providercatalog.Descriptor{Name: "s", ID: "s"}); err != nil || ok {
+		t.Fatalf("latin-s descriptor matched the long-s profile %q (err=%v)", name, err)
+	}
+	name, ok, err := m.wizardProviderStoredKey(providercatalog.Descriptor{Name: "ſ", ID: "ſ"})
+	if err != nil || !ok || name != "ſ" {
+		t.Fatalf("long-s descriptor = %q, %v, %v; want its own profile", name, ok, err)
+	}
+}
+
+func TestExistingAimlapiConfigurationRecognizesLegacyNameWithoutCatalogID(t *testing.T) {
+	t.Setenv("AIMLAPI_API_KEY", "")
+	m := model{savedProviders: []config.ProviderProfile{{
+		Name: "aimlapi", BaseURL: "https://api.aimlapi.com/v1", Model: "legacy-model", APIKey: "legacy-secret",
+	}}}
+
+	profile, runtimeKey, ok := m.existingAimlapiConfiguration()
+	if !ok || runtimeKey != "legacy-secret" || profile.Name != "aimlapi" || profile.BaseURL != "https://api.aimlapi.com/v1" || profile.Model != "legacy-model" {
+		t.Fatalf("legacy configuration = (%+v, %q, %v), want settings preserved", profile, runtimeKey, ok)
+	}
+}
+
+func TestExistingAimlapiConfigurationRejectsForeignCatalogOwnership(t *testing.T) {
+	t.Setenv("AIMLAPI_API_KEY", "")
+	m := model{savedProviders: []config.ProviderProfile{{
+		Name: "aimlapi", CatalogID: "custom-openai-compatible", BaseURL: "https://api.aimlapi.com/v1", APIKey: "foreign-secret",
+	}}}
+
+	profile, runtimeKey, ok := m.existingAimlapiConfiguration()
+	if ok || profile.Name != "" || runtimeKey != "" {
+		t.Fatalf("foreign catalog profile was treated as AIMLAPI-owned: (%+v, %q, %v)", profile, runtimeKey, ok)
 	}
 }

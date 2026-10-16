@@ -31,6 +31,30 @@ func TestLoadProviderCommandSuccess(t *testing.T) {
 	}
 }
 
+func TestLoadProviderCommandSelectsNamelessOpenAIProvider(t *testing.T) {
+	command := writeCommand(t, commandScript{
+		Stdout: `{"providers":[{"provider":"openai","model":"gpt-command"}]}`,
+	})
+
+	cfg, err := LoadProviderCommand(command)
+	if err != nil {
+		t.Fatalf("LoadProviderCommand() error = %v", err)
+	}
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "openai" {
+		t.Fatalf("providers = %+v, want normalized nameless OpenAI provider", cfg.Providers)
+	}
+}
+
+func TestLoadProviderCommandRejectsAmbiguousActiveProvider(t *testing.T) {
+	command := writeCommand(t, commandScript{
+		Stdout: `{"activeProvider":"WoRk","providers":[{"name":"work","provider":"openai","model":"one"},{"name":"WORK","provider":"openai","model":"two"}]}`,
+	})
+
+	if _, err := LoadProviderCommand(command); err == nil || !strings.Contains(err.Error(), "ambiguous active provider") {
+		t.Fatalf("LoadProviderCommand() error = %v, want ambiguous active provider", err)
+	}
+}
+
 func TestLoadProviderCommandDoesNotResolveAPIKeyEnvFromProcess(t *testing.T) {
 	t.Setenv("ZERO_CMD_API_KEY", "sk-process")
 	command := writeCommand(t, commandScript{
@@ -552,5 +576,16 @@ func TestRunProviderCommandCountsProcessStartAgainstTheDeadline(t *testing.T) {
 	if !strings.Contains(err.Error(), "starting the command") {
 		t.Fatalf("error = %q, want the start phase to be the one that exceeded the deadline; "+
 			"anything else means process creation is outside the budget again", err.Error())
+	}
+}
+
+func TestLoadProviderCommandUnnamedExplicitActive(t *testing.T) {
+	command := writeCommand(t, commandScript{Stdout: `{"activeProvider":"openai","providers":[{"provider":"openai","model":"gpt-4o"}]}`})
+	cfg, err := LoadProviderCommand(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "openai" || cfg.Providers[0].Model != "gpt-4o" {
+		t.Fatalf("unexpected command config: %+v", cfg)
 	}
 }

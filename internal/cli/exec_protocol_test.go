@@ -185,11 +185,16 @@ func TestRunExecListsMCPToolsWithoutProviderConstruction(t *testing.T) {
 }
 
 func TestRunExecLogsMCPRuntimeCloseError(t *testing.T) {
+	isolateCLIUserState(t)
+	clearProviderEnv(t)
 	cwd := t.TempDir()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
 	exitCode := runWithDeps([]string{"exec", "--list-tools", "--enabled-tools", "mcp_docs_lookup"}, &stdout, &stderr, appDeps{
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return execResolvedConfig(), nil
+		},
 		getwd: func() (string, error) {
 			return cwd, nil
 		},
@@ -221,6 +226,8 @@ func TestRunExecLogsMCPRuntimeCloseError(t *testing.T) {
 }
 
 func TestRunExecRejectsInvalidProtocolOptionsBeforeRuntime(t *testing.T) {
+	isolateCLIUserState(t)
+	clearProviderEnv(t)
 	for _, tc := range []struct {
 		name string
 		args []string
@@ -236,7 +243,11 @@ func TestRunExecRejectsInvalidProtocolOptionsBeforeRuntime(t *testing.T) {
 			var stdout bytes.Buffer
 			var stderr bytes.Buffer
 
-			exitCode := Run(tc.args, &stdout, &stderr)
+			exitCode := runWithDeps(tc.args, &stdout, &stderr, appDeps{
+				resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+					return execResolvedConfig(), nil
+				},
+			})
 
 			if exitCode != exitUsage {
 				t.Fatalf("expected exit code %d, got %d", exitUsage, exitCode)
