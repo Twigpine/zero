@@ -19,6 +19,22 @@ func (m model) runDetailsAllowed() bool {
 		m.mcpManager == nil && m.picker == nil && m.renamePrompt == nil && !m.suggestionsActive()
 }
 
+// runDetailsVisible reports whether Run details is the overlay currently
+// displayed in the viewport. Higher-priority overlays (terminal attach, speech
+// API-key prompt, keybinding help, leader help) and the detailed transcript
+// view take precedence over Run details in View/transcriptView.
+func (m model) runDetailsVisible() bool {
+	if !m.runDetailsOpen || !m.runDetailsAllowed() || m.transcriptDetailed ||
+		m.helpOverlay || m.leaderHelpOverlay || m.sttKeyPrompt != nil || m.terminalAttach != nil {
+		return false
+	}
+	width := chatWidth(m.width)
+	if m.terminalAttachOverlay(width) != "" || m.sttKeyPromptOverlay(width) != "" {
+		return false
+	}
+	return m.runDetailsOverlay(width) != ""
+}
+
 func (m model) runDetailsOverlay(width int) string {
 	if !m.runDetailsOpen || width < runDetailsMinWidth || !m.runDetailsAllowed() {
 		return ""
@@ -26,11 +42,19 @@ func (m model) runDetailsOverlay(width int) string {
 	overlayWidth := minInt(72, maxInt(40, width-8))
 	overlayWidth = minInt(overlayWidth, width)
 	inner := maxInt(12, overlayWidth-4)
-	lines := m.runDetailsLines(inner)
+	lines := m.runDetailsLayout(inner).lines
 	return centerRenderedBlock(styledBlockFillTitle(overlayWidth, "Run details", lines, zeroTheme.lineStrong, lipgloss.NewStyle()), width)
 }
 
-func (m model) runDetailsLines(width int) []string {
+type runDetailsLayout struct {
+	lines     []string
+	fileHits  []fileHit
+	fileStart int
+}
+
+func (m model) runDetailsLayout(width int) runDetailsLayout {
+	var out runDetailsLayout
+	out.fileStart = -1
 	lines := make([]string, 0, 16)
 	appendSection := func(header string, rows []string) {
 		if len(rows) == 0 {
@@ -48,8 +72,27 @@ func (m model) runDetailsLines(width int) []string {
 
 	appendSection(m.sidebarAgentHeader(width), m.sidebarAgentLines(width))
 	appendSection(m.sidebarPlanHeader(width), m.sidebarPlanLines(width))
-	fileLines, _ := m.sidebarFileLines(width)
-	appendSection(m.sidebarFilesHeader(width), fileLines)
+	fileLines, hits := m.sidebarFileLines(width)
+	if len(fileLines) > 0 {
+		if len(lines) > 0 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, m.sidebarFilesHeader(width))
+		out.fileStart = len(lines)
+		kept := fileLines
+		if len(kept) > runDetailsMaxItems {
+			kept = append(append([]string(nil), fileLines[:runDetailsMaxItems-1]...), "  "+zeroTheme.faint.Render("… more in transcript"))
+			var filtered []fileHit
+			for _, h := range hits {
+				if h.lineOffset < runDetailsMaxItems-1 {
+					filtered = append(filtered, h)
+				}
+			}
+			hits = filtered
+		}
+		lines = append(lines, kept...)
+		out.fileHits = hits
+	}
 	appendSection(sidebarHeader("ACTIVITY", width), m.sidebarActivityLines(width, runDetailsMaxItems))
 	if tokens := m.sidebarTokenText(); tokens != "" {
 		if len(lines) > 0 {
@@ -58,8 +101,10 @@ func (m model) runDetailsLines(width int) []string {
 		lines = append(lines, zeroTheme.faint.Render(tokens))
 	}
 	if len(lines) == 0 {
-		return []string{zeroTheme.faint.Render("No active run details yet.")}
+		out.lines = []string{zeroTheme.faint.Render("No active run details yet.")}
+		return out
 	}
 	lines = append(lines, "", zeroTheme.faint.Render("Esc or Ctrl+B closes"))
-	return lines
+	out.lines = lines
+	return out
 }

@@ -92,6 +92,9 @@ func applyTheme(mode themeMode, terminalDark bool) themeMode {
 	if defaultRenderCache != nil {
 		defaultRenderCache.clear() // old-palette entries must not be reused
 	}
+	if defaultFileViewCache != nil {
+		defaultFileViewCache.clear()
+	}
 	return resolved
 }
 

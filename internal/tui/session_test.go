@@ -786,7 +786,7 @@ func TestRewindRefreshesInMemorySessionState(t *testing.T) {
 	}
 	eventsBefore := len(m.sessionEvents)
 
-	m, out := m.handleRewindCommand("latest")
+	m, out, _ := m.handleRewindCommand("latest")
 	if !strings.Contains(out, "Rewound") {
 		t.Fatalf("expected a rewind summary, got %q", out)
 	}

@@ -15,6 +15,8 @@ import (
 	"sort"
 	"strings"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -357,8 +359,13 @@ func (m *model) setSelectedFile(path string) {
 
 // selectFile marks path as the selected file and scrolls the transcript so its
 // most recent edit card is in view; the card tint comes from the renderers
-// reading selectedFile (rowTouchesSelectedFile).
-func (m model) selectFile(path string) model {
+// reading selectedFile (rowTouchesSelectedFile). A second activation of the
+// same path drills into the file view and returns any load command.
+func (m model) selectFile(path string) (model, tea.Cmd) {
+	if m.selectedFile == path {
+		m.runDetailsOpen = false
+		return m.openFileView(path)
+	}
 	rowIndex := m.lastRowIndexForFile(path)
 	m.setSelectedFile(path)
 	if offset, ok := m.scrollOffsetForTranscriptRow(rowIndex); ok {
@@ -367,7 +374,46 @@ func (m model) selectFile(path string) model {
 			m.chatBodyLines = 0
 		}
 	}
-	return m
+	return m, nil
+}
+
+func (m model) runDetailsInnerWidth() int {
+	overlayWidth := minInt(72, maxInt(40, m.width-8))
+	overlayWidth = minInt(overlayWidth, m.width)
+	return maxInt(12, overlayWidth-4)
+}
+
+func (m model) runDetailsFileAtMouse(msg tea.MouseMsg) (string, bool) {
+	if !m.runDetailsVisible() {
+		return "", false
+	}
+	width := chatWidth(m.width)
+	overlay := m.runDetailsOverlay(width)
+	hit, ok := m.overlayMouseHit(msg, overlay, width)
+	if !ok {
+		return "", false
+	}
+	inner := m.runDetailsInnerWidth()
+	layout := m.runDetailsLayout(inner)
+	if layout.fileStart < 0 {
+		return "", false
+	}
+	// styledBlockFillTitle contributes a 1-line top border with title before the content rows.
+	const topBorderHeight = 1
+	y := hit.y - topBorderHeight
+	var match fileHit
+	found := false
+	for _, h := range layout.fileHits {
+		if y == layout.fileStart+h.lineOffset {
+			match = h
+			found = true
+			break
+		}
+	}
+	if !found {
+		return "", false
+	}
+	return match.path, true
 }
 
 // scrollOffsetForTranscriptRow computes the chatScrollOffset that places the
