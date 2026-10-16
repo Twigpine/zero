@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -74,6 +75,34 @@ func TestCommandTurnsOffRepositoryPrograms(t *testing.T) {
 	// An inherited GIT_OPTIONAL_LOCKS must not turn the index refresh back on.
 	if value, _ := effectiveEnv(command.Env, "GIT_OPTIONAL_LOCKS"); value != "0" {
 		t.Fatalf("effective GIT_OPTIONAL_LOCKS = %q, want 0", value)
+	}
+}
+
+// Check reads the repository config once, and every command built from it gets
+// the same flags, the same directory and its own copy of the environment.
+func TestCheckReadsTheConfigOnceForSeveralCommands(t *testing.T) {
+	calls := answerConfig(t, noEntries)
+	dir := t.TempDir()
+	checked, err := Check(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	status := checked.Command(context.Background(), "status")
+	diff := checked.Command(context.Background(), "diff")
+	if got := scopes(calls); !reflect.DeepEqual(got, []string{"--local"}) {
+		t.Fatalf("config reads = %q, want one --local read for both commands", got)
+	}
+	for _, command := range []*exec.Cmd{status, diff} {
+		if !slices.Contains(command.Args, "core.fsmonitor=false") || command.Dir != dir {
+			t.Fatalf("command %q in %q lost its flags or its directory", command.Args, command.Dir)
+		}
+		if value, _ := effectiveEnv(command.Env, "GIT_OPTIONAL_LOCKS"); value != "0" {
+			t.Fatalf("effective GIT_OPTIONAL_LOCKS = %q, want 0", value)
+		}
+	}
+	status.Env[0] = "ZERO_GITSAFE_TEST_CHANGED=1"
+	if diff.Env[0] == status.Env[0] {
+		t.Fatal("two commands from one check share an environment")
 	}
 }
 

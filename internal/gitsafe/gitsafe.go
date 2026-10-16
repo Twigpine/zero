@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strings"
 )
 
@@ -57,6 +58,26 @@ const (
 // --ignore-submodules=dirty: a submodule has its own config, which this does not
 // read, and git only runs commands there when it looks inside the submodule.
 func Command(ctx context.Context, dir string, args ...string) (*exec.Cmd, error) {
+	checked, err := Check(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	return checked.Command(ctx, args...), nil
+}
+
+// Checked is a directory whose repository config Check has read, for running
+// several commands there at the cost of one config read. Reading the config
+// takes a git process of its own, and a caller that runs git more than once per
+// call, like Scan on every turn, would otherwise pay for it each time.
+type Checked struct {
+	dir string
+	env []string
+}
+
+// Check reads the repository config for dir and fails the way Command does:
+// with ErrRepositoryDefinesCommands, or with git's own error when dir is not
+// inside a repository.
+func Check(ctx context.Context, dir string) (*Checked, error) {
 	env := environment()
 	defines, err := repositoryDefinesCommands(ctx, dir, env)
 	if err != nil {
@@ -65,13 +86,20 @@ func Command(ctx context.Context, dir string, args ...string) (*exec.Cmd, error)
 	if defines {
 		return nil, ErrRepositoryDefinesCommands
 	}
+	return &Checked{dir: dir, env: env}, nil
+}
+
+// Command returns git with args, run in the checked directory, with the
+// programs a repository can configure turned off.
+func (checked *Checked) Command(ctx context.Context, args ...string) *exec.Cmd {
 	command := exec.CommandContext(ctx, "git", append(disabledPrograms(), args...)...)
-	command.Dir = dir
+	command.Dir = checked.dir
 	// No opportunistic index refresh: a read-only call never rewrites the index,
 	// so it never triggers the hooks that run when the index is written. Git
-	// before 2.15 does not know the variable and ignores it.
-	command.Env = append(env, "GIT_OPTIONAL_LOCKS=0")
-	return command, nil
+	// before 2.15 does not know the variable and ignores it. Each command gets
+	// its own copy, so two commands never share a backing array.
+	command.Env = append(slices.Clone(checked.env), "GIT_OPTIONAL_LOCKS=0")
+	return command
 }
 
 // disabledPrograms turns off the single-key ways a repository runs a program

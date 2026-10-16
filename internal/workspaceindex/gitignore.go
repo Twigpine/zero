@@ -3,11 +3,11 @@ package workspaceindex
 import (
 	"bytes"
 	"context"
-	"os"
-	"os/exec"
 	"path"
 	"strings"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/gitsafe"
 )
 
 // gitIgnoredPathsTimeout bounds how long Scan waits on git before giving up and falling
@@ -22,7 +22,8 @@ const gitIgnoredPathsTimeout = 5 * time.Second
 // trailing slash (the `rel` form Scan computes).
 //
 // Returns (nil, false) when root is not inside a git work tree, git is missing or older
-// than the floor below, or a command fails or times out. Scan then behaves as it does
+// than the floor below, the repository's own config defines a filter or diff command
+// (see gitsafe), or a command fails or times out. Scan then behaves as it does
 // outside git. A scan must never fail or hang because of this lookup.
 //
 // Git version floor: 2.16. `status --ignored=<mode>` landed in 2.16 and `--porcelain=v1`
@@ -39,11 +40,24 @@ func gitIgnoredPaths(root string) (map[string]bool, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), gitIgnoredPathsTimeout)
 	defer cancel()
 
+	// Both calls below go through one gitsafe check of the repository's config, so
+	// the repository under scan cannot make them run a program (core.fsmonitor, its
+	// hooks, or a filter or diff driver its own config defines) and an inherited
+	// GIT_DIR or GIT_WORK_TREE cannot point them at another repository. A repository
+	// whose own config defines a filter or diff command takes the non-git path.
+	// gitsafe also sets GIT_OPTIONAL_LOCKS=0, so status never takes .git/index.lock to
+	// refresh the index: Scan runs every turn, often while the user or the model runs
+	// git in the same repository, and that lock makes a concurrent `git commit` or
+	// `git add` fail with "index.lock exists".
+	checked, err := gitsafe.Check(ctx, root)
+	if err != nil {
+		return nil, false
+	}
+
 	// status reports paths relative to the repository top level even when run from a
 	// subdirectory, while Scan's `rel` is relative to root. show-prefix is root's own
-	// location inside the repo ("" at the top level, "svc/" for <repo>/svc), and also the
-	// cheapest way to learn whether this is a git work tree at all.
-	prefixOut, err := gitCommand(ctx, root, "rev-parse", "--show-prefix").Output()
+	// location inside the repo ("" at the top level, "svc/" for <repo>/svc).
+	prefixOut, err := checked.Command(ctx, "rev-parse", "--show-prefix").Output()
 	if err != nil {
 		return nil, false
 	}
@@ -54,7 +68,9 @@ func gitIgnoredPaths(root string) (map[string]bool, bool) {
 	// The trailing "." limits the report to root when root is a repository subdirectory.
 	// --untracked-files=normal: status.showUntrackedFiles=no makes git reject
 	// --ignored=matching; without an explicit override Scan falls back to the fixed list.
-	out, err := gitCommand(ctx, root, "status", "--porcelain=v1", "-z", "--untracked-files=normal", "--ignored=matching", ".").Output()
+	// --ignore-submodules=dirty keeps git out of submodule work trees, whose own config
+	// the gitsafe check does not read.
+	out, err := checked.Command(ctx, "status", "--porcelain=v1", "-z", "--untracked-files=normal", "--ignored=matching", "--ignore-submodules=dirty", ".").Output()
 	if err != nil {
 		return nil, false
 	}
@@ -100,40 +116,4 @@ func parseIgnoredStatus(out []byte, prefix string) map[string]bool {
 		paths[rel] = true
 	}
 	return paths
-}
-
-// gitCommand builds a git invocation with a fixed argv (no shell) rooted at dir.
-//
-// GIT_OPTIONAL_LOCKS=0 stops `git status` from taking .git/index.lock to refresh the
-// index stat cache. Scan runs on every turn, often while the user or the agent is running
-// git in the same repository; an opportunistic lock there can make a concurrent
-// `git commit` or `git add` fail with "index.lock exists".
-func gitCommand(ctx context.Context, dir string, args ...string) *exec.Cmd {
-	// #nosec G204 -- fixed argv, no shell; dir is the caller's own absolute path.
-	// core.fsmonitor in .git/config can point at a command git status runs; disable it so
-	// Scan never executes foreign hooks from the repository under scan.
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir, "-c", "core.fsmonitor=false"}, args...)...)
-	cmd.Env = append(withoutRepoLocationEnv(os.Environ()), "GIT_OPTIONAL_LOCKS=0")
-	return cmd
-}
-
-// withoutRepoLocationEnv drops the repository path overrides from git(1),
-// "The Git Repository": GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_COMMON_DIR,
-// GIT_OBJECT_DIRECTORY, and GIT_ALTERNATE_OBJECT_DIRECTORIES. Hooks export
-// them (githooks(5)) so git commands inside the hook find that repository.
-// Inherited, -C dir still describes the hook's repository, and Scan applies
-// its ignore rules instead of the tree under dir. GIT_CEILING_DIRECTORIES is
-// not one of these; it only bounds discovery and must be inherited.
-func withoutRepoLocationEnv(env []string) []string {
-	out := make([]string, 0, len(env))
-	for _, kv := range env {
-		key, _, _ := strings.Cut(kv, "=")
-		switch key {
-		case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
-			"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES":
-			continue
-		}
-		out = append(out, kv)
-	}
-	return out
 }

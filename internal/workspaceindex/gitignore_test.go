@@ -1,7 +1,6 @@
 package workspaceindex
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -327,23 +326,6 @@ func TestScanIgnoresInheritedRepositoryLocation(t *testing.T) {
 	}
 	if !reflect.DeepEqual(pathsOf(got.Files), pathsOf(clean.Files)) {
 		t.Fatalf("Files=%v want clean environment %v", pathsOf(got.Files), pathsOf(clean.Files))
-	}
-}
-
-// The ignored-path lookup runs every turn, often next to a git command the user or agent
-// is running in the same repository. It must not take the optional index lock, and a
-// GIT_OPTIONAL_LOCKS value inherited from the environment must not re-enable it.
-func TestGitCommandDisablesOptionalLocks(t *testing.T) {
-	t.Setenv("GIT_OPTIONAL_LOCKS", "1")
-	cmd := gitCommand(context.Background(), t.TempDir(), "status")
-	value := ""
-	for _, entry := range cmd.Env {
-		if after, ok := strings.CutPrefix(entry, "GIT_OPTIONAL_LOCKS="); ok {
-			value = after
-		}
-	}
-	if value != "0" {
-		t.Fatalf("effective GIT_OPTIONAL_LOCKS=%q want \"0\"", value)
 	}
 }
 

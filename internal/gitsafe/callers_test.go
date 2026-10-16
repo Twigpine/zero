@@ -12,11 +12,13 @@ import (
 )
 
 // The packages whose git calls Zero makes on its own. The CLI runs git for the
-// scratch-file warning and the TUI for its files sweep and pull request
-// diffstat; each call has to come through Command.
+// scratch-file warning, the TUI for its files sweep and pull request diffstat,
+// and workspaceindex for the ignored paths Scan skips on every turn; each call
+// has to come through Command or a Checked.
 var automaticGitPackages = []string{
 	filepath.Join("..", "cli"),
 	filepath.Join("..", "tui"),
+	filepath.Join("..", "workspaceindex"),
 }
 
 // parsePackage parses the non-test Go files in dir.
@@ -112,14 +114,21 @@ func TestAutomaticGitCallsDoNotExecGitDirectly(t *testing.T) {
 	}
 }
 
-// gitArguments returns the git arguments of call when it is gitsafe.Command or a
-// runner called with the program "git" (the TUI's runner(ctx, cwd, "git", ...)),
-// as far as they are string literals.
+// gitArguments returns the git arguments of call when it is gitsafe.Command, a
+// Command on a Checked in a file that imports gitsafe (checked.Command(ctx, ...)),
+// or a runner called with the program "git" (the TUI's runner(ctx, cwd, "git",
+// ...)), as far as they are string literals.
 func gitArguments(call *ast.CallExpr, gitsafeName string) ([]string, bool) {
 	start := -1
 	if selector, ok := call.Fun.(*ast.SelectorExpr); ok && gitsafeName != "" && selector.Sel.Name == "Command" {
-		if pkg, ok := selector.X.(*ast.Ident); ok && pkg.Name == gitsafeName {
-			start = 2
+		if receiver, ok := selector.X.(*ast.Ident); ok {
+			switch receiver.Name {
+			case gitsafeName:
+				start = 2
+			case "exec":
+			default:
+				start = 1
+			}
 		}
 	}
 	if start < 0 {
@@ -174,10 +183,10 @@ func TestAutomaticStatusAndDiffSkipSubmoduleWorkTrees(t *testing.T) {
 			})
 		}
 	}
-	// The scratch-file status, the files sweep's status and diff, and the pull
-	// request diffstat.
-	if checked != 4 {
-		t.Fatalf("checked %d automatic status or diff calls, want 4; update this test when they change", checked)
+	// The scratch-file status, the files sweep's status and diff, the pull request
+	// diffstat, and Scan's ignored-path status.
+	if checked != 5 {
+		t.Fatalf("checked %d automatic status or diff calls, want 5; update this test when they change", checked)
 	}
 }
 
