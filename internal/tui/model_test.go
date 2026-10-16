@@ -1222,6 +1222,7 @@ func TestResumeHonorsPriorCompaction(t *testing.T) {
 	}
 
 	m := newModel(context.Background(), Options{SessionStore: store})
+	m.removedLiveRow = "stale-previous-provider"
 	next, _ := m.handleResumeCommand(session.SessionID)
 	// Resume must load the rehydrated (compaction-aware) context, not the raw log —
 	// matching the CLI's --resume and the in-TUI /compact reload. Compare contents,
@@ -1230,6 +1231,76 @@ func TestResumeHonorsPriorCompaction(t *testing.T) {
 	// slip past a length check.
 	if !reflect.DeepEqual(next.sessionEvents, rehydrated) {
 		t.Fatalf("resumed sessionEvents do not match the rehydrated context (resume must honor prior compaction)\nresumed:    %+v\nrehydrated: %+v\nraw:        %+v", next.sessionEvents, rehydrated, raw)
+	}
+	if next.removedLiveRow != "" {
+		t.Fatalf("removedLiveRow = %q, want cleared when resume supplies the live provider", next.removedLiveRow)
+	}
+}
+
+func TestResumeAfterDeletingLiveProjectRow(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		deleteLiveRow bool
+		sameSession   bool
+	}{
+		{name: "different session retains deleted identity", deleteLiveRow: true},
+		{name: "same session retains deleted identity", deleteLiveRow: true, sameSession: true},
+		{name: "no deletion preserves nonempty live fields"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var built []config.ProviderProfile
+			m := caseSiblingModel(t, "WORK", &built)
+			store := testSessionStore(t)
+			previous, err := store.Create(sessions.CreateInput{Provider: "WORK", ModelID: m.modelName})
+			if err != nil {
+				t.Fatal(err)
+			}
+			target, err := store.Create(sessions.CreateInput{Provider: "work", ModelID: "resumed-model"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.sessionStore = store
+			m.activeSession = previous
+			before, err := os.ReadFile(m.userConfigPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.deleteLiveRow {
+				m = selectManagerRow(t, m, "WORK")
+				m = managerKey(t, m, testKeyText("d"))
+				next, cmd := m.handleProviderWizardKey(testKeyText("y"))
+				m = drainProviderManagerCmds(t, next, cmd)
+				if m.removedLiveRow != "WORK" {
+					t.Fatalf("delete did not retain live identity: %q", m.removedLiveRow)
+				}
+				assertUserRowUntouched(t, m, before)
+				m.providerWizard = nil
+			}
+			wantProvider, wantModel, wantRemoved := m.providerName, m.modelName, m.removedLiveRow
+			liveClient, liveProfile := m.provider, m.providerProfile
+			if tc.sameSession {
+				target = previous
+			}
+			next, message := m.handleResumeCommand(target.SessionID)
+			if message != "" || next.activeSession.SessionID != target.SessionID {
+				t.Fatalf("resume failed: %s", message)
+			}
+			// Resume loads history, not a new provider. Labels and retained row
+			// ownership must still describe the client that answers the next turn.
+			if next.provider != liveClient || len(built) != 0 || !reflect.DeepEqual(next.providerProfile, liveProfile) {
+				t.Fatal("resume changed the live client or its endpoint/credential profile")
+			}
+			if next.removedLiveRow != wantRemoved || next.providerName != wantProvider || next.modelName != wantModel || next.activeProviderRowName() != wantProvider {
+				t.Fatalf("resume identity = (%q, %q, %q, %q), want (%q, %q, %q, %q)", next.removedLiveRow, next.providerName, next.modelName, next.activeProviderRowName(), wantRemoved, wantProvider, wantModel, wantProvider)
+			}
+			if !transcriptContains(next.transcript, "model: project-model") || !transcriptContains(next.transcript, "provider: WORK") {
+				t.Fatal("resume summary does not describe the live project client")
+			}
+			if !tc.sameSession && !transcriptContains(next.transcript, "(recorded: resumed-model)") {
+				t.Fatal("resume summary does not distinguish the recorded model from the live model")
+			}
+			assertUserRowUntouched(t, next, before)
+		})
 	}
 }
 

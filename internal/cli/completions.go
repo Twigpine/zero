@@ -46,12 +46,10 @@ var completionRoot = completionNode{
 			}},
 		}},
 		{names: []string{"models"}, children: []completionNode{{names: []string{"list", "ls"}}}},
-		{names: []string{"providers"}, children: []completionNode{
-			{names: []string{"current"}}, {names: []string{"list"}}, {names: []string{"catalog"}},
-			{names: []string{"add"}}, {names: []string{"check"}}, {names: []string{"use"}},
-			{names: []string{"remove", "rm"}}, {names: []string{"rename"}}, {names: []string{"setup"}},
-			{names: []string{"detect"}}, {names: []string{"models"}},
-		}},
+		// Built from providersSubcommands rather than restated here: the two
+		// inventories drifted, and `repair-config` was dispatched and documented
+		// while no generated script could complete it.
+		{names: []string{"providers"}, children: aliasNodes(providersSubcommands)},
 		{names: []string{"doctor"}},
 		{names: []string{"context"}},
 		{names: []string{"repo-map", "repomap"}},
@@ -106,6 +104,16 @@ var completionRoot = completionNode{
 		{names: []string{"help"}},
 		{names: []string{"version"}},
 	},
+}
+
+// aliasNodes builds one leaf per command, keeping each command's aliases on the
+// same node so a generated script offers every accepted spelling.
+func aliasNodes(commands [][]string) []completionNode {
+	nodes := make([]completionNode, 0, len(commands))
+	for _, names := range commands {
+		nodes = append(nodes, completionNode{names: append([]string{}, names...)})
+	}
+	return nodes
 }
 
 func leafNodes(names ...string) []completionNode {

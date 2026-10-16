@@ -190,6 +190,8 @@ func TestParseExecSpecialistMetadataRejectsInvalidValues(t *testing.T) {
 }
 
 func TestRunExecRegistersTaskOnlyForUnsafeTopLevelRuns(t *testing.T) {
+	isolateCLIUserState(t)
+	clearProviderEnv(t)
 	tests := []struct {
 		name     string
 		args     []string
@@ -204,6 +206,9 @@ func TestRunExecRegistersTaskOnlyForUnsafeTopLevelRuns(t *testing.T) {
 			var stdout bytes.Buffer
 			var stderr bytes.Buffer
 			exitCode := runWithDeps(tc.args, &stdout, &stderr, appDeps{
+				resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+					return execResolvedConfig(), nil
+				},
 				getwd: func() (string, error) {
 					return t.TempDir(), nil
 				},
@@ -1280,6 +1285,8 @@ func TestRunExecHelpDocumentsAllowEscalation(t *testing.T) {
 }
 
 func TestRunExecRegistersEscalateModelOnlyWithFlag(t *testing.T) {
+	isolateCLIUserState(t)
+	clearProviderEnv(t)
 	for _, tc := range []struct {
 		name     string
 		args     []string
@@ -1292,6 +1299,9 @@ func TestRunExecRegistersEscalateModelOnlyWithFlag(t *testing.T) {
 			var stdout bytes.Buffer
 			var stderr bytes.Buffer
 			exitCode := runWithDeps(tc.args, &stdout, &stderr, appDeps{
+				resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+					return execResolvedConfig(), nil
+				},
 				getwd: func() (string, error) {
 					return t.TempDir(), nil
 				},

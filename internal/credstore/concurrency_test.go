@@ -8,10 +8,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func fileStore(t *testing.T, dir string) *Store {
 	t.Helper()
+	secureTestDirectory(t, dir)
 	store, err := New(Options{Dir: dir, Storage: "file"})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -19,10 +21,21 @@ func fileStore(t *testing.T, dir string) *Store {
 	return store
 }
 
+func allowSlowConcurrentWrites(t *testing.T) {
+	t.Helper()
+	// These tests check lost updates, not interactive latency. A hundred
+	// serialized writes can exceed the production deadline on Windows CI.
+	// TestFileLockReportsBusyInsteadOfBlockingForever checks the deadline.
+	original := credentialLockTimeout
+	credentialLockTimeout = 30 * time.Second
+	t.Cleanup(func() { credentialLockTimeout = original })
+}
+
 // THE REPRODUCTION, kept as the regression. Before the lock this reliably kept
 // 1 of 100: every writer read the same map, added its own provider, and the
 // last rename published a file missing all the others.
 func TestConcurrentSetKeepsEveryKey(t *testing.T) {
+	allowSlowConcurrentWrites(t)
 	dir := t.TempDir()
 	store := fileStore(t, dir)
 
@@ -71,6 +84,7 @@ func TestConcurrentSetKeepsEveryKey(t *testing.T) {
 // Set: it writes back a map that never contained the new key, and the Set is
 // gone. So the assertion is on the SETS surviving, not on the bystanders.
 func TestADeleteCannotClobberAConcurrentSet(t *testing.T) {
+	allowSlowConcurrentWrites(t)
 	dir := t.TempDir()
 	store := fileStore(t, dir)
 
@@ -137,6 +151,7 @@ func TestConcurrentSetAcrossProcesses(t *testing.T) {
 	if testing.Short() {
 		t.Skip("spawns processes")
 	}
+	allowSlowConcurrentWrites(t)
 	helper := os.Getenv("ZERO_CREDSTORE_HELPER_DIR")
 	if helper != "" {
 		// Child mode: write our slice of the keys and exit.
@@ -154,6 +169,7 @@ func TestConcurrentSetAcrossProcesses(t *testing.T) {
 	}
 
 	dir := t.TempDir()
+	secureTestDirectory(t, dir)
 	const children = 4
 	var wg sync.WaitGroup
 	failures := make(chan string, children)
@@ -221,7 +237,10 @@ func TestTheLockIsNotTheDataFile(t *testing.T) {
 func TestOperationsFailWhenTheLockCannotBeAcquired(t *testing.T) {
 	base := t.TempDir()
 	dir := filepath.Join(base, "creds")
-	store := fileStore(t, dir)
+	store, err := New(Options{Dir: dir, Storage: "file"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Where the store expects its directory, put a regular file.
 	if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
 		t.Fatal(err)

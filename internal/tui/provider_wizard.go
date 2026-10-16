@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 	"unicode"
@@ -58,11 +57,12 @@ func (m model) applyProviderWizardOAuth(msg providerWizardOAuthMsg) (model, tea.
 		// it into the in-memory saved list when the write succeeded — a mirror of
 		// a profile that never reached disk shows a phantom provider that works
 		// this session and silently vanishes on restart.
-		if err := persistOAuthLoginProvider(m.userConfigPath, msg.providerID); err != nil {
+		ensured, err := persistOAuthLoginProvider(m.userConfigPath, msg.providerID)
+		if err != nil {
 			m.providerWizard.oauthErr = "Signed in, but the provider profile could not be saved: " + redaction.ErrorMessage(err, redaction.Options{})
 			return m, nil
 		}
-		m.savedProviders = appendOAuthLoginProfile(m.savedProviders, msg.providerID)
+		m.savedProviders = appendOAuthLoginProfile(m.savedProviders, msg.providerID, ensured)
 	}
 	// OAuth succeeded (key minted, or a refreshable token stored for the runtime
 	// resolver). Skip the endpoint/credential steps and go straight to model
@@ -137,7 +137,7 @@ func (m model) applyProviderWizardDeviceCode(msg providerWizardDeviceCodeMsg) (m
 	}
 	m.providerWizard.deviceUserCode = msg.userCode
 	m.providerWizard.deviceVerificationURI = msg.verifyURL
-	return m, providerWizardDevicePollCmd(msg.providerID, msg.attemptID, msg.cfg, msg.auth)
+	return m, providerWizardDevicePollCmd(msg.providerID, msg.attemptID, msg.cfg, msg.auth, m.userConfigPath)
 }
 
 // providerWizardSupportsOAuth reports whether the credential step should offer a
@@ -155,11 +155,15 @@ func providerWizardSupportsOAuth(provider providercatalog.Descriptor) bool {
 // from the ID token and stores it on the saved token so the Codex provider can
 // inject it as a header on every request; other OAuth providers (xAI) run the
 // generic engine login which stores a refreshable token.
-func providerWizardOAuthCmdFor(provider providercatalog.Descriptor, attemptID int) tea.Cmd {
+func providerWizardOAuthCmdFor(provider providercatalog.Descriptor, attemptID int, configPath string) tea.Cmd {
 	providerID := provider.ID
+	path := configPath
 	switch {
 	case provider.OAuthMintsKey:
 		return func() tea.Msg {
+			if err := preflightOAuthProviderConfig(path, providerID); err != nil {
+				return providerWizardOAuthMsg{providerID: providerID, attemptID: attemptID, err: err}
+			}
 			key, err := provideroauth.OpenRouterLogin(context.Background(), provideroauth.OpenRouterOptions{
 				OpenBrowser: browser.OpenURL,
 				Timeout:     3 * time.Minute,
@@ -168,12 +172,12 @@ func providerWizardOAuthCmdFor(provider providercatalog.Descriptor, attemptID in
 		}
 	case providerID == "chatgpt":
 		return func() tea.Msg {
-			err := runProviderChatGPTLogin()
+			err := runProviderChatGPTLogin(path)
 			return providerWizardOAuthMsg{providerID: providerID, attemptID: attemptID, tokenLogin: true, err: err}
 		}
 	default:
 		return func() tea.Msg {
-			return providerWizardOAuthMsg{providerID: providerID, attemptID: attemptID, tokenLogin: true, err: runProviderTokenLogin(providerID)}
+			return providerWizardOAuthMsg{providerID: providerID, attemptID: attemptID, tokenLogin: true, err: runProviderTokenLogin(providerID, path)}
 		}
 	}
 }
@@ -183,7 +187,11 @@ func providerWizardOAuthCmdFor(provider providercatalog.Descriptor, attemptID in
 // the token's Account field) and persists the resulting token via the oauth
 // store. The runtime resolver then attaches the bearer to Codex calls and the
 // Codex provider reads the Account field for the `chatgpt-account-id` header.
-func runProviderChatGPTLogin() error {
+func runProviderChatGPTLogin(configPath string) error {
+	path := configPath
+	if err := preflightOAuthProviderConfig(path, "chatgpt"); err != nil {
+		return err
+	}
 	env := buildOAuthPresetEnv()
 	token, err := provideroauth.ChatGPTLogin(context.Background(), provideroauth.ChatGPTOptions{
 		Env:         env,
@@ -194,25 +202,60 @@ func runProviderChatGPTLogin() error {
 	if err != nil {
 		return err
 	}
+	if err := preflightOAuthLogin(configPath); err != nil {
+		return err
+	}
 	store, err := oauth.NewStore(oauth.StoreOptions{})
 	if err != nil {
 		return err
 	}
-	return store.Save(oauth.ProviderKey("chatgpt"), token)
+	manager, err := oauth.NewManager(oauth.ManagerOptions{
+		Store:       store,
+		CommitToken: config.CatalogProviderLoginCommit(path, "chatgpt", store.Save),
+	})
+	if err != nil {
+		return err
+	}
+	_, err = manager.SaveLogin("chatgpt", token)
+	return err
+}
+
+func preflightOAuthProviderConfig(path string, providerID string) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	return config.PreflightCatalogProviderLogin(path, providerID)
 }
 
 // appendOAuthLoginProfile mirrors the profile persistOAuthLoginProvider wrote to
 // config into an in-memory saved-provider list, skipping when a profile already
-// serves the catalog entry (by name or catalog id).
-func appendOAuthLoginProfile(saved []config.ProviderProfile, providerID string) []config.ProviderProfile {
+// positively owns the catalog entry.
+func appendOAuthLoginProfile(saved []config.ProviderProfile, providerID string, ensured config.EnsuredProvider) []config.ProviderProfile {
 	descriptor, ok := providercatalog.Get(providerID)
 	if !ok {
 		return saved
 	}
-	for _, profile := range saved {
-		if strings.EqualFold(strings.TrimSpace(profile.CatalogID), descriptor.ID) ||
-			strings.EqualFold(strings.TrimSpace(profile.Name), descriptor.ID) {
+	if ensured.Name != "" {
+		for index := range saved {
+			if strings.TrimSpace(saved[index].Name) != strings.TrimSpace(ensured.Name) {
+				continue
+			}
+			if strings.TrimSpace(saved[index].CatalogID) == "" {
+				updated := append([]config.ProviderProfile(nil), saved...)
+				updated[index].CatalogID = descriptor.ID
+				return updated
+			}
 			return saved
+		}
+		if !ensured.Created {
+			return saved
+		}
+	} else {
+		for _, profile := range saved {
+			if strings.TrimSpace(profile.CatalogID) != "" &&
+				config.SameProviderIdentity(profile.CatalogID, descriptor.ID) {
+				return saved
+			}
 		}
 	}
 	return append(saved, config.ProviderProfile{
@@ -235,12 +278,11 @@ func appendOAuthLoginProfile(saved []config.ProviderProfile, providerID string) 
 // UI-thread write would silently clobber it (lost update). The returned error
 // lets the caller surface a failed write instead of showing a provider that
 // never reached disk.
-func persistOAuthLoginProvider(configPath string, catalogID string) error {
+func persistOAuthLoginProvider(configPath string, catalogID string) (config.EnsuredProvider, error) {
 	if strings.TrimSpace(configPath) == "" {
-		return nil
+		return config.EnsuredProvider{}, nil
 	}
-	_, err := config.EnsureCatalogProvider(configPath, catalogID)
-	return err
+	return config.EnsureCatalogProvider(configPath, catalogID)
 }
 
 // buildOAuthPresetEnv layers the process env with the preset opt-in so a
@@ -260,7 +302,11 @@ func buildOAuthPresetEnv() map[string]string {
 // runProviderTokenLogin runs the generic OAuth engine login for a provider that
 // has a built-in preset (e.g. xAI), storing a refreshable token under
 // provider:<name>. The runtime resolver then attaches it to model calls.
-func runProviderTokenLogin(name string) error {
+func runProviderTokenLogin(name string, configPath string) error {
+	path := configPath
+	if err := preflightOAuthProviderConfig(path, name); err != nil {
+		return err
+	}
 	store, err := oauth.NewStore(oauth.StoreOptions{})
 	if err != nil {
 		return err
@@ -273,6 +319,7 @@ func runProviderTokenLogin(name string) error {
 		// into its baked-in preset (e.g. xAI's public client_id); without this the
 		// config never resolves and the browser never opens.
 		AllowPresets: true,
+		CommitToken:  config.CatalogProviderLoginCommit(path, name, store.Save),
 	})
 	if err != nil {
 		return err
@@ -297,8 +344,11 @@ type providerWizardDeviceCodeMsg struct {
 
 // providerWizardDevicePrepareCmd runs phase 1 of the device-code login off the UI
 // goroutine and reports the code to display (or an error).
-func providerWizardDevicePrepareCmd(name string, attemptID int) tea.Cmd {
+func providerWizardDevicePrepareCmd(name string, attemptID int, configPath string) tea.Cmd {
 	return func() tea.Msg {
+		if err := preflightOAuthProviderConfig(configPath, name); err != nil {
+			return providerWizardDeviceCodeMsg{providerID: name, attemptID: attemptID, err: err}
+		}
 		auth, cfg, err := oauthDevicePrepare(name)
 		if err != nil {
 			return providerWizardDeviceCodeMsg{providerID: name, attemptID: attemptID, err: err}
@@ -316,9 +366,13 @@ func providerWizardDevicePrepareCmd(name string, attemptID int) tea.Cmd {
 
 // providerWizardDevicePollCmd runs phase 2 (poll for the token + store) off the
 // UI goroutine and reports completion as a regular OAuth result.
-func providerWizardDevicePollCmd(name string, attemptID int, cfg oauth.Config, auth oauth.DeviceAuth) tea.Cmd {
+func providerWizardDevicePollCmd(name string, attemptID int, cfg oauth.Config, auth oauth.DeviceAuth, configPath string) tea.Cmd {
 	return func() tea.Msg {
-		return providerWizardOAuthMsg{providerID: name, attemptID: attemptID, tokenLogin: true, err: oauthDeviceComplete(name, cfg, auth)}
+		path := configPath
+		if err := preflightOAuthProviderConfig(path, name); err != nil {
+			return providerWizardOAuthMsg{providerID: name, attemptID: attemptID, tokenLogin: true, err: err}
+		}
+		return providerWizardOAuthMsg{providerID: name, attemptID: attemptID, tokenLogin: true, err: oauthDeviceComplete(name, cfg, auth, path)}
 	}
 }
 
@@ -330,7 +384,7 @@ func (m model) startProviderDeviceLogin() (model, tea.Cmd) {
 		return m, nil
 	}
 	attemptID := m.providerWizard.beginOAuthAttempt(true)
-	return m, providerWizardDevicePrepareCmd(provider.ID, attemptID)
+	return m, providerWizardDevicePrepareCmd(provider.ID, attemptID, m.userConfigPath)
 }
 
 const maxProviderWizardProvidersVisible = 10
@@ -443,19 +497,28 @@ type providerWizardState struct {
 	// the wizard is on providerWizardStepAimlapi.
 	aimlapi *aimlapiOnboardState
 	// Manager state (provider_manager.go): the list-first /provider surface.
-	manage           bool
-	manageRows       []providerManagerRow
-	manageCursor     int
-	manageDeleting   bool
-	manageStatus     string
-	manageCredGen    int
-	manageActiveName string
+	manage         bool
+	manageRows     []providerManagerRow
+	manageCursor   int
+	manageDeleting bool
+	// manageDeleteKeyNote is resolved when the delete confirmation opens, from
+	// config.ProviderKeyRetainedAfterRemoval, so the prompt and the delete agree
+	// about what happens to the stored key. "" means make no claim.
+	manageDeleteKeyNote string
+	manageStatus        string
+	manageCredGen       int
+	manageActiveName    string
 	// Edit state: field-level editor for one saved profile.
 	editOriginal config.ProviderProfile
 	editDraft    config.ProviderProfile
-	editCursor   int
-	editField    providerEditField
-	editBuffer   string
+	// editOwner is the provenance of the row being edited, captured when the
+	// edit began. saveManagerEdit consumes it instead of re-deriving ownership
+	// from editOriginal.Name, which is a resolved spelling that says nothing
+	// about which layer produced the row.
+	editOwner  config.ProviderRowOwnership
+	editCursor int
+	editField  providerEditField
+	editBuffer string
 }
 
 func (m model) newProviderWizard() *providerWizardState {
@@ -968,7 +1031,7 @@ func (m model) handleProviderWizardKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			if providerWizardSupportsOAuth(m.providerWizard.currentProvider()) {
 				provider := m.providerWizard.currentProvider()
 				attemptID := m.providerWizard.beginOAuthAttempt(false)
-				return m, providerWizardOAuthCmdFor(provider, attemptID)
+				return m, providerWizardOAuthCmdFor(provider, attemptID, m.userConfigPath)
 			}
 			return m, nil
 		case keyText(msg) != "":
@@ -1268,17 +1331,18 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 		nextProvider = built
 	}
 	if strings.TrimSpace(m.userConfigPath) != "" {
-		// Capture flip: move the freshly entered key into the encrypted credential
-		// store before persisting, so config.json never holds the cleartext. The
-		// provider was already built above from runtimeProfile, which has the key.
+
 		secret := profile.APIKey
-		if !preserveExistingCredentialReference {
-			profile = config.SecureProviderProfile(profile, m.userConfigPath)
-		}
-		if _, err := config.UpsertProvider(m.userConfigPath, profile, true); err != nil {
+		committed, err := config.CommitProviderProfile(m.userConfigPath, config.ProviderCommit{
+			Profile:       profile,
+			SetActive:     true,
+			KeepStoredKey: preserveExistingCredentialReference,
+		})
+		if err != nil {
 			wizard.err = redaction.RedactString(err.Error(), redaction.Options{ExtraSecretValues: []string{secret, profile.APIKey}})
 			return m, nil // nothing committed to live state yet
 		}
+		profile = committed.Persisted
 	}
 
 	// Both succeeded — commit the live provider, profile, model, and the child
@@ -1286,6 +1350,7 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 	if nextProvider != nil {
 		m.provider = nextProvider
 	}
+	m.removedLiveRow = ""
 	m.providerProfile = profile
 	m.providerName = profile.Name
 	m.modelName = profile.Model
@@ -1302,21 +1367,46 @@ func (m model) applyProviderWizard() (model, tea.Cmd) {
 	return m, nil
 }
 
-// wizardProviderStoredKey reports the saved provider name that has a key in the
-// credential store matching the wizard-selected descriptor, so the wizard can offer
-// keep/replace/remove instead of forcing a new key entry.
-func (m model) wizardProviderStoredKey(provider providercatalog.Descriptor) (string, bool) {
+// wizardProviderStoredKey reports the persisted profile whose stored key belongs
+// to the wizard-selected catalog descriptor. An exactly named positive owner wins;
+// otherwise a catalog id must identify one row, never an arbitrary file-order
+// winner among shared catalog profiles.
+func (m model) wizardProviderStoredKey(provider providercatalog.Descriptor) (string, bool, error) {
+	providerID := strings.TrimSpace(provider.ID)
 	for _, profile := range m.savedProviders {
-		if !profile.APIKeyStored {
-			continue
-		}
-		if strings.EqualFold(strings.TrimSpace(profile.Name), strings.TrimSpace(provider.Name)) ||
-			strings.EqualFold(strings.TrimSpace(profile.CatalogID), strings.TrimSpace(provider.ID)) ||
-			strings.EqualFold(strings.TrimSpace(profile.Name), strings.TrimSpace(provider.ID)) {
-			return profile.Name, true
+		if strings.TrimSpace(profile.Name) == providerID {
+			if profile.APIKeyStored {
+				return profile.Name, true, nil
+			}
+			return "", false, nil
 		}
 	}
-	return "", false
+	owner, found, err := config.CatalogProviderOwner(m.savedProviders, providerID)
+	if err != nil {
+		return "", false, err
+	}
+	if found && owner.APIKeyStored {
+		return owner.Name, true, nil
+	}
+	return "", false, nil
+}
+
+// applyProviderKeyRemovalToSession mirrors a removed credential into every
+// in-memory profile sharing its identity, including a deleted live row.
+func (m model) applyProviderKeyRemovalToSession(name string) model {
+	// Copy before mutating: model copies share the savedProviders slice.
+	updated := make([]config.ProviderProfile, len(m.savedProviders))
+	copy(updated, m.savedProviders)
+	for index := range updated {
+		if config.SameProviderIdentity(updated[index].Name, name) {
+			updated[index].APIKeyStored = false
+		}
+	}
+	m.savedProviders = updated
+	if config.SameProviderIdentity(m.providerProfile.Name, name) {
+		m.providerProfile.APIKeyStored = false
+	}
+	return m
 }
 
 // applyManageKeyChoice acts on the keep/replace/remove selection. Keep closes the
@@ -1335,16 +1425,33 @@ func (m model) applyManageKeyChoice() (model, tea.Cmd) {
 		wizard.step = providerWizardStepCredential
 		return m, nil
 	case 2: // Remove
+		canonicalName := name
 		if strings.TrimSpace(m.userConfigPath) != "" {
-			if store, err := config.ProviderKeyStoreAt(filepath.Dir(m.userConfigPath)); err == nil {
-				_, _ = store.Delete(name)
+			_, canonical, err := config.DeleteResolvedProviderCredentials(m.userConfigPath, name)
+			if err != nil {
+				wizard.err = "remove stored key: " + redaction.ErrorMessage(err, redaction.Options{})
+				return m, nil
 			}
-			_, _ = config.ClearProviderKeyStored(m.userConfigPath, name)
+			canonicalName = canonical
 		} else {
-			_, _ = config.ForgetProviderKey(name)
+			if _, err := config.ForgetProviderKey(name); err != nil {
+				wizard.err = "remove stored key: " + redaction.ErrorMessage(err, redaction.Options{})
+				return m, nil
+			}
+		}
+		updated := make([]config.ProviderProfile, len(m.savedProviders))
+		copy(updated, m.savedProviders)
+		for index := range updated {
+			if strings.TrimSpace(updated[index].Name) == canonicalName {
+				updated[index].APIKeyStored = false
+			}
+		}
+		m.savedProviders = updated
+		if strings.TrimSpace(m.providerProfile.Name) == canonicalName {
+			m.providerProfile.APIKeyStored = false
 		}
 		m.providerWizard = nil
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Provider\nRemoved the stored key for " + name + ". Re-add it any time with /provider."})
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Provider\nRemoved the stored key for " + canonicalName + ". Re-add it any time with /provider."})
 		return m, nil
 	default: // Keep
 		m.providerWizard = nil

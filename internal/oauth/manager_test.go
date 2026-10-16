@@ -166,6 +166,59 @@ func TestManagerPrepareAndCompleteDeviceLogin(t *testing.T) {
 	}
 }
 
+func TestManagerCommitTokenFailureLeavesStoreUnchanged(t *testing.T) {
+	commitTokenErr := errors.New("config changed before save")
+	for _, test := range []struct {
+		name string
+		run  func(context.Context, *Manager) error
+	}{
+		{
+			name: "Login",
+			run: func(ctx context.Context, manager *Manager) error {
+				_, err := manager.Login(ctx, LoginOptions{Provider: "demo", Device: true})
+				return err
+			},
+		},
+		{
+			name: "CompleteDeviceLogin",
+			run: func(ctx context.Context, manager *Manager) error {
+				auth, cfg, err := manager.PrepareDeviceLogin(ctx, LoginOptions{Provider: "demo"})
+				if err != nil {
+					return err
+				}
+				_, err = manager.CompleteDeviceLogin(ctx, "demo", cfg, auth)
+				return err
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fp := newFakeProvider(t, `{"access_token":"must-not-be-saved","token_type":"Bearer","expires_in":3600}`)
+			env := map[string]string{
+				"ZERO_OAUTH_DEMO_CLIENT_ID":  "client",
+				"ZERO_OAUTH_DEMO_TOKEN_URL":  fp.server.URL + "/token",
+				"ZERO_OAUTH_DEMO_DEVICE_URL": fp.server.URL + "/device",
+			}
+			store, err := NewStore(StoreOptions{FilePath: filepath.Join(t.TempDir(), "tok.json")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Save(ProviderKey("demo"), Token{AccessToken: "keep"}); err != nil {
+				t.Fatal(err)
+			}
+			manager, err := NewManager(ManagerOptions{Store: store, Env: env, CommitToken: func(string, Token) error { return commitTokenErr }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := test.run(context.Background(), manager); !errors.Is(err, commitTokenErr) {
+				t.Fatalf("error = %v, want exact CommitToken error", err)
+			}
+			if token, ok, err := store.Load(ProviderKey("demo")); err != nil || !ok || token.AccessToken != "keep" {
+				t.Fatalf("existing provider token was replaced: token=%+v ok=%v err=%v", token, ok, err)
+			}
+		})
+	}
+}
+
 // A provider configured with only an issuer URL (no TOKEN_URL) must still be
 // refreshable: GetFresh resolves the token endpoint via discovery before
 // refreshing. Guards resolveConfigForKey calling resolveEndpoints.
@@ -247,6 +300,67 @@ func TestManagerGetFreshRefreshesExpired(t *testing.T) {
 	}
 }
 
+func TestManagerRefreshPersistenceUsesCommitToken(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  func(context.Context, *Manager, string) error
+	}{
+		{
+			name: "GetFresh",
+			run: func(ctx context.Context, manager *Manager, key string) error {
+				_, err := manager.GetFresh(ctx, key)
+				return err
+			},
+		},
+		{
+			name: "Handle401",
+			run: func(ctx context.Context, manager *Manager, key string) error {
+				_, err := manager.Handle401(ctx, key)
+				return err
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fp := newFakeProvider(t, `{"access_token":"must-not-be-saved","expires_in":3600}`)
+			store, err := NewStore(StoreOptions{FilePath: filepath.Join(t.TempDir(), "oauth.json")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			key := ProviderKey("demo")
+			previous := Token{AccessToken: "previous", RefreshToken: "refresh", ExpiresAt: time.Now().Add(-time.Hour)}
+			if err := store.Save(key, previous); err != nil {
+				t.Fatal(err)
+			}
+			commitErr := errors.New("ownership changed before refresh save")
+			commitCalls := 0
+			manager, err := NewManager(ManagerOptions{
+				Store: store,
+				Env: map[string]string{
+					"ZERO_OAUTH_DEMO_CLIENT_ID": "client",
+					"ZERO_OAUTH_DEMO_TOKEN_URL": fp.server.URL + "/token",
+				},
+				CommitToken: func(string, Token) error {
+					commitCalls++
+					return commitErr
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := test.run(context.Background(), manager, key); !errors.Is(err, commitErr) {
+				t.Fatalf("refresh error = %v, want CommitToken rejection", err)
+			}
+			if commitCalls != 1 {
+				t.Fatalf("CommitToken calls = %d, want 1", commitCalls)
+			}
+			stored, ok, err := store.Load(key)
+			if err != nil || !ok || stored.AccessToken != previous.AccessToken {
+				t.Fatalf("rejected refresh changed token: token=%+v ok=%v err=%v", stored, ok, err)
+			}
+		})
+	}
+}
+
 func TestManagerGetFreshSkipsValidToken(t *testing.T) {
 	fp := newFakeProvider(t, `{"access_token":"should-not-be-used"}`)
 	env := map[string]string{
@@ -291,5 +405,85 @@ func TestManagerLogout(t *testing.T) {
 	}
 	if removed2, _ := m.Logout("demo"); removed2 {
 		t.Fatal("second logout should report nothing removed")
+	}
+}
+
+func TestCompleteDeviceLoginBeforeSaveFailurePreservesPreviousToken(t *testing.T) {
+	fp := newFakeProvider(t, `{"access_token":"replacement","refresh_token":"replacement-refresh","expires_in":3600}`)
+	store, err := NewStore(StoreOptions{FilePath: filepath.Join(t.TempDir(), "oauth.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := ProviderKey("demo")
+	previous := Token{AccessToken: "previous", RefreshToken: "previous-refresh"}
+	if err := store.Save(key, previous); err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("config changed during login")
+	manager, err := NewManager(ManagerOptions{
+		Store:       store,
+		HTTPClient:  fp.server.Client(),
+		CommitToken: func(string, Token) error { return wantErr },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := DeviceAuth{DeviceCode: "device", ExpiresAt: time.Now().Add(time.Minute), Interval: time.Millisecond}
+	_, err = manager.CompleteDeviceLogin(context.Background(), "demo", Config{TokenEndpoint: fp.server.URL + "/token", ClientID: "client"}, auth)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("CompleteDeviceLogin error = %v, want pre-save rejection", err)
+	}
+	stored, ok, err := store.Load(key)
+	if err != nil || !ok || stored.AccessToken != previous.AccessToken || stored.RefreshToken != previous.RefreshToken {
+		t.Fatalf("pre-save rejection changed token: ok=%v err=%v token=%+v", ok, err, stored)
+	}
+}
+
+// The browser (loopback) flow runs the same pre-save check as the device flow.
+func TestLoginLoopbackBeforeSaveFailurePreservesPreviousToken(t *testing.T) {
+	fp := newFakeProvider(t, `{"access_token":"replacement","refresh_token":"replacement-refresh","expires_in":3600}`)
+	store, err := NewStore(StoreOptions{FilePath: filepath.Join(t.TempDir(), "oauth.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := ProviderKey("demo")
+	previous := Token{AccessToken: "previous", RefreshToken: "previous-refresh"}
+	if err := store.Save(key, previous); err != nil {
+		t.Fatal(err)
+	}
+	openBrowser := func(authURL string) error {
+		u, err := url.Parse(authURL)
+		if err != nil {
+			return err
+		}
+		redirect := u.Query().Get("redirect_uri")
+		state := u.Query().Get("state")
+		_, err = http.Get(redirect + "?code=the-code&state=" + url.QueryEscape(state))
+		return err
+	}
+	wantErr := errors.New("config changed during login")
+	manager, err := NewManager(ManagerOptions{
+		Store: store,
+		Env: map[string]string{
+			"ZERO_OAUTH_DEMO_CLIENT_ID":     "client",
+			"ZERO_OAUTH_DEMO_AUTHORIZE_URL": "https://auth.example.com/authorize",
+			"ZERO_OAUTH_DEMO_TOKEN_URL":     fp.server.URL + "/token",
+		},
+		OpenBrowser: openBrowser,
+		CommitToken: func(string, Token) error { return wantErr },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = manager.Login(context.Background(), LoginOptions{Provider: "demo"})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Login error = %v, want pre-save rejection", err)
+	}
+	if fp.tokenHits.Load() == 0 {
+		t.Fatal("Login rejected before the token exchange; the pre-save check was not reached")
+	}
+	stored, ok, err := store.Load(key)
+	if err != nil || !ok || stored.AccessToken != previous.AccessToken || stored.RefreshToken != previous.RefreshToken {
+		t.Fatalf("pre-save rejection changed token: ok=%v err=%v token=%+v", ok, err, stored)
 	}
 }

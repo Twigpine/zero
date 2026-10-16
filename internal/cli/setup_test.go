@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -169,8 +170,8 @@ func TestSaveSetupProviderStoresPastedAPIKey(t *testing.T) {
 		t.Fatalf("saveSetupProvider() error = %v", err)
 	}
 
-	if result.Provider.APIKey != "sk-pasted-secret" {
-		t.Fatalf("Provider.APIKey = %q, want pasted key", result.Provider.APIKey)
+	if result.Provider.APIKey != "" || !result.Provider.APIKeyStored {
+		t.Fatalf("returned provider must be the sanitized persisted profile: %+v", result.Provider)
 	}
 	if result.Provider.APIKeyEnv != "" {
 		t.Fatalf("Provider.APIKeyEnv = %q, want empty when API key is pasted", result.Provider.APIKeyEnv)
@@ -365,6 +366,105 @@ func TestVerifySetupProviderDistinguishesMissingFromRejectedKey(t *testing.T) {
 	})
 	if !probed {
 		t.Fatal("a keyless local provider should still be probed")
+	}
+}
+
+func TestSaveSetupProviderRejectsCaseVariantBeforeCredentialCapture(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{
+		ActiveProvider: "work",
+		Providers:      []config.ProviderProfile{{Name: "work", APIKeyStored: true}},
+	})
+	before, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "OLD"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = saveSetupProvider(appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+	}, tui.SetupSelection{
+		CatalogID: "ollama-cloud",
+		Name:      "WORK",
+		Model:     "qwen3-coder:480b",
+		APIKey:    "NEW",
+	}, setupSaveOptions{})
+	if err == nil || !strings.Contains(err.Error(), `provider "WORK" already exists as "work"`) {
+		t.Fatalf("saveSetupProvider() error = %v, want case-variant collision", err)
+	}
+	after, readErr := os.ReadFile(configPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("rejected setup rewrote config\nbefore: %s\nafter: %s", before, after)
+	}
+	if key, ok, getErr := store.Get("work"); getErr != nil || !ok || key != "OLD" {
+		t.Fatalf("existing credential = %q,%v,%v; want OLD,true,nil", key, ok, getErr)
+	}
+}
+
+func TestVerifySetupProviderLoadsSanitizedStoredKey(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("openai", "sk-stored"); err != nil {
+		t.Fatal(err)
+	}
+	var probed config.ProviderProfile
+	_, _ = verifySetupProvider(appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+		probeProviderHealth: func(_ context.Context, options providerhealth.Options) providerhealth.Result {
+			probed = options.Profile
+			return providerhealth.Result{}
+		},
+	}, config.ProviderProfile{
+		Name:         "openai",
+		ProviderKind: config.ProviderKindOpenAI,
+		BaseURL:      config.OpenAIBaseURL,
+		Model:        "gpt-4.1",
+		APIKeyStored: true,
+	})
+	if probed.APIKey != "sk-stored" {
+		t.Fatalf("probe API key = %q, want credential-store value", probed.APIKey)
+	}
+}
+
+func TestVerifySetupProviderReportsStoredKeyReadFailure(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "file")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(filepath.Join(dir, "credentials.json"), []byte("not-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	probed := false
+	verification, err := verifySetupProvider(appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+		probeProviderHealth: func(context.Context, providerhealth.Options) providerhealth.Result {
+			probed = true
+			return providerhealth.Result{}
+		},
+	}, config.ProviderProfile{Name: "openai", APIKeyStored: true})
+	if err == nil || !strings.Contains(err.Error(), "load stored API key") {
+		t.Fatalf("verifySetupProvider() error = %v, want stored-key read failure", err)
+	}
+	if verification.Summary != "stored api key unavailable" {
+		t.Fatalf("summary = %q, want stored api key unavailable", verification.Summary)
+	}
+	if probed {
+		t.Fatal("probe ran without a readable stored credential")
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -17,6 +18,8 @@ import (
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/mcp"
+	"github.com/Gitlawb/zero/internal/oauth"
+	"github.com/Gitlawb/zero/internal/provideroauth"
 	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/tools"
 	"github.com/Gitlawb/zero/internal/tui"
@@ -31,6 +34,29 @@ type failingWriter struct{}
 
 func (failingWriter) Write([]byte) (int, error) {
 	return 0, errWriteFailed
+}
+
+func TestChatGPTLoginDependencyDefaultsAndPreservesInjection(t *testing.T) {
+	wantDefault := reflect.ValueOf(provideroauth.ChatGPTLogin).Pointer()
+	if got := defaultAppDeps().chatGPTLogin; got == nil || reflect.ValueOf(got).Pointer() != wantDefault {
+		t.Fatal("defaultAppDeps().chatGPTLogin is not provideroauth.ChatGPTLogin")
+	}
+	if got := fillAppDeps(appDeps{}).chatGPTLogin; got == nil || reflect.ValueOf(got).Pointer() != wantDefault {
+		t.Fatal("fillAppDeps(appDeps{}).chatGPTLogin is not provideroauth.ChatGPTLogin")
+	}
+
+	called := false
+	injected := func(context.Context, provideroauth.ChatGPTOptions) (oauth.Token, error) {
+		called = true
+		return oauth.Token{}, nil
+	}
+	deps := fillAppDeps(appDeps{chatGPTLogin: injected})
+	if _, err := deps.chatGPTLogin(context.Background(), provideroauth.ChatGPTOptions{}); err != nil {
+		t.Fatalf("injected chatGPTLogin returned error: %v", err)
+	}
+	if !called {
+		t.Fatal("fillAppDeps replaced the injected chatGPTLogin")
+	}
 }
 
 func TestRunPrintsVersion(t *testing.T) {
@@ -474,6 +500,27 @@ func TestRunNoArgsFailsWhenResolveErrorIsNotProviderRelated(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "invalid config JSON") {
 		t.Fatalf("stderr = %q, want the underlying config error", stderr.String())
+	}
+}
+
+func TestRunNoArgsOffersRepairCommandForPersistedNameFailure(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cwd := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{Providers: []config.ProviderProfile{{Name: ""}, {Name: "work"}, {Name: "WORK"}}})
+	exitCode := runWithDeps(nil, &stdout, &stderr, appDeps{
+		getwd:          func() (string, error) { return cwd, nil },
+		userConfigPath: func() (string, error) { return configPath, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.Resolve(config.ResolveOptions{UserConfigPath: configPath, Env: map[string]string{}})
+		},
+		runTUI: func(context.Context, tui.Options) int {
+			t.Fatal("TUI must not launch with ambiguous persisted identities")
+			return 0
+		},
+	})
+	if exitCode == exitSuccess || !strings.Contains(stderr.String(), "zero providers repair-config") {
+		t.Fatalf("exit=%d stderr=%q, want actionable repair path", exitCode, stderr.String())
 	}
 }
 

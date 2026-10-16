@@ -206,6 +206,14 @@ zero models list
 zero doctor
 ```
 
+If an upgraded `config.json` contains one legacy provider profile without a
+name, repair it with `zero providers repair-config`. The command preserves the
+saved `activeProvider` name (falling back to `openai`). If a row already has that
+exact name, the command preserves the field merge older releases used, with
+later nonempty fields taking precedence. An explicit `--name <unique-name>`
+keeps the legacy row separate instead. Case-only collisions and multiple
+unnamed rows are not merged by guessing; follow the error's repair guidance.
+
 For API providers, set the matching environment variable before setup or enter
 the key in the wizard:
 
@@ -404,7 +412,7 @@ zero exec             one-shot or scripted agent run
 zero setup            first-run provider setup
 zero auth             OAuth/login helpers for supported providers
 zero models           model registry and capabilities
-zero providers        provider profiles and detection
+zero providers        provider profiles, recovery, and detection
 zero doctor           setup, key, and connectivity checks
 zero context          context-budget report
 zero repo-map         deterministic repository map

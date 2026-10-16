@@ -9,8 +9,16 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/browser"
+	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/oauth"
 )
+
+func preflightOAuthLogin(configPath string) error {
+	if strings.TrimSpace(configPath) == "" {
+		return nil
+	}
+	return config.PreflightUserConfig(configPath)
+}
 
 // oauthPreferDeviceFlow reports whether the device-code flow should be the
 // default for a device-capable provider because no usable browser is likely
@@ -59,7 +67,11 @@ func oauthDevicePrepare(name string) (oauth.DeviceAuth, oauth.Config, error) {
 // oauthDeviceComplete polls for the token authorized via oauthDevicePrepare and
 // stores it under provider:<name> (phase 2). The runtime resolver then attaches
 // the refreshable token to model calls.
-func oauthDeviceComplete(name string, cfg oauth.Config, auth oauth.DeviceAuth) error {
+func oauthDeviceComplete(name string, cfg oauth.Config, auth oauth.DeviceAuth, configPath string) error {
+	path := configPath
+	if err := preflightOAuthProviderConfig(path, name); err != nil {
+		return err
+	}
 	store, err := oauth.NewStore(oauth.StoreOptions{})
 	if err != nil {
 		return err
@@ -68,6 +80,7 @@ func oauthDeviceComplete(name string, cfg oauth.Config, auth oauth.DeviceAuth) e
 		Store:        store,
 		HTTPClient:   &http.Client{Timeout: 60 * time.Second},
 		AllowPresets: true, // preset config is needed to poll/exchange the device token
+		CommitToken:  config.CatalogProviderLoginCommit(path, name, store.Save),
 	})
 	if err != nil {
 		return err

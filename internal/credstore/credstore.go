@@ -304,10 +304,17 @@ func (s *Store) write(data map[string]string) error {
 // rename and would carry the lock away with the old inode.
 func (s *Store) lockPath() string { return s.file + ".lock" }
 
-// filepathDir is filepath.Dir, named locally so the two platform lock files can
-// share it without either importing path/filepath for one call.
-func filepathDir(path string) string { return filepath.Dir(path) }
-
 func normalizeProvider(provider string) string {
+	return NormalizeProvider(provider)
+}
+
+// NormalizeProvider is the credential-store's provider-name equivalence rule:
+// entries are keyed by the trimmed, lowercased name. Callers that decide
+// whether two provider spellings share one stored secret (e.g. removing a
+// case-variant row while a sibling survives) must compare with THIS function
+// rather than strings.EqualFold — the two relations are not the same. Unicode
+// case folding equates "s" and "ſ", strings.ToLower does not, so an EqualFold
+// comparison can promise a survivor access to a key it cannot look up.
+func NormalizeProvider(provider string) string {
 	return strings.ToLower(strings.TrimSpace(provider))
 }

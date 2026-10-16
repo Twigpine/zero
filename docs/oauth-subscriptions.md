@@ -32,6 +32,13 @@ When a login exists for a provider, the **OpenAI and Anthropic** providers send
 before. Tokens are stored 0600 (or the OS keyring with
 `ZERO_OAUTH_STORAGE=keyring`) and never logged. See `zero auth --help`.
 
+Provider OAuth login validates the persisted user configuration before opening
+authorization and revalidates it immediately before replacing a stored token.
+This applies to CLI login, the TUI/setup wizard, and device-code completion. If
+the configuration is invalid at either check, Zero aborts without overwriting
+the previous OAuth credential. If the error identifies one legacy unnamed
+provider profile, repair it with `zero providers repair-config`.
+
 ### In the setup wizard (`/provider`)
 
 Running `/provider` opens a **"How do you want to connect?"** chooser:

@@ -35,6 +35,7 @@ type Manager struct {
 	// openBrowser is invoked with the authorization URL for loopback logins.
 	// Tests inject a function that drives the loopback redirect.
 	openBrowser func(authURL string) error
+	commitToken func(key string, token Token) error
 	// refreshLocks serializes concurrent refreshes per key so parallel callers
 	// don't each spend the single-use refresh token; the loser reuses the rotated
 	// token. refreshMu guards the map (M7).
@@ -59,6 +60,10 @@ type ManagerOptions struct {
 	RefreshBuffer time.Duration
 	Out           io.Writer
 	OpenBrowser   func(authURL string) error
+	// CommitToken persists an interactively authorized token. Callers that bind
+	// token ownership to external state use this boundary to hold that state's
+	// write lock through validation and Store.Save. Nil uses Store.Save directly.
+	CommitToken func(key string, token Token) error
 }
 
 // NewManager builds a Manager, filling defaults.
@@ -94,9 +99,14 @@ func NewManager(opts ManagerOptions) (*Manager, error) {
 	if opts.AllowPresets {
 		env = envWithPresetsAllowed(env)
 	}
+	commitToken := opts.CommitToken
+	if commitToken == nil {
+		commitToken = opts.Store.Save
+	}
 	return &Manager{
 		store: opts.Store, registry: registry, client: client,
 		env: env, now: now, buffer: buffer, out: out, openBrowser: open,
+		commitToken: commitToken,
 	}, nil
 }
 
@@ -142,11 +152,7 @@ func (m *Manager) Login(ctx context.Context, opts LoginOptions) (Status, error) 
 		return Status{}, err
 	}
 
-	key := ProviderKey(opts.Provider)
-	if err := m.store.Save(key, token); err != nil {
-		return Status{}, err
-	}
-	return m.statusFor(key)
+	return m.SaveLogin(opts.Provider, token)
 }
 
 // PrepareDeviceLogin resolves the provider config and requests an RFC 8628
@@ -198,8 +204,15 @@ func (m *Manager) CompleteDeviceLogin(ctx context.Context, provider string, cfg 
 	if err != nil {
 		return Status{}, err
 	}
+	return m.SaveLogin(provider, token)
+}
+
+// SaveLogin persists a completed interactive login through the manager's commit
+// boundary. Bespoke authorization flows use it when they produce a Token outside
+// Login but still need the same ownership validation and persistence semantics.
+func (m *Manager) SaveLogin(provider string, token Token) (Status, error) {
 	key := ProviderKey(provider)
-	if err := m.store.Save(key, token); err != nil {
+	if err := m.commitToken(key, token); err != nil {
 		return Status{}, err
 	}
 	return m.statusFor(key)
@@ -351,7 +364,7 @@ func (m *Manager) refreshAndSave(ctx context.Context, key string, cfg Config, cu
 	if err != nil {
 		return "", err
 	}
-	if err := m.store.Save(key, refreshed); err != nil {
+	if err := m.commitToken(key, refreshed); err != nil {
 		return "", err
 	}
 	return refreshed.AccessToken, nil

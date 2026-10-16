@@ -282,8 +282,14 @@ func TestCrossProcessMutationExcludesAndPreserves(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	if _, err := upsertProviderLocked(path, ProviderProfile{Name: "parent", Model: "parent-model"}, false); err != nil {
+	// The parent already holds the config lock, so use the in-memory mutation
+	// and publication directly rather than re-entering the transaction boundary.
+	parentConfig := readTestConfig(t, path)
+	if err := upsertProviderConfig(&parentConfig, ProviderProfile{Name: "parent", Model: "parent-model"}, false); err != nil {
 		t.Fatalf("parent mutation: %v", err)
+	}
+	if err := writeConfigFile(path, parentConfig); err != nil {
+		t.Fatalf("parent publication: %v", err)
 	}
 	release()
 
@@ -392,5 +398,72 @@ func TestMutationErrorSurvivesUnlockFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "definitely-not-configured") {
 		t.Fatalf("err = %v, want it to still name the missing provider", err)
+	}
+}
+
+func TestProviderIdentityMutationsHonorConfigLock(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	for _, operation := range []struct {
+		name string
+		seed string
+		run  func(string) error
+	}{
+		{"repair", `{"activeProvider":"work","providers":[{"model":"gpt-4o"}]}`, func(path string) error {
+			_, _, err := RepairUnnamedProvider(path, "")
+			return err
+		}},
+		{"clear exact marker", `{"providers":[{"name":"work","apiKeyStored":true}]}`, func(path string) error {
+			_, err := ClearProviderKeyStored(path, "work")
+			return err
+		}},
+		{"clear identity marker", `{"providers":[{"name":"work","apiKeyStored":true}]}`, func(path string) error {
+			_, err := ClearProviderKeyStoredCaseVariants(path, "WORK")
+			return err
+		}},
+		{"commit credential", `{"providers":[{"name":"work"}]}`, func(path string) error {
+			_, err := CommitProviderProfile(path, ProviderCommit{Profile: ProviderProfile{Name: "work", APIKey: "fixture-key"}})
+			return err
+		}},
+		{"revoke credential", `{"providers":[{"name":"work","apiKeyStored":true}]}`, func(path string) error {
+			_, err := RevokeProviderCredentials(path, "work", func(string) (bool, error) { return true, nil })
+			return err
+		}},
+	} {
+		t.Run(operation.name, func(t *testing.T) {
+			for _, releaseFailure := range []bool{false, true} {
+				t.Run(fmt.Sprintf("release=%t", releaseFailure), func(t *testing.T) {
+					path := filepath.Join(t.TempDir(), "config.json")
+					if err := os.WriteFile(path, []byte(operation.seed), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					original := lockConfigFileFn
+					t.Cleanup(func() { lockConfigFileFn = original })
+					lockErr := errors.New("injected config lock failure")
+					lockConfigFileFn = func(p string) (func() error, error) {
+						if !releaseFailure {
+							return nil, lockErr
+						}
+						unlock, err := original(p)
+						if err != nil {
+							return nil, err
+						}
+						return func() error { return errors.Join(unlock(), lockErr) }, nil
+					}
+					if err := operation.run(path); !errors.Is(err, lockErr) {
+						t.Fatalf("mutation error = %v, want lock failure", err)
+					}
+					after, err := os.ReadFile(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !releaseFailure && string(after) != operation.seed {
+						t.Fatal("mutation wrote despite acquisition failure")
+					}
+					if releaseFailure && string(after) == operation.seed {
+						t.Fatal("mutation did not publish before release failure")
+					}
+				})
+			}
+		})
 	}
 }

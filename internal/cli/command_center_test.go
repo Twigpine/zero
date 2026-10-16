@@ -191,6 +191,65 @@ func TestRunProvidersCurrentJSONIncludesRuntimeMetadata(t *testing.T) {
 	}
 }
 
+func TestRunProvidersListReportsSourceAndSelectability(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{
+		Providers: []config.ProviderProfile{{Name: "work"}},
+	})
+	deps := commandCenterDeps(t)
+	deps.userConfigPath = func() (string, error) { return configPath, nil }
+	deps.resolveConfig = func(string, config.Overrides) (config.ResolvedConfig, error) {
+		profiles := []config.ProviderProfile{
+			{Name: "work", ProviderKind: config.ProviderKindOpenAI, Model: "gpt-4.1"},
+			{Name: "WORK", ProviderKind: config.ProviderKindOpenAICompatible, Model: "project-model"},
+		}
+		return config.ResolvedConfig{ActiveProvider: "WORK", Provider: profiles[1], Providers: profiles}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"providers", "list", "--json"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	var payload struct {
+		Providers []struct {
+			Name       string `json:"name"`
+			Selectable bool   `json:"selectable"`
+			Source     string `json:"source"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode JSON: %v\n%s", err, stdout.String())
+	}
+	if len(payload.Providers) != 2 {
+		t.Fatalf("providers = %#v, want two", payload.Providers)
+	}
+	for _, provider := range payload.Providers {
+		switch provider.Name {
+		case "work":
+			if !provider.Selectable || provider.Source != "user-config" {
+				t.Fatalf("saved provider metadata = %#v", provider)
+			}
+		case "WORK":
+			if provider.Selectable || provider.Source != "resolved" {
+				t.Fatalf("case-variant project provider metadata = %#v", provider)
+			}
+		default:
+			t.Fatalf("unexpected provider: %#v", provider)
+		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithDeps([]string{"providers", "current"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	for _, want := range []string{"name: WORK", "selectable: false", "source: resolved"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("current output missing %q: %q", want, stdout.String())
+		}
+	}
+}
+
 func TestRunProvidersCatalogListsDescriptors(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -876,6 +935,17 @@ func providerSetupDeps(configPath string) appDeps {
 	return appDeps{
 		userConfigPath: func() (string, error) {
 			return configPath, nil
+		},
+		resolveConfig: func(_ string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			env := map[string]string{
+				config.ActiveProviderEnv: os.Getenv(config.ActiveProviderEnv),
+				"OPENAI_API_KEY":         os.Getenv("OPENAI_API_KEY"),
+			}
+			return config.Resolve(config.ResolveOptions{
+				UserConfigPath: configPath,
+				Env:            env,
+				Overrides:      overrides,
+			})
 		},
 	}
 }

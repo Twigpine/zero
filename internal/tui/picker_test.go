@@ -1837,3 +1837,20 @@ func TestSwitchProviderModelStillRejectsProviderWithNoCredential(t *testing.T) {
 		t.Fatalf("expected the credential gate to refuse, got %q (ok=%v)", text, ok)
 	}
 }
+
+func TestSavedProviderByNamePrefersExactLiveProfileBeforeIdentityFallbacks(t *testing.T) {
+	saved := config.ProviderProfile{Name: "OpenAI", Model: "saved-model"}
+	live := config.ProviderProfile{Name: "openai", Model: "live-model"}
+	m := model{
+		savedProviders:  []config.ProviderProfile{saved},
+		providerProfile: live,
+	}
+
+	got, ok := m.savedProviderByName("openai")
+	if !ok {
+		t.Fatal("savedProviderByName() did not find openai")
+	}
+	if got.Model != live.Model {
+		t.Fatalf("savedProviderByName() = %+v, want exact live profile %+v", got, live)
+	}
+}

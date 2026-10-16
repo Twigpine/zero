@@ -79,6 +79,7 @@ func TestKeyringBackendRoundTrip(t *testing.T) {
 
 func TestEncryptedFileBackendRoundTripAndAtRest(t *testing.T) {
 	dir := t.TempDir()
+	secureTestDirectory(t, dir)
 	s, err := New(Options{Storage: "encrypted-file", Dir: dir, Keyring: newFakeKeyring(false), Env: noEnv})
 	if err != nil {
 		t.Fatal(err)
@@ -111,6 +112,7 @@ func TestEncryptedFileBackendRoundTripAndAtRest(t *testing.T) {
 
 func TestPlaintextFileBackendIsOptOut(t *testing.T) {
 	dir := t.TempDir()
+	secureTestDirectory(t, dir)
 	s, err := New(Options{Storage: "file", Dir: dir, Keyring: newFakeKeyring(false), Env: noEnv})
 	if err != nil {
 		t.Fatal(err)
@@ -161,7 +163,9 @@ func TestEnvSelectsStorage(t *testing.T) {
 }
 
 func TestProvidersListsFileBackend(t *testing.T) {
-	s, _ := New(Options{Storage: "encrypted-file", Dir: t.TempDir(), Keyring: newFakeKeyring(false), Env: noEnv})
+	dir := t.TempDir()
+	secureTestDirectory(t, dir)
+	s, _ := New(Options{Storage: "encrypted-file", Dir: dir, Keyring: newFakeKeyring(false), Env: noEnv})
 	_ = s.Set("openai", "a")
 	_ = s.Set("gemini", "b")
 	names, err := s.Providers()

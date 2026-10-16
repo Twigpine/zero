@@ -83,9 +83,12 @@ type model struct {
 	providerName         string
 	modelName            string
 	modelCatalog         modelregistry.Registry
-	providerProfile      config.ProviderProfile
-	savedProviders       []config.ProviderProfile
-	provider             zeroruntime.Provider
+
+	// removedLiveRow retains ownership while a deleted row's client keeps running.
+	removedLiveRow  string
+	providerProfile config.ProviderProfile
+	savedProviders  []config.ProviderProfile
+	provider        zeroruntime.Provider
 	// allowEscalation mirrors Options.AllowEscalation: it gates the per-run model
 	// switchers, and the caller gates the escalate_model tool on the same flag.
 	allowEscalation             bool
@@ -4599,11 +4602,11 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		// The row's owner label is derived from the same decision, so it always
 		// names the provider used here.
 		if owner := m.modelPickerSwitchOwner(item); owner != "" {
-			// A model from another saved provider: switch provider + model together.
+			// A model from another saved provider row: switch provider + model together.
 			m, text, _, cmd, switchPersistErr = m.switchProviderModel(owner, item.Value)
 		} else {
 			// Apply against the active provider instead of attempting an
-			// unresolvable provider switch.
+			// unresolvable or self-directed provider switch.
 			m, text, switchPersistErr = m.handleModelCommand(item.Value)
 		}
 		if m.providerName != previousProvider || m.modelName != previousModel {
