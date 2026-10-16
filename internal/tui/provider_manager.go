@@ -17,6 +17,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/oauth"
+	"github.com/Gitlawb/zero/internal/redaction"
 )
 
 const providerManagerMaxVisible = 10
@@ -24,10 +25,19 @@ const providerManagerMaxVisible = 10
 // providerManagerRow is one saved provider in the list. cred is resolved
 // asynchronously (keychain reads shell out to `security` on macOS and must
 // never block the render loop); empty means "still checking".
+//
+// owner is the row's PROVENANCE, resolved once when the list is built. A row
+// carries a resolved profile whose Name says nothing about which layer produced
+// it, and the mutation paths used to reconstruct ownership from that string —
+// so a project row that merely shared a credential identity with a user row
+// edited and deleted through it. Only owner.UserBacked may reach a user-config
+// or credential-store mutator, and owner.PersistedName is the exact row those
+// mutators address.
 type providerManagerRow struct {
 	profile config.ProviderProfile
 	local   bool
 	cred    string
+	owner   config.ProviderRowOwnership
 }
 
 type providerEditField int
@@ -95,9 +105,20 @@ func (m model) reloadProviderManagerRows() (model, tea.Cmd) {
 	for _, row := range m.providerWizard.manageRows {
 		previous[row.profile.Name] = row.cred
 	}
+	// Provenance is resolved ONCE per row, here, against the whole resolved list
+	// — the siblings are what distinguish "this row is the user's row under a
+	// different spelling" from "the user's row is listed separately and this one
+	// is a project/env row that only shares its credential identity".
+	resolvedNames := config.ProviderProfileNames(m.savedProviders)
 	rows := make([]providerManagerRow, 0, len(m.savedProviders))
 	for _, profile := range m.savedProviders {
 		row := providerManagerRow{profile: profile, cred: previous[profile.Name]}
+		owner, err := config.ProviderRowOwnershipAt(m.userConfigPath, resolvedNames, profile.Name)
+		if err != nil {
+			// An unreadable config is not a licence to write to it.
+			owner = config.ProviderRowOwnership{Reason: "config.json could not be read: " + redaction.ErrorMessage(err, redaction.Options{})}
+		}
+		row.owner = owner
 		if descriptor, ok := m.descriptorForProfile(profile); ok {
 			row.local = descriptor.Local
 		}
@@ -106,8 +127,10 @@ func (m model) reloadProviderManagerRows() (model, tea.Cmd) {
 	m.providerWizard.manageRows = rows
 	m.providerWizard.manageCursor = clampInt(m.providerWizard.manageCursor, 0, maxInt(0, len(rows)-1))
 	// The session's live provider is the truth the user cares about (config's
-	// activeProvider follows it on every switch).
-	m.providerWizard.manageActiveName = m.providerName
+	// activeProvider follows it on every switch). Resolve it to the row it
+	// refers to once, here, so the render's exact comparison and the sync paths
+	// below share one value instead of each re-deciding what "active" means.
+	m.providerWizard.manageActiveName = m.activeProviderRowName()
 	m.providerWizard.manageCredGen++
 	return m, providerManagerCredsCmd(m.providerWizard.manageCredGen, rows, m.userConfigPath)
 }
@@ -277,13 +300,25 @@ func (m model) handleProviderManageListKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		return m, nil
 	case strings.EqualFold(keyText(msg), "e"):
 		if row, ok := wizard.currentManagerRow(); ok {
-			wizard.beginProviderEdit(row.profile)
+			// An edit writes to config.json and can replace a stored key, so a
+			// row with no user-config row of its own has nothing to edit. Saying
+			// so beats applying this row's draft to whichever user row happens to
+			// share its credential identity.
+			if !row.owner.UserBacked {
+				wizard.manageStatus = "Can't edit " + row.profile.Name + ": " + row.owner.Reason + "."
+				return m, nil
+			}
+			wizard.beginProviderEdit(row.profile, row.owner)
 		}
 		return m, nil
 	case strings.EqualFold(keyText(msg), "d"):
-		if _, ok := wizard.currentManagerRow(); ok {
+		if row, ok := wizard.currentManagerRow(); ok {
 			wizard.manageDeleting = true
 			wizard.manageStatus = ""
+			// Resolve the retention outcome now, from the same ownership the
+			// delete uses, so the confirmation cannot promise a key removal the
+			// delete will not perform.
+			wizard.manageDeleteKeyNote = providerDeleteKeyNote(m.userConfigPath, row.owner)
 		}
 		return m, nil
 	}
@@ -328,11 +363,11 @@ func (m model) activateManagerSelection() (model, tea.Cmd) {
 	return next, cmd
 }
 
-// deleteManagerSelection removes the confirmed provider: the config write runs
-// synchronously (the list must reflect the config the instant the confirm
-// resolves), while the stored-key delete and the OAuth-login lookup — a
-// keychain subprocess and a token-store read — run in a follow-up tea.Cmd so
-// the confirm keypress never stalls the render loop. The OAuth token is
+// deleteManagerSelection removes the confirmed provider and its exclusively
+// owned stored key in one synchronous transaction, so the list reflects the
+// committed config when confirmation resolves. The OAuth-login lookup runs in
+// a follow-up tea.Cmd so its token-store read does not stall the render loop.
+// The OAuth token is
 // deliberately kept — logins outlive profiles so re-adding the provider
 // doesn't force a browser round-trip; zero auth logout removes it.
 func (m model) deleteManagerSelection() (model, tea.Cmd) {
@@ -348,39 +383,61 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 		return m, nil
 	}
 
-	persisted, err := config.ProviderPersisted(m.userConfigPath, name)
-	if err != nil {
-		wizard.manageStatus = "Delete failed: " + err.Error()
-		return m, nil
-	}
 	var notes []string
 	var activeAfter string
 	var cleanup tea.Cmd
-	if persisted {
-		cfg, err := config.RemoveProvider(m.userConfigPath, name)
+	// The row's provenance decides this, not a fresh name lookup. Asking
+	// "does config.json hold this credential identity?" answered yes for a
+	// project row whose identity a DIFFERENT user row owns, and the delete then
+	// removed that user row while the in-memory removal took the project one.
+	if row.owner.UserBacked {
+		exactName := row.owner.PersistedName
+		cfg, removedName, keyRemoved, err := config.RemoveProviderAndKey(m.userConfigPath, exactName)
 		if err != nil {
-			wizard.manageStatus = "Delete failed: " + err.Error()
+			wizard.manageStatus = "Delete failed: " + redaction.ErrorMessage(err, redaction.Options{})
 			return m, nil
 		}
+		exactName = removedName
 		activeAfter = cfg.ActiveProvider
-		notes = []string{"Deleted " + name + "."}
-		cleanup = providerManagerCleanupCmd(m.userConfigPath, row.profile)
+		if keyRemoved {
+			m = m.applyProviderKeyRemovalToSession(exactName)
+			notes = []string{"Deleted " + name + ". Its stored API key will also be deleted."}
+		} else if row.profile.APIKeyStored {
+			notes = []string{"Deleted " + name + ". Kept its stored API key because another saved provider still uses that credential."}
+		} else {
+			notes = []string{"Deleted " + name + "."}
+		}
+		resolvedProfile := row.profile
+		resolvedProfile.Name = exactName
+		resolvedProfile.APIKeyStored = false
+		cleanup = providerManagerCleanupCmd(resolvedProfile)
 	} else {
-		// Env-derived providers have no persisted profile or credential to
-		// delete. Keep this path session-only.
-		notes = []string{
-			"Removed " + name + " from this session.",
-			"It wasn't saved in config.json (likely set via an environment variable) — unset it to stop Zero from detecting it automatically.",
+		// Project- and environment-derived rows have no user-config row and no
+		// credential of their own to delete. Removing them from the session is
+		// the whole operation; nothing on disk is touched. The reason names the
+		// row that DOES own the identity when one exists, so a user who expected
+		// a saved provider to disappear can see why it did not.
+		notes = []string{"Removed " + name + " from this session."}
+		if reason := strings.TrimSpace(row.owner.Reason); reason != "" {
+			notes = append(notes, reason+" — nothing in config.json changed.")
+		} else {
+			notes = append(notes, "It wasn't saved in config.json (likely set via an environment variable) — unset it to stop Zero from detecting it automatically.")
 		}
 	}
+
+	// Decide whether the deleted row is the one this session runs on BEFORE the
+	// list shrinks: sessionRowName counts identity-carrying rows, and removing
+	// one of them changes that count.
+	deletedLiveRow := samePersistedProviderName(m.activeProviderRowName(), name)
 
 	// Surgical removal — see saveManagerEdit for why the raw cfg.Providers list
 	// must not replace the resolved/filtered savedProviders wholesale.
 	m.savedProviders = removeSavedProvider(m.savedProviders, name)
 
-	if strings.EqualFold(strings.TrimSpace(m.providerName), strings.TrimSpace(name)) {
+	if deletedLiveRow {
+		m.removedLiveRow = strings.TrimSpace(name)
 		notes = append(notes, "This session keeps running on it until you switch.")
-	} else if activeAfter != "" && !strings.EqualFold(activeAfter, name) {
+	} else if activeAfter != "" && !samePersistedProviderName(activeAfter, name) {
 		notes = append(notes, "Active provider: "+activeAfter+".")
 	}
 
@@ -398,7 +455,7 @@ func (m model) deleteManagerSelection() (model, tea.Cmd) {
 func removeSavedProvider(saved []config.ProviderProfile, name string) []config.ProviderProfile {
 	kept := saved[:0]
 	for _, profile := range saved {
-		if strings.EqualFold(strings.TrimSpace(profile.Name), strings.TrimSpace(name)) {
+		if strings.TrimSpace(profile.Name) == strings.TrimSpace(name) {
 			continue
 		}
 		kept = append(kept, profile)
@@ -406,29 +463,91 @@ func removeSavedProvider(saved []config.ProviderProfile, name string) []config.P
 	return kept
 }
 
-// providerManagerCleanupMsg reports the off-thread half of a delete: the
-// stored-key removal outcome and the OAuth-login hint.
+// providerDeleteKeyNote is the delete confirmation's sentence about the stored
+// key, computed from the same OWNERSHIP the delete itself uses so the prompt can
+// never promise an outcome the delete will not produce. It returns "" — no claim
+// at all — for a row with nothing to say: a project/env row with no user-config
+// row of its own, no user config path, or a config whose ambiguity keeps the
+// delete off disk entirely.
+func providerDeleteKeyNote(configPath string, owner config.ProviderRowOwnership) string {
+	if strings.TrimSpace(configPath) == "" || !owner.UserBacked {
+		return ""
+	}
+	retained, err := config.ProviderKeyRetainedAfterRemoval(configPath, owner.PersistedName)
+	if err != nil {
+		return ""
+	}
+	if retained {
+		return "Its stored API key is kept — another saved provider still uses that credential."
+	}
+	return "This also removes its stored API key."
+}
+
+func samePersistedProviderName(left, right string) bool {
+	return strings.TrimSpace(left) == strings.TrimSpace(right)
+}
+
+// sessionRowName resolves the LIVE session's provider spelling to the persisted
+// row it actually refers to. This answers a third question, distinct from the
+// two identity rules config defines: not "which stored secret is this?"
+// (config.SameProviderIdentity) and not "which row does this mutator target?"
+// (exact trimmed equality), but "is this the provider I am running on?".
+//
+// An exact spelling always wins, so sibling rows that differ only by case
+// ("work" and "WORK") stay distinct — a session on "work" must never follow an
+// edit or delete aimed at "WORK", and "s"/"ſ" must not re-merge. Only when the
+// credential identity is carried by exactly ONE row is the session's spelling
+// resolved to that row's own, which is what lines a session launched with
+// ZERO_PROVIDER=openai (or resumed session metadata, or a `zero providers use
+// openai` run in another terminal) up with the sole saved "OpenAI" row.
+//
+// When nothing resolves — env-derived providers, ambiguous duplicate identities
+// — the live spelling comes back unchanged, so every comparison built on this
+// degrades to exact equality rather than guessing.
+func sessionRowName(live string, providers []config.ProviderProfile) string {
+	live = strings.TrimSpace(live)
+	if live == "" {
+		return ""
+	}
+	match := ""
+	matches := 0
+	for _, provider := range providers {
+		name := strings.TrimSpace(provider.Name)
+		if name == live {
+			return name
+		}
+		if config.SameProviderIdentity(name, live) {
+			match = name
+			matches++
+		}
+	}
+	if matches == 1 {
+		return match
+	}
+	return live
+}
+
+// sessionRefersToPersistedRow reports whether the live session runs on row.
+// See sessionRowName for why this is neither blind SameProviderIdentity nor
+// plain exact equality.
+func sessionRefersToPersistedRow(live string, row string, providers []config.ProviderProfile) bool {
+	resolved := sessionRowName(live, providers)
+	return resolved != "" && resolved == strings.TrimSpace(row)
+}
+
+// providerManagerCleanupMsg reports the off-thread OAuth-login hint after a
+// provider and any exclusively owned stored key were removed transactionally.
 type providerManagerCleanupMsg struct {
 	notes []string
 }
 
-// providerManagerCleanupCmd finishes a delete off the UI goroutine: the
-// keychain delete shells out to `security` on macOS and the OAuth-login lookup
-// reads the token store — blocking work the confirm keypress must not wait on.
-// A failed key delete is surfaced rather than letting a lingering secret read
-// as a clean removal.
-func providerManagerCleanupCmd(configPath string, profile config.ProviderProfile) tea.Cmd {
+// providerManagerCleanupCmd checks for a retained OAuth login off the UI
+// goroutine. API-key deletion already completed inside the provider transaction.
+func providerManagerCleanupCmd(profile config.ProviderProfile) tea.Cmd {
 	name := profile.Name
 	catalogID := profile.CatalogID
 	return func() tea.Msg {
 		notes := []string{}
-		keyStore, storeErr := providerKeyStoreForPath(configPath)
-		if storeErr == nil {
-			_, storeErr = keyStore.Delete(name)
-		}
-		if storeErr != nil {
-			notes = append(notes, "Warning: its stored API key could not be deleted ("+storeErr.Error()+").")
-		}
 		if login, ok := oauthLoginName(config.ProviderProfile{Name: name, CatalogID: catalogID}); ok {
 			notes = append(notes, "OAuth login kept — remove with `zero auth logout "+login+"`.")
 		}
@@ -455,8 +574,9 @@ func (m model) applyProviderManagerCleanup(msg providerManagerCleanupMsg) (model
 
 // --- edit -------------------------------------------------------------------
 
-func (wizard *providerWizardState) beginProviderEdit(profile config.ProviderProfile) {
+func (wizard *providerWizardState) beginProviderEdit(profile config.ProviderProfile, owner config.ProviderRowOwnership) {
 	wizard.editOriginal = profile
+	wizard.editOwner = owner
 	wizard.editDraft = profile
 	wizard.editDraft.APIKey = "" // key field is enter-to-replace, never prefilled
 	wizard.editCursor = 0
@@ -590,39 +710,42 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 		return m, nil
 	}
 	oldName := strings.TrimSpace(wizard.editOriginal.Name)
-	persisted, err := config.ProviderPersisted(m.userConfigPath, oldName)
-	if err != nil {
-		wizard.err = err.Error()
+	// The row's provenance, captured when the edit began — not a fresh lookup
+	// from oldName. That lookup answered "does config.json carry this credential
+	// identity?", which is true for a project row whose identity a DIFFERENT user
+	// row owns, and the draft (replacement key included) was then applied to that
+	// user row while the session updated the project one.
+	if !wizard.editOwner.UserBacked {
+		wizard.err = "cannot edit " + oldName + ": " + wizard.editOwner.Reason
 		return m, nil
 	}
-	if !persisted {
-		wizard.err = "provider " + oldName + " is not saved in config.json, so there is no saved profile to edit"
-		return m, nil
-	}
+	// EditProvider matches rows exactly, and PersistedName is that exact
+	// spelling, so the credential capture and the write target the same row.
+	exactName := wizard.editOwner.PersistedName
 	newName := strings.TrimSpace(wizard.editDraft.Name)
 	if newName == "" {
 		wizard.err = "name cannot be empty"
 		return m, nil
 	}
 	edit := config.ProviderEdit{
-		Name:        oldName,
+		Name:        exactName,
 		NewName:     newName,
 		BaseURL:     strings.TrimSpace(wizard.editDraft.BaseURL),
 		Model:       strings.TrimSpace(wizard.editDraft.Model),
 		Description: wizard.editDraft.Description,
 	}
 	if key := strings.TrimSpace(wizard.editDraft.APIKey); key != "" {
-		captured := config.SecureProviderProfile(config.ProviderProfile{Name: oldName, APIKey: key}, m.userConfigPath)
-		// On a store failure SecureProviderProfile keeps the inline key, which
-		// EditProvider then persists (the startup migration re-captures later) —
-		// the same fail-soft posture as every other capture path.
-		edit.APIKey = captured.APIKey
-		edit.APIKeyStored = captured.APIKeyStored
+		edit.APIKey = key
 	}
 	if _, err := config.EditProvider(m.userConfigPath, edit); err != nil {
-		wizard.err = err.Error()
+		wizard.err = redaction.ErrorMessage(err, redaction.Options{})
 		return m, nil
 	}
+	// Decide whether the edited row is the live one BEFORE the list is rewritten:
+	// a rename changes which rows carry the session's credential identity, and
+	// sessionRowName's sole-row resolution depends on that count.
+	editedLiveRow := samePersistedProviderName(m.activeProviderRowName(), oldName)
+
 	// Mirror the edit into the in-memory list surgically. savedProviders was
 	// seeded from the RESOLVED (project-config layered) and usability-FILTERED
 	// provider set — substituting the raw user-file list here would drop
@@ -631,7 +754,8 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 
 	// Keep the live session's identity in sync with a rename of the provider it
 	// is running on: the exported ZERO_PROVIDER must resolve for spawned children.
-	if strings.EqualFold(strings.TrimSpace(m.providerName), oldName) {
+	if editedLiveRow {
+		m.removedLiveRow = ""
 		m.providerName = newName
 		m.providerProfile.Name = newName
 		config.SetActiveProviderEnv(newName)
@@ -639,7 +763,9 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 
 	wizard.step = providerWizardStepManage
 	next, cmd := m.reloadProviderManagerRows()
-	next.providerWizard.manageStatus = "Updated " + newName + "." + providerEditRestartNote(next.providerName, newName)
+	// activeProviderRowName already resolved ownership, including a removed
+	// live row. Do not resolve it again against the shortened saved list.
+	next.providerWizard.manageStatus = "Updated " + newName + "." + providerEditRestartNote(next.activeProviderRowName(), newName, nil)
 	return next, cmd
 }
 
@@ -647,19 +773,62 @@ func (m model) saveManagerEdit() (model, tea.Cmd) {
 // this session is running on — endpoint/model/key changes only apply to the
 // built client after a switch (Enter on the row re-activates and rebuilds).
 // liveName is the session's provider AFTER any rename sync, so a single
-// comparison against the edited profile's final name suffices.
-func providerEditRestartNote(liveName string, editedName string) string {
-	if strings.EqualFold(strings.TrimSpace(liveName), strings.TrimSpace(editedName)) {
+// comparison against the edited profile's final name suffices — routed through
+// sessionRefersToPersistedRow so a sole row the session spells differently
+// (live "openai", row "OpenAI") still gets the note, while case-variant
+// siblings do not.
+func providerEditRestartNote(liveName string, editedName string, providers []config.ProviderProfile) string {
+	if sessionRefersToPersistedRow(liveName, editedName, providers) {
 		return " Press Enter on it to apply the changes to this session."
 	}
 	return ""
+}
+
+// syncSavedProviderModel mirrors a model that was just written to config.json
+// into the in-memory saved list — the single reconciliation point every path
+// that persists a model must call.
+//
+// The provider manager builds its rows from savedProviders (see
+// reloadProviderManagerRows) and renders each row's model from that list, as do
+// the picker's saved-provider model sections. A switch that updates the live
+// client and config.json but not this list leaves those surfaces showing the
+// previous model until the TUI restarts and re-resolves providers from config.
+//
+// exactName must be the PERSISTED row's spelling — the one SetProviderModel was
+// handed, not the session's — because savedProviders carries row spellings.
+//
+// This is a PARTIAL update and must not route through applySavedProviderEdit.
+// config.ProviderEdit is a value struct with no field-presence semantics, so an
+// omitted field is indistinguishable from an intentional clear: that mirror
+// assigns Description unconditionally, and a model-only edit therefore wiped a
+// nonempty description out of savedProviders while config.json kept it. The
+// manager, the picker, and any copies sharing the slice then disagreed with disk
+// until the next full resolution.
+//
+// The slice is copied rather than mutated in place for the same reason: other
+// holders of the backing array — a picker snapshot taken before the switch —
+// must not observe a model change through a slice they were handed earlier.
+func syncSavedProviderModel(saved []config.ProviderProfile, exactName string, model string) []config.ProviderProfile {
+	if strings.TrimSpace(exactName) == "" || strings.TrimSpace(model) == "" {
+		return saved
+	}
+	for index := range saved {
+		if strings.TrimSpace(saved[index].Name) != strings.TrimSpace(exactName) {
+			continue
+		}
+		updated := make([]config.ProviderProfile, len(saved))
+		copy(updated, saved)
+		updated[index].Model = model
+		return updated
+	}
+	return saved
 }
 
 // applySavedProviderEdit mirrors a persisted config.EditProvider into the
 // in-memory saved list without wholesale replacement (see saveManagerEdit).
 func applySavedProviderEdit(saved []config.ProviderProfile, oldName string, edit config.ProviderEdit) []config.ProviderProfile {
 	for index := range saved {
-		if !strings.EqualFold(strings.TrimSpace(saved[index].Name), strings.TrimSpace(oldName)) {
+		if strings.TrimSpace(saved[index].Name) != strings.TrimSpace(oldName) {
 			continue
 		}
 		profile := &saved[index]
@@ -691,7 +860,7 @@ func applySavedProviderEdit(saved []config.ProviderProfile, oldName string, edit
 // in-memory saved list (replace by name, else append).
 func upsertSavedProviderProfile(saved []config.ProviderProfile, profile config.ProviderProfile) []config.ProviderProfile {
 	for index := range saved {
-		if strings.EqualFold(strings.TrimSpace(saved[index].Name), strings.TrimSpace(profile.Name)) {
+		if strings.TrimSpace(saved[index].Name) == strings.TrimSpace(profile.Name) {
 			saved[index] = profile
 			return saved
 		}
@@ -727,7 +896,7 @@ func (wizard *providerWizardState) renderManageStep(width int) []string {
 			marker = surface(zeroTheme.accent).Render("❯ ")
 		}
 		active := ""
-		if strings.EqualFold(strings.TrimSpace(row.profile.Name), strings.TrimSpace(wizard.manageActiveName)) {
+		if strings.TrimSpace(row.profile.Name) == strings.TrimSpace(wizard.manageActiveName) {
 			active = surface(zeroTheme.accent).Render(" ● active")
 		}
 		name := padProviderManagerCell(row.profile.Name, nameWidth)
@@ -753,7 +922,11 @@ func (wizard *providerWizardState) renderManageStep(width int) []string {
 		}
 		lines = append(lines, fitStyledLine(zeroTheme.faint.Render(detail), width))
 		if wizard.manageDeleting {
-			lines = append(lines, fitStyledLine(zeroTheme.red.Render("Delete "+row.profile.Name+"? This also removes its stored API key.  Enter/y confirm · Esc/n cancel"), width))
+			prompt := "Delete " + row.profile.Name + "?"
+			if note := strings.TrimSpace(wizard.manageDeleteKeyNote); note != "" {
+				prompt += " " + note
+			}
+			lines = append(lines, fitStyledLine(zeroTheme.red.Render(prompt+"  Enter/y confirm · Esc/n cancel"), width))
 		}
 	}
 	return lines

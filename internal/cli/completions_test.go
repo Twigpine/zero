@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -183,4 +184,93 @@ func assertCandidates(t *testing.T, got []string, wants ...string) {
 			t.Errorf("candidates %v do not contain %q", got, want)
 		}
 	}
+}
+
+// Dispatch, help, and completions each carried their own list of provider
+// subcommands, and they drifted: `repair-config` was dispatched and documented
+// while no generated script could complete it — so the recovery command the new
+// validation errors point users at was undiscoverable by tab.
+//
+// completionRoot now builds the providers node from providersSubcommands. This
+// holds the other two surfaces to the same inventory, so the next provider
+// command cannot ship through one door only.
+func TestProvidersSubcommandInventoryMatchesDispatchAndHelp(t *testing.T) {
+	var help bytes.Buffer
+	if err := writeProvidersHelp(&help); err != nil {
+		t.Fatalf("writeProvidersHelp: %v", err)
+	}
+	helpText := help.String()
+
+	dispatch, err := os.ReadFile("command_center.go")
+	if err != nil {
+		t.Fatalf("read dispatch source: %v", err)
+	}
+	dispatchSource := runProvidersDispatchSource(t, string(dispatch))
+
+	contexts := completionContexts(completionRoot)
+	var completionCandidates []string
+	for _, context := range contexts {
+		if context.path == "providers" {
+			completionCandidates = context.candidates
+		}
+	}
+	if completionCandidates == nil {
+		t.Fatal("completion contexts have no providers path")
+	}
+	completed := make(map[string]bool, len(completionCandidates))
+	for _, candidate := range completionCandidates {
+		completed[candidate] = true
+	}
+
+	for _, names := range providersSubcommands {
+		canonical := names[0]
+		// Help documents the canonical spelling; aliases are not separate lines.
+		if !strings.Contains(helpText, "zero providers "+canonical) {
+			t.Errorf("providers help does not document %q", canonical)
+		}
+		for _, name := range names {
+			if !completed[name] {
+				t.Errorf("providers completion context does not offer %q (candidates: %v)", name, completionCandidates)
+			}
+			// `list`, `current`, and `catalog` fall through to the shared
+			// options parser rather than an `if command ==` branch, so they are
+			// matched by the final guard instead.
+			if !strings.Contains(dispatchSource, `"`+name+`"`) {
+				t.Errorf("runProviders does not dispatch %q", name)
+			}
+		}
+	}
+
+	// The reverse direction: a command the completion tree offers but nothing
+	// dispatches would be just as broken.
+	known := make(map[string]bool)
+	for _, names := range providersSubcommands {
+		for _, name := range names {
+			known[name] = true
+		}
+	}
+	for _, candidate := range completionCandidates {
+		if strings.HasPrefix(candidate, "-") {
+			continue
+		}
+		if !known[candidate] {
+			t.Errorf("providers completion offers %q, which is not in providersSubcommands", candidate)
+		}
+	}
+}
+
+// runProvidersDispatchSource returns just the body of runProviders, so a name
+// mentioned elsewhere in the file cannot satisfy the dispatch assertion.
+func runProvidersDispatchSource(t *testing.T, source string) string {
+	t.Helper()
+	start := strings.Index(source, "func runProviders(args []string")
+	if start < 0 {
+		t.Fatal("runProviders not found in command_center.go")
+	}
+	rest := source[start:]
+	end := strings.Index(rest, "\nfunc ")
+	if end < 0 {
+		return rest
+	}
+	return rest[:end]
 }

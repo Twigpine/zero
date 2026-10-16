@@ -22,6 +22,7 @@ import (
 	"github.com/Gitlawb/zero/internal/localcontrol"
 	"github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Gitlawb/zero/internal/oauth"
 	"github.com/Gitlawb/zero/internal/observability"
 	"github.com/Gitlawb/zero/internal/peermsg"
 	"github.com/Gitlawb/zero/internal/plugins"
@@ -69,6 +70,7 @@ type appDeps struct {
 	discoverProviderModels       func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	detectLocalRuntimes          func(context.Context, provideronboarding.LocalDetectOptions) []provideronboarding.DetectedLocalRuntime
 	openRouterLogin              func(context.Context, provideroauth.OpenRouterOptions) (string, error)
+	chatGPTLogin                 func(context.Context, provideroauth.ChatGPTOptions) (oauth.Token, error)
 	newSessionStore              func() *sessions.Store
 	loadPlugins                  func(plugins.LoadOptions) (plugins.LoadResult, error)
 	loadHooks                    func(hooks.LoadOptions) (hooks.LoadResult, error)
@@ -172,6 +174,7 @@ func defaultAppDeps() appDeps {
 		discoverProviderModels: defaultDiscoverProviderModels,
 		detectLocalRuntimes:    provideronboarding.DetectLocalRuntimes,
 		openRouterLogin:        provideroauth.OpenRouterLogin,
+		chatGPTLogin:           provideroauth.ChatGPTLogin,
 		newSessionStore: func() *sessions.Store {
 			return sessions.NewStore(sessions.StoreOptions{})
 		},
@@ -545,6 +548,9 @@ func fillAppDeps(deps appDeps) appDeps {
 	if deps.openRouterLogin == nil {
 		deps.openRouterLogin = defaults.openRouterLogin
 	}
+	if deps.chatGPTLogin == nil {
+		deps.chatGPTLogin = defaults.chatGPTLogin
+	}
 	if deps.newSessionStore == nil {
 		deps.newSessionStore = defaults.newSessionStore
 	}
@@ -745,8 +751,8 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// the encrypted credential store (interactive runs only; headless exec keeps
 	// its existing behavior). Non-fatal — a missing keyring or write error leaves
 	// the inline key in place and this run still uses the already-resolved key.
-	if store, storeErr := config.ProviderKeyStoreAt(filepath.Dir(userConfigPath)); storeErr == nil {
-		_, _ = config.MigratePlaintextProviderKeys(userConfigPath, store)
+	if _, migrationErr := config.MigratePlaintextProviderKeysTransactional(userConfigPath); migrationErr != nil {
+		_, _ = fmt.Fprintf(stderr, "[zero] warning: could not migrate every plaintext provider API key: %s\n", redaction.ErrorMessage(migrationErr, redaction.Options{}))
 	}
 	doctorUserConfigPath := ""
 	projectConfigPath := ""

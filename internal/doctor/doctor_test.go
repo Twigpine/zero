@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -198,6 +199,19 @@ func TestConfigValidationCheckPassesForValidConfig(t *testing.T) {
 	check := report.Check("config.validation")
 	if check == nil || check.Status != StatusPass {
 		t.Fatalf("expected config.validation pass, got %#v", report.Checks)
+	}
+}
+
+func TestConfigValidationCheckReportsPersistedProviderNameRepair(t *testing.T) {
+	path := writeDoctorConfig(t, `{"providers":[{"name":""},{"name":"work"},{"name":"WORK"}]}`)
+	report := Run(Options{Runtime: "go", UserConfig: path, ResolveError: config.ValidatePersistedProviderNames(config.FileConfig{Providers: []config.ProviderProfile{{Name: ""}}})})
+	check := report.Check("config.validation")
+	if check == nil || check.Status != StatusFail || !strings.Contains(fmt.Sprint(check.Details), "providers repair-config") {
+		t.Fatalf("persisted-name validation = %#v", check)
+	}
+	provider := report.Check("provider.config")
+	if provider == nil || !strings.Contains(provider.Message, "could not be resolved") || strings.Contains(provider.Message, "No LLM provider") {
+		t.Fatalf("provider resolution diagnostic = %#v", provider)
 	}
 }
 

@@ -877,6 +877,17 @@ func providerSetupDeps(configPath string) appDeps {
 		userConfigPath: func() (string, error) {
 			return configPath, nil
 		},
+		resolveConfig: func(_ string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			env := map[string]string{
+				config.ActiveProviderEnv: os.Getenv(config.ActiveProviderEnv),
+				"OPENAI_API_KEY":         os.Getenv("OPENAI_API_KEY"),
+			}
+			return config.Resolve(config.ResolveOptions{
+				UserConfigPath: configPath,
+				Env:            env,
+				Overrides:      overrides,
+			})
+		},
 	}
 }
 

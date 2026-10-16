@@ -477,6 +477,27 @@ func TestRunNoArgsFailsWhenResolveErrorIsNotProviderRelated(t *testing.T) {
 	}
 }
 
+func TestRunNoArgsOffersRepairCommandForPersistedNameFailure(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cwd := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{Providers: []config.ProviderProfile{{Name: ""}, {Name: "work"}, {Name: "WORK"}}})
+	exitCode := runWithDeps(nil, &stdout, &stderr, appDeps{
+		getwd:          func() (string, error) { return cwd, nil },
+		userConfigPath: func() (string, error) { return configPath, nil },
+		resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+			return config.Resolve(config.ResolveOptions{UserConfigPath: configPath, Env: map[string]string{}})
+		},
+		runTUI: func(context.Context, tui.Options) int {
+			t.Fatal("TUI must not launch with ambiguous persisted identities")
+			return 0
+		},
+	})
+	if exitCode == exitSuccess || !strings.Contains(stderr.String(), "zero providers repair-config") {
+		t.Fatalf("exit=%d stderr=%q, want actionable repair path", exitCode, stderr.String())
+	}
+}
+
 func TestRunNoArgsLaunchesTUIWithMCPState(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

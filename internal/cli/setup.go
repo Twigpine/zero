@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode"
@@ -111,6 +112,23 @@ type setupVerification struct {
 func verifySetupProvider(deps appDeps, profile config.ProviderProfile) (setupVerification, error) {
 	if deps.probeProviderHealth == nil {
 		return setupVerification{Ran: false, Summary: "probe unavailable; skipped"}, nil
+	}
+	if profile.APIKeyStored && strings.TrimSpace(profile.APIKey) == "" {
+		configPath, err := deps.userConfigPath()
+		if err != nil {
+			return setupVerification{Ran: true, Summary: "stored api key unavailable"}, err
+		}
+		store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+		if err != nil {
+			return setupVerification{Ran: true, Summary: "stored api key unavailable"}, err
+		}
+		key, ok, err := store.Get(strings.TrimSpace(profile.Name))
+		if err != nil {
+			return setupVerification{Ran: true, Summary: "stored api key unavailable"}, fmt.Errorf("load stored API key: %w", err)
+		}
+		if ok && strings.TrimSpace(key) != "" {
+			profile.APIKey = key
+		}
 	}
 	// Distinguish "no key configured" from "key rejected": probing a remote provider
 	// with no credential yields a generic "the provider rejected the API key", which
@@ -264,12 +282,14 @@ func saveSetupProvider(deps appDeps, selection tui.SetupSelection, options setup
 	if err != nil {
 		return tui.SetupResult{}, err
 	}
-	// Persist with the key moved into the encrypted credential store (capture flip);
-	// the returned profile keeps the key for this run's immediate use.
-	if _, err := config.UpsertProvider(configPath, config.SecureProviderProfile(profile, configPath), true); err != nil {
+	committed, err := config.CommitProviderProfile(configPath, config.ProviderCommit{
+		Profile:   profile,
+		SetActive: true,
+	})
+	if err != nil {
 		return tui.SetupResult{}, err
 	}
-	return tui.SetupResult{ConfigPath: configPath, Provider: profile}, nil
+	return tui.SetupResult{ConfigPath: configPath, Provider: committed.Persisted}, nil
 }
 
 func setupProviderOptions() []tui.SetupProviderOption {

@@ -178,11 +178,7 @@ func newSaveSTTKey(userConfigPath string) func(string, string) error {
 		if strings.TrimSpace(userConfigPath) == "" {
 			return fmt.Errorf("no config path to store the key")
 		}
-		store, err := config.ProviderKeyStoreAt(filepath.Dir(userConfigPath))
-		if err != nil {
-			return err
-		}
-		return store.Set(provider, strings.TrimSpace(key))
+		return config.StoreProviderCredential(userConfigPath, provider, strings.TrimSpace(key))
 	}
 }
 

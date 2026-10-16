@@ -48,7 +48,7 @@ func (m model) advanceProviderWizard() (model, tea.Cmd) {
 			return m.startProviderDeviceLogin()
 		}
 		attemptID := m.providerWizard.beginOAuthAttempt(false)
-		return m, providerWizardOAuthCmdFor(provider, attemptID)
+		return m, providerWizardOAuthCmdFor(provider, attemptID, m.userConfigPath)
 	}
 	// A non-OAuth provider that already has a key in the credential store: offer
 	// keep/replace/remove before re-entering credentials.
@@ -65,7 +65,10 @@ func (m model) advanceProviderWizard() (model, tea.Cmd) {
 			m.providerWizard.enterAimlapi()
 			return m, nil
 		}
-		if name, ok := m.wizardProviderStoredKey(m.providerWizard.currentProvider()); ok {
+		if name, ok, err := m.wizardProviderStoredKey(m.providerWizard.currentProvider()); err != nil {
+			m.providerWizard.err = redaction.ErrorMessage(err, redaction.Options{})
+			return m, nil
+		} else if ok {
 			// Generic/custom providers (custom-openai-compatible etc.) all share
 			// the same CatalogID — matching on CatalogID would block creating a
 			// second instance. Skip ManageKey and fall through to the shared
@@ -99,7 +102,8 @@ func (m model) existingAimlapiConfiguration() (config.ProviderProfile, string, b
 	activeName := strings.TrimSpace(m.providerProfile.Name)
 	if activeName != "" {
 		for index, profile := range profiles {
-			if strings.EqualFold(strings.TrimSpace(profile.Name), activeName) && aimlapiProfile(profile) {
+			// Selecting the live session's own row: exact persisted spelling.
+			if strings.TrimSpace(profile.Name) == activeName && aimlapiProfile(profile) {
 				profiles[0], profiles[index] = profiles[index], profiles[0]
 				break
 			}
@@ -151,8 +155,11 @@ func (m model) existingAimlapiConfiguration() (config.ProviderProfile, string, b
 }
 
 func aimlapiProfile(profile config.ProviderProfile) bool {
-	return strings.EqualFold(strings.TrimSpace(profile.CatalogID), "aimlapi") ||
-		strings.EqualFold(strings.TrimSpace(profile.Name), "aimlapi")
+	catalogID := strings.TrimSpace(profile.CatalogID)
+	if catalogID != "" {
+		return config.SameProviderIdentity(catalogID, "aimlapi")
+	}
+	return config.SameProviderIdentity(profile.Name, "aimlapi")
 }
 
 func (m model) checkExistingAimlapiBalance() (model, tea.Cmd) {

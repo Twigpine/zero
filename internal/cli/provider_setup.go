@@ -53,12 +53,15 @@ func runProvidersAdd(args []string, stdout io.Writer, stderr io.Writer, deps app
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
-	// Persist with the key moved into the encrypted credential store (capture flip);
-	// the local profile keeps the key for the verification build below.
-	cfg, err := config.UpsertProvider(configPath, config.SecureProviderProfile(profile, configPath), options.setActive)
+	committed, err := config.CommitProviderProfile(configPath, config.ProviderCommit{
+		Profile:   profile,
+		SetActive: options.setActive,
+	})
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
+	cfg := committed.Config
+	profile = committed.Persisted
 
 	if options.json {
 		if err := writePrettyJSON(stdout, map[string]any{

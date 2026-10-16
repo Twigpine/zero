@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -2171,6 +2172,7 @@ func TestCompleteSetupExportsActiveProviderEnv(t *testing.T) {
 	m.width = 100
 	m.height = 30
 	m.setup.stage = setupStageReady
+	m.removedLiveRow = "stale-previous-provider"
 
 	updated, _ := m.completeSetup()
 	next := updated.(model)
@@ -2180,5 +2182,50 @@ func TestCompleteSetupExportsActiveProviderEnv(t *testing.T) {
 	}
 	if got := os.Getenv(config.ActiveProviderEnv); got != next.providerName {
 		t.Fatalf("%s = %q after setup save, want %q (children would spawn on the stale provider)", config.ActiveProviderEnv, got, next.providerName)
+	}
+	if next.removedLiveRow != "" {
+		t.Fatalf("removedLiveRow = %q, want cleared after setup commits a new live provider", next.removedLiveRow)
+	}
+}
+
+func TestApplySetupOAuthTokenPersistFailureStaysOnProvider(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"demo"},{"name":"DEMO"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(context.Background(), Options{
+		Setup: SetupOptions{Visible: true, Providers: []SetupProviderOption{
+			{ID: "xai", Name: "xAI", RequiresAuth: true},
+		}},
+	})
+	m.setup.stage = setupStageProvider
+	m.setup.oauthPending = true
+	m.setup.oauthMode = true
+	m.setup.configPath = configPath
+
+	updated, cmd := m.applySetupOAuth(setupOAuthMsg{tokenLogin: true, providerID: "xai"})
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatal("failed profile persistence should not start model discovery")
+	}
+	if next.setup.stage != setupStageProvider {
+		t.Fatalf("stage = %v, want provider", next.setup.stage)
+	}
+	if next.setup.oauthErr == "" || !strings.Contains(next.setup.oauthErr, "could not be saved") {
+		t.Fatalf("oauthErr = %q, want profile-save failure", next.setup.oauthErr)
+	}
+	if !strings.Contains(next.setup.oauthErr, "differ only by case") {
+		t.Fatalf("oauthErr = %q, want provider identity validation error", next.setup.oauthErr)
+	}
+}
+
+func TestSetupDevicePreparePreflightsConfigBeforeRequestingCode(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"demo"},{"name":"DEMO"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	msg := setupDevicePrepareCmd("xai", configPath)().(setupOAuthDeviceMsg)
+	if msg.err == nil || !strings.Contains(msg.err.Error(), "differ only by case") {
+		t.Fatalf("device-code preparation error = %v, want provider identity validation", msg.err)
 	}
 }

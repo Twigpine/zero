@@ -208,7 +208,11 @@ func (m model) newModelPicker() *commandPicker {
 		return nil
 	}
 	activeModel := strings.TrimSpace(m.modelName)
-	activeProvider := strings.TrimSpace(m.providerName)
+	// The saved ROW this session runs on, not the raw live spelling: a
+	// credential-identity comparison marked BOTH of a pair of case-sibling rows
+	// active, so the picker showed two "active" endpoints and gave no way to tell
+	// which one a selection would land on.
+	activeProvider := strings.TrimSpace(m.activeProviderRowName())
 	recent := []pickerItem{}
 	for _, pair := range m.recentModelPairsForPicker() {
 		recent = append(recent, m.modelPickerRecentItem(registry, pair.Provider, pair.Model))
@@ -294,7 +298,11 @@ func (m model) modelPickerProviders() []config.ProviderProfile {
 // active provider prefers its live-discovered models when available.
 func (m model) savedProviderModelPickerItems(profile config.ProviderProfile, activeProvider, activeModel string) []pickerItem {
 	providerName := strings.TrimSpace(profile.Name)
-	isActive := providerName != "" && strings.EqualFold(providerName, activeProvider)
+	// Exact row equality. activeProvider is already the resolved active ROW (see
+	// newModelPicker), and SameProviderIdentity here marked user "Target" and
+	// project "target" active at the same time — two rows with different
+	// endpoints, one badge each, and no way to tell them apart.
+	isActive := providerName != "" && providerName == strings.TrimSpace(activeProvider)
 	descriptor, hasDescriptor := m.descriptorForProfile(profile)
 	group := modelPickerProviderGroup(profile, descriptor, hasDescriptor)
 
@@ -493,19 +501,29 @@ func pickerItemDedupKey(item pickerItem) string {
 	return item.Value
 }
 
-// modelPickerSwitchOwner returns the saved provider that choosing item switches
-// to, or "" when the model is applied to the active provider: the owner is
-// blank, is the active provider, or (registry-fallback / stale-history rows
-// after a rename or removal) no longer resolves to a saved provider.
+// modelPickerSwitchOwner returns the saved provider row that choosing item
+// switches to, or "" when the model is applied to the active provider: the
+// owner is blank, resolves to the row this session already runs on, or
+// (registry-fallback / stale-history / ambiguous rows) resolves to no single
+// saved provider.
+//
+// It compares the resolved owner ROW to the resolved active ROW, not the two
+// credential identities. Identity comparison made an item rendered under
+// project "target" equal to active user "Target", so the switch was skipped and
+// the model was applied to — and persisted on — the OTHER endpoint's profile
+// with nothing shown to say so. savedProviderByName also refuses an ambiguous
+// spelling rather than returning the first row, so an unresolvable owner lands
+// on the active provider instead of a coin flip.
 func (m model) modelPickerSwitchOwner(item pickerItem) string {
 	owner := strings.TrimSpace(item.OwnerProvider)
-	if owner == "" || strings.EqualFold(owner, strings.TrimSpace(m.providerName)) {
+	if owner == "" {
 		return ""
 	}
-	if _, ok := m.savedProviderByName(owner); !ok {
+	ownerProfile, ok := m.savedProviderByName(owner)
+	if !ok || strings.TrimSpace(ownerProfile.Name) == strings.TrimSpace(m.activeProviderRowName()) {
 		return ""
 	}
-	return owner
+	return ownerProfile.Name
 }
 
 // modelPickerEffectiveOwner names the provider choosing item will use, so a
