@@ -47,7 +47,40 @@ const (
 var (
 	replaceKernel32       = syscall.NewLazyDLL("kernel32.dll")
 	replaceProcReplaceFil = replaceKernel32.NewProc("ReplaceFileW")
+	moveFileExProc        = replaceKernel32.NewProc("MoveFileExW")
 )
+
+// publishExclusive publishes src as a new dst without replacing anything. With
+// no MOVEFILE_REPLACE_EXISTING flag, MoveFileExW fails when dst exists (with
+// ERROR_ALREADY_EXISTS or ERROR_FILE_EXISTS, which syscall.Errno maps to
+// os.ErrExist), so a destination that appeared concurrently is refused rather
+// than overwritten. MoveFileExW removes src on success, so the caller's
+// deferred temporary cleanup becomes a no-op.
+func publishExclusive(src, dst string) error {
+	source, err := syscall.UTF16PtrFromString(src)
+	if err != nil {
+		return err
+	}
+	target, err := syscall.UTF16PtrFromString(dst)
+	if err != nil {
+		return err
+	}
+	result, _, callErr := moveFileExProc.Call(
+		uintptr(unsafe.Pointer(source)),
+		uintptr(unsafe.Pointer(target)),
+		0,
+	)
+	if result != 0 {
+		return nil
+	}
+	if callErr == nil || errors.Is(callErr, syscall.Errno(0)) {
+		return fmt.Errorf("create %s: MoveFileExW failed", dst)
+	}
+	if errors.Is(callErr, os.ErrExist) {
+		return &os.PathError{Op: "create", Path: dst, Err: os.ErrExist}
+	}
+	return callErr
+}
 
 // replaceExisting publishes src over dst with ReplaceFileW rather than
 // MoveFileEx (what os.Rename uses) to preserve destination metadata. The
@@ -86,6 +119,9 @@ func replaceExistingWithCleanup(src, dst string, replace func(string, string, st
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("refusing to replace symlink destination: %s", dst)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%w: %s", ErrNonRegularDestination, dst)
 	}
 
 	backup, err := prepareReplaceBackup(dst)

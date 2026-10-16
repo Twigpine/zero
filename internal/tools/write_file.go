@@ -88,7 +88,10 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 
 	existed := false
 	var priorInfo os.FileInfo
-	if info, err := root.Stat(rootedRelative); err == nil {
+	if info, err := root.Lstat(rootedRelative); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errorResult("Error: " + relativePath + " is a symbolic link. Writing through a symlink is not allowed; target the real file instead.")
+		}
 		existed = true
 		priorInfo = info
 		if !overwrite {
@@ -142,36 +145,28 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
+	modelKnownContent := content
+	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Format staged bytes, then
+	// publish once. Recording pre-format content would make the next edit look
+	// like an external modification and trip the conflict guard; formatting the
+	// destination in place after publication would reintroduce partial writes.
+	formatting := maybeFormatWrittenFileScoped(ctx, tool.workspaceRoot, tool.scope, absolutePath, content)
+	content = formatting.Content
+	finalContentKnown := true
+
 	var expectedContent *string
 	if priorContentKnown {
 		expectedContent = &priorContent
 	}
-	if err := commitRootedFileContents(root, absolutePath, rootedRelative, priorInfo, expectedContent, content); err != nil {
+	cleanupWarning, err := commitRootedFileContents(root, absolutePath, rootedRelative, priorInfo, expectedContent, content)
+	if err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
-	modelKnownContent := content
-	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
-	// FileTracker baseline: recording pre-format content would make the very
-	// next edit look like an external modification and trip the conflict guard.
-	restoreMode := os.FileMode(0o644)
-	if priorInfo != nil {
-		restoreMode = priorInfo.Mode().Perm()
-	}
-	formatting := maybeFormatWrittenFileScoped(ctx, tool.workspaceRoot, tool.scope, absolutePath, content, restoreMode)
-	content = formatting.Content
-	finalContentKnown := formatting.ContentKnown
 	// Baseline the freshly written content so a later edit/overwrite in this
 	// session compares against what is now on disk.
-	newInfo := formatting.Info
-	if newInfo == nil {
-		newInfo, _ = root.Stat(rootedRelative)
-	}
-	if finalContentKnown {
-		options.FileTracker.Record(absolutePath, []byte(content), newInfo)
-	} else {
-		options.FileTracker.Forget(absolutePath)
-	}
-	if finalContentKnown && content == modelKnownContent {
+	newInfo, _ := root.Stat(rootedRelative)
+	options.FileTracker.Record(absolutePath, []byte(content), newInfo)
+	if content == modelKnownContent {
 		options.FileTracker.RecordSeenRange(absolutePath, 1, trackedLineTotal(content), trackedLineTotal(content))
 	}
 	if !existed {
@@ -190,9 +185,10 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	}
 	summary := fmt.Sprintf("%s %s (%d lines).", verb, relativePath, lines)
 	summary += formatting.notice(relativePath)
-	if finalContentKnown {
-		summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
+	if cleanupWarning != "" {
+		summary += " " + cleanupWarning
 	}
+	summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}
 	// Do not pretend an unreadable overwrite was a creation. The write may be
