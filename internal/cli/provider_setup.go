@@ -53,8 +53,17 @@ func runProvidersAdd(args []string, stdout io.Writer, stderr io.Writer, deps app
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
+	if err := config.PreflightProviderWrite(configPath, profile.Name); err != nil {
+		return writeAppError(stderr, err.Error(), exitCrash)
+	}
 	// Persist with the key moved into the encrypted credential store (capture flip);
 	// the local profile keeps the key for the verification build below.
+	//
+	// Fail-soft capture: the preflight above rules out a validation failure
+	// AFTER the store write, but a config write that fails for another reason
+	// (permissions, disk full) still leaves a store entry with no apiKeyStored
+	// marker. Atomic capture+publish for this path is #894's transaction, not
+	// the OpenRouter-style PublishProviderCredential rollback this PR wires.
 	cfg, err := config.UpsertProvider(configPath, config.SecureProviderProfile(profile, configPath), options.setActive)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)

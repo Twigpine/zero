@@ -2171,6 +2171,7 @@ func TestCompleteSetupExportsActiveProviderEnv(t *testing.T) {
 	m.width = 100
 	m.height = 30
 	m.setup.stage = setupStageReady
+	m.removedLiveRow = "stale-previous-provider"
 
 	updated, _ := m.completeSetup()
 	next := updated.(model)
@@ -2180,5 +2181,8 @@ func TestCompleteSetupExportsActiveProviderEnv(t *testing.T) {
 	}
 	if got := os.Getenv(config.ActiveProviderEnv); got != next.providerName {
 		t.Fatalf("%s = %q after setup save, want %q (children would spawn on the stale provider)", config.ActiveProviderEnv, got, next.providerName)
+	}
+	if next.removedLiveRow != "" {
+		t.Fatalf("removedLiveRow = %q, want cleared after setup commits a new live provider", next.removedLiveRow)
 	}
 }

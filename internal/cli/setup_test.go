@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -365,6 +366,49 @@ func TestVerifySetupProviderDistinguishesMissingFromRejectedKey(t *testing.T) {
 	})
 	if !probed {
 		t.Fatal("a keyless local provider should still be probed")
+	}
+}
+
+func TestSaveSetupProviderRejectsCaseVariantBeforeCredentialCapture(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	writeProviderOnboardingConfig(t, configPath, config.FileConfig{
+		ActiveProvider: "work",
+		Providers:      []config.ProviderProfile{{Name: "work", APIKeyStored: true}},
+	})
+	before, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.ProviderKeyStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "OLD"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = saveSetupProvider(appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+	}, tui.SetupSelection{
+		CatalogID: "ollama-cloud",
+		Name:      "WORK",
+		Model:     "qwen3-coder:480b",
+		APIKey:    "NEW",
+	}, setupSaveOptions{})
+	if err == nil || !strings.Contains(err.Error(), `provider "WORK" already exists as "work"`) {
+		t.Fatalf("saveSetupProvider() error = %v, want case-variant collision", err)
+	}
+	after, readErr := os.ReadFile(configPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("rejected setup rewrote config\nbefore: %s\nafter: %s", before, after)
+	}
+	if key, ok, getErr := store.Get("work"); getErr != nil || !ok || key != "OLD" {
+		t.Fatalf("existing credential = %q,%v,%v; want OLD,true,nil", key, ok, getErr)
 	}
 }
 

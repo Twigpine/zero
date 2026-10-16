@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"io"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode"
@@ -11,6 +10,7 @@ import (
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/provideronboarding"
+	"github.com/Gitlawb/zero/internal/redaction"
 )
 
 type providerUseOptions struct {
@@ -35,6 +35,11 @@ type providerSetupPlan struct {
 	CheckCommand string `json:"checkCommand"`
 	UseCommand   string `json:"useCommand"`
 	EnvVar       string `json:"envVar"`
+}
+
+type providerRepairOptions struct {
+	name string
+	json bool
 }
 
 func runProvidersUse(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -113,7 +118,7 @@ func activeProviderEnvOverride(getenv func(string) string, selected string) stri
 		return ""
 	}
 	override := strings.TrimSpace(getenv(config.ActiveProviderEnv))
-	if override == "" || strings.EqualFold(override, strings.TrimSpace(selected)) {
+	if override == "" || config.SameProviderIdentity(override, selected) {
 		return ""
 	}
 	return override
@@ -379,6 +384,73 @@ func parseProviderNamesArgs(args []string, want int, usage string) (providerName
 	return options, false, nil
 }
 
+func runProvidersRepairConfig(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	options, help, err := parseProviderRepairArgs(args)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if help {
+		if err := writeProvidersHelp(stdout); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	// repaired comes from the repair itself. Re-deriving the defaulting rules
+	// here reported activeProvider as the repaired name whenever that value
+	// already belonged to a different row and the fallback had actually named
+	// this one — the command said "Named legacy provider Groq" about a row it
+	// had named "openai".
+	_, repaired, err := config.RepairUnnamedProvider(configPath, options.name)
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	if options.json {
+		if err := writePrettyJSON(stdout, map[string]any{"repairedProvider": repaired, "configPath": configPath}); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if _, err := fmt.Fprintf(stdout, "Named legacy provider %s in %s\n", repaired, configPath); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
+}
+
+func parseProviderRepairArgs(args []string) (providerRepairOptions, bool, error) {
+	options := providerRepairOptions{}
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		switch {
+		case arg == "-h" || arg == "--help" || arg == "help":
+			return options, true, nil
+		case arg == "--json":
+			options.json = true
+		case arg == "--name":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.name = value
+			index = next
+		case strings.HasPrefix(arg, "--name="):
+			value, err := requiredInlineFlagValue(arg, "--name")
+			if err != nil {
+				return options, false, err
+			}
+			options.name = value
+		case strings.HasPrefix(arg, "-"):
+			return options, false, execUsageError{fmt.Sprintf("unknown flag %q", arg)}
+		default:
+			return options, false, execUsageError{fmt.Sprintf("unexpected argument %q", arg)}
+		}
+	}
+	return options, false, nil
+}
+
 // runProvidersRemove deletes a saved provider profile and its stored API key.
 // The OAuth token (if any) is kept — logins outlive profiles so re-adding the
 // provider needs no new browser round-trip; `zero auth logout <name>` removes it.
@@ -414,14 +486,26 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 			return exit
 		}
 	}
+	// ProviderPersisted above answers a credential-identity question, but
+	// RemoveProvider targets a row by its exact spelling. Bridge the two, so
+	// `zero providers remove work` against a sole saved "WORK" row removes it
+	// instead of failing "not found" right after the persisted check passed.
+	name, err = resolveProviderMutationName(configPath, name, deps)
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
 	cfg, err := config.RemoveProvider(configPath, name)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
-	// Delete the key from the store BESIDE the config being edited — the same
-	// store setup/rename write to — not the default-path store, so a
-	// non-default config path cannot leave the encrypted key behind.
-	keyRemoved, keyErr := removeStoredProviderKeyAt(configPath, name)
+	// Provider credentials are user-scoped, so delete from the same default user
+	// store runtime lookup uses. A surviving case variant that still claims the
+	// credential keeps it (see config.CredentialKeyRetained); a survivor that
+	// never claimed it does not.
+	keyRemoved, keyErr := false, error(nil)
+	if !config.CredentialKeyRetained(cfg.Providers, name) {
+		keyRemoved, keyErr = config.ForgetProviderKey(name)
+	}
 	if options.json {
 		payload := map[string]any{
 			"removed":        name,
@@ -431,9 +515,12 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 		}
 		if keyErr != nil {
 			// A lingering secret must not read as a clean removal.
-			payload["keyError"] = keyErr.Error()
+			payload["keyError"] = redaction.ErrorMessage(keyErr, redaction.Options{})
 		}
 		if err := writePrettyJSON(stdout, payload); err != nil {
+			return exitCrash
+		}
+		if keyErr != nil {
 			return exitCrash
 		}
 		return exitSuccess
@@ -442,9 +529,10 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 		return exitCrash
 	}
 	if keyErr != nil {
-		if _, err := fmt.Fprintf(stderr, "warning: its stored API key could not be deleted and remains in the credential store: %v\n", keyErr); err != nil {
+		if _, err := fmt.Fprintf(stderr, "warning: its stored API key could not be deleted and remains in the credential store: %s\n", redaction.ErrorMessage(keyErr, redaction.Options{})); err != nil {
 			return exitCrash
 		}
+		return exitCrash
 	} else if keyRemoved {
 		if _, err := fmt.Fprintln(stdout, "Deleted its stored API key."); err != nil {
 			return exitCrash
@@ -460,17 +548,6 @@ func runProvidersRemove(args []string, stdout io.Writer, stderr io.Writer, deps 
 		}
 	}
 	return exitSuccess
-}
-
-// removeStoredProviderKeyAt deletes a provider's API key from the credential
-// store co-located with configPath (the store SecureProviderProfile captured
-// it into and RenameProvider migrates within).
-func removeStoredProviderKeyAt(configPath string, provider string) (bool, error) {
-	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
-	if err != nil {
-		return false, err
-	}
-	return store.Delete(provider)
 }
 
 // runProvidersRename renames a saved provider profile, migrating its stored
@@ -500,13 +577,19 @@ func runProvidersRename(args []string, stdout io.Writer, stderr io.Writer, deps 
 			return exit
 		}
 	}
-	cfg, err := config.RenameProvider(configPath, options.names[0], options.names[1])
+	// Same bridge as remove: the persisted check matches credential identity
+	// while RenameProvider matches the row's exact spelling.
+	oldName, err = resolveProviderMutationName(configPath, oldName, deps)
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	cfg, err := config.RenameProvider(configPath, oldName, options.names[1])
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 	if options.json {
 		if err := writePrettyJSON(stdout, map[string]any{
-			"renamed":        map[string]string{"from": options.names[0], "to": options.names[1]},
+			"renamed":        map[string]string{"from": oldName, "to": options.names[1]},
 			"activeProvider": cfg.ActiveProvider,
 			"configPath":     configPath,
 		}); err != nil {
@@ -514,10 +597,45 @@ func runProvidersRename(args []string, stdout io.Writer, stderr io.Writer, deps 
 		}
 		return exitSuccess
 	}
-	if _, err := fmt.Fprintf(stdout, "Renamed provider %s to %s\n", options.names[0], options.names[1]); err != nil {
+	if _, err := fmt.Fprintf(stdout, "Renamed provider %s to %s\n", oldName, options.names[1]); err != nil {
 		return exitCrash
 	}
 	return exitSuccess
+}
+
+// A spelling copied from providers list can identify a project/env row, not an
+// alias for a user row. Exact persisted requests stay usable for repairing an
+// otherwise invalid config; only a fallback needs cross-layer resolution.
+func resolveProviderMutationName(path, name string, deps appDeps) (string, error) {
+	persisted, err := config.ResolvePersistedProviderName(path, name)
+	if err != nil || persisted == strings.TrimSpace(name) {
+		return persisted, err
+	}
+	root, err := resolveWorkspaceRoot("", deps)
+	if err != nil {
+		return "", err
+	}
+	options, err := config.DefaultResolveOptions(root)
+	if err != nil {
+		return "", err
+	}
+	// Use the same user file the mutation will write, including injected paths.
+	options.UserConfigPath = path
+	names, err := config.ResolveProviderSourceNames(options)
+	if err != nil {
+		return "", err
+	}
+	row, lookup := config.LookupProviderName(names, name)
+	if lookup == config.ProviderNameExact {
+		owner, err := config.ProviderRowOwnershipAt(path, names, row)
+		if err != nil {
+			return "", err
+		}
+		if !owner.UserBacked {
+			return "", fmt.Errorf("%s; change that provider in its project configuration or environment instead", owner.Reason)
+		}
+	}
+	return persisted, nil
 }
 
 // providerResolvedByName reports whether name matches a provider in a
@@ -526,7 +644,7 @@ func runProvidersRename(args []string, stdout io.Writer, stderr io.Writer, deps 
 func providerResolvedByName(providers []config.ProviderProfile, name string) bool {
 	name = strings.TrimSpace(name)
 	for _, provider := range providers {
-		if strings.EqualFold(strings.TrimSpace(provider.Name), name) {
+		if config.SameProviderIdentity(provider.Name, name) {
 			return true
 		}
 	}

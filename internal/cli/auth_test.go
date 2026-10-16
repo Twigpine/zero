@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -156,6 +157,8 @@ func TestRunAuthOpenRouterRejectsArgs(t *testing.T) {
 }
 
 func TestRunAuthOpenRouterSavesMintedKey(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	setCLIUserConfigRoot(t)
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	var stdout, stderr bytes.Buffer
 
@@ -180,7 +183,7 @@ func TestRunAuthOpenRouterSavesMintedKey(t *testing.T) {
 	if profile.Name != "openrouter" || profile.CatalogID != "openrouter" || !profile.APIKeyStored || profile.APIKey != "" || profile.APIKeyEnv != "" {
 		t.Fatalf("provider not stored-key sanitized: %#v", profile)
 	}
-	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	store, err := config.ProviderKeyStore()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,4 +414,322 @@ func readCLIConfigFixture(t *testing.T, path string) config.FileConfig {
 		t.Fatalf("decode config: %v", err)
 	}
 	return cfg
+}
+
+func TestRunAuthLogoutClearsCaseVariantStoredMarker(t *testing.T) {
+	withAuthStore(t)
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	setCLIUserConfigRoot(t)
+	configPath, err := config.DefaultUserConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"work","apiKeyStored":true}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.ProviderKeyStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "sk-old"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	deps := appDeps{userConfigPath: func() (string, error) { return configPath, nil }}
+	if code := runWithDeps([]string{"auth", "logout", "WORK"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("logout failed: code=%d stderr=%s", code, stderr.String())
+	}
+	if _, ok, getErr := store.Get("work"); getErr != nil || ok {
+		t.Fatalf("stored key still present: ok=%v err=%v", ok, getErr)
+	}
+	cfg := readCLIConfigFixture(t, configPath)
+	if cfg.Providers[0].APIKeyStored {
+		t.Fatal("case-variant logout left apiKeyStored set")
+	}
+}
+
+func TestRunAuthLogoutRejectsAmbiguousConfigBeforeCredentialDeletion(t *testing.T) {
+	withAuthStore(t)
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	setCLIUserConfigRoot(t)
+	configPath, err := config.DefaultUserConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	seed := []byte(`{"providers":[{"name":"work","apiKeyStored":true},{"name":"WORK","apiKeyStored":true}]}`)
+	if err := os.WriteFile(configPath, seed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.ProviderKeyStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "sk-shared"); err != nil {
+		t.Fatal(err)
+	}
+	oauthStore, err := oauth.NewStore(oauth.StoreOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oauthToken := oauth.Token{AccessToken: "oauth-access", RefreshToken: "oauth-refresh", Account: "work@example.com"}
+	if err := oauthStore.Save(oauth.ProviderKey("work"), oauthToken); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	deps := appDeps{userConfigPath: func() (string, error) { return configPath, nil }}
+	if code := runWithDeps([]string{"auth", "logout", "WORK"}, &stdout, &stderr, deps); code != exitCrash {
+		t.Fatalf("logout exit = %d, want validation failure", code)
+	}
+	if key, ok, getErr := store.Get("work"); getErr != nil || !ok || key != "sk-shared" {
+		t.Fatalf("shared API credential changed before rejection: present=%v err=%v", ok, getErr)
+	}
+	storedOAuth, ok, loadErr := oauthStore.Load(oauth.ProviderKey("work"))
+	if loadErr != nil || !ok {
+		t.Fatalf("OAuth credential missing after rejection: ok=%v err=%v", ok, loadErr)
+	}
+	if storedOAuth.AccessToken != oauthToken.AccessToken ||
+		storedOAuth.RefreshToken != oauthToken.RefreshToken ||
+		storedOAuth.Account != oauthToken.Account {
+		t.Fatal("OAuth credential changed before ambiguous-config rejection")
+	}
+	after, readErr := os.ReadFile(configPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(after) != string(seed) {
+		t.Fatal("rejected logout rewrote ambiguous config")
+	}
+}
+
+func TestRunAuthLoginRejectsAmbiguousConfigBeforeTokenReplacement(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		provider string
+		args     []string
+	}{
+		{name: "generic", provider: "xai", args: []string{"auth", "login", "xai"}},
+		{name: "chatgpt", provider: "chatgpt", args: []string{"auth", "chatgpt"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			withAuthStore(t)
+			configPath := filepath.Join(t.TempDir(), "config.json")
+			seed := []byte(`{"providers":[{"name":"xai"},{"name":"XAI"}]}`)
+			if err := os.WriteFile(configPath, seed, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			store, err := oauth.NewStore(oauth.StoreOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			previous := oauth.Token{AccessToken: "previous-access", RefreshToken: "previous-refresh", Account: "previous-account"}
+			if err := store.Save(oauth.ProviderKey(test.provider), previous); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			code := runWithDeps(test.args, &stdout, &stderr, appDeps{userConfigPath: func() (string, error) { return configPath, nil }})
+			if code != exitCrash || !strings.Contains(stderr.String(), "ambiguous persisted provider names") {
+				t.Fatalf("login exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			stored, ok, err := store.Load(oauth.ProviderKey(test.provider))
+			if err != nil || !ok || stored.AccessToken != previous.AccessToken || stored.RefreshToken != previous.RefreshToken || stored.Account != previous.Account {
+				t.Fatalf("rejected login changed previous token: ok=%v err=%v", ok, err)
+			}
+			after, err := os.ReadFile(configPath)
+			if err != nil || !bytes.Equal(after, seed) {
+				t.Fatalf("rejected login changed config: readErr=%v", err)
+			}
+		})
+	}
+}
+
+func TestRunAuthLogoutRejectsConfigPathFailureBeforeCredentialDeletion(t *testing.T) {
+	withAuthStore(t)
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	setCLIUserConfigRoot(t)
+	store, err := config.ProviderKeyStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "sk-shared"); err != nil {
+		t.Fatal(err)
+	}
+	oauthStore, err := oauth.NewStore(oauth.StoreOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oauthToken := oauth.Token{AccessToken: "oauth-access", RefreshToken: "oauth-refresh", Account: "work@example.com"}
+	if err := oauthStore.Save(oauth.ProviderKey("work"), oauthToken); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	pathErr := errors.New("config path unavailable")
+	code := runWithDeps([]string{"auth", "logout", "work"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return "", pathErr },
+	})
+	if code != exitCrash {
+		t.Fatalf("logout exit = %d, want path failure", code)
+	}
+	if !strings.Contains(stderr.String(), pathErr.Error()) {
+		t.Fatalf("stderr = %q, want config path failure", stderr.String())
+	}
+	if key, ok, getErr := store.Get("work"); getErr != nil || !ok || key != "sk-shared" {
+		t.Fatalf("API credential changed before path rejection: present=%v len=%d err=%v", ok, len(key), getErr)
+	}
+	storedOAuth, ok, loadErr := oauthStore.Load(oauth.ProviderKey("work"))
+	if loadErr != nil || !ok {
+		t.Fatalf("OAuth credential missing after path rejection: ok=%v err=%v", ok, loadErr)
+	}
+	if storedOAuth.AccessToken != oauthToken.AccessToken || storedOAuth.RefreshToken != oauthToken.RefreshToken || storedOAuth.Account != oauthToken.Account {
+		t.Fatal("OAuth credential changed before config path rejection")
+	}
+}
+
+// Local state that already makes publication impossible must be rejected BEFORE
+// the browser flow mints a live remote credential. Validation used to live only
+// inside saveOpenRouterProviderKey, past that irreversible boundary, so a legacy
+// config sent the user through OpenRouter's authorization and then handed back
+// an orphaned key with a nonzero exit.
+func TestRunAuthOpenRouterRejectsInvalidConfigBeforeAuthorizing(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	setCLIUserConfigRoot(t)
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	seed := `{"activeProvider":"openrouter","providers":[{"name":"openrouter","apiKeyStored":true},{"name":"OPENROUTER","apiKeyStored":true}]}`
+	if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDeps([]string{"auth", "openrouter"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+		openRouterLogin: func(context.Context, provideroauth.OpenRouterOptions) (string, error) {
+			t.Error("browser authorization started despite config that cannot be published")
+			return "sk-minted", nil
+		},
+	})
+	if code == exitSuccess {
+		t.Fatalf("exit = %d, want non-zero for a config that cannot be published", code)
+	}
+	if !strings.Contains(stderr.String(), "ambiguous persisted provider names") {
+		t.Fatalf("stderr = %q, want the local rejection", stderr.String())
+	}
+	// No key was minted, so nothing is handed back for manual use either.
+	if strings.Contains(stdout.String(), "sk-minted") {
+		t.Fatalf("stdout = %q, want no minted key", stdout.String())
+	}
+	after, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != seed {
+		t.Fatalf("rejected login rewrote config:\n%s", after)
+	}
+}
+
+// The second check is not redundant with the first: the config can change while
+// the browser flow is open. A legacy duplicate-row config that appears during
+// authorization must still be rejected, and the rejection must not cost the user
+// the OpenRouter key they were already working with — the capture is validated
+// first, and a rejected publication restores the previous secret rather than
+// deleting the shared entry.
+func TestRunAuthOpenRouterPreservesExistingKeyWhenConfigRejected(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	setCLIUserConfigRoot(t)
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	// Valid when the command starts, so the preflight before authorization passes.
+	if err := os.WriteFile(configPath, []byte(`{"activeProvider":"openrouter","providers":[{"name":"openrouter","apiKeyStored":true}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	seed := `{"activeProvider":"openrouter","providers":[{"name":"openrouter","apiKeyStored":true},{"name":"OPENROUTER","apiKeyStored":true}]}`
+	store, err := config.ProviderKeyStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("openrouter", "sk-working"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDeps([]string{"auth", "openrouter"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+		openRouterLogin: func(context.Context, provideroauth.OpenRouterOptions) (string, error) {
+			// Another process edits config.json while the browser flow is open.
+			if err := os.WriteFile(configPath, []byte(seed), 0o600); err != nil {
+				t.Fatalf("seed the mid-authorization config: %v", err)
+			}
+			return "sk-minted", nil
+		},
+	})
+
+	// A login that could not be persisted is a failure, not a success.
+	if code == exitSuccess {
+		t.Fatalf("exit = %d, want non-zero for an unsaved login: %s", code, stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "ambiguous persisted provider names") {
+		t.Fatalf("stdout = %q, want ambiguous persisted-name rejection", stdout.String())
+	}
+	after, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != seed {
+		t.Fatalf("rejected login rewrote config:\n%s", after)
+	}
+	key, ok, err := store.Get("openrouter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || key != "sk-working" {
+		t.Fatalf("stored key does not match (present=%v, len=%d), want the previous sk-working preserved", ok, len(key))
+	}
+	// The minted key is still handed over for manual use.
+	if !strings.Contains(stdout.String(), "sk-minted") {
+		t.Fatalf("stdout = %q, want the manual-export hint with the minted key", stdout.String())
+	}
+}
+
+// auth logout deletes the secret by normalized identity, so the marker cleanup
+// must use the same relation: a mixed-case argument against a lowercase row
+// previously left apiKeyStored:true with no secret behind it.
+func TestRunAuthLogoutClearsMarkerForCaseVariantSpelling(t *testing.T) {
+	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	setCLIUserConfigRoot(t)
+	withAuthStore(t)
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"providers":[{"name":"work","apiKeyStored":true}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.ProviderKeyStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("work", "sk-work"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"auth", "logout", "WORK"}, &stdout, &stderr, appDeps{
+		userConfigPath: func() (string, error) { return configPath, nil },
+	}); code != exitSuccess {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	cfg := readCLIConfigFixture(t, configPath)
+	if cfg.Providers[0].APIKeyStored {
+		t.Fatal("logout left a marker claiming a credential it deleted")
+	}
+	if _, ok, err := store.Get("work"); err != nil {
+		t.Fatal(err)
+	} else if ok {
+		t.Fatal("logout left the stored key behind")
+	}
 }

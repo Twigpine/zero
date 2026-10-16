@@ -83,9 +83,12 @@ type model struct {
 	providerName         string
 	modelName            string
 	modelCatalog         modelregistry.Registry
-	providerProfile      config.ProviderProfile
-	savedProviders       []config.ProviderProfile
-	provider             zeroruntime.Provider
+
+	// removedLiveRow retains ownership while a deleted row's client keeps running.
+	removedLiveRow  string
+	providerProfile config.ProviderProfile
+	savedProviders  []config.ProviderProfile
+	provider        zeroruntime.Provider
 	// allowEscalation mirrors Options.AllowEscalation: it gates the per-run model
 	// switchers, and the caller gates the escalate_model tool on the same flag.
 	allowEscalation             bool
@@ -95,6 +98,8 @@ type model struct {
 	probeProviderHealth         func(context.Context, providerhealth.Options) providerhealth.Result
 	discoverProviderModels      func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	discoverOllamaContextWindow func(ctx context.Context, baseURL string, model string) (int, error)
+	deleteProviderKey           func(configPath, provider string) (bool, error)
+	clearProviderKeyStored      func(configPath, provider string) (bool, error)
 	registry                    *tools.Registry
 	awaitToolReadiness          func(context.Context)
 	// lspManager is created once per session and reused across prompts so gopls (and
@@ -1049,6 +1054,8 @@ func newModel(ctx context.Context, options Options) model {
 		probeProviderHealth:         options.ProbeProviderHealth,
 		discoverProviderModels:      options.DiscoverProviderModels,
 		discoverOllamaContextWindow: options.DiscoverOllamaContextWindow,
+		deleteProviderKey:           deleteProviderKey,
+		clearProviderKeyStored:      config.ClearProviderKeyStoredCaseVariants,
 		registry:                    registry,
 		awaitToolReadiness:          options.AwaitToolReadiness,
 		sessionStore:                sessionStore,
@@ -4599,11 +4606,11 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		// The row's owner label is derived from the same decision, so it always
 		// names the provider used here.
 		if owner := m.modelPickerSwitchOwner(item); owner != "" {
-			// A model from another saved provider: switch provider + model together.
+			// A model from another saved provider row: switch provider + model together.
 			m, text, _, cmd, switchPersistErr = m.switchProviderModel(owner, item.Value)
 		} else {
 			// Apply against the active provider instead of attempting an
-			// unresolvable provider switch.
+			// unresolvable or self-directed provider switch.
 			m, text, switchPersistErr = m.handleModelCommand(item.Value)
 		}
 		if m.providerName != previousProvider || m.modelName != previousModel {

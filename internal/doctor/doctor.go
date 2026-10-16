@@ -47,6 +47,7 @@ type Options struct {
 	UserConfig     string
 	ProjectConfig  string
 	Provider       config.ProviderProfile
+	ResolveError   error
 	WorkspaceRoot  string
 	Sandbox        config.SandboxConfig
 	Connectivity   bool
@@ -70,7 +71,7 @@ func Run(options Options) Report {
 		configFilesCheck(options.UserConfig, options.ProjectConfig),
 		configValidationCheck(options.UserConfig, options.ProjectConfig),
 	}
-	providerCheck := providerConfigCheck(options.Provider)
+	providerCheck := providerConfigCheck(options.Provider, options.ResolveError)
 	checks = append(checks, providerCheck)
 	modelCheck := providerModelCheck(options.Provider)
 	checks = append(checks, modelCheck)
@@ -137,7 +138,10 @@ func configFilesCheck(userPath string, projectPath string) Check {
 	return check("config.files", "Config files", StatusPass, "Zero config file inputs are available for inspection.", details)
 }
 
-func providerConfigCheck(profile config.ProviderProfile) Check {
+func providerConfigCheck(profile config.ProviderProfile, resolveErrors ...error) Check {
+	if len(resolveErrors) > 0 && resolveErrors[0] != nil {
+		return check("provider.config", "Provider config", StatusFail, "Provider config could not be resolved: "+resolveErrors[0].Error(), map[string]any{"help": "Follow the repair command in the error, then run `zero doctor` again."})
+	}
 	if emptyProviderProfile(profile) {
 		return check("provider.config", "Provider config", StatusFail, "No LLM provider is configured.", map[string]any{"help": "Set a provider in config or environment."})
 	}
@@ -411,16 +415,24 @@ func configValidationCheck(userPath string, projectPath string) Check {
 			continue
 		}
 		_, issues := config.ValidateBytes(data)
-		if len(issues) == 0 {
-			continue
-		}
-		messages := make([]string, 0, len(issues))
+		messages := make([]string, 0, len(issues)+1)
 		for _, issue := range issues {
 			messages = append(messages, issue.Message)
 		}
+		if path == userPath {
+			var persisted config.FileConfig
+			if err := json.Unmarshal(data, &persisted); err == nil {
+				if err := config.ValidatePersistedProviderNames(persisted); err != nil {
+					messages = append(messages, err.Error())
+				}
+			}
+		}
+		if len(messages) == 0 {
+			continue
+		}
 		details[path] = map[string]any{"issues": messages}
 		status = StatusFail
-		issueCount += len(issues)
+		issueCount += len(messages)
 	}
 
 	if status == StatusPass {

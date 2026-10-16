@@ -293,3 +293,83 @@ func TestManagerLogout(t *testing.T) {
 		t.Fatal("second logout should report nothing removed")
 	}
 }
+
+func TestCompleteDeviceLoginBeforeSaveFailurePreservesPreviousToken(t *testing.T) {
+	fp := newFakeProvider(t, `{"access_token":"replacement","refresh_token":"replacement-refresh","expires_in":3600}`)
+	store, err := NewStore(StoreOptions{FilePath: filepath.Join(t.TempDir(), "oauth.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := ProviderKey("demo")
+	previous := Token{AccessToken: "previous", RefreshToken: "previous-refresh"}
+	if err := store.Save(key, previous); err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("config changed during login")
+	manager, err := NewManager(ManagerOptions{
+		Store:      store,
+		HTTPClient: fp.server.Client(),
+		BeforeSave: func() error { return wantErr },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := DeviceAuth{DeviceCode: "device", ExpiresAt: time.Now().Add(time.Minute), Interval: time.Millisecond}
+	_, err = manager.CompleteDeviceLogin(context.Background(), "demo", Config{TokenEndpoint: fp.server.URL + "/token", ClientID: "client"}, auth)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("CompleteDeviceLogin error = %v, want pre-save rejection", err)
+	}
+	stored, ok, err := store.Load(key)
+	if err != nil || !ok || stored.AccessToken != previous.AccessToken || stored.RefreshToken != previous.RefreshToken {
+		t.Fatalf("pre-save rejection changed token: ok=%v err=%v token=%+v", ok, err, stored)
+	}
+}
+
+// The browser (loopback) flow runs the same pre-save check as the device flow.
+func TestLoginLoopbackBeforeSaveFailurePreservesPreviousToken(t *testing.T) {
+	fp := newFakeProvider(t, `{"access_token":"replacement","refresh_token":"replacement-refresh","expires_in":3600}`)
+	store, err := NewStore(StoreOptions{FilePath: filepath.Join(t.TempDir(), "oauth.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := ProviderKey("demo")
+	previous := Token{AccessToken: "previous", RefreshToken: "previous-refresh"}
+	if err := store.Save(key, previous); err != nil {
+		t.Fatal(err)
+	}
+	openBrowser := func(authURL string) error {
+		u, err := url.Parse(authURL)
+		if err != nil {
+			return err
+		}
+		redirect := u.Query().Get("redirect_uri")
+		state := u.Query().Get("state")
+		_, err = http.Get(redirect + "?code=the-code&state=" + url.QueryEscape(state))
+		return err
+	}
+	wantErr := errors.New("config changed during login")
+	manager, err := NewManager(ManagerOptions{
+		Store: store,
+		Env: map[string]string{
+			"ZERO_OAUTH_DEMO_CLIENT_ID":     "client",
+			"ZERO_OAUTH_DEMO_AUTHORIZE_URL": "https://auth.example.com/authorize",
+			"ZERO_OAUTH_DEMO_TOKEN_URL":     fp.server.URL + "/token",
+		},
+		OpenBrowser: openBrowser,
+		BeforeSave:  func() error { return wantErr },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = manager.Login(context.Background(), LoginOptions{Provider: "demo"})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Login error = %v, want pre-save rejection", err)
+	}
+	if fp.tokenHits.Load() == 0 {
+		t.Fatal("Login rejected before the token exchange; the pre-save check was not reached")
+	}
+	stored, ok, err := store.Load(key)
+	if err != nil || !ok || stored.AccessToken != previous.AccessToken || stored.RefreshToken != previous.RefreshToken {
+		t.Fatalf("pre-save rejection changed token: ok=%v err=%v token=%+v", ok, err, stored)
+	}
+}

@@ -67,6 +67,66 @@ func SecureProviderProfile(profile ProviderProfile, configPath string) ProviderP
 	return secured
 }
 
+// PublishProviderCredential captures key into the user-scoped credential store
+// and publishes the matching APIKeyStored marker for exactName as ONE operation,
+// so a rejected publication cannot leave the user worse off than before the call.
+//
+// Hand-rolled Set-then-Mark sequences got this wrong in both directions: they
+// wrote the secret before any validation could reject the config, and their
+// rollback deleted the entry outright — destroying a working key that some
+// other row (the store folds "openrouter" and "OPENROUTER" onto one entry) was
+// still using. This validates first, snapshots whatever the store held, and on
+// a marker failure restores that snapshot rather than deleting.
+//
+// exactName must be a persisted row's own spelling; callers holding user or
+// session input resolve it with ResolvePersistedProviderName first.
+func PublishProviderCredential(path string, exactName string, key string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("config path is required")
+	}
+	exactName = strings.TrimSpace(exactName)
+	if exactName == "" {
+		return fmt.Errorf("provider name is required")
+	}
+	if strings.TrimSpace(key) == "" {
+		return fmt.Errorf("api key is required")
+	}
+	if err := PreflightUserConfig(path); err != nil {
+		return err
+	}
+	store, err := ProviderKeyStore()
+	if err != nil {
+		return err
+	}
+	previous, hadPrevious, err := store.Get(exactName)
+	if err != nil {
+		return err
+	}
+	if err := store.Set(exactName, key); err != nil {
+		return err
+	}
+	if err := MarkProviderAPIKeyStored(path, exactName); err != nil {
+		// Put the store back exactly as it was: restore a prior key rather than
+		// deleting it, and only delete when this call created the entry.
+		var rollbackErr error
+		if hadPrevious {
+			rollbackErr = store.Set(exactName, previous)
+		} else {
+			_, rollbackErr = store.Delete(exactName)
+		}
+		if rollbackErr != nil {
+			// A failed rollback is the state the caller most needs to hear
+			// about: the store now holds a key the config does not describe.
+			// Never let it be reported as a plain publication failure. The key
+			// value itself stays out of the message.
+			return fmt.Errorf("%w (credential store rollback also failed: %v)", err, rollbackErr)
+		}
+		return err
+	}
+	return nil
+}
+
 // ForgetProviderKey removes a provider's stored API key from the credential store,
 // reporting whether one existed. Used by the lifecycle "remove key" / auth logout.
 func ForgetProviderKey(provider string) (bool, error) {
@@ -87,6 +147,12 @@ func ClearProviderKeyStored(path, provider string) (cleared bool, err error) {
 	if path == "" || provider == "" {
 		return false, nil
 	}
+	return clearProviderKeyStoredWhere(path, func(name string) bool {
+		return strings.TrimSpace(name) == provider
+	})
+}
+
+func clearProviderKeyStoredWhere(path string, matches func(string) bool) (cleared bool, err error) {
 	unlock, err := lockConfigFileFn(path)
 	if err != nil {
 		return false, err
@@ -109,7 +175,7 @@ func ClearProviderKeyStored(path, provider string) (cleared bool, err error) {
 	}
 	changed := false
 	for index := range cfg.Providers {
-		if strings.EqualFold(strings.TrimSpace(cfg.Providers[index].Name), provider) && cfg.Providers[index].APIKeyStored {
+		if matches(cfg.Providers[index].Name) && cfg.Providers[index].APIKeyStored {
 			cfg.Providers[index].APIKeyStored = false
 			changed = true
 		}
@@ -118,6 +184,24 @@ func ClearProviderKeyStored(path, provider string) (cleared bool, err error) {
 		return false, nil
 	}
 	return true, writeConfigFile(path, cfg)
+}
+
+// ClearProviderKeyStoredCaseVariants unsets the APIKeyStored marker on every
+// row whose name normalizes to the same credential-store identity as provider,
+// not just an exact-spelling match. Deleting the shared secret for one
+// case-variant row (e.g. "WORK") must also clear the marker on any sibling row
+// ("work") that pointed at the same now-gone entry — leaving it set would claim
+// a key is available when ApplyStoredAPIKey's store lookup will always miss.
+func ClearProviderKeyStoredCaseVariants(path, provider string) (bool, error) {
+	path = strings.TrimSpace(path)
+	provider = strings.TrimSpace(provider)
+	if path == "" || provider == "" {
+		return false, nil
+	}
+	providerIdentity := credstore.NormalizeProvider(provider)
+	return clearProviderKeyStoredWhere(path, func(name string) bool {
+		return credstore.NormalizeProvider(name) == providerIdentity
+	})
 }
 
 // MigratePlaintextProviderKeys moves any inline plaintext API key in the config at
@@ -152,6 +236,9 @@ func MigratePlaintextProviderKeys(path string, store APIKeySetter) (count int, e
 	var cfg FileConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return 0, fmt.Errorf("invalid config JSON %s: %w", path, err)
+	}
+	if err := ValidatePersistedProviderNames(cfg); err != nil {
+		return 0, err
 	}
 	migrated := 0
 	for index := range cfg.Providers {

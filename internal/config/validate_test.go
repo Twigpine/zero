@@ -259,3 +259,10 @@ func TestValidateFileAllowsLegacyProviderKeys(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateBytesUnnamedExplicitActive(t *testing.T) {
+	_, issues := ValidateBytes([]byte(`{"activeProvider":"openai","providers":[{"provider":"openai","model":"gpt-4o"}]}`))
+	if len(issues) != 0 {
+		t.Fatalf("unnamed project provider rejected: %+v", issues)
+	}
+}

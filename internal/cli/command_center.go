@@ -79,6 +79,31 @@ func runConfigSummary(args []string, stdout io.Writer, stderr io.Writer, deps ap
 	return exitSuccess
 }
 
+// providersSubcommands is the ONE inventory of `zero providers` subcommands.
+// Dispatch, the help text, and the shell completion tree previously each kept
+// their own list, and `repair-config` shipped in the first two while every
+// generated completion script offered the old set — so the recovery command the
+// new validation errors name could not be tab-completed into existence.
+//
+// The completion tree is built from this slice (see completionRoot) and
+// TestProvidersSubcommandInventoryMatchesDispatchAndHelp holds the other two
+// surfaces to it, so a new subcommand cannot reach users through one door only.
+// Each entry is the canonical name first, then its aliases.
+var providersSubcommands = [][]string{
+	{"current"},
+	{"list"},
+	{"catalog"},
+	{"add"},
+	{"check"},
+	{"use"},
+	{"remove", "rm"},
+	{"rename"},
+	{"repair-config"},
+	{"setup"},
+	{"detect"},
+	{"models"},
+}
+
 func runProviders(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	command := "list"
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -105,6 +130,9 @@ func runProviders(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	}
 	if command == "rename" {
 		return runProvidersRename(args, stdout, stderr, deps)
+	}
+	if command == "repair-config" {
+		return runProvidersRepairConfig(args, stdout, stderr, deps)
 	}
 	if command == "setup" {
 		return runProvidersSetup(args, stdout, stderr, deps)
@@ -563,6 +591,7 @@ func writeProvidersHelp(w io.Writer) error {
   zero providers use <name> [flags]
   zero providers remove <name> [flags]
   zero providers rename <old> <new> [flags]
+  zero providers repair-config [flags]
   zero providers setup <catalog-id> [flags]
   zero providers detect [flags]
   zero providers models [name] [flags]
@@ -593,6 +622,9 @@ Setup flags:
       --base-url <url>          Planned base URL override
       --api-key-env <name>      Planned API key environment variable
       --set-active              Include --set-active in the add command
+
+Repair-config flags:
+      --name <name>             Explicit name for the legacy unnamed provider
   -h, --help                    Show this help
 `)
 	return err

@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -39,7 +38,9 @@ func ensureLoginProviderProfile(deps appDeps, provider string) string {
 	if err != nil {
 		return "warning: login saved, but no provider profile was written: " + err.Error()
 	}
-	active := strings.EqualFold(strings.TrimSpace(ensured.Active), strings.TrimSpace(ensured.Name))
+	// Both sides are persisted provider names, so this is a provider-identity
+	// question and uses the credential store's rule rather than EqualFold.
+	active := config.SameProviderIdentity(ensured.Active, ensured.Name)
 	switch {
 	case ensured.Created && active:
 		return fmt.Sprintf("Added provider %q to your config and set it active.", ensured.Name)
@@ -50,6 +51,14 @@ func ensureLoginProviderProfile(deps appDeps, provider string) string {
 	default:
 		return fmt.Sprintf("Provider %q is already configured.\nSwitch with: zero providers use %s", ensured.Name, ensured.Name)
 	}
+}
+
+func preflightAuthLogin(deps appDeps) error {
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return err
+	}
+	return config.PreflightUserConfig(configPath)
 }
 
 // runAuth dispatches `zero auth <command>` for provider OAuth login. It is
@@ -101,6 +110,18 @@ func runAuthOpenRouter(args []string, stdout io.Writer, stderr io.Writer, deps a
 	if len(args) > 0 {
 		return writeExecUsageError(stderr, fmt.Sprintf("zero auth openrouter takes no arguments (got %q)", args[0]))
 	}
+	// Two checks, one lifecycle. This one refuses config we can already tell is
+	// unpublishable BEFORE the browser flow mints a live remote credential:
+	// validation lived only inside saveOpenRouterProviderKey, past the
+	// irreversible boundary, so a legacy unnamed or duplicate-name config sent
+	// the user through OpenRouter's authorization and then handed back an
+	// orphaned key with a nonzero exit. The sibling chatgpt and login flows check
+	// here too. The second check stays where it is, immediately before
+	// EnsureCatalogProvider, because the config can change while the browser flow
+	// is open.
+	if err := preflightAuthLogin(deps); err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
 	key, err := deps.openRouterLogin(context.Background(), provideroauth.OpenRouterOptions{
 		Out:        stdout,
 		HTTPClient: &http.Client{Timeout: 30 * time.Second},
@@ -113,10 +134,13 @@ func runAuthOpenRouter(args []string, stdout io.Writer, stderr io.Writer, deps a
 	key = strings.TrimSpace(key)
 	line, err := saveOpenRouterProviderKey(deps, key)
 	if err != nil {
+		// The key was minted, so still hand it over for manual use — but a login
+		// that could not be persisted is a failure, not a success: exiting 0 here
+		// told scripts (and users) the provider was configured when it was not.
 		if _, writeErr := fmt.Fprintf(stdout, "\nOpenRouter login complete — new API key minted, but Zero could not save it: %s\nUse it manually, e.g.:\n  export OPENROUTER_API_KEY=%s\n", err, key); writeErr != nil {
 			return exitCrash
 		}
-		return exitSuccess
+		return exitCrash
 	}
 	if _, err := fmt.Fprintf(stdout, "\nOpenRouter login complete — new API key saved.\n%s\n", line); err != nil {
 		return exitCrash
@@ -133,24 +157,24 @@ func saveOpenRouterProviderKey(deps appDeps, key string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Validate the persisted config BEFORE EnsureCatalogProvider's lookup, which
+	// matches case-insensitively and would happily return one of a pair of legacy
+	// duplicate rows — whose shared credential the capture below then overwrites
+	// for a config that can never be published.
+	if err := config.PreflightUserConfig(configPath); err != nil {
+		return "", err
+	}
 	ensured, err := config.EnsureCatalogProvider(configPath, "openrouter")
 	if err != nil {
 		return "", err
 	}
-	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
-	if err != nil {
+	// One operation owns validate → capture → publish, and restores the previous
+	// stored key if publication is rejected, so a failed login never costs the
+	// user the key they were already working with.
+	if err := config.PublishProviderCredential(configPath, ensured.Name, key); err != nil {
 		return "", err
 	}
-	if err := store.Set(ensured.Name, key); err != nil {
-		return "", err
-	}
-	if err := config.MarkProviderAPIKeyStored(configPath, ensured.Name); err != nil {
-		// Best-effort rollback: don't leave the key orphaned in the credential
-		// store while config.json still says it isn't there.
-		_, _ = store.Delete(ensured.Name)
-		return "", err
-	}
-	active := strings.EqualFold(strings.TrimSpace(ensured.Active), strings.TrimSpace(ensured.Name))
+	active := config.SameProviderIdentity(ensured.Active, ensured.Name)
 	switch {
 	case ensured.Created && active:
 		return fmt.Sprintf("Added provider %q to your config and set it active.", ensured.Name), nil
@@ -177,6 +201,9 @@ func runAuthChatGPT(args []string, stdout io.Writer, stderr io.Writer, deps appD
 	}
 	if len(args) > 0 {
 		return writeExecUsageError(stderr, fmt.Sprintf("zero auth chatgpt takes no arguments (got %q)", args[0]))
+	}
+	if err := preflightAuthLogin(deps); err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 
 	// Build the same env map the oauth engine reads so the chatgpt preset is
@@ -212,6 +239,9 @@ func runAuthChatGPT(args []string, stdout io.Writer, stderr io.Writer, deps appD
 	// the customized Token.Account field.
 	store, err := oauth.NewStore(oauth.StoreOptions{Now: deps.now})
 	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	if err := preflightAuthLogin(deps); err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 	if err := store.Save(oauth.ProviderKey("chatgpt"), token); err != nil {
@@ -381,6 +411,7 @@ func newAuthManager(deps appDeps, out io.Writer) (*oauth.Manager, error) {
 		// `zero auth login <preset>` (e.g. xai) should resolve the baked-in preset
 		// without the operator exporting ZERO_OAUTH_ALLOW_PRESETS first.
 		AllowPresets: true,
+		BeforeSave:   func() error { return preflightAuthLogin(deps) },
 	})
 }
 
@@ -410,6 +441,9 @@ func runAuthLogin(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 			return writeExecUsageError(stderr, "ChatGPT login does not support --scope (the required scopes are fixed by the Codex client registration)")
 		}
 		return runAuthChatGPT(nil, stdout, stderr, deps)
+	}
+	if err := preflightAuthLogin(deps); err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 	manager, err := newAuthManager(deps, stdout)
 	if err != nil {
@@ -447,6 +481,13 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 		return writeExecUsageError(stderr, "usage: zero auth logout <provider>")
 	}
 	provider := parsed.positional[0]
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	if err := config.PreflightUserConfig(configPath); err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
 	manager, err := newAuthManager(deps, stdout)
 	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
@@ -458,14 +499,15 @@ func runAuthLogout(args []string, stdout io.Writer, stderr io.Writer, deps appDe
 	// Also drop any stored API key and its marker so `auth logout` clears the whole
 	// credential (OAuth token AND key), not just the OAuth side. Surface deletion
 	// failures rather than reporting success while a credential remains.
+	// Marker first, then the secret: the reverse order leaves apiKeyStored:true
+	// with nothing behind it if the config write fails. Provider credentials are
+	// user-scoped, so deletion uses the same default user store as runtime lookup.
+	if _, clearErr := config.ClearProviderKeyStoredCaseVariants(configPath, provider); clearErr != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(clearErr, redaction.Options{}), exitCrash)
+	}
 	keyRemoved, keyErr := config.ForgetProviderKey(provider)
 	if keyErr != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(keyErr, redaction.Options{}), exitCrash)
-	}
-	if configPath, perr := deps.userConfigPath(); perr == nil {
-		if _, clearErr := config.ClearProviderKeyStored(configPath, provider); clearErr != nil {
-			return writeAppError(stderr, redaction.ErrorMessage(clearErr, redaction.Options{}), exitCrash)
-		}
 	}
 	removed = removed || keyRemoved
 	if parsed.json {

@@ -554,3 +554,14 @@ func TestRunProviderCommandCountsProcessStartAgainstTheDeadline(t *testing.T) {
 			"anything else means process creation is outside the budget again", err.Error())
 	}
 }
+
+func TestLoadProviderCommandUnnamedExplicitActive(t *testing.T) {
+	command := writeCommand(t, commandScript{Stdout: `{"activeProvider":"openai","providers":[{"provider":"openai","model":"gpt-4o"}]}`})
+	cfg, err := LoadProviderCommand(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "openai" || cfg.Providers[0].Model != "gpt-4o" {
+		t.Fatalf("unexpected command config: %+v", cfg)
+	}
+}
