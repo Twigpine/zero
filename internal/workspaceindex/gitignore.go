@@ -15,6 +15,10 @@ import (
 // degenerate tree (network filesystem, huge monorepo) must not stall a turn.
 const gitIgnoredPathsTimeout = 5 * time.Second
 
+// checkRepository is gitsafe.Check. It is a variable so tests can stand in for a
+// repository gitsafe refuses, without configuring one that names a command.
+var checkRepository = gitsafe.Check
+
 // gitIgnoredPaths asks git which paths under root it considers ignored, honoring every
 // source git itself resolves (nested .gitignore files, .git/info/exclude,
 // core.excludesFile). Returns a set of paths relative to root: whole ignored directories
@@ -49,7 +53,7 @@ func gitIgnoredPaths(root string) (map[string]bool, bool) {
 	// refresh the index: Scan runs every turn, often while the user or the model runs
 	// git in the same repository, and that lock makes a concurrent `git commit` or
 	// `git add` fail with "index.lock exists".
-	checked, err := gitsafe.Check(ctx, root)
+	checked, err := checkRepository(ctx, root)
 	if err != nil {
 		return nil, false
 	}

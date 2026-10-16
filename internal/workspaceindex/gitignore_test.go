@@ -1,6 +1,7 @@
 package workspaceindex
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/gitsafe"
 )
 
 // isolateGitConfig keeps the git child processes away from the developer's real global and
@@ -185,6 +188,50 @@ func TestScanSkipsBuildCacheDirsOutsideGit(t *testing.T) {
 	}
 	if got.Truncated {
 		t.Fatalf("Truncated=true: build-cache files consumed the file budget")
+	}
+}
+
+// A repository whose own config defines a filter or diff command is refused by gitsafe,
+// and Scan then takes the non-git path, as it does when git cannot run: .gitignore is
+// not consulted and the fixed list applies. How gitsafe detects such a repository is
+// covered by its own tests; this pins what Scan does with the refusal.
+func TestScanFallsBackWhenGitsafeRefusesTheRepository(t *testing.T) {
+	root := t.TempDir()
+	initGitRepo(t, root, ".locust_env/\n")
+	writeFile(t, root, "main.go", "package main\n")
+	writeFile(t, root, ".locust_env/lib/x.py", "skipped by .gitignore, kept once git is refused")
+	writeFile(t, root, "target/debug/app.d", "kept by git, skipped by the fixed list")
+
+	// Inside a work tree git decides, so the fixed list does not apply.
+	honored, err := Scan(root, Options{MaxDepth: DefaultMaxDepth})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if want := []string{".gitignore", "main.go", "target/debug/app.d"}; !reflect.DeepEqual(pathsOf(honored.Files), want) {
+		t.Fatalf("Files=%v want %v with git consulted", pathsOf(honored.Files), want)
+	}
+
+	refusals := 0
+	previous := checkRepository
+	checkRepository = func(context.Context, string) (*gitsafe.Checked, error) {
+		refusals++
+		return nil, gitsafe.ErrRepositoryDefinesCommands
+	}
+	t.Cleanup(func() { checkRepository = previous })
+
+	if paths, ok := gitIgnoredPaths(root); ok || paths != nil {
+		t.Fatalf("gitIgnoredPaths for a refused repository = (%v, %v), want (nil, false)", paths, ok)
+	}
+	before := refusals
+	got, err := Scan(root, Options{MaxDepth: DefaultMaxDepth})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if refusals == before {
+		t.Fatal("Scan never asked gitsafe about the repository")
+	}
+	if want := []string{".gitignore", ".locust_env/lib/x.py", "main.go"}; !reflect.DeepEqual(pathsOf(got.Files), want) {
+		t.Fatalf("Files=%v want %v from the fixed list", pathsOf(got.Files), want)
 	}
 }
 
