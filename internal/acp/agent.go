@@ -528,7 +528,8 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 	queue := func(input sessions.AppendEventInput) {
 		pendingEvents = append(pendingEvents, input)
 	}
-	queue(messageEvent("user", userText))
+	attachments := sessions.MessageAttachments{Images: len(images)}
+	queue(messageEvent("user", userText, attachments))
 
 	visionCache := make(map[string]bool)
 	var visionCacheMu sync.Mutex
@@ -593,7 +594,7 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 	agentPrompt := buildPrompt(sess.snapshotHistory(), effectivePrompt)
 	result, runErr := a.deps.RunAgent(ctx, agentPrompt, provider, opts)
 	if result.FinalAnswer != "" {
-		queue(messageEvent("assistant", result.FinalAnswer))
+		queue(messageEvent("assistant", result.FinalAnswer, sessions.MessageAttachments{}))
 	}
 	reason, stopErr := stopReasonFor(result, runErr)
 	if stopErr != nil {
@@ -614,7 +615,7 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 	// one file write, which is the contiguity restored here — not a disk
 	// transaction, and not a promise about crashes mid-fsync. Reported by @jatmn.
 	persistenceErr := a.persistTurn(sess.id, pendingEvents)
-	sess.appendHistory(turnRecord{user: userText, assistant: result.FinalAnswer})
+	sess.appendHistory(turnRecord{user: attachments.WithContent(userText), assistant: result.FinalAnswer})
 	a.warnPersistence(
 		note,
 		"save session history",
@@ -930,10 +931,14 @@ func (a *Agent) persistTurn(sessionID string, inputs []sessions.AppendEventInput
 	return err
 }
 
-func messageEvent(role, content string) sessions.AppendEventInput {
+func messageEvent(role, content string, attachments sessions.MessageAttachments) sessions.AppendEventInput {
+	payload := map[string]any{"role": role, "content": content}
+	if role == "user" && (attachments.Images > 0 || attachments.Documents > 0) {
+		payload["attachments"] = attachments
+	}
 	return sessions.AppendEventInput{
 		Type:    sessions.EventMessage,
-		Payload: map[string]any{"role": role, "content": content},
+		Payload: payload,
 	}
 }
 
@@ -1094,14 +1099,16 @@ func (a *Agent) loadHistory(sessionID string, requireHistoryLog bool) ([]turnRec
 			continue
 		}
 		var msg struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
+			Role        string                      `json:"role"`
+			Content     string                      `json:"content"`
+			Attachments sessions.MessageAttachments `json:"attachments"`
 		}
 		if json.Unmarshal(raw, &msg) != nil {
 			continue
 		}
 		switch msg.Role {
 		case "user":
+			msg.Content = msg.Attachments.WithContent(msg.Content)
 			messages = append(messages, persistedMessage{eventID: persistedMessageIdentity(sessionID, e), role: msg.Role, content: msg.Content})
 			if havePending {
 				records = append(records, turnRecord{user: pendingUser})
