@@ -12,11 +12,13 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/imageinput"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -115,6 +117,75 @@ func Connect(ctx context.Context, server Server) (ToolClient, error) {
 type ConnectOptions struct {
 	Execution     *execution.Runner
 	WorkspaceRoot string
+	// Credentials resolves a stdio server's EnvFrom references. nil opens the
+	// user's credential store, and only when a server actually names a
+	// reference — an ordinary server must not make startup touch the keyring.
+	Credentials CredentialResolver
+}
+
+// CredentialResolver reads a named secret out of Zero's credential store.
+// *credstore.Store satisfies it; tests inject a fake.
+type CredentialResolver interface {
+	Get(name string) (value string, found bool, err error)
+}
+
+// resolveCredentialEnv turns a stdio server's EnvFrom references into the
+// environment values the child is spawned with. It is the only place a stored
+// secret enters the launch path, and it runs before anything is spawned so a
+// missing credential fails the connect rather than producing a server that
+// starts and then dies on its own missing-config check.
+//
+// Every error names the CREDENTIAL, never the value: these strings reach logs,
+// `zero mcp check`, and the startup warning line.
+func resolveCredentialEnv(server Server, resolver CredentialResolver) (map[string]string, error) {
+	if len(server.EnvFrom) == 0 {
+		return nil, nil
+	}
+	if resolver == nil {
+		store, err := config.ProviderKeyStore()
+		if err != nil {
+			return nil, fmt.Errorf("start MCP server %s: open credential store: %w", server.Name, err)
+		}
+		resolver = store
+	}
+	variables := make([]string, 0, len(server.EnvFrom))
+	for variable := range server.EnvFrom {
+		variables = append(variables, variable)
+	}
+	// Sorted so a server missing several credentials always names the same one.
+	sort.Strings(variables)
+
+	resolved := make(map[string]string, len(server.EnvFrom))
+	for _, variable := range variables {
+		credential := strings.TrimSpace(server.EnvFrom[variable])
+		if credential == "" {
+			return nil, fmt.Errorf("start MCP server %s: envFrom %s names no credential", server.Name, variable)
+		}
+		value, found, err := resolver.Get(credential)
+		if err != nil {
+			return nil, fmt.Errorf("start MCP server %s: read credential %q: %w", server.Name, credential, err)
+		}
+		if !found || value == "" {
+			return nil, fmt.Errorf("start MCP server %s: credential %q is not stored; store it with `zero mcp secret set %s`", server.Name, credential, credential)
+		}
+		resolved[variable] = value
+	}
+	return resolved, nil
+}
+
+// stdioEnv merges the resolved credentials over the server's verbatim env.
+func stdioEnv(server Server, resolved map[string]string) map[string]string {
+	if len(resolved) == 0 {
+		return server.Env
+	}
+	merged := make(map[string]string, len(server.Env)+len(resolved))
+	for key, value := range server.Env {
+		merged[key] = value
+	}
+	for key, value := range resolved {
+		merged[key] = value
+	}
+	return merged
 }
 
 func ConnectWithOptions(ctx context.Context, server Server, options ConnectOptions) (ToolClient, error) {
@@ -167,6 +238,11 @@ func (b *boundedBuffer) String() string {
 }
 
 func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*Client, error) {
+	resolved, err := resolveCredentialEnv(server, options.Credentials)
+	if err != nil {
+		return nil, err
+	}
+	childEnv := stdioEnv(server, resolved)
 	var cmd *exec.Cmd
 	var cleanup func()
 	cleanupTransferred := false
@@ -183,7 +259,7 @@ func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*
 		prepared, err := options.Execution.Prepare(ctx, execution.Request{
 			Origin:           execution.OriginMCPServer,
 			Mode:             execution.ModeDurable,
-			Command:          execution.Command{Name: server.Command, Args: append([]string(nil), server.Args...), Env: mergeProcessEnv(server.Env)},
+			Command:          execution.Command{Name: server.Command, Args: append([]string(nil), server.Args...), Env: mergeProcessEnv(childEnv)},
 			WorkingDirectory: workspaceRoot,
 			WorkspaceRoots:   []string{workspaceRoot},
 			Approval:         execution.ApprovalContext{PolicyVersion: execution.PolicyVersion},
@@ -195,7 +271,7 @@ func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*
 		cleanup = prepared.Cleanup
 	} else {
 		cmd = exec.CommandContext(ctx, server.Command, server.Args...)
-		cmd.Env = mergeProcessEnv(server.Env)
+		cmd.Env = mergeProcessEnv(childEnv)
 	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

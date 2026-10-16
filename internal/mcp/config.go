@@ -21,11 +21,15 @@ const (
 )
 
 type Server struct {
-	Name     string
-	Type     ServerType
-	Command  string
-	Args     []string
-	Env      map[string]string
+	Name    string
+	Type    ServerType
+	Command string
+	Args    []string
+	Env     map[string]string
+	// EnvFrom maps a child environment variable to the NAME of a credential in
+	// Zero's credential store. It carries no secret: the value is fetched at
+	// spawn time (connectStdio) and never sits in config or in this struct.
+	EnvFrom  map[string]string
 	URL      string
 	Headers  map[string]string
 	Auth     string
@@ -87,6 +91,7 @@ func normalizeServer(name string, raw config.MCPServerConfig) (Server, error) {
 		Command:             strings.TrimSpace(raw.Command),
 		Args:                trimStringSlice(raw.Args),
 		Env:                 copyStringMap(raw.Env),
+		EnvFrom:             copyStringMap(raw.EnvFrom),
 		URL:                 strings.TrimSpace(raw.URL),
 		Headers:             copyStringMap(raw.Headers),
 		Auth:                auth,
@@ -118,6 +123,9 @@ func normalizeServer(name string, raw config.MCPServerConfig) (Server, error) {
 		}
 		if len(server.Env) > 0 {
 			return Server{}, fmt.Errorf("MCP server %s env is only supported for stdio transport", server.Name)
+		}
+		if len(server.EnvFrom) > 0 {
+			return Server{}, fmt.Errorf("MCP server %s envFrom is only supported for stdio transport", server.Name)
 		}
 		if err := validateHTTPURL(server.Name, server.URL); err != nil {
 			return Server{}, err
@@ -169,6 +177,7 @@ func computeServerIdentity(server Server) string {
 		Command string            `json:"command,omitempty"`
 		Args    []string          `json:"args,omitempty"`
 		Env     map[string]string `json:"env,omitempty"`
+		EnvFrom map[string]string `json:"envFrom,omitempty"`
 		URL     string            `json:"url,omitempty"`
 		Headers map[string]string `json:"headers,omitempty"`
 		Auth    string            `json:"auth,omitempty"`
@@ -178,6 +187,7 @@ func computeServerIdentity(server Server) string {
 		Command: server.Command,
 		Args:    append([]string{}, server.Args...),
 		Env:     copyStringMap(server.Env),
+		EnvFrom: copyStringMap(server.EnvFrom),
 		URL:     server.URL,
 		Headers: copyStringMap(server.Headers),
 		Auth:    server.Auth,

@@ -513,10 +513,17 @@ type MCPConfig struct {
 }
 
 type MCPServerConfig struct {
-	Type     string            `json:"type,omitempty"`
-	Command  string            `json:"command,omitempty"`
-	Args     []string          `json:"args,omitempty"`
-	Env      map[string]string `json:"env,omitempty"`
+	Type    string            `json:"type,omitempty"`
+	Command string            `json:"command,omitempty"`
+	Args    []string          `json:"args,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
+	// EnvFrom maps a child environment variable to the NAME of a credential in
+	// Zero's credential store; the value never appears here. The launch path
+	// resolves each reference at spawn time (see mcp.Server.EnvFrom), so a
+	// secret's name lives in config.json while its value stays in the store.
+	// Env and EnvFrom are separate on purpose: a verbatim Env value is written
+	// to disk, and anything that must not be is named here instead.
+	EnvFrom  map[string]string `json:"envFrom,omitempty"`
 	URL      string            `json:"url,omitempty"`
 	Headers  map[string]string `json:"headers,omitempty"`
 	Auth     string            `json:"auth,omitempty"`
@@ -730,6 +737,7 @@ func (server *MCPServerConfig) UnmarshalJSON(data []byte) error {
 		Command  string            `json:"command"`
 		Args     []string          `json:"args"`
 		Env      map[string]string `json:"env"`
+		EnvFrom  map[string]string `json:"envFrom"`
 		URL      string            `json:"url"`
 		Headers  map[string]string `json:"headers"`
 		Auth     string            `json:"auth"`
@@ -745,6 +753,7 @@ func (server *MCPServerConfig) UnmarshalJSON(data []byte) error {
 	server.Command = raw.Command
 	server.Args = raw.Args
 	server.Env = raw.Env
+	server.EnvFrom = raw.EnvFrom
 	server.URL = raw.URL
 	server.Headers = raw.Headers
 	server.Auth = raw.Auth

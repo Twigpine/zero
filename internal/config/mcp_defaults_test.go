@@ -3,6 +3,8 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -289,5 +291,147 @@ func TestResolveMCPDisabledRetiredEntryStaysReEnableable(t *testing.T) {
 	}
 	if !cfg.Servers["exa"].Disabled {
 		t.Fatal("the disable must still carry to the successor")
+	}
+}
+
+func TestDefaultMCPServersSeedsMemlawbDisabled(t *testing.T) {
+	memlawb, ok := DefaultMCPServers()["memlawb"]
+	if !ok {
+		t.Fatal("expected a memlawb default entry")
+	}
+	if !memlawb.Disabled {
+		t.Fatal("memlawb must ship disabled: it needs a passphrase and a key before it can run")
+	}
+	if memlawb.Command != "memlawb" || len(memlawb.Args) != 1 || memlawb.Args[0] != "mcp" {
+		t.Fatalf("unexpected memlawb launch: %#v", memlawb)
+	}
+	if memlawb.Env["MEMLAWB_URL"] == "" || memlawb.Env["MEMLAWB_NAMESPACE"] == "" {
+		t.Fatalf("url and namespace are not secrets and belong in env verbatim: %#v", memlawb.Env)
+	}
+	if memlawb.EnvFrom["MEMLAWB_PASSPHRASE"] == "" || memlawb.EnvFrom["MEMLAWB_API_KEY"] == "" {
+		t.Fatalf("the passphrase and the key must be credential references: %#v", memlawb.EnvFrom)
+	}
+	for key := range memlawb.Env {
+		if key == "MEMLAWB_PASSPHRASE" || key == "MEMLAWB_API_KEY" {
+			t.Fatalf("secret %s must never be a verbatim env value", key)
+		}
+	}
+}
+
+func TestResolveMCPSeedsMemlawbDisabled(t *testing.T) {
+	cfg, err := ResolveMCP(ResolveOptions{})
+	if err != nil {
+		t.Fatalf("ResolveMCP: %v", err)
+	}
+	memlawb, ok := cfg.Servers["memlawb"]
+	if !ok {
+		t.Fatal("expected the memlawb default to be seeded with no user config")
+	}
+	if !memlawb.Disabled {
+		t.Fatalf("the memlawb default must resolve disabled: %#v", memlawb)
+	}
+}
+
+func TestResolveMCPUserCanEnableMemlawbDefault(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"mcp":{"servers":{"memlawb":{"disabled":false}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ResolveMCP(ResolveOptions{UserConfigPath: path})
+	if err != nil {
+		t.Fatalf("ResolveMCP: %v", err)
+	}
+	memlawb := cfg.Servers["memlawb"]
+	if memlawb.Disabled {
+		t.Fatalf("an explicit enable must lift the shipped disable: %#v", memlawb)
+	}
+	if memlawb.Command != "memlawb" || memlawb.EnvFrom["MEMLAWB_PASSPHRASE"] == "" {
+		t.Fatalf("enabling must keep the seeded launch and references: %#v", memlawb)
+	}
+}
+
+func TestResolveMCPUserEnvFromOverridesDefault(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"mcp":{"servers":{"memlawb":{"disabled":false,"envFrom":{"MEMLAWB_PASSPHRASE":"work-passphrase"}}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ResolveMCP(ResolveOptions{UserConfigPath: path})
+	if err != nil {
+		t.Fatalf("ResolveMCP: %v", err)
+	}
+	if got := cfg.Servers["memlawb"].EnvFrom["MEMLAWB_PASSPHRASE"]; got != "work-passphrase" {
+		t.Fatalf("user credential reference did not survive the merge: %q", got)
+	}
+}
+
+func TestIsUnconfiguredDefaultTracksEnvFrom(t *testing.T) {
+	if !IsUnconfiguredDefault("memlawb", DefaultMCPServers()["memlawb"]) {
+		t.Fatal("an untouched memlawb default should be reported as unconfigured")
+	}
+	custom := DefaultMCPServers()["memlawb"]
+	custom.EnvFrom = map[string]string{"MEMLAWB_PASSPHRASE": "work-passphrase"}
+	if IsUnconfiguredDefault("memlawb", custom) {
+		t.Fatal("a server pointing at its own credential names is no longer unconfigured")
+	}
+}
+
+func TestResolveMCPRetiredDefaultMigrationLeavesMemlawbAlone(t *testing.T) {
+	// The firecrawl -> exa carry must not reach any other default.
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"mcp":{"servers":{"firecrawl":{"disabled":true}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ResolveMCP(ResolveOptions{UserConfigPath: path})
+	if err != nil {
+		t.Fatalf("ResolveMCP: %v", err)
+	}
+	if !cfg.Servers["exa"].Disabled {
+		t.Fatal("the disable must still carry to the successor")
+	}
+	memlawb := cfg.Servers["memlawb"]
+	if !reflect.DeepEqual(memlawb, DefaultMCPServers()["memlawb"]) {
+		t.Fatalf("the retired-default migration must leave memlawb exactly as seeded: %#v", memlawb)
+	}
+}
+
+func TestResolveMCPProjectCannotRetargetWhileInheritingCredentialReferences(t *testing.T) {
+	// Credential references are inheritable credential material like env and
+	// headers: a project entry that swaps the command while inheriting them
+	// gets the user's secrets resolved into a binary the repo chose.
+	dir := t.TempDir()
+	userPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(userPath, []byte(`{"mcp":{"servers":{"custom":{"command":"real-mcp","envFrom":{"TOKEN":"some-credential"}}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	projectPath := filepath.Join(dir, "project.json")
+	if err := os.WriteFile(projectPath, []byte(`{"mcp":{"servers":{"custom":{"command":"repo-mcp"}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ResolveMCP(ResolveOptions{UserConfigPath: userPath, ProjectConfigPath: projectPath})
+	if err == nil {
+		t.Fatal("ResolveMCP error = nil, want a refusal to retarget while inheriting credentials")
+	}
+	if !strings.Contains(err.Error(), "custom") {
+		t.Fatalf("error = %v, want the server named", err)
+	}
+}
+
+func TestResolveMCPProjectMayRetargetWhenItNamesItsOwnCredentials(t *testing.T) {
+	// Control for the refusal above: nothing is inherited, so the merge stands.
+	dir := t.TempDir()
+	userPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(userPath, []byte(`{"mcp":{"servers":{"custom":{"command":"real-mcp","envFrom":{"TOKEN":"some-credential"}}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	projectPath := filepath.Join(dir, "project.json")
+	if err := os.WriteFile(projectPath, []byte(`{"mcp":{"servers":{"custom":{"command":"repo-mcp","envFrom":{"TOKEN":"repo-credential"}}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ResolveMCP(ResolveOptions{UserConfigPath: userPath, ProjectConfigPath: projectPath})
+	if err != nil {
+		t.Fatalf("ResolveMCP: %v", err)
+	}
+	if got := cfg.Servers["custom"].EnvFrom["TOKEN"]; got != "repo-credential" {
+		t.Fatalf("project reference did not apply: %q", got)
 	}
 }

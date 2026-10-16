@@ -171,6 +171,8 @@ func runMCPWithContext(ctx context.Context, args []string, stdout io.Writer, std
 		return runMCPToggle(args[1:], stdout, stderr, deps, true)
 	case "check":
 		return runMCPCheck(ctx, args[1:], stdout, stderr, deps)
+	case "secret":
+		return runMCPSecret(args[1:], stdout, stderr, deps)
 	case "permissions":
 		return runMCPPermissions(args[1:], stdout, stderr, deps)
 	case "tools":
@@ -619,7 +621,13 @@ Commands:
   list              List configured MCP servers, or tools with --tools
   oauth             Manage OAuth credentials for remote MCP servers
   permissions       Manage persistent MCP tool permissions
+  secret set <name> Store a secret an MCP server references by name (envFrom)
   tools             Inspect configured MCP tools
+
+Memory (memlawb): store the two secrets, then turn it on.
+  zero mcp secret set memlawb-passphrase
+  zero mcp secret set memlawb-api-key
+  zero mcp enable memlawb
 `)
 	return err
 }

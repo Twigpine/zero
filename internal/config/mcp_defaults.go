@@ -14,13 +14,65 @@ import (
 //
 // Exa's hosted MCP server works anonymously with rate limits. Users can add an
 // Exa API key for higher limits.
+//
+// memlawb is the exception: it ships DISABLED because it cannot run without a
+// passphrase and a service key, which only the user can supply. Its two secrets
+// are credential references (EnvFrom), so `zero mcp secret set` puts the values
+// in the credential store and config.json only ever names them:
+//
+//	zero mcp secret set memlawb-passphrase
+//	zero mcp enable memlawb
 func DefaultMCPServers() map[string]MCPServerConfig {
 	return map[string]MCPServerConfig{
 		"exa": {
 			Type: "http",
 			URL:  "https://mcp.exa.ai/mcp",
 		},
+		"memlawb": {
+			Type:    "stdio",
+			Command: "memlawb",
+			Args:    []string{"mcp"},
+			Env: map[string]string{
+				"MEMLAWB_URL":       "https://memory.gitlawb.com",
+				"MEMLAWB_NAMESPACE": "user:me",
+			},
+			EnvFrom: map[string]string{
+				"MEMLAWB_PASSPHRASE": MemlawbPassphraseCredential,
+				"MEMLAWB_API_KEY":    MemlawbAPIKeyCredential,
+			},
+			Disabled: true,
+		},
 	}
+}
+
+const (
+	// MemlawbPassphraseCredential and MemlawbAPIKeyCredential are the credential
+	// store names the seeded memlawb entry points at. They are names, never
+	// values.
+	MemlawbPassphraseCredential = "memlawb-passphrase"
+	MemlawbAPIKeyCredential     = "memlawb-api-key"
+
+	// MemlawbMinimumVersion is the oldest memlawb release whose `memlawb mcp`
+	// reads MEMLAWB_PASSPHRASE from its environment. `zero mcp enable memlawb`
+	// prints it because the failure mode is otherwise unreadable: an older zero
+	// binary drops the unknown envFrom field when it reads config.json and
+	// preserves it when it rewrites the file, so the child dies on its
+	// missing-passphrase check with nothing pointing at the stale binary.
+	MemlawbMinimumVersion = "0.1.0"
+)
+
+// DefaultMCPServerShipsDisabled reports whether Zero's built-in default for name
+// is seeded with the disabled flag set.
+//
+// It exists for the enable path. Enabling normally means deleting the "disabled"
+// key from the user's entry, which is correct for a default that ships enabled
+// and wrong for one that does not: with the key absent, mergeMCPServer sees no
+// explicit decision from the user layer and the seeded Disabled:true survives,
+// so `zero mcp enable memlawb` would report success and change nothing. Such a
+// default needs an explicit "disabled": false written instead.
+func DefaultMCPServerShipsDisabled(name string) bool {
+	server, ok := DefaultMCPServers()[strings.TrimSpace(name)]
+	return ok && server.Disabled
 }
 
 // IsDefaultMCPServer reports whether name is one of Zero's built-in default MCP

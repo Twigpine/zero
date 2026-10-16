@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/charmbracelet/x/term"
+
 	"github.com/Gitlawb/zero/internal/config"
 	"github.com/Gitlawb/zero/internal/mcp"
 	"github.com/Gitlawb/zero/internal/redaction"
@@ -309,7 +311,145 @@ func runMCPToggle(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 	} else if _, err := fmt.Fprintf(stdout, "MCP server %s was already %s in %s.\n", serverName, state, configPath); err != nil {
 		return exitCrash
 	}
+	if !disabled {
+		if _, err := fmt.Fprint(stdout, mcpEnableNotice(serverName)); err != nil {
+			return exitCrash
+		}
+	}
 	return exitSuccess
+}
+
+// mcpEnableNotice returns the extra guidance `zero mcp enable <server>` prints
+// for a server whose secrets are credential references, or "" for every other
+// server.
+//
+// It names the minimum memlawb version deliberately. The credential-reference
+// field is unknown to older zero binaries: such a binary drops envFrom when it
+// reads config.json and preserves it when it rewrites the file, so the child
+// starts with no passphrase and dies on memlawb's own missing-passphrase check,
+// with nothing in that error pointing at the stale binary or the dropped field.
+func mcpEnableNotice(serverName string) string {
+	if strings.TrimSpace(serverName) != "memlawb" {
+		return ""
+	}
+	return fmt.Sprintf(`
+memlawb needs two secrets. They live in Zero's credential store, never in config.json:
+
+  zero mcp secret set %s
+  zero mcp secret set %s
+
+Requires memlawb %s or newer on your PATH (the release whose `+"`memlawb mcp`"+` reads
+MEMLAWB_PASSPHRASE from its environment); check with `+"`memlawb --version`"+`.
+`, config.MemlawbPassphraseCredential, config.MemlawbAPIKeyCredential, config.MemlawbMinimumVersion)
+}
+
+// runMCPSecret stores a named secret in Zero's credential store, so an MCP
+// server entry can reference it by name (envFrom) instead of carrying its value
+// in config.json.
+func runMCPSecret(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	if len(args) == 0 {
+		return writeExecUsageError(stderr, "usage: zero mcp secret set <name>")
+	}
+	switch args[0] {
+	case "-h", "--help", "help":
+		if err := writeMCPSecretHelp(stdout); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	case "set":
+		return runMCPSecretSet(args[1:], stdout, stderr, deps)
+	default:
+		return writeExecUsageError(stderr, fmt.Sprintf("unknown mcp secret subcommand %q", args[0]))
+	}
+}
+
+func runMCPSecretSet(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	options, positional, help, err := parseMCPConfigPositionalCommand(args, "secret set")
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if help {
+		if err := writeMCPSecretHelp(stdout); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if len(positional) != 1 {
+		return writeExecUsageError(stderr, "usage: zero mcp secret set <name> [--json]")
+	}
+	name := strings.ToLower(strings.TrimSpace(positional[0]))
+	if name == "" {
+		return writeExecUsageError(stderr, "credential name is required")
+	}
+
+	value, err := readMCPSecretValue(deps.stdin, stdout, name)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+
+	configPath, err := deps.userConfigPath()
+	if err != nil {
+		return writeAppError(stderr, "failed to resolve user config: "+err.Error(), exitCrash)
+	}
+	store, err := config.ProviderKeyStoreAt(filepath.Dir(configPath))
+	if err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	if err := store.Set(name, value); err != nil {
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+
+	if options.json {
+		payload := struct {
+			Credential string `json:"credential"`
+			Stored     bool   `json:"stored"`
+			Backend    string `json:"backend"`
+		}{Credential: name, Stored: true, Backend: store.Backend()}
+		if err := writePrettyJSON(stdout, payload); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	// The value is never echoed back, on any path.
+	if _, err := fmt.Fprintf(stdout, "Stored credential %s (%s backend).\nReference it from an MCP server with \"envFrom\": {\"SOME_VAR\": \"%s\"}.\n", name, store.Backend(), name); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
+}
+
+// readMCPSecretValue takes the secret from an interactive prompt when stdin is a
+// terminal (echo off) and from standard input otherwise, so the value can be
+// piped in without ever appearing in a shell history or an argv.
+func readMCPSecretValue(stdin io.Reader, stdout io.Writer, name string) (string, error) {
+	if file, ok := stdin.(*os.File); ok && term.IsTerminal(file.Fd()) {
+		if _, err := fmt.Fprintf(stdout, "Value for %s (input hidden): ", name); err != nil {
+			return "", err
+		}
+		typed, err := term.ReadPassword(file.Fd())
+		if _, printErr := fmt.Fprintln(stdout); printErr != nil {
+			return "", printErr
+		}
+		if err != nil {
+			return "", fmt.Errorf("read %s: %w", name, err)
+		}
+		value := strings.TrimSpace(string(typed))
+		if value == "" {
+			return "", execUsageError{fmt.Sprintf("no value entered for %s", name)}
+		}
+		return value, nil
+	}
+	if stdin == nil {
+		return "", execUsageError{fmt.Sprintf("no value for %s on standard input", name)}
+	}
+	data, err := io.ReadAll(stdin)
+	if err != nil {
+		return "", fmt.Errorf("read %s from standard input: %w", name, err)
+	}
+	value := strings.TrimSpace(string(data))
+	if value == "" {
+		return "", execUsageError{fmt.Sprintf("no value for %s on standard input", name)}
+	}
+	return value, nil
 }
 
 func runMCPCheck(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -856,20 +996,33 @@ func (cfg *mcpWritableConfig) setServerDisabled(name string, disabled bool) (boo
 		server = map[string]json.RawMessage{}
 	}
 
-	current := false
+	// With no "disabled" key in the entry, the current state is whatever the
+	// built-in default ships as — false for a default that ships enabled, true
+	// for one like memlawb that does not. Assuming false here made
+	// `zero mcp enable memlawb` report "already enabled" and write nothing.
+	current := config.DefaultMCPServerShipsDisabled(name)
 	if rawDisabled, ok := server["disabled"]; ok && len(rawDisabled) > 0 && string(rawDisabled) != "null" {
 		if err := json.Unmarshal(rawDisabled, &current); err != nil {
 			return false, false, err
 		}
 	}
 	changed := current != disabled
-	if disabled {
+	switch {
+	case disabled:
 		data, err := json.Marshal(true)
 		if err != nil {
 			return false, false, err
 		}
 		server["disabled"] = data
-	} else {
+	case config.DefaultMCPServerShipsDisabled(name):
+		// Deleting the key would leave the seeded Disabled:true in force: the
+		// merge only lifts a disable when the user layer states one explicitly.
+		data, err := json.Marshal(false)
+		if err != nil {
+			return false, false, err
+		}
+		server["disabled"] = data
+	default:
 		delete(server, "disabled")
 	}
 	data, err := json.Marshal(server)
@@ -1056,6 +1209,23 @@ Flags:
       --json    Print command result as JSON
   -h, --help    Show this help
 `, commandName)
+	return err
+}
+
+func writeMCPSecretHelp(w io.Writer) error {
+	_, err := fmt.Fprint(w, `Usage:
+  zero mcp secret set <name> [flags]
+
+Stores a secret in Zero's credential store under <name>. The value is read from
+standard input, or prompted for (hidden) when stdin is a terminal, so it never
+appears in argv or shell history. An MCP server entry then references it by name:
+
+  "envFrom": { "MEMLAWB_PASSPHRASE": "memlawb-passphrase" }
+
+Flags:
+      --json    Print command result as JSON
+  -h, --help    Show this help
+`)
 	return err
 }
 

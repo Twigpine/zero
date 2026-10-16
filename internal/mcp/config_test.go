@@ -355,3 +355,73 @@ func TestNormalizeConfigLeavesRetiredEntryWithOwnTransportAlone(t *testing.T) {
 	}
 	t.Fatalf("expected the self-hosted firecrawl server to survive: %#v", servers)
 }
+
+func TestNormalizeConfigCarriesCredentialReferences(t *testing.T) {
+	cfg := config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"memlawb": {
+			Type:    "stdio",
+			Command: "memlawb",
+			Args:    []string{"mcp"},
+			Env:     map[string]string{"MEMLAWB_URL": "https://memory.gitlawb.com"},
+			EnvFrom: map[string]string{" MEMLAWB_PASSPHRASE ": "memlawb-passphrase"},
+		},
+	}}
+	servers, err := NormalizeConfig(cfg)
+	if err != nil {
+		t.Fatalf("NormalizeConfig() error = %v", err)
+	}
+	if len(servers) != 1 {
+		t.Fatalf("servers = %#v", servers)
+	}
+	if got := servers[0].EnvFrom["MEMLAWB_PASSPHRASE"]; got != "memlawb-passphrase" {
+		t.Fatalf("EnvFrom = %#v, want the trimmed key carried through", servers[0].EnvFrom)
+	}
+}
+
+func TestNormalizeConfigRejectsCredentialReferencesOnRemoteTransport(t *testing.T) {
+	// A remote server's env is never spawned, so a reference there would be
+	// silently ignored rather than doing what the user wrote.
+	cfg := config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+		"web": {Type: "http", URL: "https://example.com/mcp", EnvFrom: map[string]string{"TOKEN": "some-credential"}},
+	}}
+	_, err := NormalizeConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "envFrom is only supported") {
+		t.Fatalf("error = %v, want an envFrom transport rejection", err)
+	}
+}
+
+func TestServerIdentityTracksCredentialReferences(t *testing.T) {
+	// Identity gates permission records: pointing an env var at a different
+	// credential changes what the child runs with, so it must change identity.
+	base := config.MCPServerConfig{Type: "stdio", Command: "memlawb", Args: []string{"mcp"}}
+	withRef := base
+	withRef.EnvFrom = map[string]string{"MEMLAWB_PASSPHRASE": "memlawb-passphrase"}
+	other := base
+	other.EnvFrom = map[string]string{"MEMLAWB_PASSPHRASE": "work-passphrase"}
+
+	identity := func(server config.MCPServerConfig) string {
+		servers, err := NormalizeConfig(config.MCPConfig{Servers: map[string]config.MCPServerConfig{"memlawb": server}})
+		if err != nil {
+			t.Fatalf("NormalizeConfig() error = %v", err)
+		}
+		return servers[0].Identity
+	}
+	if identity(withRef) == identity(base) {
+		t.Fatal("adding a credential reference must change the server identity")
+	}
+	if identity(withRef) == identity(other) {
+		t.Fatal("pointing at a different credential must change the server identity")
+	}
+}
+
+func TestNormalizeConfigSkipsSeededMemlawbDefault(t *testing.T) {
+	servers, err := NormalizeConfig(config.MCPConfig{Servers: config.DefaultMCPServers()})
+	if err != nil {
+		t.Fatalf("NormalizeConfig() error = %v", err)
+	}
+	for _, server := range servers {
+		if server.Name == "memlawb" {
+			t.Fatal("the memlawb default ships disabled and must not be normalized for launch")
+		}
+	}
+}

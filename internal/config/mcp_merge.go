@@ -33,7 +33,7 @@ func mergeProjectMCPConfig(dst *MCPConfig, src MCPConfig) error {
 		base := dst.Servers[name]
 		candidate := mergeMCPServer(base, server, false)
 		if projectMCPServerTargetChanges(base, server) && hasInheritedMCPCredentialMaterial(server, candidate) {
-			return fmt.Errorf("project MCP server %q cannot override target while inheriting user credentials; set headers/env/oauth explicitly or use a new server name", name)
+			return fmt.Errorf("project MCP server %q cannot override target while inheriting user credentials; set headers/env/envFrom/oauth explicitly or use a new server name", name)
 		}
 		candidate.ProjectConfigured = true
 		dst.Servers[name] = candidate
@@ -57,6 +57,9 @@ func mergeMCPServer(base MCPServerConfig, next MCPServerConfig, canReenable bool
 	}
 	if next.Env != nil {
 		base.Env = copyMCPStringMap(next.Env)
+	}
+	if next.EnvFrom != nil {
+		base.EnvFrom = copyMCPStringMap(next.EnvFrom)
 	}
 	if strings.TrimSpace(next.URL) != "" {
 		base.URL = next.URL
@@ -131,6 +134,12 @@ func hasInheritedMCPCredentialMaterial(project MCPServerConfig, candidate MCPSer
 		return true
 	}
 	if project.Env == nil && hasMCPStringMapMaterial(candidate.Env) {
+		return true
+	}
+	// A credential reference carries no value, but inheriting one still hands
+	// the user's stored secret to whatever binary or endpoint the project layer
+	// just pointed the server at.
+	if project.EnvFrom == nil && hasMCPStringMapMaterial(candidate.EnvFrom) {
 		return true
 	}
 	if project.OAuth == nil && hasMCPOAuthMaterial(candidate.OAuth) {
