@@ -100,6 +100,16 @@ func NewBridge(opts BridgeOptions) (*Bridge, error) {
 	if maxBundleBytes <= 0 {
 		maxBundleBytes = defaultMaxBundleBytes
 	}
+	bundleDir := strings.TrimSpace(opts.BundleDir)
+	if bundleDir != "" {
+		// A previous run may have died mid-swap, leaving a link's only tree in a
+		// staging dir. Nothing serves yet, so repair before the first upload.
+		recoverBundleDir(bundleDir, func(format string, args ...any) {
+			if opts.Log != nil {
+				opts.Log(fmt.Sprintf(format, args...))
+			}
+		})
+	}
 	return &Bridge{
 		server:           opts.Server,
 		auth:             opts.Authenticator,
@@ -107,7 +117,7 @@ func NewBridge(opts BridgeOptions) (*Bridge, error) {
 		minVersion:       minVersion,
 		handshakeTimeout: handshakeTimeout,
 		authFailDelay:    authFailDelay,
-		bundleDir:        strings.TrimSpace(opts.BundleDir),
+		bundleDir:        bundleDir,
 		maxBundleBytes:   maxBundleBytes,
 		log:              opts.Log,
 		sem:              make(chan struct{}, maxConns),

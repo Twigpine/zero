@@ -87,6 +87,12 @@ func (m model) handleDictationDownloaded(msg dictationDownloadedMsg) (model, tea
 	m.dictation.downloading = false
 	m.dictation.downloadStatus = ""
 	if msg.err != nil {
+		if errors.Is(msg.err, dictation.ErrInstalledNotReleased) {
+			// The install itself completed. Calling that a failure sends the user
+			// to repeat a setup that already ran, so say what actually went wrong
+			// and that running it again is safe.
+			return m.appendSystemNotice("Dictation is installed, but its install lock could not be released: " + dictationErrorText(msg.err) + ". Run the setup again to finish."), nil
+		}
 		return m.appendSystemNotice("Dictation setup failed: " + dictationErrorText(msg.err)), nil
 	}
 	m, err := m.applyEngineComponents(msg.components, msg.streaming)
