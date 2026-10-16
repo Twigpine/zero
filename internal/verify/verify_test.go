@@ -4,13 +4,129 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/testrunner"
 )
+
+func TestRunDefaultRunnerTimeoutKillsGrandchildHoldingOutput(t *testing.T) {
+	switch os.Getenv("ZERO_VERIFY_TREE_HELPER") {
+	case "parent":
+		if err := os.WriteFile(os.Getenv("ZERO_VERIFY_TREE_PARENT_PID_FILE"), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+			os.Exit(2)
+		}
+		child := exec.Command(os.Args[0], "-test.run=^TestRunDefaultRunnerTimeoutKillsGrandchildHoldingOutput$")
+		child.Env = append(os.Environ(),
+			"ZERO_VERIFY_TREE_HELPER=grandchild",
+			"ZERO_VERIFY_TREE_STOP_FILE="+os.Getenv("ZERO_VERIFY_TREE_STOP_FILE"),
+		)
+		child.Stdout = os.Stdout
+		child.Stderr = os.Stderr
+		if err := child.Start(); err != nil {
+			os.Exit(3)
+		}
+		if err := os.WriteFile(os.Getenv("ZERO_VERIFY_TREE_GRANDCHILD_PID_FILE"), []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+			_ = os.WriteFile(os.Getenv("ZERO_VERIFY_TREE_STOP_FILE"), nil, 0o600)
+			_ = child.Wait()
+			os.Exit(4)
+		}
+		if err := os.WriteFile(os.Getenv("ZERO_VERIFY_TREE_READY_FILE"), []byte("ready"), 0o600); err != nil {
+			_ = os.WriteFile(os.Getenv("ZERO_VERIFY_TREE_STOP_FILE"), nil, 0o600)
+			_ = child.Wait()
+			os.Exit(5)
+		}
+		waitForVerifyTreeStop(os.Getenv("ZERO_VERIFY_TREE_STOP_FILE"), 30*time.Second)
+		_ = child.Wait()
+		return
+	case "grandchild":
+		waitForVerifyTreeStop(os.Getenv("ZERO_VERIFY_TREE_STOP_FILE"), 30*time.Second)
+		return
+	}
+
+	root := t.TempDir()
+	parentPIDFile := filepath.Join(root, "parent.pid")
+	grandchildPIDFile := filepath.Join(root, "grandchild.pid")
+	readyFile := filepath.Join(root, "ready")
+	stopFile := filepath.Join(root, "stop")
+	owner := newVerifyTestProcessOwner(t, stopFile, parentPIDFile, grandchildPIDFile)
+	t.Setenv("ZERO_VERIFY_TREE_HELPER", "parent")
+	t.Setenv("ZERO_VERIFY_TREE_PARENT_PID_FILE", parentPIDFile)
+	t.Setenv("ZERO_VERIFY_TREE_GRANDCHILD_PID_FILE", grandchildPIDFile)
+	t.Setenv("ZERO_VERIFY_TREE_READY_FILE", readyFile)
+	t.Setenv("ZERO_VERIFY_TREE_STOP_FILE", stopFile)
+	plan := Plan{Root: root, Checks: []Check{{
+		ID:      "tree.timeout",
+		Name:    "process tree timeout",
+		Command: []string{os.Args[0], "-test.run=^TestRunDefaultRunnerTimeoutKillsGrandchildHoldingOutput$"},
+	}}}
+	reportChannel := make(chan Report, 1)
+	go func() {
+		reportChannel <- Run(context.Background(), plan, RunOptions{TimeoutMS: 3000})
+	}()
+	parentPID, grandchildPID := awaitVerifyTreeReady(t, owner, readyFile, parentPIDFile, grandchildPIDFile)
+	started := time.Now()
+	var report Report
+	select {
+	case report = <-reportChannel:
+	case <-time.After(6 * time.Second):
+		t.Fatal("defaultRunner did not return within six seconds after its timeout")
+	}
+	if elapsed := time.Since(started); elapsed > 4*time.Second {
+		t.Fatalf("defaultRunner remained blocked by grandchild output handles for %s", elapsed)
+	}
+	if report.OK || len(report.Results) != 1 || report.Results[0].Status == StatusPass {
+		t.Fatalf("timed-out defaultRunner command unexpectedly passed: %#v", report)
+	}
+	for role, pid := range map[string]int{"parent": parentPID, "grandchild": grandchildPID} {
+		if err := owner.awaitExit(pid, 2*time.Second); err != nil {
+			t.Fatalf("%s process %d survived verify cancellation: %v", role, pid, err)
+		}
+	}
+}
+
+func waitForVerifyTreeStop(stopFile string, lifetime time.Duration) {
+	deadline := time.Now().Add(lifetime)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(stopFile); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func awaitVerifyTreeReady(t *testing.T, owner *verifyTestProcessOwner, readyFile string, pidFiles ...string) (int, int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(readyFile); err == nil {
+			pids := make([]int, 0, len(pidFiles))
+			for _, path := range pidFiles {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatalf("read helper PID handoff %q: %v", path, err)
+				}
+				pid, err := strconv.Atoi(string(data))
+				if err != nil {
+					t.Fatalf("parse helper PID handoff %q: %v", data, err)
+				}
+				if err := owner.retain(pid); err != nil {
+					t.Fatalf("retain helper process %d: %v", pid, err)
+				}
+				pids = append(pids, pid)
+			}
+			return pids[0], pids[1]
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("process-tree helper did not hand off parent and grandchild identities")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
 
 func TestDetectPlanFindsBunAndGoChecks(t *testing.T) {
 	root := t.TempDir()

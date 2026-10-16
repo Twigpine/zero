@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/testrunner"
 )
@@ -304,11 +305,11 @@ func defaultRunner(ctx context.Context, dir string, command []string, timeout ti
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	err := execution.RunCommand(commandCtx, cmd)
 	exitCode := 0
 	if err != nil {
 		exitCode = -1
-		if exitError, ok := err.(*exec.ExitError); ok {
+		if exitError, ok := execution.AsPureExitError(err); ok {
 			exitCode = exitError.ExitCode()
 			err = nil
 		}

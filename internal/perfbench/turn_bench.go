@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/execprofile"
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/trace"
 )
 
@@ -665,11 +666,20 @@ func NewTurnExecRunner(binary string, extraArgs ...string) TurnRunner {
 		cmd.Stdout = &outBuf
 		cmd.Stderr = &errBuf
 		start := time.Now()
-		runErr := cmd.Run()
+		runErr := execution.RunCommand(ctx, cmd)
 		wallMs := float64(time.Since(start).Microseconds()) / 1000
 
-		exitCode, haveExit := streamJSONExitCode(outBuf.Bytes())
 		outcome := TurnTaskOutcome{WallMs: wallMs}
+		if !runEndCanReconcile(runErr) {
+			if errors.Is(runErr, exec.ErrWaitDelay) {
+				outcome.Err = fmt.Errorf("zero exec output cleanup failed: %w", runErr)
+			} else {
+				outcome.Err = fmt.Errorf("zero exec command failed: %w", runErr)
+			}
+			return outcome
+		}
+
+		exitCode, haveExit := streamJSONExitCode(outBuf.Bytes())
 		if haveExit && exitCode != 0 {
 			outcome.VerifyErr = fmt.Sprintf("agent run_end exit code %d", exitCode)
 		} else if !haveExit {

@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/execution"
 )
 
 // TaskSchemaVersion is the schema version of a published task-benchmark result.
@@ -335,7 +337,13 @@ func NewExecRunner(binary string, extraArgs ...string) TaskRunner {
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
-		runErr := cmd.Run()
+		runErr := execution.RunCommand(ctx, cmd)
+		if !runEndCanReconcile(runErr) {
+			if errors.Is(runErr, exec.ErrWaitDelay) {
+				return TaskOutcome{Err: fmt.Errorf("zero exec output cleanup failed: %w", runErr)}
+			}
+			return TaskOutcome{Err: fmt.Errorf("zero exec command failed: %w", runErr)}
+		}
 
 		// The terminal run_end exit code is authoritative for pass/fail: a non-zero
 		// agent exit is a normal task failure, not a harness error, even though
@@ -365,6 +373,17 @@ func NewExecRunner(binary string, extraArgs ...string) TaskRunner {
 	}
 }
 
+// runEndCanReconcile reports whether a command result contains only an ordinary
+// process exit status. A run_end may explain success or an *exec.ExitError, but
+// it must not hide cancellation, startup, process-tree, or output-cleanup errors.
+func runEndCanReconcile(err error) bool {
+	if err == nil {
+		return true
+	}
+	_, ok := execution.AsPureExitError(err)
+	return ok
+}
+
 func buildExecArgs(task BenchTask, rc RunContext, extraArgs []string) []string {
 	args := []string{"exec", "--output-format", "stream-json"}
 	if model := strings.TrimSpace(rc.Model); model != "" {
@@ -390,9 +409,12 @@ func runVerification(ctx context.Context, task BenchTask) TaskOutcome {
 	if dir := strings.TrimSpace(task.WorkspaceFixture); dir != "" {
 		cmd.Dir = dir
 	}
-	output, err := cmd.CombinedOutput()
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	err := execution.RunCommand(ctx, cmd)
 	if err != nil {
-		detail := strings.TrimSpace(string(output))
+		detail := strings.TrimSpace(output.String())
 		if detail == "" {
 			detail = err.Error()
 		}

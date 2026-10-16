@@ -3,12 +3,15 @@ package perfbench
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func sampleTaskSet() TaskSet {
@@ -276,6 +279,111 @@ func writeExecStub(t *testing.T, body string) string {
 	return path
 }
 
+func writeBlockingExecStub(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	source := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(source, []byte(`package main
+
+import (
+	"fmt"
+	"os"
+	"time"
+)
+
+func main() {
+	fmt.Println("{\"type\":\"run_end\",\"exitCode\":0}")
+	if ready := os.Getenv("PERFBENCH_BLOCKING_STUB_READY"); ready != "" {
+		if err := os.WriteFile(ready, nil, 0600); err != nil {
+			panic(err)
+		}
+	}
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); {
+		if _, err := os.Stat(os.Getenv("PERFBENCH_BLOCKING_STUB_STOP")); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+`), 0o600); err != nil {
+		t.Fatalf("write blocking exec stub: %v", err)
+	}
+	binary := filepath.Join(dir, "zero-stub")
+	if runtime.GOOS == "windows" {
+		binary += ".exe"
+	}
+	if output, err := exec.Command("go", "build", "-o", binary, source).CombinedOutput(); err != nil {
+		t.Fatalf("build blocking exec stub: %v\n%s", err, output)
+	}
+	return binary
+}
+
+// Override Err only after Done closes, allowing both context failures to be
+// injected at the readiness handoff rather than racing process startup.
+type stubFailureContext struct {
+	context.Context
+	failure error
+}
+
+func (ctx stubFailureContext) Err() error {
+	if ctx.Context.Err() != nil {
+		return ctx.failure
+	}
+	return nil
+}
+
+func runAfterStubReady[T any](t *testing.T, failure error, run func(context.Context) T) T {
+	t.Helper()
+	root := t.TempDir()
+	ready, stop := filepath.Join(root, "ready"), filepath.Join(root, "stop")
+	t.Setenv("PERFBENCH_BLOCKING_STUB_READY", ready)
+	t.Setenv("PERFBENCH_BLOCKING_STUB_STOP", stop)
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan T, 1)
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		cancel()
+		// Independent of the production process-tree cleanup being tested.
+		if err := os.WriteFile(stop, nil, 0o600); err != nil {
+			t.Error(err)
+		}
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("stub did not stop after independent cleanup")
+		}
+	})
+	go func() {
+		defer close(done)
+		result <- run(stubFailureContext{Context: ctx, failure: failure})
+	}()
+	watchdog := time.NewTimer(15 * time.Second)
+	defer watchdog.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		select {
+		case <-result:
+			t.Fatal("runner returned before run_end readiness handoff")
+		case <-watchdog.C:
+			t.Fatal("stub did not emit run_end before watchdog")
+		case <-ticker.C:
+		}
+	}
+	cancel()
+	select {
+	case outcome := <-result:
+		return outcome
+	case <-time.After(4 * time.Second):
+		t.Fatal("runner did not return after context failure")
+	}
+	var zero T
+	return zero
+}
+
 func TestNewExecRunnerNonZeroRunEndIsFailNotError(t *testing.T) {
 	// A non-zero run_end exit code is a normal task failure, not a harness error,
 	// even though the process itself exits non-zero.
@@ -289,6 +397,62 @@ exit 1
 	}
 	if outcome.Passed {
 		t.Fatalf("non-zero run_end must be a failed task, got Passed=true")
+	}
+}
+
+func TestRunEndCanReconcile(t *testing.T) {
+	exitErr := &exec.ExitError{}
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "success", want: true},
+		{name: "exit error", err: exitErr, want: true},
+		{name: "joined exit errors", err: errors.Join(exitErr, &exec.ExitError{}), want: true},
+		{name: "ordinary error", err: errors.New("startup failed")},
+		{name: "canceled", err: context.Canceled},
+		{name: "deadline", err: context.DeadlineExceeded},
+		{name: "wait delay", err: exec.ErrWaitDelay},
+		{name: "exit plus cancellation", err: errors.Join(exitErr, context.Canceled)},
+		{name: "wrapped exit error", err: fmt.Errorf("attachment failed: %w", exitErr)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := runEndCanReconcile(test.err); got != test.want {
+				t.Fatalf("runEndCanReconcile(%v) = %v, want %v", test.err, got, test.want)
+			}
+		})
+	}
+}
+
+func TestNewExecRunnerRunEndCannotHideContextFailure(t *testing.T) {
+	stub := writeBlockingExecStub(t)
+	tests := []struct {
+		name    string
+		wantErr error
+	}{
+		{
+			name:    "cancellation",
+			wantErr: context.Canceled,
+		},
+		{
+			name:    "deadline",
+			wantErr: context.DeadlineExceeded,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			outcome := runAfterStubReady(t, test.wantErr, func(ctx context.Context) TaskOutcome {
+				return NewExecRunner(stub)(ctx, BenchTask{ID: "t1", Prompt: "p"}, RunContext{Model: "m"})
+			})
+			if outcome.Err == nil || !errors.Is(outcome.Err, test.wantErr) {
+				t.Fatalf("run_end must not hide %v, got %#v", test.wantErr, outcome)
+			}
+			if outcome.Passed {
+				t.Fatal("context failure must not reach task pass accounting")
+			}
+		})
 	}
 }
 
@@ -316,6 +480,36 @@ exit 0
 	}
 	if !outcome.Passed {
 		t.Fatalf("zero run_end with no verification must pass, got Passed=false")
+	}
+}
+
+func TestNewExecRunnerWaitDelayCannotPassWithRunEnd(t *testing.T) {
+	stub := writeExecStub(t, `sleep 3 &
+echo '{"type":"run_end","exitCode":0}'
+exit 0
+`)
+	runner := NewExecRunner(stub)
+	outcome := runner(context.Background(), BenchTask{ID: "t1", Prompt: "p"}, RunContext{Model: "m"})
+	if outcome.Err == nil || !strings.Contains(outcome.Err.Error(), "output cleanup failed") {
+		t.Fatalf("inherited output pipe must be a harness error, got %#v", outcome)
+	}
+	if outcome.Passed {
+		t.Fatal("run_end must not bypass an output cleanup failure")
+	}
+}
+
+func TestNewExecRunnerNonzeroWaitDelayCannotReconcileRunEnd(t *testing.T) {
+	stub := writeExecStub(t, `sleep 3 &
+echo '{"type":"run_end","exitCode":4}'
+exit 4
+`)
+	runner := NewExecRunner(stub)
+	outcome := runner(context.Background(), BenchTask{ID: "t1", Prompt: "p"}, RunContext{Model: "m"})
+	if outcome.Err == nil || !errors.Is(outcome.Err, exec.ErrWaitDelay) {
+		t.Fatalf("nonzero inherited output pipe must retain its cleanup failure, got %#v", outcome)
+	}
+	if outcome.Passed {
+		t.Fatal("run_end must not reconcile a nonzero command with an output cleanup failure")
 	}
 }
 

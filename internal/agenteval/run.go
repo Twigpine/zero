@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/execution"
 )
 
 // defaultCommandTimeout bounds a single verification command so a hung command
@@ -144,15 +146,14 @@ func execCommand(ctx context.Context, workspace string, command Command) Command
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	err := execution.RunCommand(ctx, cmd)
 	result.Stdout = stdout.String()
 	result.Stderr = stderr.String()
 	if err == nil {
 		result.ExitCode = 0
 		return result
 	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
+	if exitErr, ok := execution.AsPureExitError(err); ok {
 		result.ExitCode = exitErr.ExitCode()
 		return result
 	}
@@ -167,14 +168,16 @@ func execCommand(ctx context.Context, workspace string, command Command) Command
 func defaultRunGit(ctx context.Context, workspace string, args ...string) ([]byte, error) {
 	allArgs := append([]string{"-C", workspace}, args...)
 	cmd := exec.CommandContext(ctx, "git", allArgs...)
-	output, err := cmd.Output()
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	err := execution.RunCommand(ctx, cmd)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
 		}
 		return nil, err
 	}
-	return output, nil
+	return output.Bytes(), nil
 }
 
 func parseGitStatusPorcelain(output []byte) []string {

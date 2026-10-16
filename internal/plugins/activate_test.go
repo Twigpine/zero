@@ -572,7 +572,10 @@ func TestPluginCommandUsesTypedPluginExecutionOrigin(t *testing.T) {
 	}
 	preparer := &pluginExecutionPreparer{}
 	command := pluginCommand{Command: os.Args[0], Args: []string{"-test.run=^$"}, Cwd: t.TempDir()}
-	output := execPluginCommandWithExecution(context.Background(), execution.NewRunner(preparer), command, time.Second)
+	// This checks origin wiring, not deadline enforcement. Allow startup and
+	// the race runtime's one-second exit delay now that even a plain exec.Command
+	// returned by the preparer is subject to the captured execution deadline.
+	output := execPluginCommandWithExecution(context.Background(), execution.NewRunner(preparer), command, 15*time.Second)
 	if output.Err != nil || output.ExitCode != 0 {
 		t.Fatalf("plugin execution output = %#v", output)
 	}

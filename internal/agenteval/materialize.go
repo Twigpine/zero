@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/execution"
 )
 
 type Materializer struct{}
@@ -198,7 +200,7 @@ func initGitBaseline(ctx context.Context, workspace string) error {
 		var output bytes.Buffer
 		cmd.Stdout = &output
 		cmd.Stderr = &output
-		if err := cmd.Run(); err != nil {
+		if err := execution.RunCommand(ctx, cmd); err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
 			}

@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/release"
 )
 
@@ -267,10 +268,13 @@ func MeasureColdStart(ctx context.Context, command []string) (float64, error) {
 	startedAt := time.Now()
 	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
 	cmd.Env = appendNoColor(os.Environ())
-	output, err := cmd.CombinedOutput()
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	err := execution.RunCommand(ctx, cmd)
 	durationMs := RoundMetric(float64(time.Since(startedAt).Microseconds()) / 1000)
 	if err != nil {
-		return 0, commandError(command, err, string(output), "")
+		return 0, commandError(command, err, output.String(), "")
 	}
 	return durationMs, nil
 }
@@ -284,15 +288,6 @@ func MeasureFirstOutput(ctx context.Context, command []string) (firstOutputSampl
 	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
 	cmd.Env = offlineBenchmarkEnv(os.Environ())
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return firstOutputSample{}, err
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return firstOutputSample{}, err
-	}
-
 	var once sync.Once
 	var firstOutputAt time.Time
 	markFirstOutput := func() {
@@ -300,32 +295,19 @@ func MeasureFirstOutput(ctx context.Context, command []string) (firstOutputSampl
 			firstOutputAt = time.Now()
 		})
 	}
-
-	if err := cmd.Start(); err != nil {
-		return firstOutputSample{}, err
-	}
-	stdoutChan := make(chan pipeResult, 1)
-	stderrChan := make(chan pipeResult, 1)
-	go readTimedPipe(stdout, markFirstOutput, stdoutChan)
-	go readTimedPipe(stderr, markFirstOutput, stderrChan)
-
-	stdoutResult := <-stdoutChan
-	stderrResult := <-stderrChan
-	waitErr := cmd.Wait()
+	stdout := &timedBuffer{onFirstWrite: markFirstOutput}
+	stderr := &timedBuffer{onFirstWrite: markFirstOutput}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	waitErr := execution.RunCommand(ctx, cmd)
 	finishedAt := time.Now()
-	if stdoutResult.Err != nil {
-		return firstOutputSample{}, stdoutResult.Err
-	}
-	if stderrResult.Err != nil {
-		return firstOutputSample{}, stderrResult.Err
-	}
 
 	if firstOutputAt.IsZero() {
 		firstOutputAt = finishedAt
 	}
 	rssAfter := readHarnessMemoryMb()
 	if waitErr != nil {
-		return firstOutputSample{}, commandError(command, waitErr, stdoutResult.Text, stderrResult.Text)
+		return firstOutputSample{}, commandError(command, waitErr, stdout.String(), stderr.String())
 	}
 	return firstOutputSample{
 		FirstOutputMs:        RoundMetric(float64(firstOutputAt.Sub(startedAt).Microseconds()) / 1000),
@@ -421,29 +403,20 @@ func median(sortedSamples []float64) float64 {
 	return RoundMetric((sortedSamples[middle-1] + sortedSamples[middle]) / 2)
 }
 
-type pipeResult struct {
-	Text string
-	Err  error
+type timedBuffer struct {
+	buffer       bytes.Buffer
+	onFirstWrite func()
 }
 
-func readTimedPipe(reader io.Reader, onFirstChunk func(), result chan<- pipeResult) {
-	var buffer bytes.Buffer
-	chunk := make([]byte, 32*1024)
-	for {
-		n, err := reader.Read(chunk)
-		if n > 0 {
-			onFirstChunk()
-			_, _ = buffer.Write(chunk[:n])
-		}
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				result <- pipeResult{Text: buffer.String()}
-				return
-			}
-			result <- pipeResult{Text: buffer.String(), Err: err}
-			return
-		}
+func (buffer *timedBuffer) Write(data []byte) (int, error) {
+	if len(data) > 0 {
+		buffer.onFirstWrite()
 	}
+	return buffer.buffer.Write(data)
+}
+
+func (buffer *timedBuffer) String() string {
+	return buffer.buffer.String()
 }
 
 func commandError(command []string, err error, stdout string, stderr string) error {

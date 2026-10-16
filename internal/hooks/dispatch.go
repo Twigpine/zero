@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"os/exec"
 	"strings"
@@ -306,13 +305,12 @@ func execCommandRunner(ctx context.Context, command string, args []string, stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	err := execution.RunCommand(ctx, cmd)
 	result := commandResult{Stdout: stdout.String(), Stderr: stderr.String()}
 	if err == nil {
 		return result
 	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
+	if exitErr, ok := execution.AsPureExitError(err); ok {
 		result.ExitCode = exitErr.ExitCode()
 		return result
 	}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSummarizeSamplesSortsAndRounds(t *testing.T) {
@@ -119,8 +120,37 @@ func TestPerfBenchHelperProcess(t *testing.T) {
 	if os.Getenv("ZERO_PERF_HELPER") != "1" {
 		return
 	}
-	fmt.Println("zero 0.1.0")
+	if stream := os.Getenv("ZERO_PERF_HELPER_STREAM"); stream != "" {
+		if stream == "stderr" {
+			fmt.Fprintln(os.Stderr, "zero 0.1.0")
+		} else {
+			fmt.Println("zero 0.1.0")
+		}
+		time.Sleep(400 * time.Millisecond)
+	} else {
+		fmt.Println("zero 0.1.0")
+	}
 	os.Exit(0)
+}
+
+func TestMeasureFirstOutputCapturesFirstByteTiming(t *testing.T) {
+	for _, stream := range []string{"stdout", "stderr"} {
+		t.Run(stream, func(t *testing.T) {
+			command := []string{os.Args[0], "-test.run=^TestPerfBenchHelperProcess$"}
+			t.Setenv("ZERO_PERF_HELPER", "1")
+			t.Setenv("ZERO_PERF_HELPER_STREAM", stream)
+			sample, err := MeasureFirstOutput(context.Background(), command)
+			if err != nil {
+				t.Fatalf("MeasureFirstOutput returned error: %v", err)
+			}
+			if sample.FirstOutputMs >= 250 {
+				t.Fatalf("first output = %fms, want before delayed exit", sample.FirstOutputMs)
+			}
+			if sample.ProcessDrainMs < 250 {
+				t.Fatalf("process drain = %fms, want delayed exit time", sample.ProcessDrainMs)
+			}
+		})
+	}
 }
 
 func equalFloatSlices(left []float64, right []float64) bool {

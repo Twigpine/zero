@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -643,6 +644,65 @@ func runTurnStub(t *testing.T, task BenchTask, stubBody string) TurnTaskOutcome 
 	return NewTurnExecRunner(stub)(context.Background(), task, RunContext{Model: "fake-model"})
 }
 
+func TestNewTurnExecRunnerWaitDelayCannotPassWithRunEnd(t *testing.T) {
+	task := BenchTask{ID: "wait-delay", Prompt: "p", WorkspaceFixture: t.TempDir()}
+	outcome := runTurnStub(t, task, `sleep 3 &
+echo '{"type":"run_end","exitCode":0}'
+exit 0
+`)
+	if outcome.Err == nil || !strings.Contains(outcome.Err.Error(), "output cleanup failed") {
+		t.Fatalf("inherited output pipe must be a harness error, got %#v", outcome)
+	}
+	if outcome.Passed {
+		t.Fatal("run_end must not bypass an output cleanup failure")
+	}
+}
+
+func TestNewTurnExecRunnerNonzeroWaitDelayCannotReconcileRunEnd(t *testing.T) {
+	task := BenchTask{ID: "wait-delay-nonzero", Prompt: "p", WorkspaceFixture: t.TempDir()}
+	outcome := runTurnStub(t, task, `sleep 3 &
+echo '{"type":"run_end","exitCode":4}'
+exit 4
+`)
+	if outcome.Err == nil || !errors.Is(outcome.Err, exec.ErrWaitDelay) {
+		t.Fatalf("nonzero inherited output pipe must retain its cleanup failure, got %#v", outcome)
+	}
+	if outcome.Passed || outcome.VerifyErr != "" {
+		t.Fatalf("output cleanup failure must precede turn accounting, got %#v", outcome)
+	}
+}
+
+func TestNewTurnExecRunnerRunEndCannotHideContextFailure(t *testing.T) {
+	task := BenchTask{ID: "context-failure", Prompt: "p", WorkspaceFixture: t.TempDir()}
+	stub := writeBlockingExecStub(t)
+	tests := []struct {
+		name    string
+		wantErr error
+	}{
+		{
+			name:    "cancellation",
+			wantErr: context.Canceled,
+		},
+		{
+			name:    "deadline",
+			wantErr: context.DeadlineExceeded,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			outcome := runAfterStubReady(t, test.wantErr, func(ctx context.Context) TurnTaskOutcome {
+				return NewTurnExecRunner(stub)(ctx, task, RunContext{Model: "m"})
+			})
+			if outcome.Err == nil || !errors.Is(outcome.Err, test.wantErr) {
+				t.Fatalf("run_end must not hide %v, got %#v", test.wantErr, outcome)
+			}
+			if outcome.Passed || outcome.VerifyErr != "" {
+				t.Fatalf("context failure must precede oracle accounting, got %#v", outcome)
+			}
+		})
+	}
+}
+
 // assertVerifyFailed asserts an outcome failed specifically because the oracle
 // rejected the work — Passed is false, there is no harness error (Err nil), and
 // VerifyErr carries the surfaced failure detail. This is stronger than merely
@@ -796,6 +856,7 @@ func TestOracleAuthoritativeOnIncompleteExit(t *testing.T) {
 	task := loadBaselineTask(t, "edit-01")
 	outcome := runTurnStub(t, task, `sed 's/const MaxRetries = 3/const RetryLimit = 3/' main.go > .zero-tmp && mv .zero-tmp main.go
 echo '{"type":"run_end","exitCode":4}'
+exit 4
 `)
 	if outcome.Err != nil {
 		t.Fatalf("incomplete-exit with a correct edit should pass, got harness error: %v", outcome.Err)
@@ -822,7 +883,8 @@ func TestNonIncompleteExitStaysAuthoritative(t *testing.T) {
 			task := loadBaselineTask(t, "edit-01")
 			outcome := runTurnStub(t, task, fmt.Sprintf(`sed 's/const MaxRetries = 3/const RetryLimit = 3/' main.go > .zero-tmp && mv .zero-tmp main.go
 echo '{"type":"run_end","exitCode":%d}'
-`, code))
+exit %d
+`, code, code))
 			if outcome.Err != nil {
 				t.Fatalf("a nonzero exit should be a task fail, not a harness error: %v", outcome.Err)
 			}
@@ -846,6 +908,7 @@ echo '{"type":"run_end","exitCode":%d}'
 func TestIncompleteExitStillFailsWhenOracleFails(t *testing.T) {
 	task := loadBaselineTask(t, "edit-01")
 	outcome := runTurnStub(t, task, `echo '{"type":"run_end","exitCode":4}'
+exit 4
 `)
 	assertVerifyFailed(t, "incomplete exit with no edit applied", outcome)
 }
@@ -858,6 +921,7 @@ func TestIncompleteExitStillFailsWhenOracleFails(t *testing.T) {
 func TestNonzeroExitStillFailsLatencyOnly(t *testing.T) {
 	task := loadBaselineTask(t, "longproc-01")
 	outcome := runTurnStub(t, task, `echo '{"type":"run_end","exitCode":4}'
+exit 4
 `)
 	if outcome.Err != nil {
 		t.Fatalf("latency-only nonzero exit should be a verify fail, not a harness error: %v", outcome.Err)

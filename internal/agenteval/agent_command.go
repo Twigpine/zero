@@ -3,9 +3,10 @@ package agenteval
 import (
 	"bytes"
 	"context"
-	"errors"
 	"os/exec"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/execution"
 )
 
 type AgentRunInput struct {
@@ -67,7 +68,7 @@ func (runner CommandAgentRunner) Run(ctx context.Context, input AgentRunInput) A
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
-	err := cmd.Run()
+	err := execution.RunCommand(ctx, cmd)
 	result.Stdout = stdout.buf.String()
 	result.Stderr = stderr.buf.String()
 	result.Truncated = stdout.truncated || stderr.truncated
@@ -81,8 +82,7 @@ func (runner CommandAgentRunner) Run(ctx context.Context, input AgentRunInput) A
 		result.Error = ctxErr.Error()
 		return result
 	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
+	if exitErr, ok := execution.AsPureExitError(err); ok {
 		result.ExitCode = exitErr.ExitCode()
 		return result
 	}
