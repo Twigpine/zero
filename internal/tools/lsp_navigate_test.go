@@ -85,3 +85,44 @@ func TestLSPNavigateIsReadOnly(t *testing.T) {
 		t.Fatalf("name = %q", tool.Name())
 	}
 }
+
+func TestReadWorkspaceFileRejectsPostResolutionSwap(t *testing.T) {
+	for _, kind := range []string{"hardlink", "escaping symlink", "ordinary"} {
+		t.Run(kind, func(t *testing.T) {
+			ws, token, _ := daemonTokenFixture(t)
+			path := filepath.Join(ws, "candidate")
+			if err := os.WriteFile(path, []byte("ordinary"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			resolved, _, err := resolveScopedReadPath(ws, nil, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if kind != "ordinary" {
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if kind == "hardlink" {
+					err = os.Link(token, path)
+				} else {
+					outside := filepath.Join(t.TempDir(), "outside")
+					if err := os.WriteFile(outside, []byte("outside"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					err = os.Symlink(outside, path)
+				}
+				if err != nil {
+					t.Skipf("alias unavailable: %v", err)
+				}
+			}
+			text, err := readWorkspaceFile(resolved, ws)
+			if kind == "ordinary" {
+				if err != nil || text != "ordinary" {
+					t.Fatalf("ordinary read: %q, %v", text, err)
+				}
+			} else if err == nil || text != "" {
+				t.Fatalf("post-resolution swap read: %q, %v", text, err)
+			}
+		})
+	}
+}

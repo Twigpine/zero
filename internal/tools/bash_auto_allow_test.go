@@ -130,6 +130,13 @@ func TestBashRequireEscalatedKeepsSandboxWhenDeniedReadsActive(t *testing.T) {
 	}
 }
 
+func TestBashRequireEscalatedKeepsSandboxWhenDaemonTokenProtected(t *testing.T) {
+	engine := defaultPolicyDaemonTokenEngine(t)
+	if commandEngineForSandboxPermissions(engine, SandboxPermissionsRequireEscalated) == nil {
+		t.Fatal("bash require_escalated must preserve the sandbox when the default remote-daemon policy protects a token file")
+	}
+}
+
 func TestBashStillPromptsWithoutActiveSandbox(t *testing.T) {
 	root := t.TempDir()
 	registry := NewRegistry()

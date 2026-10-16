@@ -22,6 +22,7 @@ type writeFileTool struct {
 	// replace it to simulate an unreadable preimage; production uses
 	// readRootedFile so bytes and identity come from the same descriptor.
 	readRooted func(*os.Root, string) ([]byte, os.FileInfo, error)
+	formatter  writtenFileFormatter
 }
 
 func NewScopedWriteFileTool(workspaceRoot string, scope PathScope) Tool {
@@ -45,6 +46,7 @@ func NewScopedWriteFileTool(workspaceRoot string, scope PathScope) Tool {
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
 		scope:         scope,
 		readRooted:    readRootedFile,
+		formatter:     maybeFormatWrittenFile,
 	}
 }
 
@@ -139,7 +141,7 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 			return errorResult("Error writing file " + relativePath + ": " + err.Error())
 		}
 	}
-	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
+	if err := protectedMutationDenied(absolutePath, tool.workspaceRoot); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
 	var expectedContent *string
@@ -153,25 +155,28 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
 	// FileTracker baseline: recording pre-format content would make the very
 	// next edit look like an external modification and trip the conflict guard.
-	restoreMode := os.FileMode(0o644)
+	writeMode := os.FileMode(0o644)
 	if priorInfo != nil {
-		restoreMode = priorInfo.Mode().Perm()
+		writeMode = priorInfo.Mode().Perm()
 	}
-	formatting := maybeFormatWrittenFileScoped(ctx, tool.workspaceRoot, tool.scope, absolutePath, content, restoreMode)
-	content = formatting.Content
-	finalContentKnown := formatting.ContentKnown
+	formatter := tool.formatter
+	if formatter == nil {
+		formatter = maybeFormatWrittenFile
+	}
+	formatting := formatter(ctx, root, rootedRelative, absolutePath, tool.workspaceRoot, tool.scope, content, writeMode)
+	// Re-read what was actually published through the same root: the formatter
+	// may have replaced the bytes, and only a descriptor-bound read can vouch
+	// for what the tracker, diagnostics and diff preview are about to consume.
+	published, newInfo, err := readRootedFile(root, rootedRelative)
+	if err != nil {
+		options.FileTracker.Forget(absolutePath)
+		return errorResult("Error reading written file " + relativePath + ": " + err.Error())
+	}
+	content = string(published)
 	// Baseline the freshly written content so a later edit/overwrite in this
 	// session compares against what is now on disk.
-	newInfo := formatting.Info
-	if newInfo == nil {
-		newInfo, _ = root.Stat(rootedRelative)
-	}
-	if finalContentKnown {
-		options.FileTracker.Record(absolutePath, []byte(content), newInfo)
-	} else {
-		options.FileTracker.Forget(absolutePath)
-	}
-	if finalContentKnown && content == modelKnownContent {
+	options.FileTracker.Record(absolutePath, []byte(content), newInfo)
+	if content == modelKnownContent {
 		options.FileTracker.RecordSeenRange(absolutePath, 1, trackedLineTotal(content), trackedLineTotal(content))
 	}
 	if !existed {
@@ -190,14 +195,12 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	}
 	summary := fmt.Sprintf("%s %s (%d lines).", verb, relativePath, lines)
 	summary += formatting.notice(relativePath)
-	if finalContentKnown {
-		summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
-	}
+	summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}
 	// Do not pretend an unreadable overwrite was a creation. The write may be
 	// valid, but ACP only receives an exact before/after pair we actually saw.
-	if priorContentKnown && finalContentKnown {
+	if priorContentKnown {
 		if diff, ok := boundedFileDiff(absolutePath, priorContent, content, existed, true); ok {
 			result.FileDiffs = []FileDiff{diff}
 		} else if diffTextRevealsObfuscatedSecret(priorContent) || diffTextRevealsObfuscatedSecret(content) {
@@ -208,7 +211,7 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	// an overwrite) on Display.Preview. Output stays the summary, so the model never
 	// re-reads the file — the rich preview costs zero model tokens.
 	preview := ""
-	if priorContentKnown && finalContentKnown {
+	if priorContentKnown {
 		preview = boundedUnifiedDiff(relativePath, priorContent, content)
 	}
 	result.Display = Display{Summary: summary, Kind: "file", Preview: preview}

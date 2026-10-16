@@ -49,15 +49,14 @@ func NewScopedGlobTool(workspaceRoot string, scope PathScope) Tool {
 }
 
 func (tool globTool) Run(ctx context.Context, args map[string]any) Result {
-	return tool.runWith(ctx, args, readExcluder{}, true)
+	return tool.runWith(ctx, args, sandboxReadExcluderWithin(nil, tool.workspaceRoot), true)
 }
 
+// RunWithOptions falls back to sandboxReadExcluderWithin, not a bare no-op
+// excluder, when options.Sandbox is nil — see the matching comment on grepTool
+// for why an engine-less call is a real production path this must still cover.
 func (tool globTool) RunWithOptions(ctx context.Context, args map[string]any, options RunOptions) Result {
-	exclude := readExcluder{}
-	if options.Sandbox != nil {
-		exclude = sandboxReadExcluder(options.Sandbox)
-	}
-	return tool.runWith(ctx, args, exclude, false)
+	return tool.runWith(ctx, args, sandboxReadExcluderWithin(options.Sandbox, tool.workspaceRoot), false)
 }
 
 // RunWithSandbox runs glob while skipping subtrees the sandbox policy denies

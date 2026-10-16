@@ -168,36 +168,54 @@ func (engine *Engine) LookupCommandPrefixForSession(toolName string, command []s
 // ReadExclusions returns the resolved DenyRead/AllowRead exclusion matcher for
 // this engine's policy, resolving each policy entry ONCE. The search tools build
 // it a single time per run and reuse it across the whole walk so the predicates
-// don't re-run Abs/EvalSymlinks per visited path. Returns nil for a nil engine
-// (the matcher's methods treat nil as "exclude nothing").
+// don't re-run Abs/EvalSymlinks per visited path. Returns nil ONLY for a nil
+// engine — every other path returns a non-nil matcher, inactive when there is
+// nothing to exclude.
+//
+// A non-nil-engine caller that skipped the nil check (there is one, but a
+// second one should never have to exist) would otherwise call Active()/
+// PathExcluded()/FileExcluded() on a nil *ReadExclusions when no token is
+// selected and the policy is disabled — the ordinary MCP startup shape.
+// Those methods happen to be nil-receiver-safe today (Active checks rx != nil
+// first), so that specific call never actually panics, but relying on every
+// future method staying nil-safe is a needless landmine when returning a real,
+// inactive value costs nothing.
 func (engine *Engine) ReadExclusions() *ReadExclusions {
-	// A disabled policy enforces nothing, so it must not filter search results
-	// either (Evaluate already allows every request under ModeDisabled).
+	// A disabled policy enforces nothing the USER configured, so it must not
+	// filter search results by DenyRead either (Evaluate likewise allows every
+	// request under ModeDisabled). The automatic credential exclusion is not
+	// policy-derived and survives: the bridge token authenticates the channel
+	// driving these tools, so turning the sandbox off must not hand a remote
+	// caller its own credential.
 	if engine == nil {
 		return nil
 	}
 	policy := engine.effectivePolicy(engine.policy)
 	if policy.Mode == ModeDisabled {
-		return nil
+		exclusions := newReadExclusions(engine.workspaceRoot, nil, nil, protectedCredentialPaths())
+		return &exclusions
 	}
-	return &ReadExclusions{
-		workspaceRoot: engine.workspaceRoot,
-		denyRoots:     resolvePolicyPaths(policy.DenyRead),
-		allowRoots:    resolvePolicyPaths(policy.AllowRead),
-	}
+	exclusions := newReadExclusions(
+		engine.workspaceRoot,
+		resolvePolicyPaths(policy.DenyRead),
+		resolvePolicyPaths(policy.AllowRead),
+		protectedCredentialPaths(),
+	)
+	return &exclusions
 }
 
 // ReadExclusionGlobs returns the ripgrep-style --glob exclusion args for this
 // engine's policy + scope (see the package-level ReadExclusionGlobs). Empty when
 // DenyRead is unset or the engine has no scope.
 func (engine *Engine) ReadExclusionGlobs() []string {
-	// A disabled policy filters nothing (parity with ReadExclusions / Evaluate).
+	// A disabled policy filters nothing the user configured, but keeps the
+	// automatic credential exclusion (parity with ReadExclusions / Evaluate).
 	if engine == nil {
 		return nil
 	}
 	policy := engine.effectivePolicy(engine.policy)
 	if policy.Mode == ModeDisabled {
-		return nil
+		return ReadExclusionGlobs(Policy{}, engine.scope)
 	}
 	return ReadExclusionGlobs(policy, engine.scope)
 }
@@ -210,7 +228,14 @@ func (engine *Engine) effectiveNetworkMode(policy Policy) NetworkMode {
 }
 
 // UnsandboxedExecutionAllowed reports whether an escalated shell attempt may
-// bypass the native sandbox without dropping active denied-read restrictions.
+// bypass the native sandbox without dropping active denied-read restrictions,
+// including the automatic remote bridge token exclusion.
+//
+// ModeDisabled short-circuits to true before the token is consulted, and that is
+// the intended reading of the switch rather than an oversight: with the sandbox
+// off there is no wrapper for an escalation to bypass, so refusing the
+// escalation would deny a capability the operator already granted globally
+// without protecting anything. See the ModeDisabled branch in Evaluate.
 func (engine *Engine) UnsandboxedExecutionAllowed() bool {
 	if engine == nil {
 		return true
@@ -219,7 +244,7 @@ func (engine *Engine) UnsandboxedExecutionAllowed() bool {
 	if policy.Mode == ModeDisabled {
 		return true
 	}
-	return len(normalizeProfilePaths(policy.DenyRead)) == 0
+	return len(normalizeProfilePaths(policy.DenyRead)) == 0 && len(protectedCredentialPaths()) == 0
 }
 
 // toolNetworkExempt reports whether a request is exempt from the engine-level
@@ -343,8 +368,33 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	request.SideEffect = NormalizeSideEffect(request.SideEffect)
 	scope := engine.scopeFor(request.WorkspaceRoot)
 	risk := classifyWithScope(request, scope)
+	// Patch targets must be established before every policy short-circuit,
+	// including ModeDisabled. Besides making the automatic daemon-token boundary
+	// enforceable, this keeps apply_patch anchored to the workspace when user
+	// sandboxing is off; the tool itself has the same non-optional containment.
+	if block := applyPatchPathBlock(request); block != nil {
+		return deny(request, risk, block.Code, block.Path, block.Reason, false)
+	}
 
 	if policy.Mode == ModeDisabled {
+		// Disabling the sandbox drops every user-configured restriction, but not the
+		// automatic credential exclusion: the remote bridge token authenticates the
+		// caller driving these tools, so it stays unreadable and unwritable through
+		// them.
+		//
+		// Shell is deliberately left open here, and it is worth being blunt about
+		// why. ModeDisabled means no OS wrapper is built at all — the runner sets
+		// SandboxPreferenceForbid and PermissionProfileFromPolicy returns an
+		// unrestricted filesystem — so there is no layer left that could confine a
+		// command. Re-wrapping shell just for this file would quietly undo the
+		// switch the operator flipped, and would not hold anyway: a shell that can
+		// run anything can read anything this process can. The exclusion below is
+		// therefore what it says — a guarantee about Zero's own file tools, not
+		// about the machine. Running a remote bridge with the sandbox disabled
+		// means trusting whoever can drive that bridge with the token.
+		if block := protectedCredentialPathBlock(request, request.WorkspaceRoot); block != nil {
+			return deny(request, risk, block.Code, block.Path, block.Reason, false)
+		}
 		return Decision{Action: ActionAllow, Risk: risk, Reason: "sandbox disabled"}
 	}
 	if request.Permission == PermissionDeny {
@@ -379,9 +429,6 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	// workspace boundary itself needs a root, so it is gated on having one. Mode is
 	// already known to be enforcing here (ModeDisabled returned above).
 	enforceWorkspace := policy.EnforceWorkspace && request.WorkspaceRoot != ""
-	if block := applyPatchPathBlock(request); block != nil {
-		return deny(request, risk, block.Code, block.Path, block.Reason, false)
-	}
 	var promptableBlock *pathBlock
 	for _, requested := range requestPaths(request) {
 		if block := validatePathWithPolicy(scope, policy, request.SideEffect, enforceWorkspace, request.WorkspaceRoot, requested); block != nil {

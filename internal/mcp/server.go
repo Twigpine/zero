@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -42,12 +43,19 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, registry *too
 	reader := newMessageReader(input)
 	writer := newMessageWriter(output)
 	resolvedOptions := options.withDefaults()
+	// MCP has no user-policy engine, but ModeDisabled intentionally retains the
+	// non-optional daemon-token guard and recursive read exclusions.
+	credentialGuard := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: resolvedOptions.WorkspaceRoot,
+		Policy:        sandbox.Policy{Mode: sandbox.ModeDisabled},
+	})
 	server := toolServer{
-		registry:      registry,
-		options:       resolvedOptions,
-		writer:        writer,
-		workspaceRoot: resolvedOptions.WorkspaceRoot,
-		scope:         resolvedOptions.Scope,
+		registry:        registry,
+		options:         resolvedOptions,
+		writer:          writer,
+		workspaceRoot:   resolvedOptions.WorkspaceRoot,
+		scope:           resolvedOptions.Scope,
+		credentialGuard: credentialGuard,
 	}
 
 	// Run the blocking reads on a goroutine and select on ctx so a
@@ -110,11 +118,12 @@ func (options ServeOptions) withDefaults() ServeOptions {
 }
 
 type toolServer struct {
-	registry      *tools.Registry
-	options       ServeOptions
-	writer        *messageWriter
-	workspaceRoot string
-	scope         tools.PathScope
+	registry        *tools.Registry
+	options         ServeOptions
+	writer          *messageWriter
+	workspaceRoot   string
+	scope           tools.PathScope
+	credentialGuard *sandbox.Engine
 }
 
 func (server toolServer) handle(ctx context.Context, message rpcMessage) error {
@@ -217,6 +226,7 @@ func (server toolServer) callTool(ctx context.Context, rawParams json.RawMessage
 
 	result := server.registry.RunWithOptions(ctx, params.Name, params.Arguments, tools.RunOptions{
 		PermissionGranted: server.options.PermissionGranted,
+		Sandbox:           server.credentialGuard,
 	})
 	return CallToolResult{
 		Content: []Content{{Type: "text", Text: result.Output}},

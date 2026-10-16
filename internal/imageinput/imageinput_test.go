@@ -1,11 +1,100 @@
 package imageinput
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/remotetoken"
 )
+
+func TestLoadOpenFileChecksConsumedHandle(t *testing.T) {
+	for _, protected := range []bool{false, true} {
+		t.Run(strconv.FormatBool(protected), func(t *testing.T) {
+			root := t.TempDir()
+			token, candidate := filepath.Join(root, "token"), filepath.Join(root, "candidate")
+			const original = "GIF89a original"
+			if err := os.WriteFile(token, []byte(original), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(remotetoken.EnvToken, "")
+			t.Setenv(remotetoken.EnvTokenFile, token)
+			t.Setenv(remotetoken.EnvTokenFileResolved, "")
+			t.Setenv(remotetoken.EnvTokenFileIdentity, "")
+			if protected {
+				if err := os.Link(token, candidate); err != nil {
+					t.Skipf("hard links unavailable: %v", err)
+				}
+			} else if err := os.WriteFile(candidate, []byte(original), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			file, err := os.Open(candidate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer file.Close()
+			// An innocent lookup path must not authorize a protected handle or
+			// replace the bytes read from an ordinary handle. Use a separate name
+			// instead of unlinking an open file, which Windows does not permit.
+			lookup := filepath.Join(root, "replacement")
+			if err := os.WriteFile(lookup, []byte("GIF89a replacement"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			image, err := LoadOpenFile(file, lookup, root)
+			if protected {
+				if err == nil || len(image.Data) != 0 || !strings.Contains(err.Error(), "holds the remote bridge token") {
+					t.Fatalf("consumed protected handle: %+v, %v", image, err)
+				}
+			} else if err != nil || string(image.Data) != original {
+				t.Fatalf("reopened pathname instead of reading handle: %+v, %v", image, err)
+			}
+		})
+	}
+}
+
+func TestLoadFileRejectsDaemonTokenAliases(t *testing.T) {
+	root := t.TempDir()
+	data := []byte("GIF89a protected image bytes")
+	token := filepath.Join(root, "token")
+	if err := os.WriteFile(token, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(remotetoken.EnvToken, "")
+	t.Setenv(remotetoken.EnvTokenFile, token)
+	t.Setenv(remotetoken.EnvTokenFileResolved, "")
+	t.Setenv(remotetoken.EnvTokenFileIdentity, "")
+	for _, kind := range []string{"exact", "symlink", "hardlink", "ordinary"} {
+		t.Run(kind, func(t *testing.T) {
+			path := token
+			if kind != "exact" {
+				path = filepath.Join(root, kind)
+				var err error
+				switch kind {
+				case "symlink":
+					err = os.Symlink(token, path)
+				case "hardlink":
+					err = os.Link(token, path)
+				case "ordinary":
+					err = os.WriteFile(path, data, 0o600)
+				}
+				if err != nil {
+					t.Skipf("%s unavailable: %v", kind, err)
+				}
+			}
+			image, err := LoadFile(path, root)
+			if kind == "ordinary" {
+				if err != nil || !bytes.Equal(image.Data, data) {
+					t.Fatalf("ordinary image = %+v, %v", image, err)
+				}
+			} else if err == nil || len(image.Data) != 0 || !strings.Contains(err.Error(), "holds the remote bridge token") {
+				t.Fatalf("protected image consumed: %+v, %v", image, err)
+			}
+		})
+	}
+}
 
 func TestLoadFileReadsAndNormalizes(t *testing.T) {
 	root := t.TempDir()

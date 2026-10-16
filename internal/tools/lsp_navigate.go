@@ -3,7 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
-	"os"
+	"io"
 	"path/filepath"
 	"strings"
 
@@ -84,8 +84,8 @@ func (tool lspNavigateTool) Run(ctx context.Context, args map[string]any) Result
 		return errorResult("Error: lsp_navigate " + scopeErr.Error())
 	}
 
-	text, readErr := readWorkspaceFile(absPath)
-	if readErr != nil && op != lsp.NavWorkspaceSymbol {
+	text, readErr := readWorkspaceFile(absPath, tool.workspaceRoot)
+	if readErr != nil {
 		return errorResult("Error: lsp_navigate could not read " + relPath + ": " + readErr.Error())
 	}
 
@@ -123,10 +123,15 @@ func (tool lspNavigateTool) Run(ctx context.Context, args map[string]any) Result
 	return okResult(tool.formatResult(op, locations, symbols))
 }
 
-// readWorkspaceFile reads an already-confined absolute path (resolved by
-// resolveScopedReadPath). Returns "" + error when the file can't be read.
-func readWorkspaceFile(absPath string) (string, error) {
-	data, err := os.ReadFile(absPath)
+// readWorkspaceFile binds the confined path and credential check to the handle
+// supplying the text, rather than reopening an authorized pathname.
+func readWorkspaceFile(absPath, workspaceRoot string) (string, error) {
+	file, _, err := ProtectedReadOpen(absPath, workspaceRoot)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(file)
 	if err != nil {
 		return "", err
 	}

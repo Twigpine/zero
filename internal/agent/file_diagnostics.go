@@ -2,18 +2,23 @@ package agent
 
 import (
 	"context"
-	"os"
+	"io"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/lsp"
+	"github.com/Gitlawb/zero/internal/tools"
 )
 
 // fileDiagnosticsTimeout bounds one inline post-edit diagnostics check so a
 // slow or wedged language server can never hang a tool call; on timeout the
 // edit simply reports without a diagnostics block.
 const fileDiagnosticsTimeout = 10 * time.Second
+
+type fileDiagnosticsChecker interface {
+	Check(context.Context, string, string) ([]lsp.Diagnostic, error)
+}
 
 // NewFileDiagnostics adapts an *lsp.Manager to the per-edit inline diagnostics
 // callback (tools.RunOptions.Diagnostics): it reads the just-written file,
@@ -29,9 +34,24 @@ func NewFileDiagnostics(manager *lsp.Manager, workspaceRoot string) func(context
 	if manager == nil {
 		return nil
 	}
+	return newFileDiagnostics(manager, workspaceRoot)
+}
+
+// newFileDiagnostics accepts the narrow operation used here so race tests can
+// observe exactly what would be sent to LSP without installing process-global
+// hooks or starting a language server.
+func newFileDiagnostics(manager fileDiagnosticsChecker, workspaceRoot string) func(context.Context, string) string {
+	if manager == nil {
+		return nil
+	}
 	return func(ctx context.Context, absPath string) string {
-		text, err := os.ReadFile(absPath)
+		file, _, err := tools.ProtectedReadOpen(absPath, workspaceRoot)
 		if err != nil {
+			return ""
+		}
+		text, readErr := io.ReadAll(file)
+		closeErr := file.Close()
+		if readErr != nil || closeErr != nil {
 			return ""
 		}
 		checkCtx, cancel := context.WithTimeout(ctx, fileDiagnosticsTimeout)

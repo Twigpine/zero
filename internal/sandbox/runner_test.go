@@ -499,6 +499,14 @@ func TestSeatbeltProfileProtectsMetadataAndDenyOrdering(t *testing.T) {
 			t.Fatalf("Seatbelt profile missing %q:\n%s", want, sbpl)
 		}
 	}
+	// A user-configured read-denied path keeps the write direction: a cache or
+	// generated directory the build legitimately writes must not become read-only
+	// just because it is excluded from reads. Only Zero's own automatic credential
+	// entries are write-denied (see TestProtectedCredentialsDenyReadAndWrite...).
+	if strings.Contains(sbpl, `(deny file-write* (subpath "`+normalizedSecretRead+`"))`) ||
+		strings.Contains(sbpl, `(deny file-write* (literal "`+normalizedSecretRead+`"))`) {
+		t.Fatalf("a user-configured DenyRead path must stay writable:\n%s", sbpl)
+	}
 	allowIdx := strings.Index(sbpl, "(allow file-write*")
 	denyReadIdx := strings.Index(sbpl, denySecretReadRule)
 	metadataIdx := strings.Index(sbpl, `(deny file-write* (regex #"^/repo/\.git(/.*)?$"))`)
@@ -627,6 +635,21 @@ func TestSeatbeltProfileDoesNotRenderSymlinkCarveout(t *testing.T) {
 		if strings.Contains(sbpl, allow) {
 			t.Fatalf("Seatbelt profile re-allowed symlink carveout path %q:\n%s", path, sbpl)
 		}
+	}
+}
+
+func TestSeatbeltTemporaryWritesFollowPermissionProfile(t *testing.T) {
+	runtimeRules := seatbeltPlatformRuntimeRules()
+	if strings.Contains(runtimeRules, `file-write* (subpath "/tmp")`) {
+		t.Fatal("platform runtime rules must not bypass FileSystemPolicy.AllowTemp")
+	}
+	withoutTemp := seatbeltWriteRule(FileSystemPolicy{Kind: FileSystemRestricted})
+	if strings.Contains(withoutTemp, `(subpath "/tmp")`) {
+		t.Fatal("restricted profile with AllowTemp=false unexpectedly permits /tmp writes")
+	}
+	withTemp := seatbeltWriteRule(FileSystemPolicy{Kind: FileSystemRestricted, AllowTemp: true})
+	if !strings.Contains(withTemp, `(subpath "/tmp")`) {
+		t.Fatal("restricted profile with AllowTemp=true must permit /tmp writes")
 	}
 }
 
@@ -849,10 +872,13 @@ func TestScrubSensitiveEnv(t *testing.T) {
 		// path to read it from (#677).
 		"ZERO_DAEMON_REMOTE_TOKEN=bridge-token-inline",
 		"ZERO_DAEMON_REMOTE_TOKEN_FILE=/home/user/.zero/remote-token",
+		"ZERO_INTERNAL_DAEMON_REMOTE_TOKEN_FILE_RESOLVED=/home/user/.zero/resolved-remote-token",
+		"ZERO_INTERNAL_DAEMON_REMOTE_TOKEN_FILE_IDENTITY=unix:1:2",
 		"COMPANY_LLM_SECRET=custom-secret",
 		"ZERO_OAUTH_MY_SVC_CLIENT_SECRET=oauth-secret",
 		"zero_oauth_second_client_secret=case-insensitive-secret",
 		"ZERO_OAUTH_CLIENT_SECRET=not-a-provider-secret",
+		"ZERO_DAEMON_REMOTE_TOKEN_FILE=/home/user/daemon-token",
 		"AWS_PROFILE=staging",
 		"SAFE_VAR=hello",
 	}

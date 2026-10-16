@@ -1,11 +1,13 @@
 package tools
 
-import "path/filepath"
+import (
+	"path/filepath"
+)
 
 // MutationTargets returns the workspace-relative paths a tool call will write to,
 // so the session layer can snapshot their before-state for safe rewind. It is a
-// pure helper (no I/O beyond path resolution) and returns nil for read-only tools
-// and for bash (whose affected paths are not knowable before execution).
+// helper and returns nil for read-only tools, protected credential targets, and
+// bash (whose affected paths are not knowable before execution).
 func MutationTargets(workspaceRoot string, name string, args map[string]any) []string {
 	switch name {
 	case "write_file", "edit_file":
@@ -16,14 +18,18 @@ func MutationTargets(workspaceRoot string, name string, args map[string]any) []s
 		if err != nil {
 			return nil
 		}
-		_, relative, err := resolveWorkspaceTargetPath(workspaceRoot, path)
-		if err != nil {
+		absolute, relative, err := resolveWorkspaceTargetPath(workspaceRoot, path)
+		if err != nil || protectedMutationDenied(absolute, workspaceRoot) != nil {
 			return nil
 		}
 		return []string{relative}
 	case "apply_patch":
 		// Resolve the patch via the SAME alias key list apply_patch uses.
 		patch, err := aliasedStringArg(args, []string{"patch", "diff"}, "", true, false)
+		if err != nil {
+			return nil
+		}
+		prepared, err := prepareApplyPatchArguments(map[string]any{"patch": patch})
 		if err != nil {
 			return nil
 		}
@@ -38,30 +44,13 @@ func MutationTargets(workspaceRoot string, name string, args map[string]any) []s
 		if err != nil {
 			return nil
 		}
-		if isStructuredPatch(patch) {
-			operations, err := parseStructuredPatch(patch)
-			if err != nil {
-				return nil
-			}
-			paths := structuredPatchOperationPaths(operations)
-			for _, path := range paths {
-				if _, _, err := resolveWorkspaceTargetPath(applyRoot, path); err != nil {
-					return nil
-				}
-			}
-			return prefixPatchPaths(relativeRoot, paths)
-		}
 		// Enforce the same workspace confinement apply_patch applies (against the
 		// resolved apply dir), so a patch with a traversal path (../x) never yields
 		// an out-of-workspace target.
-		if err := validatePatchPaths(applyRoot, patch); err != nil {
+		if err := validatePatchPaths(applyRoot, prepared.paths); err != nil {
 			return nil
 		}
-		paths := changedFilesFromPatch(relativeRoot, patch)
-		if len(paths) == 0 {
-			return nil
-		}
-		return paths
+		return prefixPatchPaths(relativeRoot, prepared.paths)
 	default:
 		return nil
 	}

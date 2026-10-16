@@ -218,6 +218,16 @@ type PathScope interface {
 	Roots() []string
 }
 
+// rootedScopedPath carries the pathname spellings used for user-facing output
+// alongside the root handle boundary used for the actual filesystem operation.
+// absolute is canonical and relative is expressed against root.
+type rootedScopedPath struct {
+	absolute string
+	display  string
+	root     string
+	relative string
+}
+
 type readPathScope interface {
 	ReadRoots() []string
 }
@@ -388,32 +398,27 @@ func resolveScopedTargetPath(workspaceRoot string, scope PathScope, requestedPat
 	return "", "", firstErr
 }
 
-// recheckScopedWriteTarget mirrors recheckWorkspaceWriteTarget across roots.
-// Prefix symlinks outside a root are resolved per root (macOS /var aliasing);
-// symlinks INSIDE a root stay visible to the single-root checks, so a write
-// target may resolve through a symlink only when its final location lies
-// inside a DIFFERENT granted root — mirroring sandbox.Scope.validate's
-// documented widening.
-func recheckScopedWriteTarget(workspaceRoot string, scope PathScope, requestedPath string) error {
-	if requestedPath == "" || !filepath.IsAbs(requestedPath) || scope == nil {
-		return recheckWorkspaceWriteTarget(workspaceRoot, requestedPath)
-	}
-	roots, err := scopedRoots(workspaceRoot, scope)
-	if err != nil {
-		return err
-	}
-	var firstErr error
-	for _, root := range roots {
-		candidate := sandbox.NormalizePrefixForRoot(requestedPath, root)
-		err := recheckWorkspaceWriteTarget(root, candidate)
-		if err == nil {
-			return nil
+func rootedPathWithin(roots []string, absolute string) (string, string, error) {
+	for _, candidate := range roots {
+		root, err := filepath.Abs(candidate)
+		if err != nil {
+			continue
 		}
-		if firstErr == nil {
-			firstErr = err
+		root, err = filepath.EvalSymlinks(root)
+		if err != nil {
+			continue
 		}
+		relative, err := filepath.Rel(root, absolute)
+		if err != nil || filepath.IsAbs(relative) || relative == ".." ||
+			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			continue
+		}
+		if relative == "" {
+			relative = "."
+		}
+		return root, relative, nil
 	}
-	return firstErr
+	return "", "", outsideWorkspaceError(absolute)
 }
 
 // errWriteRootSubstituted reports that the granted root directory changed

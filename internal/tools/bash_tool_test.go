@@ -61,7 +61,10 @@ func runBashToolHelper(command string) {
 	case "long-sleep":
 		time.Sleep(5 * time.Second)
 		fmt.Println("long sleep finished")
-	case "http-server":
+	case "http-server", "delayed-http-server":
+		if command == "delayed-http-server" {
+			time.Sleep(time.Second)
+		}
 		listener, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)

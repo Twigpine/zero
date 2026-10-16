@@ -46,14 +46,18 @@ func NewScopedListDirectoryTool(workspaceRoot string, scope PathScope) Tool {
 }
 
 func (tool listDirectoryTool) Run(_ context.Context, args map[string]any) Result {
-	return tool.run(args, true)
+	return tool.run(args, sandboxReadExcluderWithin(nil, tool.workspaceRoot), true)
 }
 
-func (tool listDirectoryTool) RunWithOptions(_ context.Context, args map[string]any, _ RunOptions) Result {
-	return tool.run(args, false)
+// Registry.Run funnels into RunWithOptions with empty options, so a nil engine
+// here is the MCP / legacy path rather than a test shape. Listing a directory
+// must not disclose the bridge token's filename merely because the caller
+// arrived without a sandbox — see sandboxReadExcluderWithin.
+func (tool listDirectoryTool) RunWithOptions(_ context.Context, args map[string]any, options RunOptions) Result {
+	return tool.run(args, sandboxReadExcluderWithin(options.Sandbox, tool.workspaceRoot), false)
 }
 
-func (tool listDirectoryTool) run(args map[string]any, directBudget bool) Result {
+func (tool listDirectoryTool) run(args map[string]any, exclude readExcluder, directBudget bool) Result {
 	// Optional with a "." default: treat an explicit empty path (a common
 	// weak-model quirk) the same as the key being absent rather than erroring.
 	requestedPath, err := aliasedStringArg(args, []string{"path", "directory", "dir"}, ".", false, true)
@@ -80,7 +84,7 @@ func (tool listDirectoryTool) run(args map[string]any, directBudget bool) Result
 		return errorResult("Error listing directory " + requestedPath + ": " + err.Error())
 	}
 
-	entries, err := listDirectoryEntries(absolutePath, 0, maxDepth)
+	entries, err := listDirectoryEntries(absolutePath, 0, maxDepth, exclude)
 	if err != nil {
 		return errorResult("Error listing directory " + relativePath + ": " + err.Error())
 	}
@@ -95,7 +99,7 @@ func (tool listDirectoryTool) run(args map[string]any, directBudget bool) Result
 	return result
 }
 
-func listDirectoryEntries(path string, depth int, maxDepth int) ([]string, error) {
+func listDirectoryEntries(path string, depth int, maxDepth int, exclude readExcluder) ([]string, error) {
 	dirEntries, err := os.ReadDir(path)
 	if err != nil {
 		return nil, err
@@ -112,16 +116,27 @@ func listDirectoryEntries(path string, depth int, maxDepth int) ([]string, error
 		if entry.IsDir() && shouldSkipDirectory(entry.Name()) {
 			continue
 		}
+		entryPath := filepath.Join(path, entry.Name())
+		if entry.IsDir() && exclude.dirExcluded(entryPath) {
+			continue
+		}
 
 		indent := strings.Repeat("  ", depth)
 		if entry.IsDir() {
-			results = append(results, indent+entry.Name()+"/")
+			// A denied directory with a nested AllowRead cannot be pruned, but the
+			// denied directory entry itself must still stay out of the listing.
+			if !exclude.fileExcluded(entryPath) {
+				results = append(results, indent+entry.Name()+"/")
+			}
 			if depth < maxDepth {
-				children, err := listDirectoryEntries(filepath.Join(path, entry.Name()), depth+1, maxDepth)
+				children, err := listDirectoryEntries(entryPath, depth+1, maxDepth, exclude)
 				if err == nil {
 					results = append(results, children...)
 				}
 			}
+			continue
+		}
+		if exclude.fileExcluded(entryPath) {
 			continue
 		}
 

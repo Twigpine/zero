@@ -12,7 +12,7 @@ func TestTrackedLineTotalMatchesReadFileStats(t *testing.T) {
 	for name, content := range map[string]string{"trailing": "a\nb\nc\n", "unterminated": "a\nb\nc", "single": "x\n", "empty": "", "crlf": "a\r\nb\r\n"} {
 		path := filepath.Join(root, name+".txt")
 		writeTestFile(t, path, content)
-		stats, err := scanReadFileStats(path)
+		stats, err := scanReadFileStats(path, root)
 		if err != nil {
 			t.Fatal(err)
 		}

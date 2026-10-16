@@ -97,3 +97,68 @@ func TestGlobSkipsDenyReadSubtree(t *testing.T) {
 		t.Fatalf("non-sandboxed glob should include the secret file, got:\n%s", plain.Output)
 	}
 }
+
+func TestListDirectorySkipsDenyReadSubtree(t *testing.T) {
+	ws, engine := denyReadFixture(t)
+	registry := NewRegistry()
+	registry.Register(NewScopedListDirectoryTool(ws, nil))
+	args := map[string]any{"path": ".", "recursive": true, "max_depth": 2}
+
+	sandboxed := registry.RunWithOptions(context.Background(), "list_directory", args, RunOptions{Sandbox: engine})
+	if sandboxed.Status != StatusOK {
+		t.Fatalf("list_directory failed: %s", sandboxed.Output)
+	}
+	if !strings.Contains(sandboxed.Output, "main.go") {
+		t.Fatalf("list_directory must still show the non-denied file, got:\n%s", sandboxed.Output)
+	}
+	if strings.Contains(sandboxed.Output, "secret") || strings.Contains(sandboxed.Output, "creds.go") {
+		t.Fatalf("list_directory must NOT surface a DenyRead subtree, got:\n%s", sandboxed.Output)
+	}
+
+	plain := NewScopedListDirectoryTool(ws, nil).Run(context.Background(), args)
+	if !strings.Contains(plain.Output, "secret/") || !strings.Contains(plain.Output, "creds.go") {
+		t.Fatalf("non-sandboxed list_directory should include the secret subtree, got:\n%s", plain.Output)
+	}
+}
+
+func TestListDirectoryDescendsToNestedAllowRead(t *testing.T) {
+	ws, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	secret := filepath.Join(ws, "secret")
+	allowed := filepath.Join(secret, "allowed")
+	if err := os.MkdirAll(allowed, 0o755); err != nil {
+		t.Fatalf("mkdir allowed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(secret, "hidden.txt"), []byte("hidden\n"), 0o600); err != nil {
+		t.Fatalf("write hidden: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(allowed, "visible.txt"), []byte("visible\n"), 0o600); err != nil {
+		t.Fatalf("write visible: %v", err)
+	}
+	engine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: ws,
+		Policy: sandbox.Policy{
+			Mode:             sandbox.ModeEnforce,
+			EnforceWorkspace: true,
+			DenyRead:         []string{secret},
+			AllowRead:        []string{allowed},
+		},
+	})
+	registry := NewRegistry()
+	registry.Register(NewScopedListDirectoryTool(ws, nil))
+
+	result := registry.RunWithOptions(context.Background(), "list_directory", map[string]any{
+		"path": ".", "recursive": true, "max_depth": 3,
+	}, RunOptions{Sandbox: engine})
+	if result.Status != StatusOK {
+		t.Fatalf("list_directory failed: %s", result.Output)
+	}
+	if !strings.Contains(result.Output, "allowed/") || !strings.Contains(result.Output, "visible.txt") {
+		t.Fatalf("list_directory must descend to the nested AllowRead subtree, got:\n%s", result.Output)
+	}
+	if strings.Contains(result.Output, "secret/") || strings.Contains(result.Output, "hidden.txt") {
+		t.Fatalf("list_directory must hide denied entries outside the nested AllowRead subtree, got:\n%s", result.Output)
+	}
+}

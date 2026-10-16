@@ -52,6 +52,23 @@ func TestMutationTargetsResolvesAliasKeys(t *testing.T) {
 	}
 }
 
+func TestMutationTargetsSkipsProtectedCredentialMutations(t *testing.T) {
+	root := t.TempDir()
+	token := filepath.Join(root, "bridge-token")
+	if err := os.WriteFile(token, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ZERO_DAEMON_REMOTE_TOKEN", "")
+	t.Setenv("ZERO_DAEMON_REMOTE_TOKEN_FILE", token)
+	t.Setenv("ZERO_INTERNAL_DAEMON_REMOTE_TOKEN_FILE_RESOLVED", "")
+	t.Setenv("ZERO_INTERNAL_DAEMON_REMOTE_TOKEN_FILE_IDENTITY", "")
+	for _, tool := range []string{"write_file", "edit_file"} {
+		if targets := MutationTargets(root, tool, map[string]any{"path": "bridge-token"}); len(targets) != 0 {
+			t.Fatalf("%s protected checkpoint targets = %v, want none", tool, targets)
+		}
+	}
+}
+
 func TestMutationTargetsRejectsEscapingPaths(t *testing.T) {
 	root := t.TempDir()
 	if got := MutationTargets(root, "write_file", map[string]any{"path": "../escape.txt", "content": "x"}); len(got) != 0 {
@@ -114,5 +131,38 @@ func TestStripPatchPrefixStripsOnlyOne(t *testing.T) {
 	})
 	if len(got) != 1 || got[0] != "b/foo.txt" {
 		t.Fatalf("expected [b/foo.txt], got %v", got)
+	}
+}
+
+func TestApplyPatchRejectsDisagreeingExecutorOperationPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		patch string
+	}{
+		{
+			name: "delete header disagrees with diff git",
+			patch: "diff --git a/decoy.txt b/decoy.txt\n" +
+				"deleted file mode 100644\n" +
+				"--- a/secret.txt\n" +
+				"+++ /dev/null\n" +
+				"@@ -1 +0,0 @@\n" +
+				"-secret\n",
+		},
+		{
+			name: "unmatched a b prefixes",
+			patch: "diff --git a/secret.txt secret.txt\n" +
+				"--- a/secret.txt\n" +
+				"+++ secret.txt\n" +
+				"@@ -1 +1 @@\n" +
+				"-secret\n" +
+				"+changed\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prepared, err := prepareApplyPatchArguments(map[string]any{"patch": tc.patch})
+			if err == nil {
+				t.Fatalf("prepare patch = %#v, want disagreement error", prepared)
+			}
+		})
 	}
 }

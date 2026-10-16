@@ -64,6 +64,10 @@ type RunOptions struct {
 	// it introduced in the same turn instead of waiting for a later verification
 	// pass. nil disables inline diagnostics.
 	Diagnostics func(ctx context.Context, absPath string) string
+	// preparedApplyPatch carries the built-in parser's result from the sandbox
+	// gate into execution, so one parse chooses both the authorized paths and the
+	// operations that touch the filesystem.
+	preparedApplyPatch *applyPatchPreparation
 }
 
 type sandboxAwareTool interface {
@@ -226,6 +230,13 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 			return res
 		}
 	}
+	if _, builtIn := tool.(interface{ isBuiltInApplyPatch() }); builtIn {
+		prepared, err := prepareApplyPatchArguments(args)
+		if err != nil {
+			return errorResult("Error applying patch: " + err.Error())
+		}
+		options.preparedApplyPatch = prepared
+	}
 
 	permission := effectiveToolPermission(tool, args)
 	sandboxGrantAuthorized := false
@@ -238,6 +249,7 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 			PermissionGranted: options.PermissionGranted,
 			PermissionMode:    sandbox.PermissionMode(options.PermissionMode),
 			Args:              args,
+			PatchPaths:        preparedPatchPaths(options.preparedApplyPatch),
 			Reason:            tool.Safety().Reason,
 		})
 		sandboxDecision = &d

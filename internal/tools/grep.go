@@ -63,15 +63,18 @@ func NewScopedGrepTool(workspaceRoot string, scope PathScope) Tool {
 }
 
 func (tool grepTool) Run(ctx context.Context, args map[string]any) Result {
-	return tool.runWith(ctx, args, readExcluder{}, true)
+	return tool.runWith(ctx, args, sandboxReadExcluderWithin(nil, tool.workspaceRoot), true)
 }
 
+// RunWithOptions falls back to sandboxReadExcluderWithin rather than a bare
+// no-op excluder when options.Sandbox is nil. Registry.Run funnels into this
+// with an empty RunOptions, which is a real production path (MCP tool
+// dispatch that predates a Sandbox engine, and any future caller of the plain
+// registry API) — without the fallback, grep could return the bridge token's
+// contents from a workspace search whenever no engine happened to be passed,
+// even though list_directory's equivalent engine-less path already protects it.
 func (tool grepTool) RunWithOptions(ctx context.Context, args map[string]any, options RunOptions) Result {
-	exclude := readExcluder{}
-	if options.Sandbox != nil {
-		exclude = sandboxReadExcluder(options.Sandbox)
-	}
-	return tool.runWith(ctx, args, exclude, false)
+	return tool.runWith(ctx, args, sandboxReadExcluderWithin(options.Sandbox, tool.workspaceRoot), false)
 }
 
 // RunWithSandbox runs the search while skipping subtrees the sandbox policy
@@ -350,7 +353,7 @@ func exactGrepLineMatcher(compiled *regexp.Regexp) grepLineMatcher {
 
 func scanGrepMatches(ctx context.Context, resolvedRoot string, target string, globMatcher *regexp.Regexp, exclude readExcluder, absolutePaths bool, matcher grepLineMatcher, emit func(grepMatch) bool) error {
 	err := walkGrepFiles(ctx, resolvedRoot, target, globMatcher, exclude, func(file string) error {
-		return scanGrepFile(ctx, resolvedRoot, absolutePaths, file, matcher, emit)
+		return scanGrepFile(ctx, resolvedRoot, absolutePaths, file, exclude, matcher, emit)
 	})
 	if errors.Is(err, errGrepLimitReached) {
 		return nil
@@ -358,7 +361,7 @@ func scanGrepMatches(ctx context.Context, resolvedRoot string, target string, gl
 	return err
 }
 
-func scanGrepFile(ctx context.Context, resolvedRoot string, absolutePaths bool, file string, matcher grepLineMatcher, emit func(grepMatch) bool) error {
+func scanGrepFile(ctx context.Context, resolvedRoot string, absolutePaths bool, file string, exclude readExcluder, matcher grepLineMatcher, emit func(grepMatch) bool) error {
 	// Re-confine at read time (defense-in-depth) AND to compute the clean
 	// workspace-relative path used in output.
 	relative, resolvedPath, ok := confineGrepFile(resolvedRoot, file)
@@ -384,6 +387,17 @@ func scanGrepFile(ctx context.Context, resolvedRoot string, absolutePaths bool, 
 		return nil
 	}
 	defer handle.Close()
+
+	// The walk-time exclusion above inspected a PATHNAME; this open selects the
+	// object. A workspace writer can replace an ordinary candidate with a
+	// symlink or hard link to the protected credential in between, so the
+	// decision that actually authorizes the scan has to come from this handle's
+	// own metadata — the same binding protectedReadOpen and MCP resources/read
+	// use. The earlier check stays as a walk pruning optimization.
+	info, err := handle.Stat()
+	if err != nil || exclude.openedFileExcluded(resolvedPath, handle, info) {
+		return nil
+	}
 
 	reader := bufio.NewReader(handle)
 	lineNumber := 1

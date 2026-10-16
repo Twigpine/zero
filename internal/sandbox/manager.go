@@ -2,10 +2,14 @@ package sandbox
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/Gitlawb/zero/internal/remotetoken"
 )
 
 // errWindowsSandboxNotInitialized is returned only to a caller that explicitly
@@ -234,8 +238,27 @@ func (manager SandboxManager) BuildExecutionRequest(request SandboxManagerReques
 	if request.ValidateExecution && preference == SandboxPreferenceRequire && backend.SupportLevel() != BackendSupportNative {
 		return SandboxExecutionRequest{}, nativeSandboxUnavailableError(backend)
 	}
-	if request.ValidateExecution && preference != SandboxPreferenceForbid && backend.SupportLevel() != BackendSupportNative && policyHasExplicitDeny(policy) {
-		return SandboxExecutionRequest{}, errors.New("native sandbox unavailable: configured deny_read or deny_write rules cannot be enforced")
+	protectedCredentials := protectedCredentialPaths()
+	protectedCredentialNeedsNative := policy.Mode != ModeDisabled && len(protectedCredentials) > 0
+	if request.ValidateExecution && preference != SandboxPreferenceForbid && backend.SupportLevel() != BackendSupportNative &&
+		(policyHasExplicitDeny(policy) || protectedCredentialNeedsNative) {
+		return SandboxExecutionRequest{}, errors.New("native sandbox unavailable: configured deny rules or protected credentials cannot be enforced")
+	}
+	if request.ValidateExecution && preference != SandboxPreferenceForbid && policy.Mode != ModeDisabled &&
+		manager.goos == "darwin" && len(protectedCredentials) > 0 {
+		return SandboxExecutionRequest{}, errors.New("macOS Seatbelt cannot protect a file-backed remote token from inode aliases across its lifecycle; sandboxed shell commands require ZERO_DAEMON_REMOTE_TOKEN")
+	}
+	if request.ValidateExecution && preference != SandboxPreferenceForbid && policy.Mode != ModeDisabled &&
+		manager.goos == "windows" && len(protectedCredentials) > 0 {
+		return SandboxExecutionRequest{}, errors.New("the Windows sandbox enforces writes through ACLs and has no filesystem deny-read rule, so it cannot keep a file-backed remote token out of a sandboxed shell; sandboxed shell commands require ZERO_DAEMON_REMOTE_TOKEN")
+	}
+	if request.ValidateExecution && preference != SandboxPreferenceForbid && policy.Mode != ModeDisabled && manager.goos == "linux" {
+		if credential, changed := protectedCredentialStartupIdentityChanged(protectedCredentials); changed {
+			return SandboxExecutionRequest{}, fmt.Errorf("bubblewrap cannot protect the remote token file %q because it no longer names the token object opened at daemon startup; restart the daemon or restore the original token file", credential)
+		}
+		if credential, ok := protectedCredentialLinkableIntoLinuxShellRoot(profile, protectedCredentials); ok {
+			return SandboxExecutionRequest{}, fmt.Errorf("bubblewrap cannot protect the remote token file %q from hard-link aliases in a shell-accessible root: a /dev/null bind covers one pathname, not the inode; use ZERO_DAEMON_REMOTE_TOKEN, place the file on a separate filesystem, or remove that root from the sandbox", credential)
+		}
 	}
 	// Windows: the FULL OS sandbox needs a one-time elevated `zero sandbox setup`
 	// (it applies WFP network filters + workspace ACLs and writes a marker).
@@ -294,6 +317,100 @@ func (manager SandboxManager) BuildExecutionRequest(request SandboxManagerReques
 
 func policyHasExplicitDeny(policy Policy) bool {
 	return len(normalizeProfilePaths(policy.DenyRead)) > 0 || len(normalizeProfilePaths(policy.DenyWrite)) > 0
+}
+
+// Windows deliberately has no placement exception either: credentialDenyReadPaths
+// returns nothing there (the ACL model has no read-deny rule — see #662), so a
+// wrapped shell would run with the token readable under every pathname. The
+// in-process tool gate still applies on Windows, which is what keeps read_file
+// and friends covered while the shell boundary stays refused.
+//
+// macOS deliberately has no placement exception for file-backed tokens.
+// Seatbelt can deny configured and resolved pathnames, but not every existing or
+// future inode alias, and a restart authorizes the configured pathname again.
+// BuildExecutionRequest therefore rejects shell execution whenever file-backed
+// remote authentication is selected. In-process tools remain protected.
+
+// protectedCredentialStartupIdentityChanged rejects sequential token rotation:
+// masking a replacement pathname does not hide the still-authorized startup
+// object after it has been renamed elsewhere. This is an admission check, not a
+// lock over concurrent rotation and sandbox startup.
+func protectedCredentialStartupIdentityChanged(protected []string) (string, bool) {
+	source, selected := remotetoken.SourceFromEnv()
+	if !selected || source.Identity == "" {
+		return "", false
+	}
+	for _, path := range protected {
+		file, err := os.Open(path)
+		if err != nil {
+			return path, true
+		}
+		identity, ok := remotetoken.IdentityOfFile(file)
+		closeErr := file.Close()
+		if !ok || closeErr != nil || identity != source.Identity {
+			return path, true
+		}
+	}
+	return "", false
+}
+
+// protectedCredentialLinkableIntoLinuxShellRoot reports a mandatory token that a
+// shell command could reach through a second directory entry for the same inode,
+// and the offending pathname.
+//
+// Bubblewrap masks each selected pathname. A READ root containing that masked
+// spelling does not expose another alias by itself; an existing alias is proven
+// separately by the link count. A FUTURE alias requires a shell-writable root on
+// the same filesystem. Keeping those classes separate makes the documented
+// separate-filesystem placement usable even when the normal read root is "/".
+func protectedCredentialLinkableIntoLinuxShellRoot(profile PermissionProfile, protected []string) (string, bool) {
+	if len(protected) == 0 {
+		return "", false
+	}
+	if profile.FileSystem.Kind == FileSystemUnrestricted {
+		return protected[0], true
+	}
+	if profile.FileSystem.Kind != FileSystemRestricted {
+		return "", false
+	}
+	writeRoots := make([]string, 0, len(profile.FileSystem.WriteRoots)+len(sandboxWritableSubpaths))
+	for _, root := range profile.FileSystem.WriteRoots {
+		writeRoots = append(writeRoots, normalizeProfilePath(root.Root))
+	}
+	if profile.FileSystem.AllowTemp {
+		writeRoots = append(writeRoots, normalizeProfilePaths(sandboxWritableSubpaths)...)
+	}
+	for _, credential := range protected {
+		credential = filepath.Clean(credential)
+		if credential == "." || credential == "" {
+			continue
+		}
+		// An absent token has no inode to alias; the lexical pathname rule is
+		// what reserves it through rotation. Any OTHER inspection failure leaves
+		// the alias question unanswered, and an unanswered question about a
+		// bearer token is a refusal.
+		count, err := pathHardLinkCount(credential)
+		switch {
+		case err == nil && count > 1:
+			return credential, true
+		case err != nil && !errors.Is(err, fs.ErrNotExist):
+			return credential, true
+		}
+		for _, root := range writeRoots {
+			if root == "" {
+				continue
+			}
+			if pathWithinRoot(root, credential) {
+				return credential, true
+			}
+			// An uninspectable root is not proof of a separate filesystem: it is
+			// a root a hard link might still be creatable in.
+			if shared, known := pathsShareFilesystem(root, credential); !known || shared {
+				return credential, true
+			}
+		}
+	}
+	return "", false
 }
 
 func (manager SandboxManager) BuildCommandPlan(request SandboxManagerRequest) (CommandPlan, error) {

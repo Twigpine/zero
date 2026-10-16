@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/remotetoken"
 )
 
 func newCkStore(t *testing.T) (*Store, string) {
@@ -43,6 +45,59 @@ func TestCaptureToolCheckpointWritesBlobAndEvent(t *testing.T) {
 	}
 	if _, err := store.readBlob("s", p.Files[0].Blob); err != nil {
 		t.Fatalf("blob not stored: %v", err)
+	}
+}
+
+func TestCheckpointCallbacksDoNotStoreProtectedCredentialAliases(t *testing.T) {
+	store, ws := newCkStore(t)
+	token := filepath.Join(ws, "bridge-token")
+	alias := filepath.Join(ws, "ordinary.txt")
+	if err := os.WriteFile(token, []byte("checkpoint-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(token, alias); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+	file, err := os.Open(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, ok := remotetoken.IdentityOfFile(file)
+	file.Close()
+	if !ok {
+		t.Fatal("stable file identity unavailable")
+	}
+	t.Setenv(remotetoken.EnvToken, "")
+	t.Setenv(remotetoken.EnvTokenFile, token)
+	t.Setenv(remotetoken.EnvTokenFileResolved, token)
+	t.Setenv(remotetoken.EnvTokenFileIdentity, identity)
+	// Rotate after target discovery. The alias still names the live startup
+	// credential, but no longer shares an inode with the configured pathname.
+	if err := os.Rename(token, token+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(token, []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	event, err := store.CaptureToolCheckpoint("s", ws, "write_file", []string{"ordinary.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	captured := decodeCk(t, event)
+	if len(captured.Files) != 1 || !captured.Files[0].Skipped || captured.Files[0].Blob != "" {
+		t.Fatalf("exec checkpoint captured protected alias: %+v", captured.Files)
+	}
+	snapshot, ok := store.SnapshotForCheckpoint("s", ws, "edit_file", []string{"ordinary.txt"})
+	if !ok || len(snapshot.Files) != 1 || !snapshot.Files[0].Skipped || snapshot.Files[0].Blob != "" {
+		t.Fatalf("TUI checkpoint captured protected alias: ok=%v files=%+v", ok, snapshot.Files)
+	}
+	entries, err := os.ReadDir(store.blobsDir("s"))
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("protected credential became visible in checkpoint blobs: %v", entries)
 	}
 }
 

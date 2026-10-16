@@ -177,6 +177,13 @@ func TestExecCommandRequireEscalatedBypassesNativeSandboxAfterApproval(t *testin
 	}
 }
 
+func TestExecCommandRequireEscalatedKeepsSandboxWhenDaemonTokenProtected(t *testing.T) {
+	engine := defaultPolicyDaemonTokenEngine(t)
+	if commandEngineForSandboxPermissions(engine, SandboxPermissionsRequireEscalated) == nil {
+		t.Fatal("exec_command require_escalated must preserve the sandbox when the default remote-daemon policy protects a token file")
+	}
+}
+
 // TestExecCommandRequireEscalatedBypassesMsysGuardAfterApproval mirrors
 // TestBashToolRequireEscalatedMsysGuard for exec_command: the MSYS sandbox
 // guard exists only because MSYS/Cygwin coreutils fail under the
@@ -362,8 +369,10 @@ func TestExecCommandForegroundServerReturnsSessionAndServesHTTP(t *testing.T) {
 	execTool := NewScopedExecCommandTool(root, nil, manager)
 	writeTool := NewWriteStdinTool(manager)
 
+	// Force startup to outlast the first yield, rather than relying on CI load
+	// to exercise the readiness polling below.
 	start := execTool.Run(context.Background(), map[string]any{
-		"cmd":           helperCommand("http-server"),
+		"cmd":           helperCommand("delayed-http-server"),
 		"yield_time_ms": 500,
 	})
 	if start.Status != StatusOK {

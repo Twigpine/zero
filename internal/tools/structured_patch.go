@@ -127,14 +127,6 @@ func isStructuredPatch(patch string) bool {
 	return sandbox.IsStructuredPatch(patch)
 }
 
-func (tool applyPatchTool) runStructuredPatch(applyRoot, relativeRoot, patch string, options RunOptions) Result {
-	operations, err := parseStructuredPatch(patch)
-	if err != nil {
-		return errorResult("Error applying patch: " + err.Error())
-	}
-	return applyPatchOperations(applyRoot, relativeRoot, operations, options)
-}
-
 // applyPatchOperations applies parsed operations (from either patch format)
 // through an opened workspace root: every stat, read, create and write is
 // descriptor-relative and refuses to follow a link out of the root, so there
@@ -172,15 +164,15 @@ func applyPatchOperations(applyRoot, relativeRoot string, operations []structure
 		case structuredPatchDelete:
 			options.FileTracker.Forget(change.from.absolute)
 		case structuredPatchAdd:
-			recordStructuredPatchFile(options.FileTracker, change.to.absolute, true, true)
+			recordStructuredPatchFile(workspace, options.FileTracker, change.to, true, true)
 		case structuredPatchUpdate:
 			wasWhole := wholeBefore[change.from.absolute]
 			options.FileTracker.Forget(change.from.absolute)
-			recordStructuredPatchFile(options.FileTracker, change.to.absolute, false, wasWhole)
+			recordStructuredPatchFile(workspace, options.FileTracker, change.to, false, wasWhole)
 		case structuredPatchCopy:
 			// The source is untouched; the destination inherits only what the
 			// model had actually seen of the source.
-			recordStructuredPatchFile(options.FileTracker, change.to.absolute, true, wholeBefore[change.from.absolute])
+			recordStructuredPatchFile(workspace, options.FileTracker, change.to, true, wholeBefore[change.from.absolute])
 		}
 	}
 
@@ -517,6 +509,15 @@ func resolveStructuredPatchTarget(root, path string) (structuredPatchTarget, err
 	}
 	absolute, relative, err := resolveWorkspaceTargetPath(root, normalizePatchPathForRoot(root, path))
 	if err != nil {
+		return structuredPatchTarget{}, err
+	}
+	// Every structured-patch target (add/delete/update, and both the from and to
+	// side of a move) funnels through here, so one check covers all of them —
+	// engine-independent, and the only protection a structured patch has when
+	// called through the plain registry API. os.Root already confines the actual
+	// read/write to this tree without following an escaping symlink, but that is
+	// containment, not a refusal of one specific in-tree file.
+	if err := protectedMutationDenied(absolute, root); err != nil {
 		return structuredPatchTarget{}, err
 	}
 	return structuredPatchTarget{requested: path, absolute: absolute, relative: relative}, nil
@@ -1080,23 +1081,28 @@ func removeStructuredPatchTemp(root *os.Root, name string) error {
 	return errors.Join(chmodErr, removeErr)
 }
 
-func recordStructuredPatchFile(tracker *FileTracker, absolute string, created, seenWhole bool) {
+func recordStructuredPatchFile(root *os.Root, tracker *FileTracker, target structuredPatchTarget, created, seenWhole bool) {
 	if tracker == nil {
 		return
 	}
-	content, err := os.ReadFile(absolute)
+	file, info, err := protectedRootRead(root, target.relative, target.absolute, root.Name())
 	if err != nil {
-		tracker.Forget(absolute)
+		tracker.Forget(target.absolute)
 		return
 	}
-	info, _ := os.Stat(absolute)
-	tracker.Record(absolute, content, info)
+	content, readErr := io.ReadAll(file)
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil {
+		tracker.Forget(target.absolute)
+		return
+	}
+	tracker.Record(target.absolute, content, info)
 	if seenWhole {
 		lines := trackedLineTotal(string(content))
-		tracker.RecordSeenRange(absolute, 1, lines, lines)
+		tracker.RecordSeenRange(target.absolute, 1, lines, lines)
 	}
 	if created {
-		tracker.RecordCreated(absolute)
+		tracker.RecordCreated(target.absolute)
 	}
 }
 

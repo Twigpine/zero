@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
 	"net/http"
 	"net/url"
@@ -94,6 +95,9 @@ func (server toolServer) listResources() []Resource {
 		}
 		for _, file := range summary.Files {
 			absolute := filepath.Join(root, filepath.FromSlash(file.Path))
+			if server.credentialGuard.ReadExclusions().PathExcluded(absolute) {
+				continue
+			}
 			uri := fileURI(absolute)
 			if _, ok := seen[uri]; ok {
 				continue
@@ -146,9 +150,23 @@ func (server toolServer) readResource(rawParams json.RawMessage) ([]ResourceCont
 		// outside the granted roots.
 		return nil, jsonRPCResourceNotFound, err
 	}
-
-	info, err := os.Stat(absolute)
+	// Open ONCE, then decide everything from that handle. Checking the pathname
+	// and re-opening it to stat and read would let a concurrent rename or a
+	// repointed symlink swap the object between the check and the read — and let
+	// a file that passed the size check be replaced by an unbounded one before
+	// os.ReadFile allocates for it. The exclusion test, the type and size checks,
+	// and the read all describe the same opened object here.
+	file, err := os.Open(absolute)
 	if err != nil {
+		return nil, jsonRPCResourceNotFound, fmt.Errorf("resource not found: %s", uri)
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return nil, jsonRPCResourceNotFound, fmt.Errorf("resource not found: %s", uri)
+	}
+	if server.credentialGuard.ReadExclusions().FileHandleExcluded(absolute, file, info) {
 		return nil, jsonRPCResourceNotFound, fmt.Errorf("resource not found: %s", uri)
 	}
 	if info.IsDir() {
@@ -158,9 +176,15 @@ func (server toolServer) readResource(rawParams json.RawMessage) ([]ResourceCont
 		return nil, jsonRPCInvalidParams, fmt.Errorf("resource exceeds %d-byte limit: %s", maxResourceBytes, uri)
 	}
 
-	data, err := os.ReadFile(absolute)
+	// Bound the read by the limit rather than by the size just observed: on a
+	// growing file the stat is already stale, and one byte over the cap is enough
+	// to report the overflow without holding an unbounded buffer.
+	data, err := io.ReadAll(io.LimitReader(file, maxResourceBytes+1))
 	if err != nil {
 		return nil, jsonRPCResourceNotFound, fmt.Errorf("resource not found: %s", uri)
+	}
+	if len(data) > maxResourceBytes {
+		return nil, jsonRPCInvalidParams, fmt.Errorf("resource exceeds %d-byte limit: %s", maxResourceBytes, uri)
 	}
 
 	contents := ResourceContents{

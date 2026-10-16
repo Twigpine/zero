@@ -63,6 +63,11 @@ Commands:
                             daemon. Requires a bearer token in $ZERO_DAEMON_REMOTE_TOKEN
                             (or $ZERO_DAEMON_REMOTE_TOKEN_FILE). --bundle-dir enables
                             git-bundle uploads, extracted into per-link work trees.
+                            An inline token takes precedence, so a stale token-file pointer is intentionally not protected as the live credential.
+                            macOS shell commands require the inline token because
+                            Seatbelt cannot deny inode aliases. Linux accepts a token
+                            file only when it has no hard-link aliases and no
+                            shell-writable root shares its filesystem.
   link --remote <host:port> --repo <dir> --id <name> [--out <file>]
                             Upload repo's git history to the remote as a bundle and
                             print the extracted remote path. --out saves a session
@@ -514,11 +519,10 @@ func runDaemonServeRemote(args []string, stdout io.Writer, stderr io.Writer) int
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
-	token, err := remote.TokenFromEnv()
-	if err != nil {
-		return writeAppError(stderr, err.Error(), exitCrash)
-	}
-	auth, err := remote.NewTokenAuthenticator(token)
+	// Carry both the configured absolute spelling and the resolved startup object
+	// before workers inherit the environment. The configured identity reserves the
+	// authority boundary across restart; the resolved identity protects this run.
+	auth, err := remote.NewAuthenticatorFromEnv()
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
@@ -551,7 +555,9 @@ func runDaemonServeRemote(args []string, stdout io.Writer, stderr io.Writer) int
 	}
 
 	// Serve the local control socket too, so local clients keep working.
+	localServeDone := make(chan struct{})
 	go func() {
+		defer close(localServeDone)
 		if serveErr := srv.Serve(); serveErr != nil {
 			logf("local serve error: " + serveErr.Error())
 		}
@@ -562,6 +568,7 @@ func runDaemonServeRemote(args []string, stdout io.Writer, stderr io.Writer) int
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
 
 	fmt.Fprintf(stdout, "zero daemon remote bridge listening on %s (TLS)\n", addr)
 	select {
@@ -569,10 +576,15 @@ func runDaemonServeRemote(args []string, stdout io.Writer, stderr io.Writer) int
 		srv.Shutdown()
 		_ = bridge.Close()
 		<-serveErr // wait for the accept loop to unwind
+		<-localServeDone
 		return exitSuccess
 	case err := <-serveErr:
 		// Bind/serve failed before any signal (e.g. address in use).
 		srv.Shutdown()
+		// Shutdown interrupts Serve even during startup. Join its cleanup and
+		// final logging before writing the terminal error or returning ownership
+		// of the writers/runtime directory to the caller.
+		<-localServeDone
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 }
@@ -624,7 +636,9 @@ func runDaemonLink(args []string, stdout io.Writer, stderr io.Writer) int {
 		return writeExecUsageError(stderr, "daemon link requires --remote, --repo, and --id (or --show <file>)")
 	}
 	if strings.TrimSpace(token) == "" {
-		token, _ = remote.TokenFromEnv() // best effort; UploadRepoBundle rejects an empty token
+		// A one-shot client that never ran CanonicalizeTokenFileEnv must not trust
+		// an inherited resolved marker — see TokenFromFreshEnv.
+		token, _ = remote.TokenFromFreshEnv() // best effort; UploadRepoBundle rejects an empty token
 	}
 	link, err := remote.UploadRepoBundle(remote.RemoteConfig{
 		Address:    addr,
@@ -667,7 +681,9 @@ func dialForCLI(flags remoteDialFlags) (*daemon.Client, error) {
 	}
 	token := strings.TrimSpace(flags.Token)
 	if token == "" {
-		token, _ = remote.TokenFromEnv() // best effort; DialRemote rejects an empty token
+		// A one-shot client that never ran CanonicalizeTokenFileEnv must not trust
+		// an inherited resolved marker — see TokenFromFreshEnv.
+		token, _ = remote.TokenFromFreshEnv() // best effort; DialRemote rejects an empty token
 	}
 	return remote.DialRemote(remote.RemoteConfig{
 		Address:    flags.Addr,

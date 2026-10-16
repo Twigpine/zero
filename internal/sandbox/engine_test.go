@@ -236,13 +236,14 @@ func TestEngineAutoAllowsWorkspaceFileMutationTools(t *testing.T) {
 	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy()})
 
 	for _, tc := range []struct {
-		name string
-		args map[string]any
+		name       string
+		args       map[string]any
+		patchPaths []string
 	}{
 		{name: "write_file", args: map[string]any{"path": "notes.txt"}},
 		{name: "edit_file", args: map[string]any{"path": "notes.txt"}},
-		{name: "apply_patch", args: map[string]any{"patch": "diff --git a/notes.txt b/notes.txt\n"}},
-		{name: "apply_patch", args: map[string]any{"patch": "*** Begin Patch\n*** Add File: notes.txt\n+x\n*** End Patch\n"}},
+		{name: "apply_patch", args: map[string]any{"patch": "diff --git a/notes.txt b/notes.txt\n"}, patchPaths: []string{"notes.txt"}},
+		{name: "apply_patch", args: map[string]any{"patch": "*** Begin Patch\n*** Add File: notes.txt\n+x\n*** End Patch\n"}, patchPaths: []string{"notes.txt"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			decision := engine.Evaluate(context.Background(), Request{
@@ -251,6 +252,7 @@ func TestEngineAutoAllowsWorkspaceFileMutationTools(t *testing.T) {
 				Permission:     PermissionPrompt,
 				PermissionMode: PermissionModeAsk,
 				Args:           tc.args,
+				PatchPaths:     tc.patchPaths,
 			})
 			if decision.Action != ActionAllow || !decision.AutoAllowed || decision.GrantMatched {
 				t.Fatalf("workspace mutation decision = %#v, want auto allow without grant", decision)
@@ -275,12 +277,13 @@ func TestEngineDoesNotAutoAllowProtectedMetadataWrites(t *testing.T) {
 	engine := NewEngine(EngineOptions{WorkspaceRoot: root, Policy: DefaultPolicy()})
 
 	for _, tc := range []struct {
-		name string
-		args map[string]any
+		name       string
+		args       map[string]any
+		patchPaths []string
 	}{
 		{name: "write_file git hook", args: map[string]any{"path": ".git/hooks/pre-commit"}},
 		{name: "edit_file zero config", args: map[string]any{"path": ".zero/config.json"}},
-		{name: "apply_patch agents metadata", args: map[string]any{"patch": "--- /dev/null\n+++ b/.agents/config.json\n@@ -0,0 +1 @@\n+{}\n"}},
+		{name: "apply_patch agents metadata", args: map[string]any{"patch": "--- /dev/null\n+++ b/.agents/config.json\n@@ -0,0 +1 @@\n+{}\n"}, patchPaths: []string{".agents/config.json"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			decision := engine.Evaluate(context.Background(), Request{
@@ -289,6 +292,7 @@ func TestEngineDoesNotAutoAllowProtectedMetadataWrites(t *testing.T) {
 				Permission:     PermissionPrompt,
 				PermissionMode: PermissionModeAsk,
 				Args:           tc.args,
+				PatchPaths:     tc.patchPaths,
 			})
 			if decision.Action != ActionPrompt || decision.AutoAllowed {
 				t.Fatalf("protected metadata decision = %#v, want prompt without auto-allow", decision)
@@ -309,6 +313,7 @@ func TestEngineDeniesApplyPatchEscapesFromPatchBody(t *testing.T) {
 		Args: map[string]any{
 			"patch": "--- a/notes.txt\n+++ b/../escape.txt\n@@ -0,0 +1 @@\n+escape\n",
 		},
+		PatchPaths: []string{"notes.txt", "../escape.txt"},
 	})
 
 	if decision.Action != ActionDeny || decision.Block == nil || decision.Block.Code != BlockOutsideWorkspace {
@@ -330,6 +335,7 @@ func TestEngineDeniesStructuredApplyPatchEscapesFromPatchBody(t *testing.T) {
 			Permission:     PermissionPrompt,
 			PermissionMode: PermissionModeAsk,
 			Args:           map[string]any{"patch": patch},
+			PatchPaths:     []string{"../escape.txt"},
 		})
 		if decision.Action != ActionDeny || decision.Block == nil || decision.Block.Code != BlockOutsideWorkspace {
 			t.Fatalf("escaping structured apply_patch decision = %#v, want outside-workspace deny", decision)
@@ -460,6 +466,7 @@ func TestEngineDeniesAutoAllowedSymlinkEscape(t *testing.T) {
 		Args: map[string]any{
 			"patch": "--- /dev/null\n+++ b/linked/escape.txt\n@@ -0,0 +1 @@\n+escape\n",
 		},
+		PatchPaths: []string{"linked/escape.txt"},
 	})
 
 	if decision.Action != ActionDeny || decision.Block == nil || decision.Block.Code != BlockSymlinkTraversal {

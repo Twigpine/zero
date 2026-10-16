@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -11,6 +12,7 @@ type editFileTool struct {
 	baseTool
 	workspaceRoot string
 	scope         PathScope
+	formatter     writtenFileFormatter
 }
 
 func NewScopedEditFileTool(workspaceRoot string, scope PathScope) Tool {
@@ -34,6 +36,7 @@ func NewScopedEditFileTool(workspaceRoot string, scope PathScope) Tool {
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
 		scope:         scope,
+		formatter:     maybeFormatWrittenFile,
 	}
 }
 
@@ -72,7 +75,13 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 		return errorResult("Error reading " + relativePath + ": " + err.Error())
 	}
 	defer root.Close()
-	contentBytes, priorInfo, err := readRootedFile(root, rootedRelative)
+	// Bind the credential decision to the same handle the content is read from.
+	readFile, readInfo, err := protectedRootRead(root, rootedRelative, absolutePath, tool.workspaceRoot)
+	if err != nil {
+		return errorResult("Error reading " + relativePath + ": " + err.Error())
+	}
+	contentBytes, err := io.ReadAll(readFile)
+	readFile.Close()
 	if err != nil {
 		return errorResult("Error reading " + relativePath + ": " + err.Error())
 	}
@@ -158,28 +167,26 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 		return okResult("No changes: new_string is identical to old_string.")
 	}
 	editedSpans := replacementByteSpans(content, oldString, newString, replaceAll)
-	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
+	if err := protectedMutationDenied(absolutePath, tool.workspaceRoot); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
-	if err := commitRootedFileContents(root, absolutePath, rootedRelative, priorInfo, &content, updated); err != nil {
+	if err := commitRootedFileContents(root, absolutePath, rootedRelative, readInfo, &content, updated); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
 	modelKnownContent := updated
 	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
 	// FileTracker re-baseline: recording pre-format content would make the very
 	// next edit look like an external modification and trip the conflict guard.
-	formatting := maybeFormatWrittenFileScoped(ctx, tool.workspaceRoot, tool.scope, absolutePath, updated, priorInfo.Mode().Perm())
-	updated = formatting.Content
-	finalContentKnown := formatting.ContentKnown
+	formatting := tool.formatter(ctx, root, rootedRelative, absolutePath, tool.workspaceRoot, tool.scope, updated, readInfo.Mode().Perm())
+	published, newInfo, err := readRootedFile(root, rootedRelative)
+	if err != nil {
+		options.FileTracker.Forget(absolutePath)
+		return errorResult("Error reading written file " + relativePath + ": " + err.Error())
+	}
+	updated = string(published)
 	// Re-baseline to the content we just wrote so subsequent edits in this session
 	// compare against the current on-disk state, not the pre-edit version.
-	newInfo := formatting.Info
-	if newInfo == nil {
-		newInfo, _ = root.Stat(rootedRelative)
-	}
-	if !finalContentKnown {
-		options.FileTracker.Forget(absolutePath)
-	} else if updated == modelKnownContent {
+	if updated == modelKnownContent {
 		// OUR edit, so we know precisely which lines moved: RecordEdit carries
 		// across the reads this edit did not disturb instead of dropping them.
 		//
@@ -209,24 +216,17 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	}
 	summary := fmt.Sprintf("Successfully edited %s (replaced %d occurrence%s).", relativePath, replacedCount, suffix)
 	summary += formatting.notice(relativePath)
-	if finalContentKnown {
-		summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
-	}
+	summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}
-	if finalContentKnown {
-		if diff, ok := boundedFileDiff(absolutePath, content, updated, true, true); ok {
-			result.FileDiffs = []FileDiff{diff}
-		} else if diffTextRevealsObfuscatedSecret(content) || diffTextRevealsObfuscatedSecret(updated) {
-			result.Redacted = true
-		}
+	if diff, ok := boundedFileDiff(absolutePath, content, updated, true, true); ok {
+		result.FileDiffs = []FileDiff{diff}
+	} else if diffTextRevealsObfuscatedSecret(content) || diffTextRevealsObfuscatedSecret(updated) {
+		result.Redacted = true
 	}
 	// Card-only preview (Display.Preview): the model's Output stays the one-line
 	// summary, so the red/green diff costs zero model tokens.
-	preview := ""
-	if finalContentKnown {
-		preview = boundedUnifiedDiff(relativePath, content, updated)
-	}
+	preview := boundedUnifiedDiff(relativePath, content, updated)
 	result.Display = Display{Summary: fmt.Sprintf("Edited %s", relativePath), Kind: "diff", Preview: preview}
 	return result
 }

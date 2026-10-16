@@ -50,7 +50,7 @@ func TestLinuxBwrapPlanDoesNotMountBelowWorktreePointer(t *testing.T) {
 			ReadOnlySubpaths: gitMetadataWriteCarveouts(root),
 		}},
 	}}
-	args := linuxBwrapFilesystemArgs(profile)
+	args := mustBuildLinuxBwrapFilesystemPlan(t, profile).Args
 	assertArgsContainSequence(t, args, "--ro-bind", gitPath, gitPath)
 	for _, child := range []string{"hooks", "config"} {
 		bogus := filepath.Join(gitPath, child)

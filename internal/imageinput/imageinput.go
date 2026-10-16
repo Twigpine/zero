@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -60,6 +61,28 @@ func LoadFile(path string, workspaceRoot string) (zeroruntime.ImageBlock, error)
 		return zeroruntime.ImageBlock{}, fmt.Errorf("cannot open image %s: %w", path, err)
 	}
 	defer file.Close()
+
+	return LoadOpenFile(file, path, workspaceRoot)
+}
+
+// LoadOpenFile validates and consumes the supplied handle without reopening its
+// pathname. The caller owns the handle and any workspace confinement; LoadFile
+// intentionally permits user-selected images outside the workspace.
+func LoadOpenFile(file *os.File, path, workspaceRoot string) (zeroruntime.ImageBlock, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return zeroruntime.ImageBlock{}, fmt.Errorf("cannot stat image %s: %w", path, err)
+	}
+	exclusions := sandbox.ProtectedCredentialExclusions(workspaceRoot)
+	if exclusions.FileHandleExcluded(path, file, info) {
+		return zeroruntime.ImageBlock{}, fmt.Errorf("%s holds the remote bridge token and is never readable", path)
+	}
+	if !info.Mode().IsRegular() {
+		return zeroruntime.ImageBlock{}, fmt.Errorf("image file must be a regular file: %s", path)
+	}
+	if info.Size() > MaxImageBytes {
+		return zeroruntime.ImageBlock{}, fmt.Errorf("image %s is larger than the 10 MiB limit", path)
+	}
 
 	data, err := io.ReadAll(io.LimitReader(file, MaxImageBytes+1))
 	if err != nil {

@@ -202,7 +202,13 @@ type Request struct {
 	PermissionGranted bool           `json:"permissionGranted,omitempty"`
 	PermissionMode    PermissionMode `json:"permissionMode"`
 	Args              map[string]any `json:"args,omitempty"`
-	Reason            string         `json:"reason,omitempty"`
+	// PatchPaths is the authoritative set of paths produced by the built-in
+	// apply_patch executor's parser. A non-nil slice means the patch was parsed,
+	// including when it contains no operations. Keeping parsed targets on the
+	// request prevents the sandbox from interpreting model-controlled headers a
+	// second, potentially different way.
+	PatchPaths []string `json:"patchPaths,omitempty"`
+	Reason     string   `json:"reason,omitempty"`
 }
 
 type Decision struct {

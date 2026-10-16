@@ -3,7 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
-	"os"
+	"io"
 	"strconv"
 	"strings"
 
@@ -74,14 +74,24 @@ func (tool readMinifiedFileTool) run(args map[string]any, options RunOptions, di
 		return errorResult("Error reading file " + requestedPath + ": " + err.Error())
 	}
 
-	content, err := os.ReadFile(absolutePath)
+	// protectedReadOpen binds the daemon-token check to the handle the content is
+	// actually read from — see internal/tools/protected_credentials.go. This is
+	// also the ONLY protection this tool has when called through the plain
+	// registry API (Registry.Run, or RunWithOptions with no sandbox engine):
+	// unlike read_file's sibling gate through Engine.Evaluate, nothing upstream
+	// of this call ever checked the path at all.
+	file, info, err := protectedReadOpen(absolutePath, tool.workspaceRoot)
+	if err != nil {
+		return errorResult("Error reading file " + relativePath + ": " + err.Error())
+	}
+	content, err := io.ReadAll(file)
+	file.Close()
 	if err != nil {
 		return errorResult("Error reading file " + relativePath + ": " + err.Error())
 	}
 	// Record the raw whole-file baseline (matching read_file/edit_file) so a later
 	// write can still detect an out-of-Zero modification — the minification only
 	// affects what the model SEES, not the tracked on-disk state.
-	info, _ := os.Stat(absolutePath)
 	options.FileTracker.Record(absolutePath, content, info)
 
 	selected := selectSourceLines(content, offset, limit)

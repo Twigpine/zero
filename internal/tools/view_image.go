@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"os"
 
 	"github.com/Gitlawb/zero/internal/imageinput"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
@@ -62,9 +63,23 @@ func (tool viewImageTool) Run(_ context.Context, args map[string]any) Result {
 	if err != nil {
 		return errorResult("Error: " + err.Error())
 	}
-	image, err := imageinput.LoadFile(absolutePath, tool.workspaceRoot)
+	// Preserve the loader's early non-regular-file rejection (notably FIFOs).
+	// The consumed handle is validated again below; this is only a fast check.
+	info, err := os.Stat(absolutePath)
 	if err != nil {
-		// LoadFile's errors already name the problem (missing, too large,
+		return errorResult("Error viewing " + relativePath + ": " + err.Error())
+	}
+	if !info.Mode().IsRegular() {
+		return errorResult("Error viewing " + relativePath + ": image file must be a regular file")
+	}
+	file, _, err := ProtectedReadOpen(absolutePath, tool.workspaceRoot)
+	if err != nil {
+		return errorResult("Error viewing " + relativePath + ": " + err.Error())
+	}
+	defer file.Close()
+	image, err := imageinput.LoadOpenFile(file, absolutePath, tool.workspaceRoot)
+	if err != nil {
+		// The loader's errors already name the problem (missing, too large,
 		// unsupported type) and are safe to show: they carry the path the caller
 		// asked for, which it already knows.
 		return errorResult("Error viewing " + relativePath + ": " + err.Error())

@@ -5,10 +5,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
+
+	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 // CheckpointsDir is the per-session subdirectory holding content-addressed blobs.
@@ -107,7 +110,13 @@ func (store *Store) SnapshotForCheckpoint(sessionID, workspaceRoot, tool string,
 	if !CheckpointsEnabled() || len(paths) == 0 {
 		return CheckpointPayload{}, false
 	}
+	root, err := os.OpenRoot(workspaceRoot)
+	if err != nil {
+		return CheckpointPayload{}, false
+	}
+	defer root.Close()
 	capBytes := int64(maxCheckpointBytes())
+	exclusions := sandbox.ProtectedCredentialExclusions(workspaceRoot)
 	files := make([]CheckpointFile, 0, len(paths))
 	for _, rel := range paths {
 		entry := CheckpointFile{Path: rel}
@@ -121,9 +130,9 @@ func (store *Store) SnapshotForCheckpoint(sessionID, workspaceRoot, tool string,
 			files = append(files, entry)
 			continue
 		}
-		info, statErr := os.Stat(abs)
-		if statErr != nil {
-			if os.IsNotExist(statErr) {
+		file, openErr := root.Open(rel)
+		if openErr != nil {
+			if os.IsNotExist(openErr) {
 				// Genuinely new file — restore deletes it.
 				entry.Absent = true
 			} else {
@@ -134,12 +143,21 @@ func (store *Store) SnapshotForCheckpoint(sessionID, workspaceRoot, tool string,
 			files = append(files, entry)
 			continue
 		}
+		info, statErr := file.Stat()
+		if statErr != nil || exclusions.FileHandleExcluded(abs, file, info) {
+			file.Close()
+			entry.Skipped = true
+			files = append(files, entry)
+			continue
+		}
 		if info.IsDir() {
+			file.Close()
 			continue
 		}
 		// Compare sizes as int64 so a file larger than the cap is never silently
 		// truncated past the cap via an int overflow on a 32-bit platform.
 		if info.Size() > capBytes {
+			file.Close()
 			entry.Skipped = true
 			if info.Size() <= int64(^uint(0)>>1) {
 				entry.Bytes = int(info.Size())
@@ -150,8 +168,9 @@ func (store *Store) SnapshotForCheckpoint(sessionID, workspaceRoot, tool string,
 		// Record the prior permission bits so a restore can put them back (an
 		// executable script must not return as 0o644).
 		entry.Mode = uint32(info.Mode().Perm())
-		content, readErr := os.ReadFile(abs)
-		if readErr != nil {
+		content, readErr := io.ReadAll(file)
+		closeErr := file.Close()
+		if readErr != nil || closeErr != nil {
 			entry.Skipped = true
 			files = append(files, entry)
 			continue

@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+
+	"github.com/Gitlawb/zero/internal/sandbox"
 )
 
 var errFileChangedDuringWrite = errors.New("file changed on disk before the write committed")
@@ -27,21 +30,28 @@ var fileWriteStat = func(file *os.File) (os.FileInfo, error) { return file.Stat(
 // call is refused by the kernel instead of redirecting the write.
 //
 // A create uses exclusive creation THROUGH THE ROOT. An overwrite opens the
-// observed object without truncation, verifies identity/content through that
-// handle, then truncates and writes the same handle. relativePath is the target
-// expressed relative to root; absolutePath is retained only for the test hook
-// and error reporting.
+// observed object without truncation, verifies identity/content and the
+// protected-credential decision through that handle, then truncates and writes
+// the same handle. relative is the target expressed relative to root;
+// absolutePath is retained only for the test hook.
 //
 // expectedInfo nil means the caller observed a missing path. expectedContent
 // may be nil for an existing but unreadable file; that path may still be
 // overwritten, but callers must omit rich before/after evidence.
-func commitRootedFileContents(root *os.Root, absolutePath, relativePath string, expectedInfo os.FileInfo, expectedContent *string, content string) error {
+func commitRootedFileContents(root *os.Root, absolutePath, relative string, expectedInfo os.FileInfo, expectedContent *string, content string) error {
+	path := filepath.Join(root.Name(), relative)
 	if fileWriteBeforeCommit != nil {
 		fileWriteBeforeCommit(absolutePath)
 	}
 
 	if expectedInfo == nil {
-		file, err := root.OpenFile(relativePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err := protectedMutationDenied(path, root.Name()); err != nil {
+			return err
+		}
+		if err := root.MkdirAll(filepath.Dir(relative), 0o755); err != nil {
+			return err
+		}
+		file, err := root.OpenFile(relative, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 		if err != nil {
 			return err
 		}
@@ -50,14 +60,14 @@ func commitRootedFileContents(root *os.Root, absolutePath, relativePath string, 
 			_ = file.Close()
 			return err
 		}
-		return writeAndVerifyRootedFileIdentity(root, relativePath, file, openedInfo, content, false)
+		return writeAndVerifyRootedFileIdentity(root, relative, file, openedInfo, content, false)
 	}
 
 	flags := os.O_WRONLY
 	if expectedContent != nil {
 		flags = os.O_RDWR
 	}
-	file, err := root.OpenFile(relativePath, flags, 0)
+	file, err := root.OpenFile(relative, flags, 0)
 	if err != nil {
 		return err
 	}
@@ -66,11 +76,16 @@ func commitRootedFileContents(root *os.Root, absolutePath, relativePath string, 
 		_ = file.Close()
 		return err
 	}
+	exclusions := sandbox.ProtectedCredentialExclusions(root.Name())
+	if exclusions.FileHandleExcluded(path, file, openedInfo) {
+		_ = file.Close()
+		return protectedCredentialErr(path, "writable")
+	}
 	if !os.SameFile(expectedInfo, openedInfo) {
 		_ = file.Close()
 		return errFileChangedDuringWrite
 	}
-	pathInfo, err := root.Stat(relativePath)
+	pathInfo, err := root.Stat(relative)
 	if err != nil || !os.SameFile(openedInfo, pathInfo) {
 		_ = file.Close()
 		return errFileChangedDuringWrite
@@ -86,10 +101,10 @@ func commitRootedFileContents(root *os.Root, absolutePath, relativePath string, 
 			return errFileChangedDuringWrite
 		}
 	}
-	return writeAndVerifyRootedFileIdentity(root, relativePath, file, openedInfo, content, true)
+	return writeAndVerifyRootedFileIdentity(root, relative, file, openedInfo, content, true)
 }
 
-func writeAndVerifyRootedFileIdentity(root *os.Root, relativePath string, file *os.File, openedInfo os.FileInfo, content string, truncate bool) error {
+func writeAndVerifyRootedFileIdentity(root *os.Root, relative string, file *os.File, openedInfo os.FileInfo, content string, truncate bool) error {
 	if truncate {
 		if err := file.Truncate(0); err != nil {
 			_ = file.Close()
@@ -107,7 +122,7 @@ func writeAndVerifyRootedFileIdentity(root *os.Root, relativePath string, file *
 	if err := file.Close(); err != nil {
 		return err
 	}
-	pathInfo, err := root.Stat(relativePath)
+	pathInfo, err := root.Stat(relative)
 	if err != nil || !os.SameFile(openedInfo, pathInfo) {
 		return fmt.Errorf("%w: path identity changed", errFileChangedDuringWrite)
 	}

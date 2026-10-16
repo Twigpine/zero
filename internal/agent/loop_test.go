@@ -27,6 +27,38 @@ type mockProvider struct {
 	requests []zeroruntime.CompletionRequest
 }
 
+func TestSandboxRequestApplyPatchPreflight(t *testing.T) {
+	root := t.TempDir()
+	engine := sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: root, Policy: sandbox.DefaultPolicy()})
+	tool := tools.NewScopedApplyPatchTool(root, nil)
+	for _, tc := range []struct {
+		path string
+		want sandbox.Action
+	}{
+		{"notes.txt", sandbox.ActionAllow},
+		{".agents/notes.md", sandbox.ActionPrompt},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			args := map[string]any{"patch": "--- /dev/null\n+++ b/" + tc.path + "\n@@ -0,0 +1 @@\n+hello\n"}
+			request := sandboxRequest("apply_patch", tool, args, false, PermissionModeAsk, Options{})
+			decision := engine.Evaluate(context.Background(), request)
+			if decision.Action != tc.want {
+				t.Fatalf("agent preflight = %#v, want %s", decision, tc.want)
+			}
+			if !reflect.DeepEqual(request.PatchPaths, []string{tc.path}) {
+				t.Fatalf("risk classification paths = %q, want %q", request.PatchPaths, tc.path)
+			}
+			if tc.want == sandbox.ActionPrompt && !shouldRequestPermission(tool, args, false, &decision) {
+				t.Fatal("protected metadata must offer approval")
+			}
+		})
+	}
+	request := sandboxRequest("apply_patch", tool, map[string]any{"patch": "not a patch"}, false, PermissionModeAsk, Options{})
+	if decision := engine.Evaluate(context.Background(), request); decision.Action != sandbox.ActionDeny {
+		t.Fatalf("malformed patch preflight = %#v, want deny", decision)
+	}
+}
+
 func TestPrePermissionRejectScrubsFileDiffs(t *testing.T) {
 	secret := "sk-proj-abcdefghijklmnopqrstuvwxyz"
 	result := toolResultFromPrePermissionReject(ToolCall{ID: "call", Name: "test"}, tools.Result{
