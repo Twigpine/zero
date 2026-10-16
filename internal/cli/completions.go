@@ -20,7 +20,7 @@ type completionContext struct {
 }
 
 var completionRoot = completionNode{
-	flags: []string{"-h", "--help", "-v", "--version", "-p", "--prompt", "--add-dir", "--theme", "--skip-permissions-unsafe"},
+	flags: []string{"-h", "--help", "-v", "--version", "-p", "--prompt", "--add-dir", "--allow-escalation", "--theme", "--skip-permissions-unsafe"},
 	children: []completionNode{
 		{names: []string{"exec"}, flags: []string{
 			"-h", "--help", "-f", "--file", "--image", "--add-dir", "--mode", "-m", "--model",
@@ -40,7 +40,11 @@ var completionRoot = completionNode{
 		},
 		{names: []string{"daemon"}, children: leafNodes("start", "stop", "status", "run", "attach", "serve-remote", "link")},
 		{names: []string{"setup"}},
-		{names: []string{"config"}},
+		{names: []string{"config"}, flags: []string{"-h", "--help", "--json"}, children: []completionNode{
+			{names: []string{"notify"}, flags: []string{
+				"-h", "--help", "--mode", "--focus", "--reset", "--json",
+			}},
+		}},
 		{names: []string{"models"}, children: []completionNode{{names: []string{"list", "ls"}}}},
 		{names: []string{"providers"}, children: []completionNode{
 			{names: []string{"current"}}, {names: []string{"list"}}, {names: []string{"catalog"}},
@@ -78,7 +82,8 @@ var completionRoot = completionNode{
 			{names: []string{"tools"}, children: leafNodes("list")},
 			{names: []string{"oauth"}, children: leafNodes("login", "logout", "status")},
 		}},
-		{names: []string{"auth"}, children: leafNodes("openrouter", "chatgpt", "login", "logout", "status", "refresh")},
+		{names: []string{"auth"}, children: append(leafNodes("openrouter", "chatgpt", "login", "logout", "status", "refresh"),
+			completionNode{names: []string{"reset"}, flags: []string{"--confirm", "--json", "--help"}})},
 		{names: []string{"sandbox"}, children: []completionNode{
 			{names: []string{"policy"}}, {names: []string{"setup"}}, {names: []string{"check"}},
 			{names: []string{"grants"}, children: leafNodes("list", "allow", "deny", "revoke", "clear")},

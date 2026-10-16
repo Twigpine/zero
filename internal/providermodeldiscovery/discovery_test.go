@@ -109,6 +109,49 @@ func TestParseModelsResponseSupportsChatGPTCatalog(t *testing.T) {
 	}
 }
 
+func TestParseModelsResponseCapturesModalities(t *testing.T) {
+	models, err := parseModelsResponse([]byte(`{
+		"data": [
+			{
+				"id": "openrouter/custom-multimodal",
+				"architecture": {
+					"input_modalities": ["text", "image"],
+					"output_modalities": ["text"]
+				}
+			},
+			{
+				"id": "opengateway/flat-multimodal",
+				"modalities": {
+					"input": ["text", "image"],
+					"output": ["text", "image"]
+				}
+			},
+			{
+				"id": "text-only",
+				"architecture": {
+					"input_modalities": ["text"]
+				}
+			}
+		]
+	}`))
+	if err != nil {
+		t.Fatalf("parseModelsResponse: %v", err)
+	}
+	byID := map[string]Model{}
+	for _, m := range models {
+		byID[m.ID] = m
+	}
+	if got := strings.Join(byID["openrouter/custom-multimodal"].InputModalities, ","); got != "text,image" {
+		t.Fatalf("openrouter input modalities = %q, want text,image", got)
+	}
+	if got := strings.Join(byID["opengateway/flat-multimodal"].InputModalities, ","); got != "text,image" {
+		t.Fatalf("opengateway input modalities = %q, want text,image", got)
+	}
+	if got := strings.Join(byID["text-only"].InputModalities, ","); got != "text" {
+		t.Fatalf("text-only input modalities = %q, want text", got)
+	}
+}
+
 func TestParseModelsResponseNormalizesLegacyFastTier(t *testing.T) {
 	models, err := parseModelsResponse([]byte(`{"data":[{"id":"gpt-test","additional_speed_tiers":["fast","priority"]}]}`))
 	if err != nil {

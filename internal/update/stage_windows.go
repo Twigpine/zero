@@ -154,6 +154,11 @@ func (staged *stagedBinary) promote(targetPath string) error {
 	}
 	if renameErr != nil {
 		if restoreErr := restoreOriginalBinary(original, asidePath, targetPath); restoreErr != nil {
+			// Best-effort: the restore error is what the operator must see.
+			// persistFailedRestoreSignal writes the per-user record when it
+			// can, and otherwise relocates the last verified copy so deleting
+			// the sibling .keep marker cannot silence the next preflight (#868).
+			restoreErr = persistFailedRestoreSignal(original, targetPath, asidePath, originalIdentity, restoreErr)
 			return fmt.Errorf("install new binary: %v; additionally failed to restore the original binary: %w", renameErr, restoreErr)
 		}
 		return fmt.Errorf("install new binary: %w", renameErr)
@@ -212,7 +217,7 @@ func preflightRecoveryStateLocked(targetPath string) error {
 		}
 		return fmt.Errorf(
 			"%w: a previous update could not restore the original binary. Recovery path(s) %s may hold the last binary this updater verified and %s may hold unverified content. "+
-				"Move the correct recovery binary back over %s to restore it, or delete its marker (%s) to accept the installed binary, then update again",
+				"Move the correct recovery binary back over %s to restore it, or delete the recovery copy itself (not only its marker, %s) to accept the installed binary, then update again",
 			ErrTargetPossiblyTampered, strings.Join(recoveryPaths, ", "), targetPath,
 			targetPath, strings.Join(markerPaths, ", "),
 		)
@@ -342,19 +347,36 @@ func relocatedRecoveryPaths(targetPath string) ([]string, error) {
 	return paths, nil
 }
 
-// markedRecoveryPaths finds recovery copies protected by either the canonical
-// marker or a marker beside a randomized aside path. A failed second-or-later
-// update commonly uses the latter because the canonical .old already exists.
+// markedRecoveryPaths finds recovery copies protected by a sibling .keep
+// marker or by a trusted per-user unresolved-state record. A failed
+// second-or-later update commonly uses a randomized aside because the
+// canonical .old already exists. The trusted record is consulted even when
+// the marker is gone: that marker lives in the attacker-writable install
+// directory (#868).
 func markedRecoveryPaths(targetPath string) ([]string, error) {
 	recoveryPaths, err := existingRecoveryPaths(targetPath)
 	if err != nil {
 		return nil, err
 	}
 	var marked []string
+	seen := make(map[string]bool)
 	for _, recoveryPath := range recoveryPaths {
 		if oldBinaryPreserved(recoveryPath) {
 			marked = append(marked, recoveryPath)
+			seen[strings.ToLower(recoveryPath)] = true
 		}
+	}
+	recordedPaths, err := unresolvedRecordedRecoveryPaths(targetPath)
+	if err != nil {
+		return nil, err
+	}
+	for _, recorded := range recordedPaths {
+		key := strings.ToLower(recorded)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		marked = append(marked, recorded)
 	}
 	return marked, nil
 }

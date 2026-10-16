@@ -5,11 +5,11 @@ blessed one.
 
 | Method | Command | Self-update |
 | --- | --- | --- |
-| Install script (Linux, macOS) | `curl -fsSL https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.sh \| bash` | `zero upgrade` |
-| Install script (Windows) | `irm https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.ps1 \| iex` | `zero upgrade` |
-| npm | `npm install -g @gitlawb/zero` | `zero upgrade` (runs npm) |
-| Release archive | download from [Releases](https://github.com/Gitlawb/zero/releases) | `zero upgrade` |
-| mise | `mise use -g ubi:Gitlawb/zero` | `mise upgrade` |
+| Install script (Linux, macOS) | `curl -fsSL https://raw.githubusercontent.com/Twigpine/zero/main/scripts/install.sh \| bash` | `zero upgrade` |
+| Install script (Windows) | `irm https://raw.githubusercontent.com/Twigpine/zero/main/scripts/install.ps1 \| iex` | `zero upgrade` |
+| npm | `npm install -g @twigpine/zero` | `zero upgrade` (runs npm) |
+| Release archive | download from [Releases](https://github.com/Twigpine/zero/releases) | `zero upgrade` |
+| mise | `mise use -g ubi:Twigpine/zero` | `mise upgrade` |
 | `go install` | `go install github.com/Gitlawb/zero/cmd/zero@latest` | rerun the command |
 | Source | `go build -o zero ./cmd/zero` | rebuild |
 
@@ -29,7 +29,7 @@ Release and verify its checksum.
 ## npm
 
 ```bash
-npm install -g @gitlawb/zero
+npm install -g @twigpine/zero
 zero
 ```
 
@@ -56,15 +56,47 @@ cannot write to keeps failing — rerun the install or the command below with
 sufficient permissions). To trigger the fetch manually:
 
 ```bash
-node "$(npm root -g)/@gitlawb/zero/scripts/postinstall.mjs"
+node "$(npm root -g)/@twigpine/zero/scripts/postinstall.mjs"
 ```
+
+### Moving from @gitlawb/zero
+
+Zero was published as `@gitlawb/zero` up to 0.9.0. From 0.10.0 it is
+`@twigpine/zero`, and the old name gets no further releases.
+
+Both packages provide the `zero` command, so npm refuses to install the new
+one while the old one is installed (`EEXIST`). Forcing it is worse: a later
+uninstall of the old package removes the shared `zero` command. Quit any
+running `zero` (on Windows a running `zero.exe` cannot be removed), then
+uninstall the old package before installing the new one:
+
+```bash
+npm uninstall -g @gitlawb/zero
+npm install -g @twigpine/zero
+```
+
+With another package manager, the same two steps:
+
+```bash
+bun remove -g @gitlawb/zero && bun add -g @twigpine/zero
+pnpm remove -g @gitlawb/zero && pnpm add -g @twigpine/zero
+yarn global remove @gitlawb/zero && yarn global add @twigpine/zero
+```
+
+Config, sessions, logins, and plugins live in your user config and home
+directories, not in the package, so they carry over unchanged.
+
+0.10.0 was also published once as `@gitlawb/zero`, so an old install that
+updates lands on a working build. That build prints these steps when `zero`
+exits in a terminal, and `zero upgrade` and `zero update --check` print them
+too.
 
 ## Linux And macOS Script
 
 Install the latest release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Twigpine/zero/main/scripts/install.sh | bash
 ```
 
 From a checkout:
@@ -89,7 +121,7 @@ scripts/install.sh --install-dir "$HOME/bin"
 
 Defaults:
 
-- Repository: `Gitlawb/zero`
+- Repository: `Twigpine/zero`
 - Version: latest GitHub release
 - Install path: `~/.local/bin/zero`
 
@@ -100,7 +132,7 @@ Requirements: Bash, `curl` or `wget`, `tar`, and `shasum` or `sha256sum`.
 Install the latest release:
 
 ```powershell
-irm https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/Twigpine/zero/main/scripts/install.ps1 | iex
 ```
 
 From a checkout:
@@ -123,7 +155,7 @@ powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -InstallDir "$env:U
 
 Defaults:
 
-- Repository: `Gitlawb/zero`
+- Repository: `Twigpine/zero`
 - Version: latest GitHub release
 - Install path: `%LOCALAPPDATA%\zero\bin\zero.exe`
 
@@ -134,13 +166,13 @@ archives through its `ubi` backend, so there is nothing extra to publish and no
 registry in the middle:
 
 ```bash
-mise use -g ubi:Gitlawb/zero
+mise use -g ubi:Twigpine/zero
 ```
 
 Pin a version the same way you would any other tool:
 
 ```bash
-mise use -g ubi:Gitlawb/zero@0.7.1
+mise use -g ubi:Twigpine/zero@0.7.1
 ```
 
 Updates come from `mise upgrade`. `zero upgrade` also works, because a
@@ -153,13 +185,14 @@ describe a version that is no longer on disk. Prefer `mise upgrade`.
 go install github.com/Gitlawb/zero/cmd/zero@latest
 ```
 
-This builds from source, so it needs Go 1.26.6+ and it does not go through the
+This builds from source, so it needs Go 1.26.9+ and it does not go through the
 release archives. Two consequences worth knowing before you pick it:
 
-- On Linux you also need the sandbox helper, which is a separate binary and is
-  not installed by this command. See
+- On Linux, Bubblewrap is still required for native sandboxing. Zero resolves
+  the helper in this order: an executable `zero-linux-sandbox` next to `zero`,
+  then `PATH`, then self-exec of the main binary. Standalone helpers remain
+  optional and preferred. See
   [Sandbox Helpers For Source Builds](#sandbox-helpers-for-source-builds).
-  Without it, native sandboxing is unavailable.
 - `zero upgrade` treats the result as a standalone install and will replace the
   binary with a release build rather than rebuilding from source. If you chose
   `go install` deliberately, rerun it instead.
@@ -169,7 +202,7 @@ macOS and Windows need no extra helper.
 ## From Source
 
 ```bash
-git clone https://github.com/Gitlawb/zero.git
+git clone https://github.com/Twigpine/zero.git
 cd zero
 go run ./cmd/zero
 ```
@@ -180,25 +213,32 @@ Build a local binary:
 go build -o zero ./cmd/zero
 ```
 
-Source builds require Go 1.26.6+.
+Source builds require Go 1.26.9+.
 
 ### Sandbox Helpers For Source Builds
 
-Release archives include the platform sandbox helpers. If you build directly
-from source, build the helpers you need:
+Release archives include the platform sandbox helpers. A source build of the
+main `zero` binary is enough for Linux native sandboxing. Zero resolves the
+helper in this order:
 
-Linux:
+1. an executable `zero-linux-sandbox` next to `zero`
+2. then `PATH`
+3. then self-exec of the main binary
+
+Bubblewrap must still be installed. Standalone helpers remain optional and
+preferred.
+
+A separate helper remains supported if it sits next to `zero` or on `PATH`:
 
 ```bash
 go build -o zero ./cmd/zero
-go build -o zero-linux-sandbox ./cmd/zero-linux-sandbox
-go build -o zero-seccomp ./cmd/zero-seccomp
+go build -o zero-linux-sandbox ./cmd/zero-linux-sandbox   # optional
+go build -o zero-seccomp ./cmd/zero-seccomp               # optional compatibility wrapper
 ```
 
-Put `zero` and `zero-linux-sandbox` in the same directory on `PATH`, for example
-`~/.local/bin`. `zero-seccomp` is kept as a compatibility wrapper; the sandbox
-helper applies the Unix-socket filter itself when that sandbox option is enabled.
-Linux native sandboxing also requires Bubblewrap to be installed.
+Put `zero` on `PATH`, for example `~/.local/bin`. `zero-seccomp` is kept as a
+compatibility wrapper; the sandbox helper applies the Unix-socket filter itself
+when that sandbox option is enabled.
 
 macOS uses the system sandbox and does not need an extra helper binary.
 
@@ -213,7 +253,7 @@ seccomp filter on Android:
 pkg install golang
 
 # Build Zero for Android
-git clone https://github.com/Gitlawb/zero.git
+git clone https://github.com/Twigpine/zero.git
 cd zero
 CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -ldflags="-s -w" -o zero ./cmd/zero
 
@@ -302,7 +342,10 @@ See the [update guide](UPDATE.md) for update modes, flags, and platform details.
 overwriting a binary a package manager owns leaves that manager describing a
 version that is no longer there:
 
-- **npm**: runs `npm install -g @gitlawb/zero@latest` for you.
+- **npm**: runs `npm install -g @twigpine/zero@latest` for you. An install of
+  the old `@gitlawb/zero` package refuses instead and prints the steps in
+  [Moving from @gitlawb/zero](#moving-from-gitlawbzero): that name gets no
+  further releases, so npm would only reinstall the same version.
 - **Homebrew**: refuses, and tells you to run `brew upgrade zero`. Replacing the
   keg binary directly would be reverted by the next `brew upgrade` or
   `brew reinstall`.

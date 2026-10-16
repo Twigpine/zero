@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        New feature ideas start in [Discussions Ideas](https://github.com/Gitlawb/zero/discussions/categories/ideas),
+        New feature ideas start in [Discussions Ideas](https://github.com/Twigpine/zero/discussions/categories/ideas),
         not here. This form is for the step after that: an idea that gained traction in Discussions,
         or one a maintainer asked to have tracked as an issue. Please link the discussion below.
         Do not begin implementation until the issue has been reviewed and marked with the

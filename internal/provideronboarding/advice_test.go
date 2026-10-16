@@ -1,6 +1,8 @@
 package provideronboarding
 
 import (
+	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -225,6 +227,36 @@ func assertNoSecretLeak(t *testing.T, actions []Action, secrets ...string) {
 			}
 			if strings.Contains(action.Label, secret) || strings.Contains(action.Command, secret) || strings.Contains(action.Detail, secret) {
 				t.Fatalf("action leaked secret %q: %#v", secret, action)
+			}
+		}
+	}
+}
+
+func TestSetupCommandWithModelShellRoundTrip(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell round-trip; portable command boundary is tested on every OS")
+	}
+	for _, id := range []string{"my loaded model", "unsloth/Qwen3-GGUF", "model:latest", "user/model@revision"} {
+		command := SetupCommandWithModel(providercatalog.Descriptor{ID: "atomic-chat-local"}, "Atomic Chat Local", id, true)
+		out, err := exec.Command("sh", "-c", `zero() { printf '%s\n' "$@"; }; `+command).CombinedOutput()
+		want := "providers\nadd\natomic-chat-local\n--name\nAtomic Chat Local\n--model\n" + id + "\n--set-active\n"
+		if err != nil || string(out) != want {
+			t.Fatalf("argument round-trip: command=%q output=%q err=%v", command, out, err)
+		}
+	}
+}
+
+func TestSetupCommandWithModelOmitsUnsafeArguments(t *testing.T) {
+	for _, value := range []string{"x&calc", `a"&calc&"b`, "$(id)", "`id`", "%PATH%", "!PATH!", "a;b", "a|b", "a^b", "a>b", "a\nb", "@args", "a\u201db", "-x&calc", `-a"&calc&"b`, "-$(id)", "-%PATH%", "-model=value"} {
+		for _, field := range []string{"model", "name"} {
+			name, model := "local", "loaded/model"
+			if field == "model" {
+				model = value
+			} else {
+				name = value
+			}
+			if got := SetupCommandWithModel(providercatalog.Descriptor{ID: "atomic-chat-local"}, name, model, true); got != "" {
+				t.Fatalf("unsafe %s %q emitted as a shell command: %q", field, value, got)
 			}
 		}
 	}

@@ -8,10 +8,20 @@ import (
 	"strings"
 )
 
+// writePreimageBeforeObserve is a deterministic test hook. Production leaves
+// it nil. Tests substitute the pathname after the write root is open and
+// before existence or bytes are read, so a dissenting absolute-path resolution
+// cannot be mistaken for the rooted object.
+var writePreimageBeforeObserve func(absolutePath string)
+
 type writeFileTool struct {
 	baseTool
 	workspaceRoot string
 	scope         PathScope
+	// readRooted reads an existing file through the granted write root. Tests
+	// replace it to simulate an unreadable preimage; production uses
+	// readRootedFile so bytes and identity come from the same descriptor.
+	readRooted func(*os.Root, string) ([]byte, os.FileInfo, error)
 }
 
 func NewScopedWriteFileTool(workspaceRoot string, scope PathScope) Tool {
@@ -34,6 +44,7 @@ func NewScopedWriteFileTool(workspaceRoot string, scope PathScope) Tool {
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
 		scope:         scope,
+		readRooted:    readRootedFile,
 	}
 }
 
@@ -59,10 +70,27 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	if err != nil {
 		return errorResult("Error writing file " + requestedPath + ": " + err.Error())
 	}
+	// Anchor observation and mutation on the granted write root. The pathname
+	// checks above say what was REQUESTED; this handle enforces what actually
+	// happens, so a parent directory swapped for an escaping symlink after
+	// validation cannot redirect the create or overwrite. Existence and prior
+	// bytes must come from the same handle: os.Stat on the absolute path stores
+	// a pathname and, on Windows, fills volume and file index only when
+	// os.SameFile re-opens that path, so a same-name substitution compares equal.
+	root, rootedRelative, err := openScopedWriteRoot(tool.workspaceRoot, tool.scope, absolutePath)
+	if err != nil {
+		return errorResult("Error writing file " + relativePath + ": " + err.Error())
+	}
+	defer root.Close()
+	if writePreimageBeforeObserve != nil {
+		writePreimageBeforeObserve(absolutePath)
+	}
 
 	existed := false
-	if _, err := os.Stat(absolutePath); err == nil {
+	var priorInfo os.FileInfo
+	if info, err := root.Stat(rootedRelative); err == nil {
 		existed = true
+		priorInfo = info
 		if !overwrite {
 			return errorResult("Error: " + relativePath + " already exists. Pass overwrite: true to replace it.")
 		}
@@ -72,17 +100,23 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 
 	// On overwrite, refuse to clobber a tracked file that changed on disk outside
 	// Zero since it was last read — the new content was likely composed against a
-	// stale view. Only read current bytes when there is a baseline to compare,
-	// so a first-touch create/overwrite stays a single write with no extra read.
+	// stale view. The rooted read below is also the preimage: one descriptor-bound
+	// snapshot supplies both the conflict check and the bytes passed to commit.
+	readRooted := tool.readRooted
+	if readRooted == nil {
+		readRooted = readRootedFile
+	}
+	priorContent := ""
+	priorContentKnown := !existed
 	if existed {
 		if options.FileTracker != nil && !options.FileTracker.SeenWhole(absolutePath) {
 			return errorResult(fileUnseenMessage(relativePath))
 		}
+		current, info, rerr := readRooted(root, rootedRelative)
 		if _, tracked := options.FileTracker.Version(absolutePath); tracked {
 			// Fail CLOSED: if the tracked file can't be re-read to verify it, refuse
 			// the overwrite rather than clobbering a file whose current state is
 			// unknown (it may have been replaced or removed out from under us).
-			current, rerr := os.ReadFile(absolutePath)
 			if rerr != nil {
 				return errorResult(fileConflictMessage(relativePath))
 			}
@@ -90,36 +124,54 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 				return errorResult(fileConflictMessage(relativePath))
 			}
 		}
-	}
-
-	// Capture the prior content (before we replace it) so an overwrite can show a
-	// real diff; a fresh create stays "" and previews as all-additions.
-	priorContent := ""
-	if existed {
-		if prev, rerr := os.ReadFile(absolutePath); rerr == nil {
-			priorContent = string(prev)
+		if rerr == nil {
+			// Prefer the identity from the opened object over root.Stat. Both
+			// capture it at observation time; the opened object is the one whose
+			// bytes were just read.
+			priorInfo = info
+			priorContent = string(current)
+			priorContentKnown = true
 		}
 	}
 
-	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o755); err != nil {
-		return errorResult("Error writing file " + relativePath + ": " + err.Error())
+	if dir := filepath.Dir(rootedRelative); dir != "." {
+		if err := root.MkdirAll(dir, 0o755); err != nil {
+			return errorResult("Error writing file " + relativePath + ": " + err.Error())
+		}
 	}
 	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
-	if err := os.WriteFile(absolutePath, []byte(content), 0o644); err != nil {
+	var expectedContent *string
+	if priorContentKnown {
+		expectedContent = &priorContent
+	}
+	if err := commitRootedFileContents(root, absolutePath, rootedRelative, priorInfo, expectedContent, content); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
 	modelKnownContent := content
 	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
 	// FileTracker baseline: recording pre-format content would make the very
 	// next edit look like an external modification and trip the conflict guard.
-	content = maybeFormatWrittenFile(ctx, absolutePath, content)
+	restoreMode := os.FileMode(0o644)
+	if priorInfo != nil {
+		restoreMode = priorInfo.Mode().Perm()
+	}
+	formatting := maybeFormatWrittenFileScoped(ctx, tool.workspaceRoot, tool.scope, absolutePath, content, restoreMode)
+	content = formatting.Content
+	finalContentKnown := formatting.ContentKnown
 	// Baseline the freshly written content so a later edit/overwrite in this
 	// session compares against what is now on disk.
-	newInfo, _ := os.Stat(absolutePath)
-	options.FileTracker.Record(absolutePath, []byte(content), newInfo)
-	if content == modelKnownContent {
+	newInfo := formatting.Info
+	if newInfo == nil {
+		newInfo, _ = root.Stat(rootedRelative)
+	}
+	if finalContentKnown {
+		options.FileTracker.Record(absolutePath, []byte(content), newInfo)
+	} else {
+		options.FileTracker.Forget(absolutePath)
+	}
+	if finalContentKnown && content == modelKnownContent {
 		options.FileTracker.RecordSeenRange(absolutePath, 1, trackedLineTotal(content), trackedLineTotal(content))
 	}
 	if !existed {
@@ -137,13 +189,29 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 		lines++
 	}
 	summary := fmt.Sprintf("%s %s (%d lines).", verb, relativePath, lines)
-	summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
+	summary += formatting.notice(relativePath)
+	if finalContentKnown {
+		summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
+	}
 	result := okResult(summary)
 	result.ChangedFiles = []string{relativePath}
+	// Do not pretend an unreadable overwrite was a creation. The write may be
+	// valid, but ACP only receives an exact before/after pair we actually saw.
+	if priorContentKnown && finalContentKnown {
+		if diff, ok := boundedFileDiff(absolutePath, priorContent, content, existed, true); ok {
+			result.FileDiffs = []FileDiff{diff}
+		} else if diffTextRevealsObfuscatedSecret(priorContent) || diffTextRevealsObfuscatedSecret(content) {
+			result.Redacted = true
+		}
+	}
 	// Card-only preview: a real unified diff (all-green for a create, red/green for
 	// an overwrite) on Display.Preview. Output stays the summary, so the model never
 	// re-reads the file — the rich preview costs zero model tokens.
-	result.Display = Display{Summary: summary, Kind: "file", Preview: boundedUnifiedDiff(relativePath, priorContent, content)}
+	preview := ""
+	if priorContentKnown && finalContentKnown {
+		preview = boundedUnifiedDiff(relativePath, priorContent, content)
+	}
+	result.Display = Display{Summary: summary, Kind: "file", Preview: preview}
 	return result
 }
 

@@ -196,6 +196,35 @@ func TestSandboxManagerBuildsCommandPlanThroughLinuxHelper(t *testing.T) {
 	assertArgsContainSequence(t, plan.Args, "--", "/bin/sh", "-c", "pwd")
 }
 
+func TestSandboxManagerBuildsCommandPlanThroughLinuxSelfExec(t *testing.T) {
+	backend := Backend{
+		Name:                 BackendLinuxBwrap,
+		Available:            true,
+		Executable:           "/usr/local/bin/zero",
+		ExecutableArgsPrefix: []string{LinuxSandboxHelperSubcommand},
+		Platform:             "linux",
+	}
+	policy := DefaultPolicy()
+	manager := NewSandboxManager(SandboxManagerOptions{GOOS: "linux", Backend: backend})
+	plan, err := manager.BuildCommandPlan(SandboxManagerRequest{
+		WorkspaceRoot:     "/workspace",
+		Command:           CommandSpec{Name: "/bin/sh", Args: []string{"-c", "pwd"}, Dir: "/workspace"},
+		Policy:            policy,
+		Profile:           PermissionProfileFromPolicy("/workspace", policy, nil),
+		Preference:        SandboxPreferenceAuto,
+		ValidateExecution: true,
+	})
+	if err != nil {
+		t.Fatalf("BuildCommandPlan: %v", err)
+	}
+	if !plan.Wrapped || plan.Name != "/usr/local/bin/zero" || plan.TargetBackend != BackendLinuxBwrap {
+		t.Fatalf("command plan = %#v, want self-exec linux helper wrapper", plan)
+	}
+	if len(plan.Args) == 0 || plan.Args[0] != LinuxSandboxHelperSubcommand {
+		t.Fatalf("plan.Args = %#v, want prefix %q", plan.Args, LinuxSandboxHelperSubcommand)
+	}
+}
+
 func TestSandboxManagerBuildsCommandPlanThroughWindowsRunner(t *testing.T) {
 	// This exercises the native wrapped path, which requires the workspace to be
 	// sandbox-initialized; stub the marker present (otherwise it degrades).
@@ -204,12 +233,19 @@ func TestSandboxManagerBuildsCommandPlanThroughWindowsRunner(t *testing.T) {
 	windowsSandboxInitialized = func() bool { return true }
 	backend := Backend{Name: BackendWindowsRestrictedToken, Available: true, Executable: `C:\zero\zero-windows-command-runner.exe`, Platform: "windows"}
 	policy := DefaultPolicy()
+	// Build the usual restricted FS profile, then clear DenyRead. On non-Windows
+	// hosts PermissionProfileFromPolicy injects credential-store DenyRead paths,
+	// and the Windows plan path rejects any non-empty DenyRead (PR #640). This
+	// happy-path plan must exercise a valid restricted profile without DenyRead;
+	// rejection coverage lives in TestSandboxManagerRejectsWindowsDenyReadOnBothRestrictedTokenTiers.
+	profile := PermissionProfileFromPolicy(`C:\workspace`, policy, nil)
+	profile.FileSystem.DenyRead = nil
 	manager := NewSandboxManager(SandboxManagerOptions{GOOS: "windows", Backend: backend})
 	plan, err := manager.BuildCommandPlan(SandboxManagerRequest{
 		WorkspaceRoot:     `C:\workspace`,
 		Command:           CommandSpec{Name: "cmd.exe", Args: []string{"/d", "/s", "/c", "dir"}, Dir: `C:\workspace\src`, Env: []string{"PATH=C:\\Tools", "TERM=xterm"}},
 		Policy:            policy,
-		Profile:           PermissionProfileFromPolicy(`C:\workspace`, policy, nil),
+		Profile:           profile,
 		Preference:        SandboxPreferenceAuto,
 		ValidateExecution: true,
 	})
@@ -241,6 +277,87 @@ func TestSandboxManagerBuildsCommandPlanThroughWindowsRunner(t *testing.T) {
 	if config.Env[EnvSandboxed] != "1" || config.Env[EnvSandboxBackend] != string(BackendWindowsRestrictedToken) || config.Env["COMSPEC"] == "" {
 		t.Fatalf("parsed env = %#v, want sandbox markers and COMSPEC", config.Env)
 	}
+}
+
+// TestSandboxManagerRejectsWindowsDenyReadOnBothRestrictedTokenTiers is the
+// regression for PR #640: DenyRead cannot be launched or provisioned through
+// either the elevated restricted-token path or the unelevated auto fallback.
+// Both build the same fully restricted narrow-SID token.
+func TestSandboxManagerRejectsWindowsDenyReadOnBothRestrictedTokenTiers(t *testing.T) {
+	backend := Backend{Name: BackendWindowsRestrictedToken, Available: true, Executable: `C:\zero\zero-windows-command-runner.exe`, Platform: "windows"}
+	manager := NewSandboxManager(SandboxManagerOptions{GOOS: "windows", Backend: backend})
+	policy := DefaultPolicy()
+	profile := PermissionProfile{
+		FileSystem: FileSystemPolicy{
+			Kind:       FileSystemRestricted,
+			WriteRoots: []WritableRoot{{Root: `C:\workspace`}},
+			DenyRead:   []string{`C:\workspace\secret`},
+		},
+		Network: NetworkPolicy{Mode: NetworkDeny},
+	}
+	cmd := CommandSpec{Name: "cmd.exe", Args: []string{"/c", "dir"}, Dir: `C:\workspace`}
+
+	t.Run("elevated_restricted_token", func(t *testing.T) {
+		restore := windowsSandboxInitialized
+		t.Cleanup(func() { windowsSandboxInitialized = restore })
+		windowsSandboxInitialized = func() bool { return true }
+
+		_, err := manager.BuildCommandPlan(SandboxManagerRequest{
+			WorkspaceRoot:     `C:\workspace`,
+			Command:           cmd,
+			Policy:            policy,
+			Profile:           profile,
+			Preference:        SandboxPreferenceAuto,
+			ValidateExecution: true,
+		})
+		if err == nil {
+			t.Fatal("expected BuildCommandPlan error for elevated restricted-token DenyRead")
+		}
+		msg := err.Error()
+		for _, want := range []string{"DenyRead", "not supported", "restricted-token"} {
+			if !strings.Contains(msg, want) {
+				t.Fatalf("error %q missing %q", msg, want)
+			}
+		}
+	})
+
+	t.Run("unelevated_auto_fallback", func(t *testing.T) {
+		restore := windowsSandboxInitialized
+		t.Cleanup(func() { windowsSandboxInitialized = restore })
+		windowsSandboxInitialized = func() bool { return false }
+
+		req, err := manager.BuildExecutionRequest(SandboxManagerRequest{
+			WorkspaceRoot:     `C:\workspace`,
+			Command:           cmd,
+			Policy:            policy,
+			Profile:           profile,
+			Preference:        SandboxPreferenceAuto,
+			ValidateExecution: true,
+		})
+		if err != nil {
+			t.Fatalf("BuildExecutionRequest: %v", err)
+		}
+		if req.EnforcementLevel != EnforcementUnelevated {
+			t.Fatalf("EnforcementLevel = %v, want unelevated auto fallback before DenyRead rejection", req.EnforcementLevel)
+		}
+		_, err = manager.BuildCommandPlan(SandboxManagerRequest{
+			WorkspaceRoot:     `C:\workspace`,
+			Command:           cmd,
+			Policy:            policy,
+			Profile:           profile,
+			Preference:        SandboxPreferenceAuto,
+			ValidateExecution: true,
+		})
+		if err == nil {
+			t.Fatal("expected BuildCommandPlan error for unelevated DenyRead")
+		}
+		if !strings.Contains(err.Error(), "DenyRead") || !strings.Contains(err.Error(), "not supported") {
+			t.Fatalf("unelevated DenyRead error = %v", err)
+		}
+		if strings.Contains(err.Error(), "Use `--sandbox forbid`, the unelevated") {
+			t.Fatalf("error still recommends unelevated as a workaround: %v", err)
+		}
+	})
 }
 
 func TestSandboxManagerDegradesUnavailableCommandPlan(t *testing.T) {
@@ -304,6 +421,60 @@ func TestSandboxManagerSelectsPlatformBackend(t *testing.T) {
 				t.Fatalf("target backend = %q, want %q for %#v", backend.TargetBackend(), test.wantTarget, backend)
 			}
 		})
+	}
+}
+
+func TestSelectPlatformBackendLinuxSelfExecWhenStandaloneHelperMissing(t *testing.T) {
+	exe := fakeZeroMain(t)
+	manager := NewSandboxManager(SandboxManagerOptions{
+		GOOS: "linux",
+		LookupExecutable: func(name string) (string, error) {
+			if name == "bwrap" {
+				return "/usr/bin/bwrap", nil
+			}
+			return "", errors.New("missing")
+		},
+	})
+	backend := manager.Backend()
+	if backend.Name != BackendLinuxBwrap || !backend.Available {
+		t.Fatalf("backend = %#v, want native linux bwrap via self-exec", backend)
+	}
+	if backend.Executable != exe {
+		t.Fatalf("executable = %q, want fake zero %q", backend.Executable, exe)
+	}
+	if len(backend.ExecutableArgsPrefix) != 1 || backend.ExecutableArgsPrefix[0] != LinuxSandboxHelperSubcommand {
+		t.Fatalf("args prefix = %#v, want [%q]", backend.ExecutableArgsPrefix, LinuxSandboxHelperSubcommand)
+	}
+}
+
+func TestSandboxManagerLinuxSelfExecSelectionDrivesCommandPlan(t *testing.T) {
+	exe := fakeZeroMain(t)
+	manager := NewSandboxManager(SandboxManagerOptions{
+		GOOS: "linux",
+		LookupExecutable: func(name string) (string, error) {
+			if name == "bwrap" {
+				return "/usr/bin/bwrap", nil
+			}
+			return "", errors.New("missing")
+		},
+	})
+	policy := DefaultPolicy()
+	plan, err := manager.BuildCommandPlan(SandboxManagerRequest{
+		WorkspaceRoot:     "/workspace",
+		Command:           CommandSpec{Name: "/bin/echo", Args: []string{"ok"}, Dir: "/workspace"},
+		Policy:            policy,
+		Profile:           PermissionProfileFromPolicy("/workspace", policy, nil),
+		Preference:        SandboxPreferenceAuto,
+		ValidateExecution: true,
+	})
+	if err != nil {
+		t.Fatalf("BuildCommandPlan: %v", err)
+	}
+	if !plan.Wrapped || plan.Name != exe || plan.EnforcementLevel != EnforcementNative {
+		t.Fatalf("plan = %#v, want native wrap of fake zero", plan)
+	}
+	if len(plan.Args) == 0 || plan.Args[0] != LinuxSandboxHelperSubcommand {
+		t.Fatalf("plan.Args = %#v, want prefix %q", plan.Args, LinuxSandboxHelperSubcommand)
 	}
 }
 

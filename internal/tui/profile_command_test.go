@@ -46,7 +46,7 @@ func TestProfileEffortReconciledOnModelSwitch(t *testing.T) {
 
 	// Supported -> unsupported: the profile-applied level must not survive
 	// onto a model with no effort ring.
-	m, text, ok, _ := m.switchProviderModel("ollama", "kimi-k2.7-code:cloud")
+	m, text, ok, _, _ := m.switchProviderModel("ollama", "kimi-k2.7-code:cloud")
 	if !ok {
 		t.Fatalf("switch to ollama failed: %q", text)
 	}
@@ -62,7 +62,7 @@ func TestProfileEffortReconciledOnModelSwitch(t *testing.T) {
 
 	// Unsupported -> supported: switching (back) to a supporting model must
 	// behave like selecting the profile there.
-	m, text, ok, _ = m.switchProviderModel("anthropic", "claude-sonnet-4.5")
+	m, text, ok, _, _ = m.switchProviderModel("anthropic", "claude-sonnet-4.5")
 	if !ok {
 		t.Fatalf("switch back to anthropic failed: %q", text)
 	}
@@ -183,7 +183,7 @@ func TestProfileEffortTouchedSurvivesModelSwitch(t *testing.T) {
 
 	m, _ = m.handleProfileCommand("fast")
 	m, _ = m.handleEffortCommand("high")
-	m, text, ok, _ := m.switchProviderModel("ollama", "kimi-k2.7-code:cloud")
+	m, text, ok, _, _ := m.switchProviderModel("ollama", "kimi-k2.7-code:cloud")
 	if !ok {
 		t.Fatalf("switch to ollama failed: %q", text)
 	}

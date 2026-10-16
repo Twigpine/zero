@@ -272,6 +272,20 @@ func shrinkBackoff(t *testing.T) {
 	})
 }
 
+func TestShrinkBackoffForTest(t *testing.T) {
+	origRetry, origPreSend := retryBackoffBase, preSendBackoffBase
+	restore := ShrinkBackoffForTest()
+	if retryBackoffBase != time.Millisecond || preSendBackoffBase != time.Millisecond {
+		t.Fatalf("ShrinkBackoffForTest did not set bases to 1ms: got retry=%v, preSend=%v",
+			retryBackoffBase, preSendBackoffBase)
+	}
+	restore()
+	if retryBackoffBase != origRetry || preSendBackoffBase != origPreSend {
+		t.Fatalf("restore() failed: got retry=%v, preSend=%v; want %v, %v",
+			retryBackoffBase, preSendBackoffBase, origRetry, origPreSend)
+	}
+}
+
 func TestBackoffWaitSchedule(t *testing.T) {
 	// Without Retry-After the wait doubles per attempt from 2s and caps at 30s;
 	// a supplied Retry-After wins but is capped too.

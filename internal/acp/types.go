@@ -12,6 +12,8 @@ const (
 	MethodAuthenticate           = "authenticate"
 	MethodSessionNew             = "session/new"
 	MethodSessionLoad            = "session/load"
+	MethodSessionList            = "session/list"
+	MethodSessionResume          = "session/resume"
 	MethodSessionPrompt          = "session/prompt"
 	MethodSessionCancel          = "session/cancel" // notification
 	MethodSessionUpdate          = "session/update" // notification (agent -> client)
@@ -62,8 +64,16 @@ type PromptCapabilities struct {
 }
 
 type AgentCapabilities struct {
-	LoadSession        bool               `json:"loadSession"`
-	PromptCapabilities PromptCapabilities `json:"promptCapabilities"`
+	LoadSession         bool                 `json:"loadSession"`
+	PromptCapabilities  PromptCapabilities   `json:"promptCapabilities"`
+	SessionCapabilities *SessionCapabilities `json:"sessionCapabilities,omitempty"`
+}
+
+// Empty capability objects are presence flags in ACP v1. Pointers preserve
+// the wire distinction between an advertised `{}` and an omitted capability.
+type SessionCapabilities struct {
+	List   *struct{} `json:"list,omitempty"`
+	Resume *struct{} `json:"resume,omitempty"`
 }
 
 type AuthMethod struct {
@@ -117,9 +127,14 @@ type McpServer struct {
 }
 
 type NewSessionParams struct {
-	Cwd                   string      `json:"cwd"`
-	McpServers            []McpServer `json:"mcpServers"`
-	AdditionalDirectories []string    `json:"additionalDirectories,omitempty"`
+	Cwd        string      `json:"cwd"`
+	McpServers []McpServer `json:"mcpServers"`
+	// AdditionalDirectories is declared by the protocol and consumed nowhere in
+	// this repo yet. When it is wired up it must go through requestedWorkspace
+	// like Cwd does: these are client-supplied paths with no absoluteness rule of
+	// their own, which is the same shape as the resume-cwd hole that made
+	// {"sessionId":"known"} activate a session against this process's directory.
+	AdditionalDirectories []string `json:"additionalDirectories,omitempty"`
 }
 
 type NewSessionResult struct {
@@ -139,6 +154,39 @@ type LoadSessionResult struct {
 	ConfigOptions []SessionConfigOption `json:"configOptions,omitempty"`
 	Modes         *SessionModeState     `json:"modes,omitempty"`
 }
+
+// ListSessionsParams and the following types implement ACP v1 session/list.
+// Transcript contents stay behind session/load; this method returns metadata
+// only and leaves the optional pagination cursor opaque.
+type ListSessionsParams struct {
+	Cwd    string `json:"cwd,omitempty"`
+	Cursor string `json:"cursor,omitempty"`
+}
+
+type SessionInfoMeta struct {
+	ModelID   string `json:"modelId,omitempty"`
+	CreatedAt string `json:"createdAt,omitempty"`
+}
+
+type SessionInfo struct {
+	SessionID string           `json:"sessionId"`
+	Cwd       string           `json:"cwd"`
+	Title     string           `json:"title,omitempty"`
+	UpdatedAt string           `json:"updatedAt,omitempty"`
+	Meta      *SessionInfoMeta `json:"_meta,omitempty"`
+}
+
+type ListSessionsResult struct {
+	Sessions   []SessionInfo `json:"sessions"`
+	NextCursor string        `json:"nextCursor,omitempty"`
+}
+
+// session/resume takes session/load's wire shape, so its cwd is a plain string
+// too and an omitted one decodes exactly like an empty one. Sharing the type is
+// safe only because activatePersistedSession requires an absolute cwd from the
+// request itself — nothing downstream may supply a default for either method.
+type ResumeSessionParams = LoadSessionParams
+type ResumeSessionResult = LoadSessionResult
 
 // ---- prompt turn ----
 
@@ -174,6 +222,7 @@ type SessionNotification struct {
 // ContentBlock under "content"; the variant is set via SessionUpdate.
 type ContentChunk struct {
 	SessionUpdate string       `json:"sessionUpdate"`
+	MessageID     string       `json:"messageId,omitempty"`
 	Content       ContentBlock `json:"content"`
 }
 
@@ -235,9 +284,30 @@ type ToolCallContent struct {
 	// type == "content"
 	Content *ContentBlock `json:"content,omitempty"`
 	// type == "diff"
-	Path    string `json:"path,omitempty"`
-	OldText string `json:"oldText,omitempty"`
-	NewText string `json:"newText,omitempty"`
+	Path    string  `json:"path,omitempty"`
+	OldText *string `json:"oldText,omitempty"`
+	NewText *string `json:"newText,omitempty"`
+}
+
+// MarshalJSON preserves ACP's discriminated content union. A diff always has
+// path, while nullable oldText/newText distinguish creation, deletion, and an
+// existing file replaced with empty content. Other content variants omit all
+// diff fields rather than serializing irrelevant nulls.
+func (content ToolCallContent) MarshalJSON() ([]byte, error) {
+	if content.Type == "diff" {
+		return json.Marshal(struct {
+			Type    string  `json:"type"`
+			Path    string  `json:"path"`
+			OldText *string `json:"oldText"`
+			NewText *string `json:"newText"`
+		}{
+			Type: content.Type, Path: content.Path, OldText: content.OldText, NewText: content.NewText,
+		})
+	}
+	return json.Marshal(struct {
+		Type    string        `json:"type"`
+		Content *ContentBlock `json:"content,omitempty"`
+	}{Type: content.Type, Content: content.Content})
 }
 
 func ToolContent(block ContentBlock) ToolCallContent {

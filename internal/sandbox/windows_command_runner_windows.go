@@ -8,6 +8,15 @@ import (
 )
 
 func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writer) int {
+	// Fully restricted DenyRead tokens cannot load ordinary Users-granted
+	// system binaries without SID broadening; broadening is permanently off
+	// because it admits write grants outside WriteRoots. Reject on both the
+	// elevated and unelevated restricted-token tiers before setup or launch
+	// until access-time confinement exists (PR #640).
+	if err := windowsDenyReadRestrictedTokenUnsupported(config); err != nil {
+		fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
+		return 1
+	}
 	switch config.SandboxLevel {
 	case WindowsSandboxLevelRestrictedToken:
 		if err := ValidateWindowsSandboxSetupMarker(WindowsSandboxSetupConfigFromCommand(config)); err != nil {
@@ -69,11 +78,11 @@ func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writ
 	// this has no in-token fix; preflight blocking and output hints live in
 	// internal/tools/shell_runtime.go.
 	tokenSIDs := windowsRuntimeTokenSIDs(capabilitySIDs, offlineSID, config.PermissionProfile.Network.Mode)
-	// A WRITE_RESTRICTED token keeps reads unrestricted so sandboxed commands
-	// can actually launch executables; it is only unsafe when DenyRead paths
-	// are configured, because the kernel skips restricted-SID deny ACEs for
-	// reads under that flag (#612). Profiles with DenyRead keep the fully
-	// restricted token, trading spawn capability for read-deny enforcement.
+	// WRITE_RESTRICTED keeps reads unrestricted so sandboxed commands can load
+	// Users-granted executables. It is only used when DenyRead is empty (#612:
+	// WRITE_RESTRICTED skips restricted-SID deny ACEs for reads). Non-empty
+	// DenyRead is rejected above for both runner levels rather than launching a
+	// fully restricted narrow-SID token that cannot execute normal tools.
 	writeRestricted := len(config.PermissionProfile.FileSystem.DenyRead) == 0
 	token, err := createWindowsRestrictedTokenForCapabilitySIDs(tokenSIDs, writeRestricted)
 	if err != nil {

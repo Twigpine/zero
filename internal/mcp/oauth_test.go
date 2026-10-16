@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -666,5 +668,88 @@ func TestFullFlowUsesProtectedResourceDiscovery(t *testing.T) {
 	}
 	if resourceProbeHits.Load() != 1 || resourceMetadataHits.Load() != 1 || authorizationMetadataHits.Load() != 1 || tokenHits.Load() != 1 {
 		t.Fatalf("flow hits = probe:%d resource:%d authorization:%d token:%d", resourceProbeHits.Load(), resourceMetadataHits.Load(), authorizationMetadataHits.Load(), tokenHits.Load())
+	}
+}
+
+// A CLIENT STALLED MID-HEADER MUST NOT OUTLIVE LOGIN (#1028).
+//
+// Login built a bare http.Server and ended it with Shutdown under a one-second
+// deadline, and Shutdown only closes idle connections. A client that has sent
+// part of a request header is not idle, so it survived the deadline and kept
+// its goroutine, and the Serve goroutine, alive after Login returned.
+//
+// No sleep is needed to get the stalled connection accepted before Login ends:
+// it is dialled before the real callback's connection, Serve accepts in order,
+// and Login cannot finish until the real callback has been served.
+func TestLoginDoesNotLeaveAStalledCallbackClientOpen(t *testing.T) {
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "access-final", "token_type": "Bearer", "expires_in": 3600,
+		})
+	}))
+	defer tokenServer.Close()
+
+	var stalled net.Conn
+	opener := func(authURL string) error {
+		parsed, err := url.Parse(authURL)
+		if err != nil {
+			return err
+		}
+		redirect, err := url.Parse(parsed.Query().Get("redirect_uri"))
+		if err != nil {
+			return err
+		}
+		stalled, err = net.Dial("tcp", redirect.Host)
+		if err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(stalled, "GET /callback HTTP/1.1\r\nHost: %s\r\nX-Stall:", redirect.Host); err != nil {
+			return err
+		}
+		cbURL := redirect.String() + "?code=auth-code&state=" + url.QueryEscape(parsed.Query().Get("state"))
+		go func() {
+			if resp, err := http.Get(cbURL); err == nil {
+				resp.Body.Close()
+			}
+		}()
+		return nil
+	}
+
+	_, err := Login(context.Background(), LoginOptions{
+		ServerName: "demo",
+		ServerURL:  "https://issuer.invalid",
+		Config: OAuthConfig{
+			ClientID:              "client-123",
+			AuthorizationEndpoint: "https://issuer.invalid/authorize",
+			TokenEndpoint:         tokenServer.URL,
+		},
+		HTTPClient:  http.DefaultClient,
+		OpenBrowser: opener,
+		Timeout:     5 * time.Second,
+		Now:         time.Now,
+	})
+	if err != nil {
+		t.Fatalf("Login() error = %v", err)
+	}
+	if stalled == nil {
+		t.Fatal("SETUP INVALID: the stalled client never connected, so this proves nothing")
+	}
+	defer stalled.Close()
+	requireCallbackClientClosed(t, stalled)
+}
+
+// requireCallbackClientClosed fails unless the server end of conn is already
+// closed: a read has to fail with something other than a timeout.
+func requireCallbackClientClosed(t *testing.T, conn net.Conn) {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var one [1]byte
+	_, err := conn.Read(one[:])
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		t.Fatal("the stalled callback client was still connected after Login returned")
+	}
+	if err == nil {
+		t.Fatal("the stalled callback client received data instead of being closed")
 	}
 }

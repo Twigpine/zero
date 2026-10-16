@@ -9,6 +9,10 @@ import (
 
 const commandReapTimeout = 3 * time.Second
 
+// terminateOwnedProcessForTest is a seam for the failure-boundary tests. Tests
+// replace it only while no other test in this package is running in parallel.
+var terminateOwnedProcessForTest = terminateOwnedProcess
+
 // TerminateProcess stops a background process by PID — on Windows its process
 // tree; on POSIX its whole process group when the PID leads its own group (the
 // invariant ConfigureChildProcessGroup establishes for processes started through
@@ -26,11 +30,15 @@ func TerminateProcess(pid int) error {
 // have exclusive ownership of cmd: it must not have previously called Wait or
 // Process.Release, and no goroutine may call either concurrently. On POSIX it
 // stops the whole group when the command was configured as its leader; ordinary
-// commands safely fall back to PID/tree discovery. On Windows, success for a
-// leader that was already dead confirms only that the leader was reaped;
-// descendants may survive because Windows cannot rediscover a tree from a dead
-// root. `zero daemon start` needs this operation when readiness times out: it
-// launched the child, so it must both stop the tree and collect the leader.
+// commands safely fall back to PID/tree discovery. When POSIX observes a
+// waitable-zombie leader before signalling, a termination error is discarded
+// after reap only if the launch-time signal target is independently gone; the
+// leader observation alone says nothing about descendants. Windows retains its
+// existing behavior of ignoring the expected kill-attempt error when
+// GetExitCodeProcess shows that the root was already dead. Windows cannot
+// rediscover a tree from a dead root, so descendants may survive there. `zero
+// daemon start` needs this operation when readiness times out: it launched the
+// child, so it must both stop the tree and collect the leader.
 //
 // The order matters: the tree is signalled first, because Wait releases the
 // leader's PID and a later group lookup could then resolve to nothing (or, worse,
@@ -44,7 +52,7 @@ func TerminateCommand(cmd *exec.Cmd) error {
 	if cmd == nil || cmd.Process == nil {
 		return errors.New("terminate command: process was never started")
 	}
-	leaderAlreadyExited, terminateErr := terminateOwnedProcess(cmd)
+	leaderAlreadyExited, terminateErr := terminateOwnedProcessForTest(cmd)
 	reapErr := waitForTerminatedCommandWithin(cmd, commandReapTimeout)
 	if reapErr != nil {
 		if terminateErr != nil {
@@ -52,13 +60,40 @@ func TerminateCommand(cmd *exec.Cmd) error {
 		}
 		return reapErr
 	}
-	if terminateErr != nil && !leaderAlreadyExited {
-		return terminateErr
+	if terminateErr != nil {
+		if !leaderAlreadyExited || !terminationTargetGoneAfterReap(cmd) {
+			return terminateErr
+		}
 	}
-	// Only discard a termination error when the platform demonstrated before
-	// attempting termination that the leader had already exited. A successful
-	// reap alone says nothing about whether a live descendant tree was stopped.
+	// On POSIX, discard a termination error only when the leader was already
+	// exited and the launch-time signal target is independently gone after reap.
+	// A successful leader reap alone says nothing about live descendants.
+	// Windows retains its existing dead-root semantics because it has no
+	// persistent group identity to query after the root exits.
 	return nil
+}
+
+// TerminateCommandGroup stops a started command's process group on POSIX, or its
+// process tree on Windows, WITHOUT reaping it.
+//
+// It is TerminateCommand without the Wait, for a caller whose Wait already runs
+// somewhere else: a worker pool waiting on the command in its own goroutine, or
+// the command's own Cancel hook, which exec.Cmd invokes while its Wait is in
+// progress. TerminateCommand would be a second Wait there. Both used to pass
+// cmd.Process.Pid to TerminateProcess, which rediscovers the group at signal time
+// with Getpgid, and once the leader has exited that lookup fails, so only the dead
+// leader was signalled and its descendants kept running. When cmd was configured
+// by ConfigureChildProcessGroup the group now comes from that launch-time
+// configuration instead. On Windows it is the tree kill TerminateProcess performs,
+// with the process handle pinned while it runs so the PID cannot be recycled
+// underneath it; once the command has been waited that pin fails with an error
+// wrapping os.ErrProcessDone.
+func TerminateCommandGroup(cmd *exec.Cmd) error {
+	if cmd == nil || cmd.Process == nil {
+		return nil
+	}
+	_, err := terminateOwnedProcess(cmd)
+	return err
 }
 
 // classifyWaitError treats a non-zero exit status as success: a process being

@@ -2,20 +2,202 @@ package daemon
 
 import (
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/observability"
+	"github.com/Gitlawb/zero/internal/testutil"
 )
+
+func TestServeSupportsReadOnlyCustomRuntimeDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission compatibility regression")
+	}
+	dir, err := os.MkdirTemp("/tmp", "zero-serve-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	paths := Paths{
+		Socket: filepath.Join(dir, "daemon.sock"),
+		Lock:   filepath.Join(dir, "daemon.lock"),
+		Status: filepath.Join(dir, "daemon.status"),
+	}
+	launcher, _ := seqLauncher(&fakeWorker{pid: 1})
+	srv := newTestServerWithPaths(t, launcher, paths)
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve() }()
+	testutil.WaitFor(t, "file "+paths.Status, func() bool { _, err := os.Stat(paths.Status); return err == nil })
+	srv.Shutdown()
+	if err := <-serveErr; err != nil {
+		t.Fatalf("Serve with 0755 custom runtime directory: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o755 {
+		t.Fatalf("custom runtime directory permissions = %04o, want unchanged 0755", got)
+	}
+}
+
+func TestServeKeepsDefaultRootBoundAcrossCoordination(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows may deny renaming a directory with an open AF_UNIX lifecycle handle")
+	}
+	home, err := os.MkdirTemp("/tmp", "zero-root-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(paths.Socket)
+	moved := filepath.Join(home, "bound-runtime")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	launcher, _ := seqLauncher(&fakeWorker{pid: 1})
+	srv := newTestServerWithPaths(t, launcher, paths)
+	srv.opts.beforeSocketBind = func() {
+		if err := os.Rename(dir, moved); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err = srv.Serve()
+	if err == nil || !strings.Contains(err.Error(), "changed after it was secured") {
+		t.Fatalf("Serve error = %v, want replaced-runtime rejection", err)
+	}
+	if _, err := os.Stat(filepath.Join(moved, filepath.Base(paths.Lock))); err != nil {
+		t.Fatalf("rooted lock was not created in the bound directory: %v", err)
+	}
+	for _, path := range []string{paths.Lock, paths.Socket, paths.Status} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("substitute runtime entry %s was touched: %v", path, err)
+		}
+	}
+}
+
+func TestServeRemovesSocketBoundAfterFinalRuntimeSwap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows may deny renaming a directory with an open AF_UNIX lifecycle handle")
+	}
+	home, err := os.MkdirTemp("/tmp", "zero-bind-swap-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(paths.Socket)
+	moved := filepath.Join(home, "trusted-runtime")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	launcher, _ := seqLauncher(&fakeWorker{pid: 1})
+	srv := newTestServerWithPaths(t, launcher, paths)
+	srv.opts.afterSocketPreflight = func() {
+		if err := os.Rename(dir, moved); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err = srv.Serve()
+	if err == nil || !strings.Contains(err.Error(), "changed after it was secured") {
+		t.Fatalf("Serve error = %v, want post-bind runtime replacement rejection", err)
+	}
+	if _, err := os.Stat(filepath.Join(moved, filepath.Base(paths.Lock))); err != nil {
+		t.Fatalf("rooted lock was not retained in the trusted directory: %v", err)
+	}
+	if _, err := os.Lstat(paths.Socket); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("substitute runtime retained stale socket: %v", err)
+	}
+	listener, err := net.Listen("unix", paths.Socket)
+	if err != nil {
+		t.Fatalf("substitute runtime remained unbindable after rollback: %v", err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenRuntimeLogHardensDefaultRootBeforeOpen(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows DACL hardening has platform-specific coverage")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(paths.Socket)
+	if err := os.MkdirAll(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	file, logPath, err := OpenRuntimeLog(paths)
+	if err != nil {
+		t.Fatalf("OpenRuntimeLog: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if logPath != filepath.Join(dir, "daemon.log") {
+		t.Fatalf("log path = %q", logPath)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got&0o077 != 0 {
+		t.Fatalf("default runtime directory permissions = %04o, want owner-only", got)
+	}
+}
 
 func newTestServer(t *testing.T, launcher Launcher) (*Server, Paths) {
 	t.Helper()
 	dir := t.TempDir()
+	secureStatusTestDir(t, dir)
 	paths := Paths{
 		Socket: filepath.Join(dir, "d.sock"),
 		Lock:   filepath.Join(dir, "d.lock"),
 		Status: filepath.Join(dir, "d.status"),
 	}
+	return newTestServerWithPaths(t, launcher, paths), paths
+}
+
+func newTestServerWithPaths(t *testing.T, launcher Launcher, paths Paths) *Server {
+	t.Helper()
 	pool, err := NewPool(PoolOptions{Size: 2, Launcher: launcher, KillTimeout: 200 * time.Millisecond})
 	if err != nil {
 		t.Fatalf("NewPool: %v", err)
@@ -28,19 +210,7 @@ func newTestServer(t *testing.T, launcher Launcher) (*Server, Paths) {
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
-	return srv, paths
-}
-
-func waitForFile(t *testing.T, path string) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err == nil {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatalf("file %s did not appear within timeout", path)
+	return srv
 }
 
 func TestServerEndToEnd(t *testing.T) {
@@ -50,7 +220,7 @@ func TestServerEndToEnd(t *testing.T) {
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve() }()
-	waitForFile(t, paths.Status)
+	testutil.WaitFor(t, "file "+paths.Status, func() bool { _, err := os.Stat(paths.Status); return err == nil })
 
 	// --- run a session and collect its stream-json output ---
 	runClient, err := Dial(paths.Socket)
@@ -136,6 +306,154 @@ func TestServerEndToEnd(t *testing.T) {
 	}
 }
 
+func TestServePreservesPreviousStatusWhenReplacementFails(t *testing.T) {
+	launcher, _ := seqLauncher(&fakeWorker{pid: 1, exitCode: 0})
+	dir, err := os.MkdirTemp("", "zero-daemon-status-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	secureStatusTestDir(t, dir)
+	paths := Paths{Socket: filepath.Join(dir, "d.sock"), Lock: filepath.Join(dir, "d.lock"), Status: filepath.Join(dir, "d.status")}
+	srv := newTestServerWithPaths(t, launcher, paths)
+	previous := []byte(`{"pid":7,"socket":"previous","version":1}`)
+	if err := os.WriteFile(paths.Status, previous, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv.opts.replaceStatusFile = func(*os.Root, string, string) error {
+		return errors.New("injected replacement failure")
+	}
+
+	if err := srv.Serve(); err == nil || !strings.Contains(err.Error(), "injected replacement failure") {
+		t.Fatal("Serve succeeded despite injected status replacement failure")
+	}
+	got, err := os.ReadFile(paths.Status)
+	if err != nil {
+		t.Fatalf("previous status was removed after failed publication: %v", err)
+	}
+	if string(got) != string(previous) {
+		t.Fatalf("previous status changed after failed publication: %q", got)
+	}
+}
+
+func TestServeCleansStatusThroughBoundDirectoryAfterSwap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not permit renaming the directory containing the live socket")
+	}
+	parent, err := os.MkdirTemp("", "zero-daemon-swap-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(parent) })
+	dir := filepath.Join(parent, "live")
+	movedDir := filepath.Join(parent, "moved")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	secureStatusTestDir(t, dir)
+	paths := Paths{
+		Socket: filepath.Join(dir, "d.sock"),
+		Lock:   filepath.Join(dir, "d.lock"),
+		Status: filepath.Join(dir, "d.status"),
+	}
+	launcher, _ := seqLauncher(&fakeWorker{pid: 1, exitCode: 0})
+	srv := newTestServerWithPaths(t, launcher, paths)
+	substitute := []byte(`{"pid":999,"socket":"substitute"}`)
+	srv.opts.beforeStatusReplace = func() {
+		if err := os.Rename(dir, movedDir); err != nil {
+			t.Fatalf("move status directory: %v", err)
+		}
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatalf("create substitute directory: %v", err)
+		}
+		if err := os.WriteFile(paths.Status, substitute, 0o600); err != nil {
+			t.Fatalf("write substitute status: %v", err)
+		}
+	}
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve() }()
+	movedStatus := filepath.Join(movedDir, "d.status")
+	testutil.WaitFor(t, "file "+movedStatus, func() bool { _, err := os.Stat(movedStatus); return err == nil })
+	srv.Shutdown()
+	select {
+	case err := <-serveErr:
+		if err != nil {
+			t.Fatalf("Serve: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Serve did not return after shutdown")
+	}
+	if _, err := os.Stat(filepath.Join(movedDir, "d.status")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("bound status survived cleanup: %v", err)
+	}
+	got, err := os.ReadFile(paths.Status)
+	if err != nil {
+		t.Fatalf("substitute status was removed by pathname cleanup: %v", err)
+	}
+	if string(got) != string(substitute) {
+		t.Fatalf("substitute status changed during cleanup: %q", got)
+	}
+}
+
+func TestServerPublishesDefaultStatusAfterCrashReportCreatesRuntimeDirectory(t *testing.T) {
+	home, err := os.MkdirTemp("", "zero-home-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_RUNTIME_DIR", "")
+
+	if _, err := observability.WriteCrashReport(
+		observability.DefaultCrashDir(),
+		"cli",
+		"boom",
+		[]byte("stack"),
+		time.Now(),
+	); err != nil {
+		t.Fatalf("WriteCrashReport: %v", err)
+	}
+	paths, err := DefaultPaths()
+	if err != nil {
+		t.Fatalf("DefaultPaths: %v", err)
+	}
+	if paths.Status != filepath.Join(home, ".zero", "daemon.status") {
+		t.Fatalf("default status path = %q, want path beneath temporary home", paths.Status)
+	}
+
+	launcher, _ := seqLauncher(&fakeWorker{pid: 1})
+	srv := newTestServerWithPaths(t, launcher, paths)
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve() }()
+
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	for {
+		if _, err := os.Stat(paths.Status); err == nil {
+			break
+		}
+		select {
+		case err := <-serveErr:
+			t.Fatalf("Serve returned before publishing status: %v", err)
+		case <-deadline.C:
+			t.Fatal("daemon did not publish its default status file")
+		case <-time.After(2 * time.Millisecond):
+		}
+	}
+
+	srv.Shutdown()
+	select {
+	case err := <-serveErr:
+		if err != nil {
+			t.Fatalf("Serve returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Serve did not return after shutdown")
+	}
+}
+
 func TestServerSecondInstanceFails(t *testing.T) {
 	block := make(chan struct{})
 	defer close(block)
@@ -144,7 +462,7 @@ func TestServerSecondInstanceFails(t *testing.T) {
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv1.Serve() }()
-	waitForFile(t, paths.Status)
+	testutil.WaitFor(t, "file "+paths.Status, func() bool { _, err := os.Stat(paths.Status); return err == nil })
 
 	// A second server on the same paths must refuse to start (single instance).
 	pool2, _ := NewPool(PoolOptions{Size: 1, Launcher: launcher})
@@ -165,7 +483,7 @@ func TestServerRejectsUnknownCommand(t *testing.T) {
 	srv, paths := newTestServer(t, launcher)
 	go func() { _ = srv.Serve() }()
 	defer srv.Shutdown()
-	waitForFile(t, paths.Status)
+	testutil.WaitFor(t, "file "+paths.Status, func() bool { _, err := os.Stat(paths.Status); return err == nil })
 
 	client, err := Dial(paths.Socket)
 	if err != nil {

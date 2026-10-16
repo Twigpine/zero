@@ -433,3 +433,50 @@ func TestVerifyArchiveChecksumRejectsFilenameMismatch(t *testing.T) {
 		t.Fatalf("expected error to name both the referenced file and the expected one, got %q", err)
 	}
 }
+
+// An install of the old package name gets no further releases, so npm would
+// reinstall the same build and Apply would report an update that did not
+// happen. It must refuse with the switch steps in the one safe order, without
+// waiting on a release check that cannot change the answer.
+func TestApplyRefusesALegacyNpmInstallWithTheSwitchSteps(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "zero")
+	original := []byte("legacy binary")
+	if err := os.WriteFile(binary, original, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"name":"@gitlawb/zero","version":"0.10.0-linux-x64","os":["linux"],"cpu":["x64"]}`
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	restore := currentExecutable
+	currentExecutable = func() (string, error) { return binary, nil }
+	t.Cleanup(func() { currentExecutable = restore })
+
+	_, err := Apply(context.Background(), Options{
+		CurrentVersion: "0.10.0",
+		Fetch: func(context.Context, string) (Release, error) {
+			t.Error("Apply ran the release check for a legacy install; the refusal must not depend on the network")
+			return Release{}, errors.New("offline")
+		},
+	})
+	if err == nil {
+		t.Fatal("Apply did not refuse a legacy npm install")
+	}
+	message := err.Error()
+	uninstall := strings.Index(message, "npm uninstall -g @gitlawb/zero")
+	install := strings.Index(message, "npm install -g @twigpine/zero")
+	if uninstall < 0 || install < 0 {
+		t.Fatalf("refusal does not give both switch commands: %q", message)
+	}
+	if uninstall > install {
+		t.Fatalf("refusal installs before uninstalling, which npm rejects with EEXIST: %q", message)
+	}
+	after, readErr := os.ReadFile(binary)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(after) != string(original) {
+		t.Error("Apply rewrote the binary it refused to update")
+	}
+}

@@ -103,6 +103,87 @@ func TestCoordinatorReassign(t *testing.T) {
 	}
 }
 
+func TestCoordinatorHandoffClaimBlocksCompetingTransitions(t *testing.T) {
+	c := NewCoordinator()
+	_, _ = c.Register("t1", "a1", "team", "desc")
+	_ = c.SetStatus("t1", StatusRunning)
+	if _, err := c.BeginHandoff("t1"); err != nil {
+		t.Fatalf("BeginHandoff: %v", err)
+	}
+	if task, _ := c.Get("t1"); task.Status != StatusRunning {
+		t.Fatalf("status during handoff = %v, want running until source exits", task.Status)
+	}
+	if _, err := c.BeginHandoff("t1"); err == nil {
+		t.Fatal("a second handoff claim must fail")
+	}
+	if err := c.Complete("t1", "late result"); err == nil {
+		t.Fatal("member completion must not win after handoff is claimed")
+	}
+	if err := c.Reassign("t1", "a2"); err == nil {
+		t.Fatal("orphan adoption must not race a claimed handoff")
+	}
+	c.AbortHandoff("t1")
+}
+
+func TestCoordinatorAbortHandoffRestoresNormalCompletion(t *testing.T) {
+	c := NewCoordinator()
+	_, _ = c.Register("t1", "a1", "team", "desc")
+	if _, err := c.BeginHandoff("t1"); err != nil {
+		t.Fatalf("BeginHandoff: %v", err)
+	}
+	c.AbortHandoff("t1")
+	if err := c.Complete("t1", "done"); err != nil {
+		t.Fatalf("Complete after AbortHandoff: %v", err)
+	}
+}
+
+func TestCoordinatorHandoffReservationBlocksRegistrationUntilAbort(t *testing.T) {
+	c := NewCoordinator()
+	_, _ = c.Register("source", "a1", "team", "desc")
+	if _, err := c.BeginHandoff("source"); err != nil {
+		t.Fatalf("BeginHandoff: %v", err)
+	}
+	if err := c.ReserveHandoffSuccessor("source", "successor"); err != nil {
+		t.Fatalf("ReserveHandoffSuccessor: %v", err)
+	}
+	if _, err := c.Register("successor", "other", "team", "collision"); !errors.Is(err, ErrTaskExists) {
+		t.Fatalf("Register reserved id error = %v, want ErrTaskExists", err)
+	}
+	c.AbortHandoff("source")
+	if _, err := c.Register("successor", "other", "team", "available again"); err != nil {
+		t.Fatalf("reservation was not released by AbortHandoff: %v", err)
+	}
+	if err := c.Complete("source", "source continued"); err != nil {
+		t.Fatalf("source claim was not released by AbortHandoff: %v", err)
+	}
+}
+
+func TestCoordinatorCommitHandoffPublishesBothSides(t *testing.T) {
+	c := NewCoordinator()
+	_, _ = c.Register("source", "a1", "team", "desc")
+	_ = c.SetStatus("source", StatusRunning)
+	if _, err := c.BeginHandoff("source"); err != nil {
+		t.Fatalf("BeginHandoff: %v", err)
+	}
+	if err := c.ReserveHandoffSuccessor("source", "successor"); err != nil {
+		t.Fatalf("ReserveHandoffSuccessor: %v", err)
+	}
+	successor, err := c.CommitHandoff("source", "successor", "a2", "team", "continued")
+	if err != nil {
+		t.Fatalf("CommitHandoff: %v", err)
+	}
+	if successor.Status != StatusPending || successor.AgentID != "a2" {
+		t.Fatalf("successor = %+v, want pending ownership by a2", successor)
+	}
+	source, _ := c.Get("source")
+	if source.Status != StatusHandedOff {
+		t.Fatalf("source status = %s, want handed-off", source.Status)
+	}
+	if _, err := c.Register("successor", "other", "team", "duplicate"); !errors.Is(err, ErrTaskExists) {
+		t.Fatalf("committed successor was not registered: %v", err)
+	}
+}
+
 func TestCoordinatorColorStability(t *testing.T) {
 	c := NewCoordinator()
 	first := c.Color("a1")

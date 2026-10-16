@@ -9,6 +9,7 @@ import (
 )
 
 func TestGeminiPartTextOnlySerializationOmitsInlineData(t *testing.T) {
+	t.Parallel()
 	part := geminiPart{Text: "hello"}
 	got, err := json.Marshal(part)
 	if err != nil {
@@ -20,6 +21,7 @@ func TestGeminiPartTextOnlySerializationOmitsInlineData(t *testing.T) {
 }
 
 func TestGeminiInlineDataSerialization(t *testing.T) {
+	t.Parallel()
 	part := geminiPart{InlineData: &geminiInlineData{MimeType: "image/png", Data: "QUJD"}}
 	got, err := json.Marshal(part)
 	if err != nil {
@@ -31,6 +33,7 @@ func TestGeminiInlineDataSerialization(t *testing.T) {
 }
 
 func TestMapMessagesTextOnlyUserUnchanged(t *testing.T) {
+	t.Parallel()
 	_, contents, err := mapMessages([]zeroruntime.Message{
 		{Role: zeroruntime.MessageRoleUser, Content: "Read the file."},
 	})
@@ -47,6 +50,7 @@ func TestMapMessagesTextOnlyUserUnchanged(t *testing.T) {
 }
 
 func TestMapMessagesImageAndTextUserTurn(t *testing.T) {
+	t.Parallel()
 	raw := []byte("ABC")
 	_, contents, err := mapMessages([]zeroruntime.Message{
 		{
@@ -80,6 +84,7 @@ func TestMapMessagesImageAndTextUserTurn(t *testing.T) {
 }
 
 func TestMapMessagesImageOnlyUserTurn(t *testing.T) {
+	t.Parallel()
 	_, contents, err := mapMessages([]zeroruntime.Message{
 		{
 			Role:   zeroruntime.MessageRoleUser,

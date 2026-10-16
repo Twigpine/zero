@@ -290,6 +290,15 @@ func (c *Client) Install(ctx context.Context, entry Entry) (*Animation, error) {
 		return nil, err
 	}
 	defer unlock()
+	// Put back anything an earlier run was killed mid-commit; see installtxn.Recover,
+	// and abort on a transaction it could not resolve rather than install over a
+	// tree that is still owed a restore. The reconciler is nil because this commit
+	// publishes no metadata beside the tree (the publish is a no-op), so there is
+	// nothing to reconcile a retained backup against and a live target is the
+	// committed one.
+	if err := installtxn.Recover(root, nil); err != nil {
+		return nil, err
+	}
 	target := filepath.Join(root, entry.Slug)
 	if err := installtxn.CommitDir(target, stage, func() error { return nil }); err != nil {
 		return nil, fmt.Errorf("install pet: %w", err)

@@ -10,6 +10,7 @@ import (
 )
 
 func TestToolCallKeyOutputIndexZero(t *testing.T) {
+	t.Parallel()
 	p := &CodexProvider{}
 	zero, two := 0, 2
 	// output_index 0 with no item_id must produce a key (it was dropped before M1).
@@ -148,6 +149,7 @@ func TestCodexPreservesCustomApplyPatchFunction(t *testing.T) {
 }
 
 func TestHandleTerminalResponseNilPayload(t *testing.T) {
+	t.Parallel()
 	p := &CodexProvider{}
 
 	// response.failed with no Response payload must emit an error, not a silent done.
@@ -180,6 +182,7 @@ func TestHandleTerminalResponseNilPayload(t *testing.T) {
 }
 
 func TestHandleTerminalResponseFailedPayloadWithoutError(t *testing.T) {
+	t.Parallel()
 	p := &CodexProvider{}
 
 	// A response.failed carrying a payload whose error object is null/omitted (the

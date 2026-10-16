@@ -150,6 +150,12 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 		return InstallResult{}, err
 	}
 	defer unlock()
+	// Put back anything an earlier run was killed mid-commit; see installtxn.Recover.
+	// Abort on a transaction it could not resolve: installing over a target that is
+	// still owed a restore destroys the only copy of the tree it is owed.
+	if err := installtxn.Recover(dir, lockReconciler(dir)); err != nil {
+		return InstallResult{}, err
+	}
 
 	// Re-read under the cross-process lock. Another install may have updated the
 	// lockfile while this skill was fetched and staged.
@@ -184,6 +190,65 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 	return result, nil
 }
 
+// lockReconciler answers, for one interrupted workspace, which of the two trees
+// beside each other the lockfile records. A kill between the tree swap and the
+// lockfile publish leaves exactly what a kill after both leaves, so filesystem
+// shape cannot tell them apart and only the recorded hash can: the tree it
+// describes is the one the user was told they had.
+func lockReconciler(dir string) installtxn.Reconciler {
+	return func(name string, target string, backup string) (installtxn.Phase, error) {
+		lock, err := ReadLock(dir)
+		if err != nil {
+			return installtxn.PhaseUnknown, err
+		}
+		entry, locked := lock[name]
+		if !locked {
+			// A missing entry is not proof that the publish never ran. The entry can
+			// also be lost after a publish that did run: a truncated or deleted
+			// lockfile reads as an empty one. A hand-written skill the lockfile never
+			// named is an ordinary thing to find here too, and replacing it with the
+			// retained backup would delete the user's own work.
+			return installtxn.PhaseUnknown, nil
+		}
+		if entry.Hash == "" {
+			// Nothing to compare against, so neither tree can be shown to be the
+			// recorded one and recovery must not pick between them.
+			return installtxn.PhaseUnknown, nil
+		}
+		targetHash, err := manifestHash(target)
+		if err != nil {
+			return installtxn.PhaseUnknown, err
+		}
+		if targetHash == entry.Hash {
+			return installtxn.PhaseCommitted, nil
+		}
+		backupHash, err := manifestHash(backup)
+		if err != nil {
+			return installtxn.PhaseUnknown, err
+		}
+		if backupHash == entry.Hash {
+			return installtxn.PhasePrePublish, nil
+		}
+		return installtxn.PhaseUnknown, nil
+	}
+}
+
+// manifestHash hashes the SKILL.md under path the same way an install records
+// it. A tree with no SKILL.md is a non-match rather than a failure: an install
+// killed mid-copy can leave one, and it simply is not the tree the lockfile
+// describes. Any other read error means the comparison could not be made at all,
+// which is not the same answer and is reported.
+func manifestHash(path string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(path, skillFileName))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read %s: %w", skillFileName, err)
+	}
+	return hashContent(data), nil
+}
+
 // Remove deletes an installed skill directory and its lockfile entry. It errors
 // if the named skill is not present in either the dir or the lockfile.
 func Remove(dir string, name string) error {
@@ -201,6 +266,13 @@ func Remove(dir string, name string) error {
 		return err
 	}
 	defer unlock()
+	// Put back anything an earlier run was killed mid-commit; see installtxn.Recover.
+	// Abort on a transaction it could not resolve: reporting a successful removal
+	// leaves a backup nothing else reads, and the next install's recovery would
+	// publish it again and reinstate what the user deleted.
+	if err := installtxn.Recover(dir, lockReconciler(dir)); err != nil {
+		return err
+	}
 
 	lock, err := ReadLock(dir)
 	if err != nil {

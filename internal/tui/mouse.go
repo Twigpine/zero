@@ -299,7 +299,7 @@ func (m model) wantsMouseCapture() bool {
 	if m.mouseReleased {
 		return false // user released the mouse for native text selection/copy
 	}
-	return m.altScreen && (m.setupWantsMouseCapture() || m.chatWantsMouseCapture() || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil || m.suggestionsActive())
+	return m.altScreen && (m.setupWantsMouseCapture() || m.chatWantsMouseCapture() || m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil || m.terminalAttach != nil || m.suggestionsActive())
 }
 
 func (m model) setupWantsMouseCapture() bool {
@@ -474,23 +474,31 @@ func (wizard *mcpAddWizardState) mcpAddWizardResultActionStartRow() int {
 
 func (m *model) selectModelPickerAtMouse(msg tea.MouseMsg) (mouseSelectionTarget, bool) {
 	width := chatWidth(m.width)
-	hit, ok := m.overlayMouseHit(msg, m.modelPickerOverlay(width), width)
+	overlay, start, count := m.modelPickerOverlayLayout(width)
+	hit, ok := m.overlayMouseHit(msg, overlay, width)
 	if !ok {
 		return mouseSelectionTarget{}, false
 	}
-	maxVisible := minInt(pickerOverlayMaxVisible, len(m.picker.items))
-	start := selectableListStart(len(m.picker.items), maxVisible, clampInt(m.picker.selected, 0, len(m.picker.items)-1))
-	rowStart := 3
-	if m.modelPickerLoadError != "" {
-		rowStart++
+	line := 3
+	if strings.TrimSpace(m.modelPickerLoadError) != "" {
+		line++
 	}
-	row := hit.y - rowStart
-	if row < 0 || row >= maxVisible {
-		return mouseSelectionTarget{}, false
+	innerWidth := maxInt(1, modelPickerOverlayWidth(width, m.picker)-4)
+	lastGroup := ""
+	for index := start; index < start+count; index++ {
+		item := m.picker.items[index]
+		if item.Group != "" && item.Group != lastGroup {
+			line++
+			lastGroup = item.Group
+		}
+		rowLines := len(viewLines(renderModelPickerRow(innerWidth, index == m.picker.selected, item)))
+		if hit.y >= line && hit.y < line+rowLines {
+			m.picker.selected = index
+			return mouseSelectionTarget{Scope: "picker", Kind: int(m.picker.kind), Value: item.Value, Index: index}, true
+		}
+		line += rowLines
 	}
-	index := start + row
-	m.picker.selected = index
-	return mouseSelectionTarget{Scope: "picker", Kind: int(m.picker.kind), Value: m.picker.items[index].Value, Index: index}, true
+	return mouseSelectionTarget{}, false
 }
 
 func (m *model) selectGenericPickerAtMouse(msg tea.MouseMsg) (mouseSelectionTarget, bool) {
@@ -513,10 +521,11 @@ func (m *model) selectGenericPickerAtMouse(msg tea.MouseMsg) (mouseSelectionTarg
 			return mouseSelectionTarget{}, false
 		}
 	}
-	maxVisible := minInt(pickerOverlayMaxVisible, len(m.picker.items))
+	maxVisible := pickerMaxVisible(m.picker, width)
 	selected := clampInt(m.picker.selected, 0, len(m.picker.items)-1)
 	start := selectableListStart(len(m.picker.items), maxVisible, selected)
 	visible := m.picker.items[start : start+maxVisible]
+	details := pickerShowsDetails(m.picker, width)
 	// y=0 titled top border, y=1 search line, y=2 separator; rows begin at y=3.
 	line := 3
 	lastGroup := ""
@@ -528,12 +537,18 @@ func (m *model) selectGenericPickerAtMouse(msg tea.MouseMsg) (mouseSelectionTarg
 			line++
 			lastGroup = item.Group
 		}
-		if hit.y == line {
+		// A rendered detail line belongs to its item: a click anywhere on the
+		// two-line block selects the same row.
+		rowLines := 1
+		if details && item.Detail != "" {
+			rowLines = 2
+		}
+		if hit.y >= line && hit.y < line+rowLines {
 			index := start + offset
 			m.picker.selected = index
 			return mouseSelectionTarget{Scope: "picker", Kind: int(m.picker.kind), Value: item.Value, Index: index}, true
 		}
-		line++
+		line += rowLines
 	}
 	return mouseSelectionTarget{}, false
 }

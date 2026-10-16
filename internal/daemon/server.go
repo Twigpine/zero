@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -23,6 +24,23 @@ type Server struct {
 	listener net.Listener
 	conns    map[net.Conn]struct{} // open connections, closed on Shutdown so blocked reads return
 	lock     *fileLock
+	// runtimeRoot is retained for the full default-daemon lifecycle. Every file
+	// child is addressed relative to this capability; runtimeDir is used only to
+	// verify the unavoidable AF_UNIX pathname bind still names the same object.
+	runtimeRoot *os.Root
+	runtimeDir  string
+	// socketRoot captures the directory that actually received the pathname
+	// bind. It can differ from runtimeRoot only when the configured directory is
+	// exchanged in the final pre-bind window; retaining it makes rollback target
+	// the socket that was really created rather than re-resolving the pathname.
+	socketRoot *os.Root
+	socketName string
+	// statusRoot binds status publication and shutdown cleanup to the same
+	// directory object. statusCommitted is set only after this server publishes
+	// its document, so a failed startup never removes a previous daemon's status.
+	statusRoot      *os.Root
+	statusName      string
+	statusCommitted bool
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -41,6 +59,14 @@ type ServerOptions struct {
 	Now     func() time.Time
 	Log     func(string)
 	isAlive func(int) bool // test hook for the single-instance lock
+	// beforeStatusReplace, replaceStatusFile, and syncStatusParent are test hooks
+	// for the status-file commit boundary. nil selects production behavior.
+	beforeStatusReplace  func()
+	replaceStatusFile    func(root *os.Root, src, dst string) error
+	syncStatusParent     func(root *os.Root) error
+	afterRuntimeRootOpen func() // test hook at the default-root trust boundary
+	beforeSocketBind     func() // test hook before the final root verification
+	afterSocketPreflight func() // test hook in the unavoidable pathname-bind window
 }
 
 // NewServer validates options and builds a Server.
@@ -80,11 +106,41 @@ func (s *Server) Serve() error {
 	if err := checkSocketPathLength(s.opts.Paths.Socket); err != nil {
 		return err
 	}
-	if err := secureSocketParent(s.opts.Paths.Socket); err != nil {
+	defaultRoot, isDefault, err := openDefaultRuntimeRoot(s.opts.Paths)
+	if err != nil {
 		return err
 	}
-	lock, err := acquireLock(s.opts.Paths.Lock, s.opts.isAlive)
+	if isDefault {
+		s.runtimeRoot = defaultRoot
+		s.runtimeDir = filepath.Dir(s.opts.Paths.Socket)
+		s.statusRoot = defaultRoot
+		s.statusName = filepath.Base(s.opts.Paths.Status)
+		if s.opts.afterRuntimeRootOpen != nil {
+			s.opts.afterRuntimeRootOpen()
+		}
+		if err := runtimeRootStillNamesPath(defaultRoot, s.runtimeDir); err != nil {
+			s.closeRuntimeRoots()
+			return err
+		}
+	} else {
+		if err := secureCustomRuntimeParents(s.opts.Paths); err != nil {
+			return err
+		}
+		statusRoot, err := openStatusRoot(s.opts.Paths.Status)
+		if err != nil {
+			return fmt.Errorf("daemon: open status directory: %w", err)
+		}
+		s.statusRoot = statusRoot
+		s.statusName = filepath.Base(s.opts.Paths.Status)
+	}
+	var lock *fileLock
+	if s.runtimeRoot != nil {
+		lock, err = acquireLockRoot(s.runtimeRoot, filepath.Base(s.opts.Paths.Lock), s.opts.Paths.Lock, s.opts.isAlive)
+	} else {
+		lock, err = acquireLock(s.opts.Paths.Lock, s.opts.isAlive)
+	}
 	if err != nil {
+		s.closeRuntimeRoots()
 		return err
 	}
 	s.lock = lock
@@ -92,7 +148,22 @@ func (s *Server) Serve() error {
 
 	// A leftover socket file from an unclean exit would make Listen fail with
 	// "address already in use"; we hold the lock, so any socket here is stale.
-	_ = os.Remove(s.opts.Paths.Socket)
+	if s.runtimeRoot != nil {
+		if err := s.runtimeRoot.Remove(filepath.Base(s.opts.Paths.Socket)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("daemon: remove stale control socket: %w", err)
+		}
+		if s.opts.beforeSocketBind != nil {
+			s.opts.beforeSocketBind()
+		}
+		if err := runtimeRootStillNamesPath(s.runtimeRoot, s.runtimeDir); err != nil {
+			return err
+		}
+		if s.opts.afterSocketPreflight != nil {
+			s.opts.afterSocketPreflight()
+		}
+	} else {
+		_ = os.Remove(s.opts.Paths.Socket)
+	}
 
 	listener, err := net.Listen("unix", s.opts.Paths.Socket)
 	if err != nil {
@@ -101,6 +172,22 @@ func (s *Server) Serve() error {
 	s.mu.Lock()
 	s.listener = listener
 	s.mu.Unlock()
+	if s.runtimeRoot != nil {
+		boundRoot, boundName, err := captureBoundSocketRoot(s.opts.Paths.Socket)
+		if err != nil {
+			_ = listener.Close()
+			return fmt.Errorf("daemon: capture bound control socket: %w", err)
+		}
+		s.socketRoot = boundRoot
+		s.socketName = boundName
+		if err := runtimeRootStillNamesPath(s.runtimeRoot, s.runtimeDir); err != nil {
+			return err
+		}
+		info, err := s.runtimeRoot.Lstat(filepath.Base(s.opts.Paths.Socket))
+		if err != nil || info.Mode()&os.ModeSocket == 0 {
+			return fmt.Errorf("daemon: bound control socket is outside the secured runtime directory")
+		}
+	}
 	// If Shutdown already fired during the bind window, close now and bail so a
 	// shutdown requested at startup is never lost (the accept loop would otherwise
 	// block forever waiting for a connection that never comes) (D4).
@@ -111,7 +198,7 @@ func (s *Server) Serve() error {
 		return nil
 	default:
 	}
-	if err := hardenSocketFile(s.opts.Paths.Socket); err != nil {
+	if err := s.hardenSocket(); err != nil {
 		return fmt.Errorf("daemon: harden control socket: %w", err)
 	}
 	s.startedAt = s.opts.Now()
@@ -190,11 +277,56 @@ func (s *Server) cleanup() {
 	if s.listener != nil {
 		_ = s.listener.Close()
 	}
-	_ = os.Remove(s.opts.Paths.Socket)
-	_ = os.Remove(s.opts.Paths.Status)
+	if s.socketRoot != nil {
+		if err := s.socketRoot.Remove(s.socketName); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.logf("daemon: remove control socket: %v", err)
+		}
+	} else if s.runtimeRoot != nil {
+		if err := s.runtimeRoot.Remove(filepath.Base(s.opts.Paths.Socket)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.logf("daemon: remove control socket: %v", err)
+		}
+	} else {
+		_ = os.Remove(s.opts.Paths.Socket)
+	}
+	if s.statusRoot != nil {
+		if s.statusCommitted {
+			if err := s.statusRoot.Remove(s.statusName); err != nil && !errors.Is(err, os.ErrNotExist) {
+				s.logf("daemon: remove status file: %v", err)
+			}
+		}
+	}
 	if s.lock != nil {
 		_ = s.lock.release()
 	}
+	s.closeRuntimeRoots()
+}
+
+func (s *Server) hardenSocket() error {
+	if s.runtimeRoot != nil {
+		return hardenSocketFileRoot(s.runtimeRoot, filepath.Base(s.opts.Paths.Socket))
+	}
+	return hardenSocketFile(s.opts.Paths.Socket)
+}
+
+func (s *Server) closeRuntimeRoots() {
+	if s.socketRoot != nil {
+		if err := s.socketRoot.Close(); err != nil {
+			s.logf("daemon: close bound socket directory: %v", err)
+		}
+	}
+	s.socketRoot = nil
+	if s.statusRoot != nil && s.statusRoot != s.runtimeRoot {
+		if err := s.statusRoot.Close(); err != nil {
+			s.logf("daemon: close status directory: %v", err)
+		}
+	}
+	s.statusRoot = nil
+	if s.runtimeRoot != nil {
+		if err := s.runtimeRoot.Close(); err != nil {
+			s.logf("daemon: close runtime directory: %v", err)
+		}
+	}
+	s.runtimeRoot = nil
 }
 
 func (s *Server) writeStatusFile() error {
@@ -208,7 +340,30 @@ func (s *Server) writeStatusFile() error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(s.opts.Paths.Status, data, 0o600); err != nil {
+	root := s.statusRoot
+	ownedRoot := false
+	if root == nil {
+		var err error
+		root, err = openStatusRoot(s.opts.Paths.Status)
+		if err != nil {
+			return fmt.Errorf("daemon: write status file: %w", err)
+		}
+		ownedRoot = true
+	}
+	committed, err := writeStatusFileAtomicallyRoot(root, filepath.Base(s.opts.Paths.Status), data, 0o600, s.opts.beforeStatusReplace, s.opts.replaceStatusFile, s.opts.syncStatusParent)
+	if ownedRoot {
+		if closeErr := root.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close status directory: %w", closeErr))
+		}
+	}
+	if committed {
+		s.statusCommitted = true
+	}
+	if err != nil {
+		if committed {
+			s.logf("daemon: status file publication committed with warning: %v", err)
+			return nil
+		}
 		return fmt.Errorf("daemon: write status file: %w", err)
 	}
 	return nil

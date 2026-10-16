@@ -360,6 +360,86 @@ func TestConnNotification(t *testing.T) {
 	}
 }
 
+func TestConnNotificationsForOneMethodStayInWireOrder(t *testing.T) {
+	a, b, stop := connPair(t)
+	defer stop()
+
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	delivered := make(chan int, 2)
+	b.HandleNotify("update", func(_ context.Context, params json.RawMessage) {
+		var in struct{ Sequence int }
+		_ = json.Unmarshal(params, &in)
+		if in.Sequence == 1 {
+			close(firstStarted)
+			<-releaseFirst
+		}
+		delivered <- in.Sequence
+	})
+
+	if err := a.Notify("update", map[string]int{"Sequence": 1}); err != nil {
+		t.Fatalf("first notify: %v", err)
+	}
+	select {
+	case <-firstStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first notification did not start")
+	}
+	if err := a.Notify("update", map[string]int{"Sequence": 2}); err != nil {
+		t.Fatalf("second notify: %v", err)
+	}
+	select {
+	case sequence := <-delivered:
+		t.Fatalf("notification %d overtook the blocked first notification", sequence)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(releaseFirst)
+	for want := 1; want <= 2; want++ {
+		select {
+		case got := <-delivered:
+			if got != want {
+				t.Fatalf("notification order = ...,%d; want %d", got, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("notification %d was not delivered", want)
+		}
+	}
+}
+
+func TestConnDifferentNotificationMethodsStayConcurrent(t *testing.T) {
+	a, b, stop := connPair(t)
+	defer stop()
+
+	updateStarted := make(chan struct{})
+	releaseUpdate := make(chan struct{})
+	cancelDelivered := make(chan struct{})
+	b.HandleNotify("update", func(context.Context, json.RawMessage) {
+		close(updateStarted)
+		<-releaseUpdate
+	})
+	b.HandleNotify("cancel", func(context.Context, json.RawMessage) {
+		close(cancelDelivered)
+	})
+
+	if err := a.Notify("update", nil); err != nil {
+		t.Fatalf("update notify: %v", err)
+	}
+	select {
+	case <-updateStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("update notification did not start")
+	}
+	if err := a.Notify("cancel", nil); err != nil {
+		t.Fatalf("cancel notify: %v", err)
+	}
+	select {
+	case <-cancelDelivered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("different notification method was blocked behind update")
+	}
+	close(releaseUpdate)
+}
+
 func TestConnMethodNotFound(t *testing.T) {
 	a, _, stop := connPair(t)
 	defer stop()

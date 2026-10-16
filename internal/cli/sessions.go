@@ -18,6 +18,8 @@ type sessionCommandOptions struct {
 	excludeTarget  bool
 	preserveLast   int
 	maxPromptChars int
+	olderThan      string
+	dryRun         bool
 }
 
 func runSessions(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -72,6 +74,11 @@ func runSessions(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 			return writeExecUsageError(stderr, "sessions compact-plan requires a session id")
 		}
 		return runSessionsCompactPlan(store, remaining[0], options, stdout, stderr)
+	case "prune":
+		if len(remaining) != 0 {
+			return writeExecUsageError(stderr, "sessions prune does not accept positional arguments")
+		}
+		return runSessionsPrune(store, options, stdout, stderr, deps)
 	default:
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown sessions command %q", command))
 	}
@@ -91,6 +98,8 @@ func parseSessionsArgs(args []string) (string, []string, sessionCommandOptions, 
 			options.json = true
 		case "--exclude-target":
 			options.excludeTarget = true
+		case "--dry-run":
+			options.dryRun = true
 		case "--kind":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
@@ -168,6 +177,21 @@ func parseSessionsArgs(args []string) (string, []string, sessionCommandOptions, 
 				}
 				options.preserveLast = preserveLast
 				continue
+			case arg == "--older-than":
+				value, next, err := nextFlagValue(args, index, arg)
+				if err != nil {
+					return command, remaining, options, false, err
+				}
+				options.olderThan = value
+				index = next
+				continue
+			case strings.HasPrefix(arg, "--older-than="):
+				value, err := parseNonEmptySessionsFlag("--older-than", strings.TrimPrefix(arg, "--older-than="))
+				if err != nil {
+					return command, remaining, options, false, err
+				}
+				options.olderThan = value
+				continue
 			case arg == "--max-prompt-chars":
 				value, next, err := nextFlagValue(args, index, arg)
 				if err != nil {
@@ -225,7 +249,7 @@ func parseSessionKindFlag(value string) (sessions.SessionKind, error) {
 
 func isSessionsCommand(command string) bool {
 	switch command {
-	case "list", "children", "lineage", "tree", "rewind-plan", "rewind", "compact-plan":
+	case "list", "children", "lineage", "tree", "rewind-plan", "rewind", "compact-plan", "prune":
 		return true
 	default:
 		return false
@@ -243,6 +267,9 @@ func validateSessionCommandFlags(command string, options sessionCommandOptions) 
 	hasCompactionFlag := options.preserveLast > 0 || options.maxPromptChars > 0
 	if hasCompactionFlag && command != "compact-plan" {
 		return execUsageError{"--preserve-last and --max-prompt-chars are only valid for sessions compact-plan"}
+	}
+	if (options.olderThan != "" || options.dryRun) && command != "prune" {
+		return execUsageError{"--older-than and --dry-run are only valid for sessions prune"}
 	}
 	return nil
 }
@@ -532,6 +559,7 @@ Commands:
   rewind-plan <id>      Preview events kept and dropped by a rewind
   rewind <id>           Restore workspace files and truncate the log to a checkpoint
   compact-plan <id>     Preview events compacted and preserved by compaction
+  prune                 Remove sessions last updated before a cutoff
 
 Flags:
       --json            Print JSON output
@@ -541,7 +569,13 @@ Flags:
       --exclude-target  Drop the target event (rewind-plan, rewind)
       --preserve-last <n> Keep recent events in compact-plan
       --max-prompt-chars <n> Limit compact-plan summary prompt
+      --older-than <age>  Prune cutoff, as days (30d) or a duration (720h); at least 1d.
+                        Without it, prune uses sessions.retentionDays from your user config.
+      --dry-run         List what prune would remove, and why it keeps the rest
   -h, --help            Show this help
+
+prune only runs when you run it. It never removes a session another Zero process
+has open, or an ancestor of a session it keeps, and --dry-run shows why.
 `)
 	return err
 }

@@ -69,7 +69,7 @@ func TestRunExecListToolsHonorsDisabledLocalControlConfig(t *testing.T) {
 	if exitCode != exitSuccess {
 		t.Fatalf("exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
 	}
-	if stderr.Len() != 0 {
+	if stderr.String() != hostSandboxNotice(t) {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
 	}
 	var payload struct {

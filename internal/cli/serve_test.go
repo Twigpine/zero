@@ -168,11 +168,18 @@ func TestBuildServeScopeKeepsLexicalPaths(t *testing.T) {
 	}
 	linkWorkspace := filepath.Join(base, "link-workspace")
 	linkExtra := filepath.Join(base, "link-extra")
+	// SKIPPED, NOT FAILED, WHEN THE PLATFORM WILL NOT MAKE THE LINK. Creating a
+	// symlink on Windows needs SeCreateSymbolicLinkPrivilege, which an ordinary
+	// developer account does not hold, so this reported a failure with nothing
+	// wrong in the code: "A required privilege is not held by the client". CI
+	// runners are elevated, so it only ever showed up locally, where it cost a
+	// round of triage before being ruled environmental. The sibling tests that
+	// need a link already answer this way.
 	if err := os.Symlink(realWorkspace, linkWorkspace); err != nil {
-		t.Fatal(err)
+		t.Skipf("symlink unavailable: %v", err)
 	}
 	if err := os.Symlink(realExtra, linkExtra); err != nil {
-		t.Fatal(err)
+		t.Skipf("symlink unavailable: %v", err)
 	}
 
 	scope, err := buildServeScope(linkWorkspace, []string{linkExtra})

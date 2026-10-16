@@ -7,7 +7,7 @@ DEADCODE_VERSION := v0.46.0
 GOLANGCI_LINT_VERSION := v2.12.2
 GOVULNCHECK_VERSION := v1.3.0
 
-.PHONY: build build-all test test-race vet fmt fmt-check lint lint-static deadcode vulncheck tidy clean baseline help
+.PHONY: build build-all test test-race vet fmt fmt-check lint lint-static deadcode vulncheck vulncheck-windows tidy clean baseline help
 
 # Build the main CLI binary into ./zero.
 build:
@@ -44,7 +44,8 @@ lint: fmt-check vet
 # the possibly stale Go toolchain or consulting a multi-module GOWORK. git grep
 # works with both POSIX shells and cmd.exe, including GNU Make 3.81 on macOS.
 # The target-specific export is shell-independent.
-lint-static deadcode vulncheck: export GOTOOLCHAIN = $(GO_TOOLCHAIN)
+lint-static deadcode vulncheck vulncheck-windows: export GOTOOLCHAIN = $(GO_TOOLCHAIN)
+lint-static deadcode vulncheck vulncheck-windows: export GOWORK = off
 
 lint-static:
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run --enable-only unused,ineffassign,staticcheck ./...
@@ -54,6 +55,11 @@ deadcode:
 
 vulncheck:
 	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
+
+vulncheck-windows:
+	mkdir -p "$(CURDIR)/.cache/gobin"
+	GOBIN="$(CURDIR)/.cache/gobin" go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
+	GOOS=windows "$(CURDIR)/.cache/gobin/govulncheck" ./...
 
 tidy:
 	go mod tidy
@@ -77,4 +83,4 @@ baseline: build
 		--output internal/perfbench/reports/baseline.json
 
 help:
-	@echo "Targets: build (default), build-all, test, test-quick, vet, fmt, fmt-check, lint, lint-static, deadcode, vulncheck, tidy, clean, baseline"
+	@echo "Targets: build (default), build-all, test, test-quick, vet, fmt, fmt-check, lint, lint-static, deadcode, vulncheck, vulncheck-windows, tidy, clean, baseline"

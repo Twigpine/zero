@@ -3,6 +3,7 @@ package openai
 import "testing"
 
 func TestOpenAIReasoningEffortPreservesKnownProviderTiers(t *testing.T) {
+	t.Parallel()
 	for _, effort := range []string{"minimal", "low", "medium", "high", "xhigh", "max", "ultra"} {
 		if got := openAIReasoningEffort(effort); got != effort {
 			t.Fatalf("openAIReasoningEffort(%q) = %q", effort, got)
@@ -14,6 +15,7 @@ func TestOpenAIReasoningEffortPreservesKnownProviderTiers(t *testing.T) {
 }
 
 func TestOpenAIServiceTierNormalizesKnownValues(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		input string
 		want  string

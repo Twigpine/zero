@@ -3,10 +3,13 @@ package mcp
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"net/http"
 	"os"
 	"os/exec"
 	"strconv"
@@ -15,6 +18,8 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/execution"
+	"github.com/Gitlawb/zero/internal/imageinput"
+	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
 type RemoteTool struct {
@@ -26,10 +31,16 @@ type RemoteTool struct {
 type Content struct {
 	Type string `json:"type"`
 	Text string `json:"text,omitempty"`
-	// MimeType names what a non-text block holds. Decoded but not yet forwarded:
-	// it is what lets a dropped block be described to the model instead of
-	// vanishing (#823). Servers that omit it still decode fine.
+	// MimeType names what a non-text block holds. Additive and omitempty, so
+	// servers that never send it decode exactly as before. Image blocks with
+	// valid data are forwarded on Result.Images; MimeType is what lets a
+	// remaining dropped block (audio, resource, failed decode) be described
+	// instead of vanishing (#823).
 	MimeType string `json:"mimeType,omitempty"`
+	// Data is the MCP image block's base64 payload. Additive and omitempty so a
+	// result that never sent it still unmarshals. Decoded only for type
+	// "image"; other types leave it unread.
+	Data string `json:"data,omitempty"`
 }
 
 type CallToolResult struct {
@@ -49,19 +60,38 @@ type Client struct {
 	stdin   io.WriteCloser
 	reader  *messageReader
 	writer  *messageWriter
-	mu      sync.Mutex
 	closeMu sync.Mutex
+	idMu    sync.Mutex
 	nextID  int
 	cleanup func()
 
+	writeMu          sync.Mutex
+	writeQueue       chan writeOp
+	writeClosed      bool
+	writeSenders     sync.WaitGroup
+	writerStop       chan struct{}
+	writerDone       chan struct{}
+	courtesyOverflow []writeOp
+
 	// dispatchMu guards the response-dispatch state shared with the single
-	// reader goroutine. It is never held across a blocking read.
+	// reader goroutine. It is never held across a blocking read or write.
 	dispatchMu sync.Mutex
 	readerOnce sync.Once
 	pending    map[int]chan dispatchResult
 	readErr    error
 	readDone   bool
 }
+
+type writeOp struct {
+	ctx     context.Context
+	message rpcMessage
+	done    chan error
+}
+
+const writeQueueCapacity = 32
+const courtesyOverflowCap = writeQueueCapacity
+
+var errMCPClientClosed = errors.New("MCP client closed")
 
 // dispatchResult carries one matched JSON-RPC response (or a terminal reader
 // error) to a waiting caller.
@@ -252,7 +282,8 @@ func (client *Client) Close() error {
 	// Fail any callers still waiting on a response. The blocking read in the
 	// reader goroutine is released below when stdin closes and the process
 	// exits (or is killed), EOFing stdout.
-	client.failAll(errors.New("MCP client closed"))
+	client.failAll(errMCPClientClosed)
+	client.beginWriterShutdown()
 
 	var err error
 	stdin := client.stdin
@@ -292,6 +323,7 @@ func (client *Client) Close() error {
 		client.cleanup()
 		client.cleanup = nil
 	}
+	client.finishWriterShutdown()
 	return err
 }
 
@@ -307,20 +339,20 @@ func (client *Client) request(ctx context.Context, method string, params any, ta
 		return err
 	}
 
-	// Allocate an id, register a response channel, and write the request while
-	// holding client.mu. The mutex serializes writes and id allocation but is
-	// released before the (potentially unbounded) wait for the response, so a
-	// hung server never holds the lock and blocks other callers/Close.
-	client.mu.Lock()
+	// Allocate an id and register a response channel. ID allocation and dispatch
+	// registrations are fast non-blocking operations. Message transmission is
+	// handled via writeMessage so a caller with a canceled context can stop
+	// waiting even when the peer is not draining its input.
+	client.idMu.Lock()
 	id := client.nextID
 	client.nextID++
+	client.idMu.Unlock()
 
 	responses := make(chan dispatchResult, 1)
 	client.dispatchMu.Lock()
 	if client.readDone {
 		readErr := client.readErr
 		client.dispatchMu.Unlock()
-		client.mu.Unlock()
 		if readErr != nil {
 			return readErr
 		}
@@ -329,16 +361,14 @@ func (client *Client) request(ctx context.Context, method string, params any, ta
 	client.pending[id] = responses
 	client.dispatchMu.Unlock()
 
-	if err := client.writer.write(rpcMessage{
+	if err := client.writeMessage(ctx, rpcMessage{
 		ID:     id,
 		Method: method,
 		Params: rawParams,
 	}); err != nil {
 		client.removePending(id)
-		client.mu.Unlock()
 		return err
 	}
-	client.mu.Unlock()
 
 	select {
 	case <-ctx.Done():
@@ -358,6 +388,185 @@ func (client *Client) request(ctx context.Context, method string, params any, ta
 			}
 		}
 		return nil
+	}
+}
+
+func (client *Client) startWriter() error {
+	client.writeMu.Lock()
+	defer client.writeMu.Unlock()
+	if client.writeClosed {
+		return errMCPClientClosed
+	}
+	if client.writeQueue != nil {
+		return nil
+	}
+	queue := make(chan writeOp, writeQueueCapacity)
+	client.writeQueue = queue
+	client.writerStop = make(chan struct{})
+	client.writerDone = make(chan struct{})
+	go client.writeLoop(queue)
+	return nil
+}
+
+func (client *Client) writerStopped() bool {
+	if client.writerStop == nil {
+		return false
+	}
+	select {
+	case <-client.writerStop:
+		return true
+	default:
+		return false
+	}
+}
+
+func (client *Client) beginWriterShutdown() {
+	client.writeMu.Lock()
+	defer client.writeMu.Unlock()
+	if client.writeClosed {
+		return
+	}
+	client.writeClosed = true
+	if client.writerStop != nil {
+		close(client.writerStop)
+	}
+	for _, op := range client.courtesyOverflow {
+		if op.done != nil {
+			op.done <- errMCPClientClosed
+		}
+	}
+	client.courtesyOverflow = nil
+}
+
+func (client *Client) finishWriterShutdown() {
+	client.writeMu.Lock()
+	queue := client.writeQueue
+	done := client.writerDone
+	client.writeQueue = nil
+	client.writeMu.Unlock()
+	if queue == nil {
+		return
+	}
+	client.writeSenders.Wait()
+	close(queue)
+	if done != nil {
+		<-done
+	}
+}
+
+func (client *Client) writeLoop(queue <-chan writeOp) {
+	defer close(client.writerDone)
+	if queue == nil {
+		return
+	}
+	for op := range queue {
+		if client.writerStopped() {
+			if op.done != nil {
+				op.done <- errMCPClientClosed
+			}
+			continue
+		}
+		if op.ctx != nil {
+			select {
+			case <-op.ctx.Done():
+				if op.done != nil {
+					op.done <- op.ctx.Err()
+				}
+				continue
+			default:
+			}
+		}
+		err := client.writer.write(op.message)
+		if op.done != nil {
+			op.done <- err
+		}
+		client.drainCourtesyOverflow()
+	}
+}
+
+func (client *Client) drainCourtesyOverflow() {
+	client.writeMu.Lock()
+	defer client.writeMu.Unlock()
+	if client.writeClosed || client.writeQueue == nil {
+		client.courtesyOverflow = nil
+		return
+	}
+	for len(client.courtesyOverflow) > 0 {
+		select {
+		case client.writeQueue <- client.courtesyOverflow[0]:
+			client.courtesyOverflow = client.courtesyOverflow[1:]
+		default:
+			return
+		}
+	}
+}
+
+func (client *Client) enqueueCourtesy(message rpcMessage) {
+	if err := client.startWriter(); err != nil {
+		return
+	}
+	op := writeOp{message: message}
+	client.writeMu.Lock()
+	defer client.writeMu.Unlock()
+	if client.writeClosed || client.writeQueue == nil {
+		return
+	}
+	select {
+	case client.writeQueue <- op:
+	default:
+		if len(client.courtesyOverflow) >= courtesyOverflowCap {
+			return
+		}
+		client.courtesyOverflow = append(client.courtesyOverflow, op)
+	}
+}
+
+func (client *Client) writeMessage(ctx context.Context, message rpcMessage) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := client.startWriter(); err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	op := writeOp{ctx: ctx, message: message, done: done}
+
+	client.writeMu.Lock()
+	if client.writeClosed {
+		client.writeMu.Unlock()
+		return errMCPClientClosed
+	}
+	stop := client.writerStop
+	queue := client.writeQueue
+	client.writeSenders.Add(1)
+	client.writeMu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		client.writeSenders.Done()
+		return ctx.Err()
+	case <-stop:
+		client.writeSenders.Done()
+		return errMCPClientClosed
+	case queue <- op:
+		client.writeSenders.Done()
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-stop:
+		select {
+		case err := <-done:
+			if err != nil {
+				return err
+			}
+			return errMCPClientClosed
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	case err := <-done:
+		return err
 	}
 }
 
@@ -384,6 +593,20 @@ func (client *Client) readLoop() {
 		if err != nil {
 			client.failAll(err)
 			return
+		}
+		// A message with a Method is a server-initiated request or notification.
+		// It must never be routed as a response to a pending client request.
+		if message.isRequestOrNotification() {
+			if message.ID != nil && jsonRPCIDEchoable(message.ID) {
+				client.enqueueCourtesy(rpcMessage{
+					ID: message.ID,
+					Error: &rpcError{
+						Code:    -32601,
+						Message: fmt.Sprintf("Method %q not supported", message.Method),
+					},
+				})
+			}
+			continue
 		}
 		if message.ID == nil {
 			continue
@@ -428,6 +651,20 @@ func (client *Client) failAll(err error) {
 
 // rpcMessageID extracts the integer id from a JSON-RPC id value across the
 // numeric/string encodings a server may use.
+func jsonNumberAsInt(n json.Number) (int64, bool) {
+	if parsed, err := n.Int64(); err == nil {
+		return parsed, true
+	}
+	f, err := n.Float64()
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f != math.Trunc(f) {
+		return 0, false
+	}
+	if f > float64(math.MaxInt64) || f < float64(math.MinInt64) {
+		return 0, false
+	}
+	return int64(f), true
+}
+
 func rpcMessageID(value any) (int, bool) {
 	switch typed := value.(type) {
 	case int:
@@ -435,10 +672,13 @@ func rpcMessageID(value any) (int, bool) {
 	case int64:
 		return int(typed), true
 	case float64:
+		if math.IsNaN(typed) || math.IsInf(typed, 0) || typed != math.Trunc(typed) {
+			return 0, false
+		}
 		return int(typed), true
 	case json.Number:
-		parsed, err := typed.Int64()
-		if err != nil {
+		parsed, ok := jsonNumberAsInt(typed)
+		if !ok {
 			return 0, false
 		}
 		return int(parsed), true
@@ -454,18 +694,30 @@ func rpcMessageID(value any) (int, bool) {
 }
 
 func rpcIDMatches(value any, id int) bool {
-	switch typed := value.(type) {
-	case int:
-		return typed == id
-	case int64:
-		return typed == int64(id)
-	case float64:
-		return typed == float64(id)
-	case json.Number:
-		parsed, err := typed.Int64()
-		return err == nil && parsed == int64(id)
+	got, ok := rpcMessageID(value)
+	return ok && got == id
+}
+
+// jsonRPCIDEchoable reports whether id is a valid JSON-RPC 2.0 identifier type
+// (string or finite number) that is safe to echo back.
+func jsonRPCIDEchoable(id any) bool {
+	if id == nil {
+		return false
+	}
+	switch v := id.(type) {
 	case string:
-		return typed == strconv.Itoa(id)
+		return true
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return true
+	case float64:
+		return !math.IsNaN(v) && !math.IsInf(v, 0)
+	case json.Number:
+		parsed, err := v.Float64()
+		if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+			return false
+		}
+		_, err = json.Marshal(v)
+		return err == nil
 	default:
 		return false
 	}
@@ -476,7 +728,7 @@ func (client *Client) notify(method string, params any) error {
 	if err != nil {
 		return err
 	}
-	return client.writer.write(rpcMessage{
+	return client.writeMessage(context.Background(), rpcMessage{
 		Method: method,
 		Params: rawParams,
 	})
@@ -500,24 +752,95 @@ func TextContent(content []Content) string {
 	return strings.TrimSpace(strings.Join(parts, "\n"))
 }
 
-// DroppedContentSummary describes the blocks TextContent discards, e.g.
-// "1 image/png block" or "2 resource blocks, 1 audio/wav block". It returns ""
-// when a result is entirely text, so a caller adds nothing to the ordinary case.
-//
-// This exists because dropping silently is the worst available behaviour. A
-// screenshot server returns a valid image, TextContent keeps nothing, and the
-// call is reported as "(empty MCP tool result)" — so the model concludes the
-// tool produced nothing and usually retries, burning another call on the same
-// empty answer. Naming what came back costs nothing and ends that loop even
-// though the payload still cannot be forwarded.
-//
-// Counts are grouped by mime type and ordered by first appearance, so the same
-// result always produces the same sentence.
-func DroppedContentSummary(content []Content) string {
+// itemDisp is the per-item forwarding/drop disposition produced by the
+// single-pass conversion. DroppedContentSummary is built from this so a
+// valid image is never base64-decoded a second time just to name what was
+// kept versus dropped.
+type itemDisp uint8
+
+const (
+	dispText itemDisp = iota
+	dispForwarded
+	dispDropped
+	dispBudgetExceeded
+	dispUninspected
+)
+
+// decodeImageBase64 is the MCP image payload decoder. Tests replace it to
+// count decode attempts; production uses standard base64.
+var decodeImageBase64 = base64.StdEncoding.DecodeString
+
+// Bound provider content-block overhead independently of decoded image size.
+const maxForwardedImages = 16
+
+// Bound decode work even when invalid or oversized-for-the-residue candidates
+// do not consume the forwarding budgets.
+const maxInspectedImages = 32
+
+type imageLimitReason int
+
+const (
+	imageLimitNone imageLimitReason = iota
+	imageLimitBudget
+	imageLimitForwardCount
+	imageLimitInspectionCount
+)
+
+func forwardImages(content []Content) ([]zeroruntime.ImageBlock, []itemDisp, imageLimitReason) {
+	disp := make([]itemDisp, len(content))
+	var images []zeroruntime.ImageBlock
+	remaining := imageinput.MaxImageBytes
+	inspected := 0
+	var limitReason imageLimitReason
+	for i, item := range content {
+		if item.Type == "text" {
+			disp[i] = dispText
+			continue
+		}
+		if item.Type == "image" {
+			if remaining == 0 {
+				disp[i] = dispUninspected
+				if limitReason == imageLimitNone {
+					limitReason = imageLimitBudget
+				}
+				continue
+			}
+			if len(images) >= maxForwardedImages {
+				disp[i] = dispUninspected
+				if limitReason == imageLimitNone {
+					limitReason = imageLimitForwardCount
+				}
+				continue
+			}
+			if inspected >= maxInspectedImages {
+				disp[i] = dispUninspected
+				if limitReason == imageLimitNone {
+					limitReason = imageLimitInspectionCount
+				}
+				continue
+			}
+			inspected++
+			if image, ok := imageBlockFromContent(item); ok {
+				if len(image.Data) <= remaining {
+					images = append(images, image)
+					remaining -= len(image.Data)
+					disp[i] = dispForwarded
+					continue
+				}
+				disp[i] = dispBudgetExceeded
+				continue
+			}
+		}
+		disp[i] = dispDropped
+	}
+	return images, disp, limitReason
+}
+
+func droppedContentNote(content []Content, disp []itemDisp, kinds ...itemDisp) string {
 	labels := make([]string, 0, len(content))
 	counts := make(map[string]int, len(content))
-	for _, item := range content {
-		if item.Type == "text" {
+	for i, item := range content {
+		if i >= len(disp) || !dispKind(disp[i], kinds) {
 			continue
 		}
 		// Prefer the mime type: "image/png" tells the reader more than "image".
@@ -547,4 +870,57 @@ func DroppedContentSummary(content []Content) string {
 		parts = append(parts, part)
 	}
 	return strings.Join(parts, ", ")
+}
+
+func dispKind(got itemDisp, kinds []itemDisp) bool {
+	for _, kind := range kinds {
+		if got == kind {
+			return true
+		}
+	}
+	return false
+}
+
+func dispCount(disp []itemDisp, kinds ...itemDisp) int {
+	count := 0
+	for _, d := range disp {
+		if dispKind(d, kinds) {
+			count++
+		}
+	}
+	return count
+}
+
+func imageBlockFromContent(item Content) (zeroruntime.ImageBlock, bool) {
+	if item.Type != "image" {
+		return zeroruntime.ImageBlock{}, false
+	}
+	raw := strings.TrimSpace(item.Data)
+	if raw == "" {
+		return zeroruntime.ImageBlock{}, false
+	}
+	// EncodedLen(MaxImageBytes) is the encoded size of an image that decodes
+	// to exactly the inclusive cap, including "==" padding. DecodedLen is an
+	// upper bound and reports cap+2 for that input, so using it here would
+	// reject a valid at-limit PNG. The post-decode len(data) check is the
+	// exact backstop.
+	if len(raw) > base64.StdEncoding.EncodedLen(imageinput.MaxImageBytes) {
+		return zeroruntime.ImageBlock{}, false
+	}
+	data, err := decodeImageBase64(raw)
+	if err != nil {
+		return zeroruntime.ImageBlock{}, false
+	}
+	if len(data) == 0 || len(data) > imageinput.MaxImageBytes {
+		return zeroruntime.ImageBlock{}, false
+	}
+	sniffLen := len(data)
+	if sniffLen > 512 {
+		sniffLen = 512
+	}
+	mediaType := zeroruntime.NormalizeImageMediaType(http.DetectContentType(data[:sniffLen]))
+	if mediaType == "" {
+		return zeroruntime.ImageBlock{}, false
+	}
+	return zeroruntime.ImageBlock{MediaType: mediaType, Data: data}, true
 }

@@ -365,7 +365,7 @@ type handoffTool struct {
 
 func (t *handoffTool) Name() string { return HandoffToolName }
 func (t *handoffTool) Description() string {
-	return "Hand a task off to a fresh member of another agent type, delivering an optional note to the new member's inbox."
+	return "Stop a task's current member, then hand it off to a fresh member of another agent type, delivering an optional note to the new member's inbox."
 }
 func (t *handoffTool) Parameters() tools.Schema {
 	return tools.Schema{
@@ -384,7 +384,7 @@ func (t *handoffTool) Safety() tools.Safety {
 	return tools.Safety{
 		SideEffect:      tools.SideEffectShell,
 		Permission:      tools.PermissionPrompt,
-		Reason:          "Spawns a replacement swarm member to take over a task, and writes the handoff note to the new member's inbox.",
+		Reason:          "Stops the current swarm member, spawns its replacement, and writes the handoff note to the new member's inbox.",
 		AdvertiseInAuto: true,
 	}
 }

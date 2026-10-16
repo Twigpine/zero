@@ -13,6 +13,7 @@ import (
 // can ask the model to retry, mirroring the OpenAI provider's behavior, instead
 // of silently dropping it.
 func TestStreamCompletionEmitsDroppedOnNamelessToolUseBlock(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeSSEEvent(w, "content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":""}}`)
 		writeSSEEvent(w, "content_block_stop", `{"type":"content_block_stop","index":0}`)
@@ -45,6 +46,7 @@ func TestStreamCompletionEmitsDroppedOnNamelessToolUseBlock(t *testing.T) {
 
 // A well-formed tool_use block must NOT emit a dropped signal.
 func TestStreamCompletionDoesNotDropValidToolUseBlock(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeSSEEvent(w, "content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file"}}`)
 		writeSSEEvent(w, "content_block_stop", `{"type":"content_block_stop","index":0}`)

@@ -977,6 +977,8 @@ func TestParseBackgroundTerminalCommands(t *testing.T) {
 		{input: "/ps", kind: commandPS, text: ""},
 		{input: "/stop", kind: commandStop, text: ""},
 		{input: "/stop 1000", kind: commandStop, text: "1000"},
+		{input: "/attach", kind: commandAttach, text: ""},
+		{input: "/attach 7", kind: commandAttach, text: "7"},
 	}
 	for _, tc := range cases {
 		got := parseCommand(tc.input)

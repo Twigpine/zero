@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Gitlawb/zero/internal/providercatalog"
+	"github.com/Gitlawb/zero/internal/providermodelcatalog"
 )
 
 // LocalRuntime describes a local, OpenAI-compatible model server that ZERO can
@@ -102,16 +103,65 @@ func DetectLocalRuntimes(ctx context.Context, options LocalDetectOptions) []Dete
 // SetupAction returns the no-key onboarding action for a detected local runtime.
 func (runtime DetectedLocalRuntime) SetupAction() Action {
 	descriptor := providercatalog.Descriptor{ID: runtime.CatalogID, RequiresAuth: false}
-	command := SetupCommand(descriptor, runtime.Name, true)
+	model := runtime.AdoptModel()
 	name := strings.TrimSpace(runtime.Name)
 	if name == "" {
 		name = runtime.CatalogID
 	}
+	// Do not fall back to an unserved/default model when all advertised IDs
+	// were rejected. Preserve other runtimes' existing empty-response behavior.
+	if model == "" && (runtime.CatalogID == "atomic-chat-local" || len(runtime.Models) > 0) {
+		return Action{
+			Label:  "Load a chat model",
+			Detail: "Detected " + name + " on " + runtime.BaseURL + " but no usable chat model ID was discovered. Load a chat model in " + name + ", then run zero providers detect again.",
+		}
+	}
+	command := SetupCommandWithModel(descriptor, runtime.Name, model, true)
+	if command == "" {
+		return Action{
+			Label:  "Use interactive setup",
+			Detail: "A setup value cannot be safely included in a command for all supported shells. Run zero setup and select or enter the model there.",
+		}
+	}
+	detail := "Detected " + name + " on " + runtime.BaseURL + " — no API key required."
+	if model != "" {
+		detail = "Detected " + name + " on " + runtime.BaseURL + " serving " + model + " — no API key required."
+	}
 	return Action{
 		Label:   "Use local runtime",
 		Command: command,
-		Detail:  "Detected " + name + " on " + runtime.BaseURL + " — no API key required.",
+		Detail:  detail,
 	}
+}
+
+// AdoptModel returns an advertised model eligible for automatic chat adoption,
+// preferring the catalog default when served. Shell syntax is handled when
+// rendering the command, so eligible IDs are not silently replaced for quoting.
+func (runtime DetectedLocalRuntime) AdoptModel() string {
+	want := strings.TrimSpace(runtime.DefaultModel)
+	first := ""
+	defaultAlias := ""
+	for _, raw := range runtime.Models {
+		id := strings.TrimSpace(raw)
+		if id == "" || providermodelcatalog.IsKnownNonCodingModelID(id) || runtime.CatalogID == "atomic-chat-local" && id == "local-model" {
+			continue
+		}
+		if id == want {
+			return id
+		}
+		// Ollama's untagged default is equivalent to its :latest spelling.
+		// Retain the advertised ID and prefer an exact match if one follows.
+		if runtime.CatalogID == "ollama" && want != "" && !strings.Contains(want, ":") && id == want+":latest" {
+			defaultAlias = id
+		}
+		if first == "" {
+			first = id
+		}
+	}
+	if defaultAlias != "" {
+		return defaultAlias
+	}
+	return first
 }
 
 func probeLocalRuntime(ctx context.Context, client *http.Client, timeout time.Duration, candidate LocalRuntime) ([]string, bool) {

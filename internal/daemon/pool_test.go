@@ -3,10 +3,13 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Gitlawb/zero/internal/testutil"
 )
 
 // --- test doubles ---------------------------------------------------------
@@ -146,6 +149,35 @@ func TestPoolRunPermanentStopsImmediately(t *testing.T) {
 	}
 }
 
+// A `zero exec` run that ended with usage (2), provider (3), incomplete (4) or
+// interrupted (130) is over: retrying would repeat its side effects and merge a
+// second run into the same session stream.
+func TestPoolRunFinalExitCodesDoNotRetry(t *testing.T) {
+	for _, code := range []int{2, 3, 4, 130} {
+		t.Run(fmt.Sprintf("exit_%d", code), func(t *testing.T) {
+			launcher, calls := seqLauncher(
+				&fakeWorker{pid: 1, exitCode: code, out: []string{"first run"}},
+				&fakeWorker{pid: 2, exitCode: 0, out: []string{"second run"}},
+			)
+			pool, _ := NewPool(PoolOptions{Size: 1, Launcher: launcher, MaxAttempts: 5, Backoff: func(int) time.Duration { return 0 }})
+			sink := &collectSink{}
+			got, err := pool.Run(context.Background(), WorkerSpec{Session: "s"}, sink)
+			if !errors.Is(err, ErrPermanent) {
+				t.Fatalf("Run err = %v, want ErrPermanent", err)
+			}
+			if got != code {
+				t.Fatalf("Run code = %d, want the worker's exit code %d", got, code)
+			}
+			if *calls != 1 {
+				t.Fatalf("launcher calls = %d, want 1 (no retry)", *calls)
+			}
+			if len(sink.lines) != 1 || sink.lines[0] != "first run" {
+				t.Fatalf("sink lines = %v, want only the first run's output", sink.lines)
+			}
+		})
+	}
+}
+
 func TestPoolRunCapExhausted(t *testing.T) {
 	launcher, calls := seqLauncher(
 		&fakeWorker{pid: 1, exitCode: 1},
@@ -191,7 +223,7 @@ func TestPoolQueuesWhenFull(t *testing.T) {
 	}()
 	<-started
 	// Wait until the first run holds the only slot.
-	waitFor(t, func() bool { return pool.QueueDepth() == 1 })
+	testutil.WaitFor(t, "queue depth 1", func() bool { return pool.QueueDepth() == 1 })
 
 	secondDone := make(chan struct{})
 	go func() {
@@ -224,7 +256,7 @@ func TestPoolDrainKillsStraggler(t *testing.T) {
 		_, _ = pool.Run(context.Background(), WorkerSpec{Session: "a"}, &collectSink{})
 		close(runDone)
 	}()
-	waitFor(t, func() bool { return pool.QueueDepth() == 1 })
+	testutil.WaitFor(t, "queue depth 1", func() bool { return pool.QueueDepth() == 1 })
 
 	pool.Drain() // KillTimeout elapses, straggler is force-killed
 	if atomic.LoadInt32(&straggler.killed) != 1 {
@@ -240,18 +272,6 @@ func TestPoolDrainKillsStraggler(t *testing.T) {
 	if _, err := pool.Run(context.Background(), WorkerSpec{Session: "b"}, &collectSink{}); !errors.Is(err, ErrPoolDraining) {
 		t.Fatalf("Run after drain err = %v, want ErrPoolDraining", err)
 	}
-}
-
-func waitFor(t *testing.T, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatal("condition not met within timeout")
 }
 
 func TestPoolRunSurfacesStdoutReadError(t *testing.T) {

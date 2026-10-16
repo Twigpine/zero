@@ -7,6 +7,7 @@ import (
 )
 
 func TestMapStopReasonRefusal(t *testing.T) {
+	t.Parallel()
 	if got := mapStopReason("refusal"); got != zeroruntime.FinishReasonContentFilter {
 		t.Errorf("refusal → %q, want content_filter (M4)", got)
 	}

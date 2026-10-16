@@ -197,3 +197,66 @@ func TestProviderKeyNormalizesCase(t *testing.T) {
 		t.Fatalf("candidate \"xai\" must find the mixed-case login, ok=%v key=%q", ok, key)
 	}
 }
+
+func TestStoreFileResetCleansPublicationResiduesAndSecretLock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tokens.json")
+	s, err := NewStore(StoreOptions{FilePath: path, Encrypted: true})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	// 1. Perform initial save to establish encrypted store and .secret
+	if err := s.Save(ProviderKey("svc"), Token{AccessToken: "initial"}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// 2. Simulate crash residues: publish-* in .publish and .secret.publish, and stale .secret.lock
+	pubDir := path + ".publish"
+	secPubDir := path + ".secret.publish"
+	if err := os.MkdirAll(pubDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll pubDir: %v", err)
+	}
+	if err := os.MkdirAll(secPubDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll secPubDir: %v", err)
+	}
+	strandedToken := filepath.Join(pubDir, "publish-stranded-token")
+	strandedSecret := filepath.Join(secPubDir, "publish-stranded-secret")
+	staleLock := path + ".secret.lock"
+	if err := os.WriteFile(strandedToken, []byte("token-residue"), 0o600); err != nil {
+		t.Fatalf("write strandedToken: %v", err)
+	}
+	if err := os.WriteFile(strandedSecret, []byte("secret-residue"), 0o600); err != nil {
+		t.Fatalf("write strandedSecret: %v", err)
+	}
+	if err := os.WriteFile(staleLock, []byte("stale-lock"), 0o600); err != nil {
+		t.Fatalf("write staleLock: %v", err)
+	}
+
+	// 3. Reset the store
+	if err := s.Reset(); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+
+	// 4. Verify all secret-bearing artifacts and locks are removed
+	for _, p := range []string{path, path + ".secret", strandedToken, strandedSecret, staleLock} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("file %s should be removed by Reset, stat err=%v", p, err)
+		}
+	}
+	// Publication dirs themselves should be preserved
+	for _, d := range []string{pubDir, secPubDir} {
+		if _, err := os.Stat(d); err != nil {
+			t.Errorf("publication directory %s should be preserved, stat err=%v", d, err)
+		}
+	}
+
+	// 5. Verify fresh encrypted Save/Load succeeds
+	if err := s.Save(ProviderKey("svc2"), Token{AccessToken: "fresh"}); err != nil {
+		t.Fatalf("Save after Reset: %v", err)
+	}
+	tok, ok, err := s.Load(ProviderKey("svc2"))
+	if err != nil || !ok || tok.AccessToken != "fresh" {
+		t.Fatalf("Load after Reset = (%v, %v, %v), want fresh token", tok, ok, err)
+	}
+}

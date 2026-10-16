@@ -15,6 +15,7 @@ import (
 // message_stop or closing) must abort on the idle timeout instead of blocking
 // the agent forever.
 func TestStreamCompletionIdleTimeoutAbortsStalledStream(t *testing.T) {
+	t.Parallel()
 	released := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeSSEEvent(w, "content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`)

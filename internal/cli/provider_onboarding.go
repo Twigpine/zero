@@ -542,9 +542,9 @@ func providerResolvedByName(providers []config.ProviderProfile, name string) boo
 // reports the situation plainly instead of that confusing error (issue
 // #707).
 func reportUnpersistedProviderUse(stdout, stderr io.Writer, deps appDeps, options providerUseOptions, configPath string) (int, bool) {
-	resolved, exitCode := resolveCommandCenterConfig(stderr, deps)
+	resolved, exitCode := resolveProviderManagementConfig(stderr, deps)
 	if exitCode != exitSuccess {
-		// resolveCommandCenterConfig already wrote its own error to stderr;
+		// resolveProviderManagementConfig already wrote its own error to stderr;
 		// stop here instead of letting the caller try SetActiveProvider too.
 		return exitCode, true
 	}
@@ -578,7 +578,7 @@ func reportUnpersistedProviderUse(stdout, stderr io.Writer, deps appDeps, option
 // name isn't resolvable at all, it returns handled=false so the caller falls
 // through to RemoveProvider's real "not found" error.
 func reportUnpersistedProviderRemove(stdout, stderr io.Writer, deps appDeps, name string, jsonOutput bool, configPath string) (int, bool) {
-	resolved, exitCode := resolveCommandCenterConfig(stderr, deps)
+	resolved, exitCode := resolveProviderManagementConfig(stderr, deps)
 	if exitCode != exitSuccess {
 		return exitCode, true
 	}
@@ -609,7 +609,7 @@ func reportUnpersistedProviderRemove(stdout, stderr io.Writer, deps appDeps, nam
 }
 
 func reportUnpersistedProviderRename(stdout, stderr io.Writer, deps appDeps, name string, jsonOutput bool, configPath string) (int, bool) {
-	resolved, exitCode := resolveCommandCenterConfig(stderr, deps)
+	resolved, exitCode := resolveProviderManagementConfig(stderr, deps)
 	if exitCode != exitSuccess {
 		return exitCode, true
 	}

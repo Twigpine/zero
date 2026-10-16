@@ -82,6 +82,7 @@ func drainCodexEvents(t *testing.T, stream <-chan zeroruntime.StreamEvent) {
 }
 
 func TestCodexProviderSetsExpectedHeaders(t *testing.T) {
+	t.Parallel()
 	var rec codexRequest
 	srv := newCodexTestServer(t, &rec)
 	defer srv.Close()
@@ -130,6 +131,7 @@ func TestCodexProviderSetsExpectedHeaders(t *testing.T) {
 }
 
 func TestCodexProviderUsesConfiguredBaseURL(t *testing.T) {
+	t.Parallel()
 	var rec codexRequest
 	// Run the test server on a custom path to confirm the request goes
 	// through {BaseURL}/responses, not a hard-coded host.
@@ -175,6 +177,7 @@ func TestCodexProviderUsesConfiguredBaseURL(t *testing.T) {
 }
 
 func TestCodexProviderDefaultsOriginator(t *testing.T) {
+	t.Parallel()
 	var rec codexRequest
 	srv := newCodexTestServer(t, &rec)
 	defer srv.Close()
@@ -204,6 +207,7 @@ func TestCodexProviderDefaultsOriginator(t *testing.T) {
 }
 
 func TestCodexProviderBrandsUserAgent(t *testing.T) {
+	t.Parallel()
 	var rec codexRequest
 	srv := newCodexTestServer(t, &rec)
 	defer srv.Close()
@@ -236,6 +240,7 @@ func TestCodexProviderBrandsUserAgent(t *testing.T) {
 }
 
 func TestCodexProviderAccountResolverIsUsedWhenAccountIDEmpty(t *testing.T) {
+	t.Parallel()
 	var rec codexRequest
 	srv := newCodexTestServer(t, &rec)
 	defer srv.Close()
@@ -272,6 +277,7 @@ func TestCodexProviderAccountResolverIsUsedWhenAccountIDEmpty(t *testing.T) {
 }
 
 func TestCodexProviderResolverIsConsultedOnEveryRequest(t *testing.T) {
+	t.Parallel()
 	// The factory wires the AccountResolver from the OAuth store so a refresh
 	// that updates the stored token's Account field takes effect on the next
 	// outgoing request — not just the first. This test asserts the resolver
@@ -354,6 +360,7 @@ func TestCodexProviderResolverIsConsultedOnEveryRequest(t *testing.T) {
 }
 
 func TestCodexProviderOmitsAccountIDWhenResolverSaysNo(t *testing.T) {
+	t.Parallel()
 	var rec codexRequest
 	srv := newCodexTestServer(t, &rec)
 	defer srv.Close()
@@ -384,6 +391,7 @@ func TestCodexProviderOmitsAccountIDWhenResolverSaysNo(t *testing.T) {
 }
 
 func TestCodexProviderSendsResponsesRequestShape(t *testing.T) {
+	t.Parallel()
 	// The Codex provider speaks the Responses API, not the chat-completions
 	// API. The request body must carry top-level `instructions`, `input` items
 	// (not `messages`), a `stream: true` flag, and `tools` (when the caller
@@ -455,6 +463,7 @@ func TestCodexProviderSendsResponsesRequestShape(t *testing.T) {
 }
 
 func TestCodexProviderForwardsReasoningEffort(t *testing.T) {
+	t.Parallel()
 	// A reasoning effort must reach the Responses backend nested under
 	// `reasoning.effort` (where the chat-completions `reasoning_effort` moved).
 	// Without this the user's chosen effort is silently dropped for Codex models.
@@ -493,6 +502,7 @@ func TestCodexProviderForwardsReasoningEffort(t *testing.T) {
 }
 
 func TestCodexProviderNormalizesServiceTier(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name  string
 		input string
@@ -536,6 +546,7 @@ func TestCodexProviderNormalizesServiceTier(t *testing.T) {
 }
 
 func TestCodexProviderStreamsReasoningSummaryDeltas(t *testing.T) {
+	t.Parallel()
 	// reasoning_summary_text deltas must surface as StreamEventReasoning (live
 	// "thinking"), in order, alongside the normal text output. Without this a long
 	// reasoning phase produces zero visible output and reads as a hang.
@@ -583,6 +594,7 @@ func TestCodexProviderStreamsReasoningSummaryDeltas(t *testing.T) {
 }
 
 func TestCodexProviderOmitsReasoningWhenUnset(t *testing.T) {
+	t.Parallel()
 	// No effort (and unsupported values) must omit the `reasoning` field entirely
 	// rather than send an empty object, which the backend would reject.
 	var rec codexRequest
@@ -611,6 +623,7 @@ func TestCodexProviderOmitsReasoningWhenUnset(t *testing.T) {
 }
 
 func TestCodexProviderRetriesHeadersAfter401(t *testing.T) {
+	t.Parallel()
 	var hits atomic.Int32
 	var rec1, rec2 codexRequest
 	mux := http.NewServeMux()
@@ -685,6 +698,7 @@ func TestCodexProviderRetriesHeadersAfter401(t *testing.T) {
 }
 
 func TestCodexProviderRequiresBaseURL(t *testing.T) {
+	t.Parallel()
 	// An empty baseURL falls back to the openai provider's default
 	// (https://api.openai.com/v1). The Codex provider is designed to be
 	// wired by the factory with the catalog's Codex baseURL, so the
@@ -704,6 +718,7 @@ func TestCodexProviderRequiresBaseURL(t *testing.T) {
 }
 
 func TestCodexProviderRejectsBadBaseURL(t *testing.T) {
+	t.Parallel()
 	_, err := NewCodexProvider(CodexOptions{
 		Options:   Options{APIKey: "sk", Model: "gpt-5", BaseURL: "://not a url"},
 		AccountID: "acc-x",
@@ -717,6 +732,7 @@ func TestCodexProviderRejectsBadBaseURL(t *testing.T) {
 }
 
 func TestValidateAccount(t *testing.T) {
+	t.Parallel()
 	if err := ValidateAccount(""); err == nil {
 		t.Fatal("empty account id should be rejected")
 	}
@@ -729,9 +745,9 @@ func TestValidateAccount(t *testing.T) {
 }
 
 func TestCodexProviderStreamIdleTimeoutPropagates(t *testing.T) {
-	// Sanity check: the wrapped openai provider's StreamIdleTimeout flows
-	// through. The default is 90s; we override to a small value so a real
-	// hang surfaces in the test.
+	// Serial: StreamIdleTimeout arms a real wall-clock idle timer. Under
+	// t.Parallel() the 50ms watchdog can fire before response.completed is
+	// consumed. This test only checks that the option is accepted.
 	var rec codexRequest
 	srv := newCodexTestServer(t, &rec)
 	defer srv.Close()
@@ -760,6 +776,7 @@ func TestCodexProviderStreamIdleTimeoutPropagates(t *testing.T) {
 }
 
 func TestCodexProviderParsesResponsesTextDeltas(t *testing.T) {
+	t.Parallel()
 	// The Codex backend streams text as a series of
 	// `response.output_text.delta` events. Each delta must surface as a
 	// runtime text event in order, and the terminal `response.completed`
@@ -818,6 +835,7 @@ func TestCodexProviderParsesResponsesTextDeltas(t *testing.T) {
 }
 
 func TestCodexProviderParsesResponsesToolCalls(t *testing.T) {
+	t.Parallel()
 	// The Codex backend streams function calls as three coordinated event
 	// types: `response.output_item.added` (carries the call id and name),
 	// `response.function_call_arguments.delta` (one or more events that
@@ -886,6 +904,7 @@ func TestCodexProviderParsesResponsesToolCalls(t *testing.T) {
 }
 
 func TestCodexProviderSendsAssistantToolCallsAsInputItems(t *testing.T) {
+	t.Parallel()
 	// When the runtime replays a prior assistant turn that issued a tool
 	// call, the Codex provider must serialize the turn as BOTH the
 	// assistant message (its text) AND a function_call item for the call.
@@ -957,6 +976,7 @@ func TestCodexProviderSendsAssistantToolCallsAsInputItems(t *testing.T) {
 }
 
 func TestCodexProviderEmitsErrorOnResponseErrorEvent(t *testing.T) {
+	t.Parallel()
 	// A `response.error` event from the Codex backend is the stream-level
 	// error signal. It must surface as a single StreamEventError and stop
 	// the scan so the runtime doesn't hang waiting for a completion.
@@ -995,6 +1015,7 @@ func TestCodexProviderEmitsErrorOnResponseErrorEvent(t *testing.T) {
 }
 
 func TestCodexProviderEmitsErrorOnMalformedStream(t *testing.T) {
+	t.Parallel()
 	// A non-JSON data payload (or a payload with a missing `type` field)
 	// must be reported as a stream error rather than silently dropped —
 	// otherwise the runtime would hang waiting for a completion event
@@ -1031,6 +1052,7 @@ func TestCodexProviderEmitsErrorOnMalformedStream(t *testing.T) {
 }
 
 func TestCodexProviderEmitsLengthFinishWhenStreamEndsWithoutCompletion(t *testing.T) {
+	t.Parallel()
 	// The Codex backend may close the SSE stream without emitting
 	// `response.completed` (e.g. an internal truncation). The wrapper
 	// must surface a StreamEventDone with FinishReasonLength so the

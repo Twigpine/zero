@@ -6,6 +6,125 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once the first release is
 tagged. Until then, source builds report the version `dev`.
 
+## [0.11.0](https://github.com/Twigpine/zero/compare/v0.10.0...v0.11.0) (2026-10-15)
+
+
+### Features
+
+* **providers:** add Concentrate provider preset ([#1147](https://github.com/Twigpine/zero/issues/1147)) ([61b0936](https://github.com/Twigpine/zero/commit/61b09364f0f45b0fa8aebaf0a6c3d1c55dbe01c3))
+
+
+### Bug Fixes
+
+* **cli:** let providers subcommands run with no active provider ([#1143](https://github.com/Twigpine/zero/issues/1143)) ([d1a0d04](https://github.com/Twigpine/zero/commit/d1a0d048ee2c1e7cbfb75160ec4c9f099f3c4472))
+* **npm:** wait for npm to apply each publish, and drop the one-time @gitlawb/zero steps ([#1145](https://github.com/Twigpine/zero/issues/1145)) ([8e363fc](https://github.com/Twigpine/zero/commit/8e363fcaa5d51bf5b5b244692dc61bf8d4ae8799))
+* **tui,cli:** stop a repository's git config from running programs in Zero's own git calls ([#1133](https://github.com/Twigpine/zero/issues/1133)) ([640d936](https://github.com/Twigpine/zero/commit/640d936bfbe00c4cd3017ca35fb7b5c15d91a1c5))
+* **workspaceindex:** skip git-ignored and build-cache dirs in Scan only ([#1117](https://github.com/Twigpine/zero/issues/1117)) ([c88c77b](https://github.com/Twigpine/zero/commit/c88c77bf701039dca01d9786bf5648d779c949b3))
+
+
+### Performance Improvements
+
+* **redaction:** add fast-path byte checks to eliminate regex allocations on clean strings ([#945](https://github.com/Twigpine/zero/issues/945)) ([ce2fcff](https://github.com/Twigpine/zero/commit/ce2fcffaf10d8e8c8c5a13e06fd7809f09fc9867))
+
+## [0.10.0](https://github.com/Twigpine/zero/compare/v0.9.0...v0.10.0) (2026-10-15)
+
+
+### Features
+
+* **notify:** make permission-prompt alerts on by default and discoverable ([#1001](https://github.com/Twigpine/zero/issues/1001)) ([7f8e5f0](https://github.com/Twigpine/zero/commit/7f8e5f08bb83371ce16cc54c97ab032a010026cf))
+* **npm:** publish as @twigpine/zero ([#1142](https://github.com/Twigpine/zero/issues/1142)) ([530563a](https://github.com/Twigpine/zero/commit/530563a0bb58d3cbadceb97b3ee234ef763124df))
+* **providers:** add GMI Cloud provider preset and partner listing ([#1127](https://github.com/Twigpine/zero/issues/1127)) ([1335ca6](https://github.com/Twigpine/zero/commit/1335ca6671023ecda81a3cfaae7e9f2ff5d6e0de))
+* **providers:** opt-in ZERO_RESPONSE_HEADER_TIMEOUT override for slow first-byte deployments ([#1106](https://github.com/Twigpine/zero/issues/1106)) ([ddc45f2](https://github.com/Twigpine/zero/commit/ddc45f2c8152fdd04b45dc11ed20d246fe7740a5))
+* **runtime:** add process-local per-model RPM admission limits ([#1116](https://github.com/Twigpine/zero/issues/1116)) ([eebb384](https://github.com/Twigpine/zero/commit/eebb384676fb567acc1f5a20dcbb17df8a03dc42))
+* **sessions:** add zero sessions prune, which never removes a session another process has open ([#1089](https://github.com/Twigpine/zero/issues/1089)) ([23c27e0](https://github.com/Twigpine/zero/commit/23c27e0778e3af54c04b8749d1eda846d3253f4e))
+
+
+### Bug Fixes
+
+* **acp:** persist the session permission mode across restarts ([#1134](https://github.com/Twigpine/zero/issues/1134)) ([bb96206](https://github.com/Twigpine/zero/commit/bb96206c2781e846fd13437113eec5790afe9c81)), closes [#1125](https://github.com/Twigpine/zero/issues/1125)
+* **acp:** persist token usage events for ACP sessions ([#1137](https://github.com/Twigpine/zero/issues/1137)) ([300cf62](https://github.com/Twigpine/zero/commit/300cf6275f8c94f06da3f00197d21cb8771842d9)), closes [#1118](https://github.com/Twigpine/zero/issues/1118)
+* **acp:** publish sub-run sessions loaded over ACP as view-only ([#1078](https://github.com/Twigpine/zero/issues/1078)) ([7f11491](https://github.com/Twigpine/zero/commit/7f11491078662b2d389c278f3ce5d41d956670c4))
+* **agent:** retry mid-stream transport aborts before tool dispatch ([#1076](https://github.com/Twigpine/zero/issues/1076)) ([b9ef1d2](https://github.com/Twigpine/zero/commit/b9ef1d271aa6ebc6d9adad2ef4ff0d695bb40da5))
+* **config:** sync atomic config replacements ([#1093](https://github.com/Twigpine/zero/issues/1093)) ([4d2e9f0](https://github.com/Twigpine/zero/commit/4d2e9f0d08472f7304652ef7896df587e1cc6c21))
+* **cron:** bound run history and read recent records from the tail ([#1094](https://github.com/Twigpine/zero/issues/1094)) ([42eb6ab](https://github.com/Twigpine/zero/commit/42eb6ab5fbe4ae9037f1f4cd42a00243c456a22e))
+* **cron:** preserve newer claims when overlapping runs complete ([#1090](https://github.com/Twigpine/zero/issues/1090)) ([2eb9d94](https://github.com/Twigpine/zero/commit/2eb9d94fac56d91d749ea4f96edcf1c87f79b48c))
+* **daemon:** bound pending sessions and prune on completion ([#1091](https://github.com/Twigpine/zero/issues/1091)) ([8a68660](https://github.com/Twigpine/zero/commit/8a68660161b04ce9668363faa14ff72c9fbad223))
+* **daemon:** do not retry workers that finished with a final exit code ([#1112](https://github.com/Twigpine/zero/issues/1112)) ([eefa978](https://github.com/Twigpine/zero/commit/eefa978f6183332b7416c70c25242bcdfba1a75c)), closes [#1100](https://github.com/Twigpine/zero/issues/1100)
+* **daemon:** stop worker process groups by their launch-time identity ([#1088](https://github.com/Twigpine/zero/issues/1088)) ([ab018b3](https://github.com/Twigpine/zero/commit/ab018b3098b5cb103cf8f90b8698d32a6687bdf7)), closes [#861](https://github.com/Twigpine/zero/issues/861)
+* **deps:** refresh the lockfile to patched hono and @hono/node-server ([#1080](https://github.com/Twigpine/zero/issues/1080)) ([aa52040](https://github.com/Twigpine/zero/commit/aa52040498e012c41d5e8f6027a91c18eff861d4))
+* **deps:** refresh the lockfile to patched shell-quote ([#1131](https://github.com/Twigpine/zero/issues/1131)) ([c56a4c4](https://github.com/Twigpine/zero/commit/c56a4c4e6e598504ab417e8cc4f5ab8d69f1b42f))
+* **execution:** reserve process capacity before launching ([#1092](https://github.com/Twigpine/zero/issues/1092)) ([bb3346a](https://github.com/Twigpine/zero/commit/bb3346a82883c19ed8815fe1e874f54950711d69))
+* **mcp:** forward image tool results on the existing image channel ([#1077](https://github.com/Twigpine/zero/issues/1077)) ([0324c1d](https://github.com/Twigpine/zero/commit/0324c1d4103328eb90cb24a0b582dba335255b5c))
+* **mcp:** refresh OAuth tokens for discovered endpoints and registered clients ([#1113](https://github.com/Twigpine/zero/issues/1113)) ([571af70](https://github.com/Twigpine/zero/commit/571af701bd3d8dfaf40f87b5b112b25e7def5b29)), closes [#1101](https://github.com/Twigpine/zero/issues/1101)
+* **oauth:** give every loopback callback server the bounded shutdown ([#1079](https://github.com/Twigpine/zero/issues/1079)) ([5473301](https://github.com/Twigpine/zero/commit/547330197b20ece591e077e876a4b8ffd015cb6e))
+* **providers:** send stable session headers to OpenCode ([#1060](https://github.com/Twigpine/zero/issues/1060)) ([99721c7](https://github.com/Twigpine/zero/commit/99721c762f37cd43ac511007a5f51d1846df959e))
+* **redaction:** redact adjacent AWS keys glued end to end ([#1095](https://github.com/Twigpine/zero/issues/1095)) ([df67ede](https://github.com/Twigpine/zero/commit/df67edec13345b73a85327adc003cacc7bdd8009))
+* **redaction:** redact credentials split by an invisible character ([#1067](https://github.com/Twigpine/zero/issues/1067)) ([e20b762](https://github.com/Twigpine/zero/commit/e20b7624261cef8336a8eb0fbdd44d536ad77fc2))
+* **sandbox:** say when a session's sandbox enforcement is degraded ([#1082](https://github.com/Twigpine/zero/issues/1082)) ([6b5852d](https://github.com/Twigpine/zero/commit/6b5852dc18bb256af1f25745697c2f2e3ea6f112))
+* **search:** redact every text field of session metadata, not ten of thirty ([#1073](https://github.com/Twigpine/zero/issues/1073)) ([9520f2b](https://github.com/Twigpine/zero/commit/9520f2bad7e09ce4a8d0d42be7ce77d2ae928ddd))
+* **security:** harden shell flag parsing, write roots, and formatters ([#1066](https://github.com/Twigpine/zero/issues/1066)) ([ac5fe0d](https://github.com/Twigpine/zero/commit/ac5fe0d21849b0f74af428dd3ca12e3b80a8b7aa))
+* **sessions:** keep a session lease for the life of the process, not of the Store ([#1144](https://github.com/Twigpine/zero/issues/1144)) ([883e5be](https://github.com/Twigpine/zero/commit/883e5bec24dac791d1d60618c7f4927f4659b687))
+* **tools:** hint when Windows resolves POSIX paths under root ([#1063](https://github.com/Twigpine/zero/issues/1063)) ([0c6f179](https://github.com/Twigpine/zero/commit/0c6f179a8443d4dfdfbbefe5cc6caf11c2a525f0))
+* **tui:** bound live dictation regions ([#985](https://github.com/Twigpine/zero/issues/985)) ([feb9927](https://github.com/Twigpine/zero/commit/feb992757c582c68f0397e070e206d4bf07071e1))
+* **tui:** show provider ownership in Recent and Favorites ([#1083](https://github.com/Twigpine/zero/issues/1083)) ([1697b7a](https://github.com/Twigpine/zero/commit/1697b7a5ce948e781877cdbe9223adac62c3fde6))
+* **tui:** stop held peer message Allow/Deny from deadlocking Update ([#1111](https://github.com/Twigpine/zero/issues/1111)) ([a195e88](https://github.com/Twigpine/zero/commit/a195e8848cec1a27b4fe1789ecc572b943c32186)), closes [#1099](https://github.com/Twigpine/zero/issues/1099)
+* unbreak main CI (cron claim tests, Go 1.26.9) ([#1124](https://github.com/Twigpine/zero/issues/1124)) ([2c418fc](https://github.com/Twigpine/zero/commit/2c418fc8ff6763de16703128f372fe526fddd331))
+
+## [0.9.0](https://github.com/Gitlawb/zero/compare/v0.8.0...v0.9.0) (2026-09-15)
+
+
+### Features
+
+* **acp:** add standard session list and resume ([#914](https://github.com/Gitlawb/zero/issues/914)) ([c1937df](https://github.com/Gitlawb/zero/commit/c1937dfac72e6ad0e5ade6e48e2d9c17d9c3e5d6))
+* **acp:** emit structured file changes in tool updates ([#999](https://github.com/Gitlawb/zero/issues/999)) ([faec8ee](https://github.com/Gitlawb/zero/commit/faec8ee2017fdd6d0c2c347add892cb73eb413d7))
+* **acp:** surface safe browser tool metadata ([#1000](https://github.com/Gitlawb/zero/issues/1000)) ([a6ec043](https://github.com/Gitlawb/zero/commit/a6ec0435e36b9bea9793b2fd97f2ecd30e3a0f9b))
+* **exec:** default headless runs to the turn-budget ceiling ([#1049](https://github.com/Gitlawb/zero/issues/1049)) ([9e609c5](https://github.com/Gitlawb/zero/commit/9e609c52420fd322f047fc238c04ac81dd623fdd))
+* **tui:** interactive terminal attach for tty exec sessions ([#1055](https://github.com/Gitlawb/zero/issues/1055)) ([d73ec81](https://github.com/Gitlawb/zero/commit/d73ec81e2d3facb5377bc9ad0fe2aa314628a0c0))
+* **tui:** offer mid-run model escalation behind --allow-escalation ([#1019](https://github.com/Gitlawb/zero/issues/1019)) ([91d921f](https://github.com/Gitlawb/zero/commit/91d921f4c5b8289a9e437f786218f1b48f2add5a))
+* **tui:** richer /resume session browser ([#1047](https://github.com/Gitlawb/zero/issues/1047)) ([2f53117](https://github.com/Gitlawb/zero/commit/2f531178f614e587b629e4f81e0470adda647fbd))
+
+
+### Bug Fixes
+
+* **acp:** make configured MCP tools callable ([#1003](https://github.com/Gitlawb/zero/issues/1003)) ([7f5e5af](https://github.com/Gitlawb/zero/commit/7f5e5af7bbdbe5bb4d91706146072d461c0234a4))
+* **agent:** stop the tool-schema ratchet meaning a different thing per host ([#1017](https://github.com/Gitlawb/zero/issues/1017)) ([f909266](https://github.com/Gitlawb/zero/commit/f9092668a832ea73a69551f0ea2df4f6eaf356df))
+* **background:** treat POSIX zombie leader as already-exited ([#981](https://github.com/Gitlawb/zero/issues/981)) ([1aacf38](https://github.com/Gitlawb/zero/commit/1aacf38b727d31b5ca09949316d6afa8292aec46))
+* **config:** lock config read-modify-write across processes ([#960](https://github.com/Gitlawb/zero/issues/960)) ([b04fe96](https://github.com/Gitlawb/zero/commit/b04fe96e9ef3f2deda4fb2a972270300629079d2))
+* **config:** preserve unknown top-level fields ([#984](https://github.com/Gitlawb/zero/issues/984)) ([488def6](https://github.com/Gitlawb/zero/commit/488def68dcc6d36701fdf171e94a74a436b090fc))
+* **daemon:** publish status files atomically ([#949](https://github.com/Gitlawb/zero/issues/949)) ([9001421](https://github.com/Gitlawb/zero/commit/90014210d2ada2e3d61f4eca5087d3f35a3c4b8b))
+* **installtxn:** put back an install a killed commit left behind ([#997](https://github.com/Gitlawb/zero/issues/997)) ([2837f5e](https://github.com/Gitlawb/zero/commit/2837f5efb38dcd3c69771b0ba31565f98a206120))
+* let the configured forward proxy through the loopback guard ([#1025](https://github.com/Gitlawb/zero/issues/1025)) ([1e4db7c](https://github.com/Gitlawb/zero/commit/1e4db7c6643ca7e2c3d8e4b8b30371cfbe43561e))
+* **lockutil:** use kernel-held advisory locks ([#950](https://github.com/Gitlawb/zero/issues/950)) ([6fe0d1e](https://github.com/Gitlawb/zero/commit/6fe0d1edcdbadea6d566800fbcca739c1cd54ea1))
+* **mcp:** discover OAuth through protected resource metadata ([#991](https://github.com/Gitlawb/zero/issues/991)) ([1b5db17](https://github.com/Gitlawb/zero/commit/1b5db1765672820caac1684b168c9898b5ba3593))
+* **mcp:** reject a server-initiated request as a streamable-HTTP response ([#1054](https://github.com/Gitlawb/zero/issues/1054)) ([2479d94](https://github.com/Gitlawb/zero/commit/2479d946c15dbf74ee3c04a637e97181d1786f08))
+* **oauth:** force-close loopback callback connections past the shutdown deadline ([#1051](https://github.com/Gitlawb/zero/issues/1051)) ([176f5a2](https://github.com/Gitlawb/zero/commit/176f5a242b754a86ea4c7121a8dcc1c0d72cf2e4))
+* **oauth:** Split an oversized keyring token blob across entries ([#1007](https://github.com/Gitlawb/zero/issues/1007)) ([275e248](https://github.com/Gitlawb/zero/commit/275e2486695338ce38193a6e3319f8b6a9a5c33c))
+* **providerio:** close idle connections periodically to prevent HTTP/2 PROTOCOL_ERROR ([#1058](https://github.com/Gitlawb/zero/issues/1058)) ([b76c764](https://github.com/Gitlawb/zero/commit/b76c764b77926891aa67163e6605a2d8540aacaa))
+* **providers:** register Atomic Chat as local OpenAI-compatible runtime ([#550](https://github.com/Gitlawb/zero/issues/550)) ([79fa142](https://github.com/Gitlawb/zero/commit/79fa1422ef1a3691b93342788453ebc284d57f9c))
+* **redaction:** split camelCase keys in normalizeKey ([#994](https://github.com/Gitlawb/zero/issues/994)) ([08fbea7](https://github.com/Gitlawb/zero/commit/08fbea7a3221d2061d88038924f90a4cba9af1ac))
+* **sandbox:** keep a derived ACL target inside the write root it came from ([#1040](https://github.com/Gitlawb/zero/issues/1040)) ([3b43c43](https://github.com/Gitlawb/zero/commit/3b43c43eca968c8619adadc81fcc1a17e220216a))
+* **sandbox:** keep Windows restricted-token SIDs narrow and fail closed on DenyRead ([#1006](https://github.com/Gitlawb/zero/issues/1006)) ([0207f2b](https://github.com/Gitlawb/zero/commit/0207f2b2697149a73ecc89a5ab5db0bd665f1911))
+* **sandbox:** Make WSL backend tests deterministic. ([#948](https://github.com/Gitlawb/zero/issues/948)) ([e59bf78](https://github.com/Gitlawb/zero/commit/e59bf78cabc2703678778b904c27c8bc8ef82bc8))
+* **sandbox:** protect worktree git pointers ([#805](https://github.com/Gitlawb/zero/issues/805)) ([f30f550](https://github.com/Gitlawb/zero/commit/f30f550e6037c53f8521ba2d59c984ae6c574917))
+* **sandbox:** refcount temporary roots so one holder's cleanup cannot revoke another's ([#911](https://github.com/Gitlawb/zero/issues/911)) ([7acac7a](https://github.com/Gitlawb/zero/commit/7acac7acee65565e25089f2a7b5813c086ce65eb))
+* **sessions:** carry an interrupted turn's work into the resume prompt ([#1016](https://github.com/Gitlawb/zero/issues/1016)) ([6ae8396](https://github.com/Gitlawb/zero/commit/6ae8396f0282a5f18a431f0c0ef1a272ecc2ca2b))
+* **sessions:** render resume context fields in key order ([#1043](https://github.com/Gitlawb/zero/issues/1043)) ([da244bc](https://github.com/Gitlawb/zero/commit/da244bcbfcfa05e414567ac0acc3cf8ba745ad7d))
+* **specialist:** keep the pinned model when a specialist is resumed ([#1009](https://github.com/Gitlawb/zero/issues/1009)) ([aadb4a2](https://github.com/Gitlawb/zero/commit/aadb4a27e9cdb41e774e8e1a8f23cf9c2fb50db2))
+* **swarm:** stop original member before handoff ([#957](https://github.com/Gitlawb/zero/issues/957)) ([0021475](https://github.com/Gitlawb/zero/commit/0021475d4c58c91911098f414795512cf60a0b56))
+* **tools:** an edit keeps the reads it did not disturb ([#908](https://github.com/Gitlawb/zero/issues/908)) ([1649008](https://github.com/Gitlawb/zero/commit/1649008506da0e675431dc056251a01891b15cc8))
+* **tools:** make apply_patch tolerant and re-expose edit_file ([#956](https://github.com/Gitlawb/zero/issues/956)) ([2749447](https://github.com/Gitlawb/zero/commit/2749447cdce4ae5dd333538b36fa919b80ecc66d))
+* **tools:** reject fuzzy edits with drifted content ([#983](https://github.com/Gitlawb/zero/issues/983)) ([8b3d1b1](https://github.com/Gitlawb/zero/commit/8b3d1b1597b04bfa6d4bc7f912abc13ca80a6298))
+* **tools:** say when format-on-write ran out of time ([#1044](https://github.com/Gitlawb/zero/issues/1044)) ([6937a30](https://github.com/Gitlawb/zero/commit/6937a309cf00825572210a7610a1f3ea8b74c2f9))
+* **tui:** move voice capture to Ctrl+Space ([#968](https://github.com/Gitlawb/zero/issues/968)) ([eeea330](https://github.com/Gitlawb/zero/commit/eeea3308fed38b37b203522624babaf2f30df91f))
+* **update:** keep Windows failed-restore state in trusted recovery records ([#979](https://github.com/Gitlawb/zero/issues/979)) ([a3852ba](https://github.com/Gitlawb/zero/commit/a3852bac595e06c5d3ca9da22212b281b8796802))
+
+
+### Performance Improvements
+
+* **agent:** cheap compaction — dedicated summarizer model, input cap… ([#532](https://github.com/Gitlawb/zero/issues/532)) ([6645f97](https://github.com/Gitlawb/zero/commit/6645f9744b37dda4d52ecc4631578d62cefc89de))
+* **providers:** parallelize isolated provider unit tests and shrink retry backoffs ([#955](https://github.com/Gitlawb/zero/issues/955)) ([d6b25fc](https://github.com/Gitlawb/zero/commit/d6b25fc3039a6b7d72a5703a87a097449792b102))
+* reduce startup and turn overhead ([#932](https://github.com/Gitlawb/zero/issues/932)) ([1fde941](https://github.com/Gitlawb/zero/commit/1fde941803c4295c11a4a14559f3c5217d1a9e69))
+
 ## [0.8.0](https://github.com/Gitlawb/zero/compare/v0.7.0...v0.8.0) (2026-08-21)
 
 

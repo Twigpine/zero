@@ -2,15 +2,20 @@ package acp
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
 	"github.com/Gitlawb/zero/internal/agent"
 	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/providercatalog"
 	"github.com/Gitlawb/zero/internal/providermodelcatalog"
 	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
@@ -18,6 +23,7 @@ import (
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/sessions"
 	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Gitlawb/zero/internal/usage"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
@@ -40,8 +46,12 @@ type Deps struct {
 	// ResolveWorkspaceRoot validates + normalizes a client-supplied cwd (must be an
 	// existing directory; never the bare root). It is the file-tool confinement root.
 	ResolveWorkspaceRoot func(cwd string) (string, error)
-	Store                *sessions.Store
-	AgentInfo            Implementation
+	// PersistEvents is an optional test seam for injecting event-store failures.
+	// It receives a COMPLETED TURN as one batch, never one event at a time: the
+	// batch is the unit the shared store keeps contiguous (see persistTurn).
+	PersistEvents func(sessionID string, inputs []sessions.AppendEventInput) error
+	Store         *sessions.Store
+	AgentInfo     Implementation
 }
 
 // Workspace is the per-turn execution environment passed to the agent. ACP does
@@ -98,6 +108,14 @@ type acpSession struct {
 	restrictModels bool
 	cancel         context.CancelFunc
 	history        []turnRecord
+
+	// readOnly marks a session published by session/load for a kind that is
+	// not resumable (a child, side or spec sub-run). Load still replays its
+	// transcript, which is the render-only use a client needs, but a prompt
+	// would continue the sub-run as a standalone conversation, which every
+	// other resume path refuses (sessions.IsResumableKind). Set once when the
+	// session is first registered and never changed, so it is read without mu.
+	readOnly bool
 }
 
 // NewAgent builds the ACP server and registers its method handlers on conn.
@@ -106,6 +124,8 @@ func NewAgent(conn *Conn, deps Deps) *Agent {
 	conn.Handle(MethodInitialize, a.handleInitialize)
 	conn.Handle(MethodSessionNew, a.handleSessionNew)
 	conn.Handle(MethodSessionLoad, a.handleSessionLoad)
+	conn.Handle(MethodSessionList, a.handleSessionList)
+	conn.Handle(MethodSessionResume, a.handleSessionResume)
 	conn.Handle(MethodSessionPrompt, a.handleSessionPrompt)
 	conn.Handle(MethodSessionSetMode, a.handleSetMode)
 	conn.Handle(MethodSessionSetConfigOption, a.handleSetConfigOption)
@@ -134,11 +154,11 @@ func (a *Agent) handleInitialize(_ context.Context, params json.RawMessage) (any
 	return InitializeResult{
 		ProtocolVersion: negotiated,
 		AgentCapabilities: AgentCapabilities{
-			// Only advertise what ZERO actually implements: session/load (loadSession)
-			// and image prompts. session/resume + the session-capability sub-object
-			// are intentionally omitted since there is no resume handler yet.
-			LoadSession:        true,
-			PromptCapabilities: PromptCapabilities{Image: true},
+			// ACP v1 optional methods are advertised as empty capability objects;
+			// clients must gate session/list and session/resume on their presence.
+			LoadSession:         true,
+			PromptCapabilities:  PromptCapabilities{Image: true},
+			SessionCapabilities: &SessionCapabilities{List: &struct{}{}, Resume: &struct{}{}},
 		},
 		AgentInfo: &info,
 		// ZERO owns credentials (BYOK) and does not delegate auth to the editor.
@@ -148,12 +168,41 @@ func (a *Agent) handleInitialize(_ context.Context, params json.RawMessage) (any
 
 // ---- session lifecycle ----
 
+// requestedWorkspace is the single rule for a cwd that arrived from the client,
+// applied before the value can reach ResolveWorkspaceRoot.
+//
+// THE REQUEST'S OWN CWD IS THE ONLY THING ALLOWED TO PICK A ROOT. Every params
+// type spells cwd as a plain string, so an absent field and an empty one decode
+// to exactly the same "", and the resolver treats "" as "use the directory this
+// process was started in" and joins a relative cwd onto it. Those two defaults
+// meet in the middle: `{"sessionId":"known"}` used to activate a persisted
+// session, and `{}` used to create one, both rooted at wherever the editor
+// happened to spawn `zero acp` — which then becomes the sandbox and file-tool
+// confinement root. The client never named that directory, so it is a root the
+// server invented, and ACP requires an absolute cwd on every method carrying
+// one. Rejecting here is what keeps a missing field from being answered with a
+// guess.
+func requestedWorkspace(cwd string) (string, error) {
+	trimmed := strings.TrimSpace(cwd)
+	if trimmed == "" {
+		return "", RPCError(codeInvalidParams, "cwd is required and must be an absolute path")
+	}
+	if !filepath.IsAbs(trimmed) {
+		return "", RPCError(codeInvalidParams, "cwd must be an absolute path: "+trimmed)
+	}
+	return trimmed, nil
+}
+
 func (a *Agent) handleSessionNew(ctx context.Context, params json.RawMessage) (any, error) {
 	var p NewSessionParams
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, RPCError(codeInvalidParams, "invalid session/new params")
 	}
-	root, err := a.deps.ResolveWorkspaceRoot(p.Cwd)
+	cwd, err := requestedWorkspace(p.Cwd)
+	if err != nil {
+		return nil, err
+	}
+	root, err := a.deps.ResolveWorkspaceRoot(cwd)
 	if err != nil {
 		return nil, RPCError(codeInvalidParams, err.Error())
 	}
@@ -165,7 +214,7 @@ func (a *Agent) handleSessionNew(ctx context.Context, params json.RawMessage) (a
 	if err != nil {
 		return nil, RPCError(codeInternalError, "create session: "+err.Error())
 	}
-	sess := a.registerSession(meta.SessionID, root, nil, model, models, restrictModels)
+	sess, _ := a.registerSession(meta.SessionID, root, nil, model, models, restrictModels, false, agent.PermissionModeAuto)
 	return NewSessionResult{
 		SessionID:     sess.id,
 		ConfigOptions: a.configOptions(sess),
@@ -178,22 +227,96 @@ func (a *Agent) handleSessionLoad(ctx context.Context, params json.RawMessage) (
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, RPCError(codeInvalidParams, "invalid session/load params")
 	}
+	return a.activatePersistedSession(ctx, p, persistedSessionLoad)
+}
+
+func (a *Agent) handleSessionResume(ctx context.Context, params json.RawMessage) (any, error) {
+	var p ResumeSessionParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, RPCError(codeInvalidParams, "invalid session/resume params")
+	}
+	return a.activatePersistedSession(ctx, p, persistedSessionResume)
+}
+
+type persistedSessionOperation uint8
+
+const (
+	persistedSessionLoad persistedSessionOperation = iota
+	persistedSessionResume
+)
+
+// activatePersistedSession restores the agent's internal conversation context
+// for both lifecycle methods. session/load additionally replays user-visible
+// history as ordered session/update notifications; session/resume deliberately
+// does not, which makes it safe for an already-rendered desktop reconnect.
+func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParams, operation persistedSessionOperation) (any, error) {
+	// BOTH METHODS, BEFORE ANYTHING IS LOOKED UP. session/resume shares this
+	// params type with session/load, so the wire cannot tell an omitted cwd from
+	// an empty one; the blank case used to be answered with the persisted cwd,
+	// which made {"sessionId":"known"} a complete, successful activation request.
+	// Validating here rather than in one handler is what keeps the two entry
+	// points from drifting apart.
+	cwd, err := requestedWorkspace(p.Cwd)
+	if err != nil {
+		return nil, err
+	}
 	meta, err := a.deps.Store.Get(p.SessionID)
 	if err != nil || meta == nil {
 		return nil, RPCError(codeInvalidParams, "session not found: "+p.SessionID)
 	}
-	cwdInput := p.Cwd
-	if strings.TrimSpace(cwdInput) == "" {
-		cwdInput = meta.Cwd
+	if operation == persistedSessionResume && !sessions.IsResumableKind(meta.SessionKind) {
+		return nil, RPCError(codeInvalidParams, "session is not resumable: "+p.SessionID)
 	}
-	root, err := a.deps.ResolveWorkspaceRoot(cwdInput)
+	if strings.TrimSpace(meta.Cwd) == "" {
+		return nil, RPCError(codeInvalidParams, "session has no persisted workspace: "+p.SessionID)
+	}
+	// SAME RULE ON THE WAY IN. Omitting a relative entry from the listing is not
+	// enough: a stored "." still resolves against this process's directory, so a
+	// client that hands back that same directory as its cwd would be sold the
+	// invented root as a match. A workspace that cannot be identified is not one
+	// this session can be restored into.
+	if !filepath.IsAbs(meta.Cwd) {
+		return nil, RPCError(codeInvalidParams, "session workspace is not an absolute path, so it cannot be identified: "+p.SessionID)
+	}
+	persistedRoot, err := a.deps.ResolveWorkspaceRoot(meta.Cwd)
+	if err != nil {
+		return nil, RPCError(codeInvalidParams, "persisted session workspace is unavailable: "+err.Error())
+	}
+	root, err := a.deps.ResolveWorkspaceRoot(cwd)
 	if err != nil {
 		return nil, RPCError(codeInvalidParams, err.Error())
+	}
+	// ACP session cwd is immutable. Loading history under a different root
+	// would give a conversation from one workspace access to another
+	// workspace's configuration, files, and tools.
+	if !sameWorkspace(root, persistedRoot) {
+		return nil, RPCError(codeInvalidParams, "session cwd does not match its persisted workspace")
 	}
 	// Load history BEFORE publishing the session so no concurrent prompt observes
 	// a half-initialized session (registerSession sets history under the lock and
 	// reuses an already-live session rather than orphaning its in-flight turn).
-	history, historyErr := a.loadHistory(meta.SessionID)
+	requireHistoryLog := operation == persistedSessionResume && meta.EventCount > 0
+	history, messages, historyWarning, historyErr := a.loadHistory(meta.SessionID, requireHistoryLog)
+	// RESUME PROMISES RESTORED CONTEXT, SO A FAILED RESTORATION IS A FAILED
+	// RESUME. historyErr used to do nothing but suppress replay and raise a
+	// warning: the session was registered and reported ready regardless, so a
+	// corrupt record or an unreadable events file left the caller holding a live,
+	// promptable session ID whose next prompt ran as a brand-new conversation
+	// under the old identity. Nothing in the response said so.
+	//
+	// Publication is now gated on restoration for resume. LOAD keeps the
+	// best-effort policy deliberately rather than by inheriting this helper: it
+	// replays what it has and warns about the rest, which is the right trade for
+	// a client rebuilding a transcript it can still scroll. Reported by @jatmn.
+	if operation == persistedSessionResume && historyErr != nil {
+		return nil, RPCError(codeInternalError, "restore session history: "+historyErr.Error())
+	}
+	// Load stays best effort about a history it cannot read, but not about one
+	// prune holds: publishing it would leave the client using a session prune may
+	// be removing, one this process could not hold open.
+	if errors.Is(historyErr, sessions.ErrPruning) {
+		return nil, RPCError(codeInternalError, historyErr.Error())
+	}
 	model, models, restrictModels, err := a.resolveModelChoices(ctx, root)
 	if err != nil {
 		return nil, RPCError(codeInternalError, "config: "+err.Error())
@@ -204,17 +327,118 @@ func (a *Agent) handleSessionLoad(ctx context.Context, params json.RawMessage) (
 			models = append(models, SessionConfigOptionValue{Value: persistedModel, Name: persistedModel})
 		}
 	}
-	sess := a.registerSession(meta.SessionID, root, history, model, models, restrictModels)
+	// Resume has already refused a non-resumable kind above, so only load can
+	// reach here with one, and it publishes that session for viewing only.
+	readOnly := !sessions.IsResumableKind(meta.SessionKind)
+	sess, existed := a.registerSession(meta.SessionID, root, history, model, models, restrictModels, readOnly, restoredPermissionMode(meta.PermissionMode))
+	if existed {
+		_, messages, historyWarning, historyErr = a.refreshSessionHistory(sess, requireHistoryLog)
+		if operation == persistedSessionResume && historyErr != nil {
+			return nil, RPCError(codeInternalError, "restore session history: "+historyErr.Error())
+		}
+	}
+	note := &notifier{conn: a.conn, sessionID: sess.id}
+	if operation == persistedSessionLoad && historyErr == nil {
+		for _, message := range messages {
+			if message.tool != nil {
+				note.send(*message.tool)
+				continue
+			}
+			note.send(replayMessageChunk(message.role, replayMessageID(message.eventID), message.content))
+		}
+	}
 	a.warnPersistence(
-		&notifier{conn: a.conn, sessionID: sess.id},
+		note,
+		"rehydrate session compaction",
+		"Could not apply session compaction. Raw session history was restored instead.",
+		historyWarning,
+		operation == persistedSessionLoad,
+	)
+	a.warnPersistence(
+		note,
 		"load session history",
 		"Could not load session history. The session is open, but earlier turns may be missing until storage recovers.",
 		historyErr,
+		operation == persistedSessionLoad,
 	)
 	return LoadSessionResult{
 		ConfigOptions: a.configOptions(sess),
 		Modes:         a.modeState(sess),
 	}, nil
+}
+
+func (a *Agent) handleSessionList(_ context.Context, params json.RawMessage) (any, error) {
+	var p ListSessionsParams
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, RPCError(codeInvalidParams, "invalid session/list params")
+		}
+	}
+	if p.Cursor != "" {
+		return nil, RPCError(codeInvalidParams, "invalid session/list cursor")
+	}
+	items, err := a.deps.Store.ListResumable()
+	if err != nil {
+		return nil, RPCError(codeInternalError, "list sessions: "+err.Error())
+	}
+	// The filter is the one cwd ACP leaves optional, so a blank one means "no
+	// filter" rather than an error — but a relative one is rebased onto this
+	// process's directory exactly like the others, and would then silently answer
+	// about a workspace the client never named.
+	var cwd string
+	if strings.TrimSpace(p.Cwd) != "" {
+		filter, err := requestedWorkspace(p.Cwd)
+		if err != nil {
+			return nil, err
+		}
+		cwd, err = a.deps.ResolveWorkspaceRoot(filter)
+		if err != nil {
+			return nil, RPCError(codeInvalidParams, err.Error())
+		}
+	}
+	result := ListSessionsResult{Sessions: make([]SessionInfo, 0, len(items))}
+	for _, item := range items {
+		// EVERY ENTRY IS RESOLVED, FILTER OR NO FILTER. Listing is a menu, and
+		// every item on it has to be orderable: activatePersistedSession
+		// resolves the persisted workspace and refuses what it cannot reach, so
+		// anything this loop cannot resolve is something the client would be
+		// offered and then denied.
+		//
+		// Resolving only when a cwd filter was supplied left two shapes through —
+		// a session whose workspace has since been deleted, and a legacy entry
+		// holding a relative path, which was then reported as cwd "." even though
+		// ACP requires SessionInfo.cwd to be absolute.
+		if strings.TrimSpace(item.Cwd) == "" {
+			continue
+		}
+		// A RELATIVE PERSISTED CWD HAS NO RECOVERABLE IDENTITY. Resolving one
+		// rebases it onto wherever this ACP server happens to be running and
+		// advertises that invented absolute path as the session's workspace — so a
+		// conversation created for one project could be resumed against another
+		// project's configuration, files and tools. The original base is not
+		// knowable from the metadata, so the honest answer is to omit the entry
+		// rather than to guess at it.
+		if !filepath.IsAbs(item.Cwd) {
+			continue
+		}
+		itemRoot, err := a.deps.ResolveWorkspaceRoot(item.Cwd)
+		if err != nil {
+			continue
+		}
+		if cwd != "" && !sameWorkspace(itemRoot, cwd) {
+			continue
+		}
+		result.Sessions = append(result.Sessions, SessionInfo{
+			SessionID: item.SessionID,
+			Title:     item.Title,
+			// The RESOLVED root, not the stored string: absolute as ACP
+			// requires, and the same value the client will hand back on resume.
+			Cwd:       itemRoot,
+			UpdatedAt: item.UpdatedAt,
+			Meta:      &SessionInfoMeta{ModelID: item.ModelID, CreatedAt: item.CreatedAt},
+		})
+	}
+	return result, nil
 }
 
 // ---- prompt turn ----
@@ -227,6 +451,9 @@ func (a *Agent) handleSessionPrompt(ctx context.Context, params json.RawMessage)
 	sess := a.session(p.SessionID)
 	if sess == nil {
 		return nil, RPCError(codeInvalidParams, "unknown session: "+p.SessionID)
+	}
+	if sess.readOnly {
+		return nil, RPCError(codeInvalidParams, "session is not resumable, so it was loaded for viewing only and cannot be prompted: "+p.SessionID)
 	}
 
 	// Serialize turns for this session so two prompts can't interleave history or
@@ -293,6 +520,39 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 			note.text("\n\n[zero warning] " + text + "\n")
 		}
 	}
+	// Buffer the complete turn until RunAgent has a valid ACP outcome. A hard run
+	// failure is an aborted turn: neither live history nor durable history may
+	// retain its user/tool prefix under an RPC error. StopCancelled is a valid
+	// outcome and commits through the same boundary below.
+	pendingEvents := make([]sessions.AppendEventInput, 0, 4)
+	queue := func(input sessions.AppendEventInput) {
+		pendingEvents = append(pendingEvents, input)
+	}
+	queue(messageEvent("user", userText))
+
+	visionCache := make(map[string]bool)
+	var visionCacheMu sync.Mutex
+	supportsVision := func(modelID string) bool {
+		modelID = strings.TrimSpace(modelID)
+		if modelID == "" {
+			return false
+		}
+		visionCacheMu.Lock()
+		defer visionCacheMu.Unlock()
+		if cached, ok := visionCache[modelID]; ok {
+			return cached
+		}
+		supported := a.modelSupportsVision(ctx, resolved.Provider, modelID)
+		visionCache[modelID] = supported
+		return supported
+	}
+	effectivePrompt := userText
+	if len(images) > 0 && !supportsVision(resolved.Provider.Model) {
+		msg := fmt.Sprintf("Model %s does not support image input; ignoring %d prompt image(s).", resolved.Provider.Model, len(images))
+		note.text("[zero] " + msg + "\n\n")
+		effectivePrompt = fmt.Sprintf("[Note: %s]\n\n%s", msg, userText)
+		images = nil
+	}
 
 	opts := agent.Options{
 		Cwd:            sess.cwd,
@@ -305,10 +565,21 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 		DeferThreshold: workspace.DeferThreshold,
 		MaxTurns:       resolved.MaxTurns,
 		Images:         images,
+		SupportsVision: supportsVision,
 		OnText:         note.text,
 		OnReasoning:    note.thought,
-		OnToolCall:     note.toolCall,
+		// Persist token usage the same way `zero exec` does, so `zero usage report`
+		// sees ACP sessions too. It joins the turn's buffered batch: a hard run
+		// failure that aborts the turn drops its usage together with its history.
+		OnUsage: func(u agent.Usage) {
+			queue(usageEvent(u))
+		},
+		OnToolCall: func(call agent.ToolCall) {
+			queue(toolCallEvent(call))
+			note.toolCall(call)
+		},
 		OnToolResult: func(result agent.ToolResult) {
+			queue(toolResultEvent(result))
 			note.toolResult(result)
 			if result.Name == "update_plan" {
 				a.emitPlan(registry, note)
@@ -319,21 +590,38 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 		},
 	}
 
-	agentPrompt := buildPrompt(sess.snapshotHistory(), userText)
+	agentPrompt := buildPrompt(sess.snapshotHistory(), effectivePrompt)
 	result, runErr := a.deps.RunAgent(ctx, agentPrompt, provider, opts)
-
+	if result.FinalAnswer != "" {
+		queue(messageEvent("assistant", result.FinalAnswer))
+	}
 	reason, stopErr := stopReasonFor(result, runErr)
 	if stopErr != nil {
 		return "", RPCError(codeInternalError, stopErr.Error())
 	}
-	if err := a.persistTurn(sess, userText, result.FinalAnswer); err != nil {
-		a.warnPersistence(
-			note,
-			"save session history",
-			"Could not save session history. This turn is available in memory, but future resume may miss it until storage recovers.",
-			err,
-		)
-	}
+	// ONE BATCH, ONE LOCK. The outcome gate above decides WHETHER the turn is
+	// committed; the store batch decides WHICH RECORDS STAY TOGETHER relative to
+	// other writers, and these are different guarantees. Persisting the buffer
+	// one event per call took and released the store's session lock between
+	// events, so a second ACP instance holding the same session — its turnMu is
+	// its own, only the store is shared — could append its whole turn in the
+	// gap: user A, user B, answer B, answer A. Every write was individually
+	// locked and the log was valid, but a fresh load pairs prose by order and
+	// reconstructed three wrong turns from two right ones. Before this branch,
+	// persistTurn handed the user and assistant events to AppendEvents together;
+	// buffering until the outcome is known was correct, splitting the commit
+	// into singleton writes was not. The store writes a batch under one lock and
+	// one file write, which is the contiguity restored here — not a disk
+	// transaction, and not a promise about crashes mid-fsync. Reported by @jatmn.
+	persistenceErr := a.persistTurn(sess.id, pendingEvents)
+	sess.appendHistory(turnRecord{user: userText, assistant: result.FinalAnswer})
+	a.warnPersistence(
+		note,
+		"save session history",
+		"Could not save session history. This turn is available in memory, but future resume may miss it until storage recovers.",
+		persistenceErr,
+		true,
+	)
 	return reason, nil
 }
 
@@ -414,7 +702,9 @@ func (a *Agent) handleSetMode(_ context.Context, params json.RawMessage) (any, e
 	mode := agent.PermissionMode(p.ModeID)
 	switch mode {
 	case agent.PermissionModeAuto, agent.PermissionModeAsk, agent.PermissionModePlan:
-		sess.setMode(mode)
+		if err := a.updateMode(sess, mode); err != nil {
+			return nil, err
+		}
 		(&notifier{conn: a.conn, sessionID: sess.id}).currentMode(string(mode))
 		return SetSessionModeResult{}, nil
 	case agent.PermissionModeUnsafe:
@@ -450,7 +740,9 @@ func (a *Agent) handleSetConfigOption(_ context.Context, params json.RawMessage)
 		mode := agent.PermissionMode(p.Value)
 		switch mode {
 		case agent.PermissionModeAuto, agent.PermissionModeAsk, agent.PermissionModePlan:
-			sess.setMode(mode)
+			if err := a.updateMode(sess, mode); err != nil {
+				return nil, err
+			}
 			(&notifier{conn: a.conn, sessionID: sess.id}).currentMode(string(mode))
 		case agent.PermissionModeUnsafe:
 			return nil, RPCError(codeInvalidParams, "mode not permitted over ACP: "+p.Value)
@@ -490,6 +782,35 @@ func (a *Agent) updateModel(sess *acpSession, model string, restrictModels bool)
 	}
 	sess.setModel(model)
 	return nil
+}
+
+// updateMode persists the mode BEFORE applying it, so a failed write fails the
+// request instead of leaving disk behind memory; the same order updateModel
+// uses. The caller holds sess.turnMu (both mode doors take it and it is not
+// reentrant, so this must not lock it again); the write under turnMu briefly
+// blocks that session's prompts, which is what makes the store authoritative.
+func (a *Agent) updateMode(sess *acpSession, mode agent.PermissionMode) error {
+	if _, err := a.deps.Store.UpdateMode(sess.id, string(mode)); err != nil {
+		return RPCError(codeInternalError, "save mode selection: "+err.Error())
+	}
+	sess.setMode(mode)
+	return nil
+}
+
+// restoredPermissionMode maps a persisted mode onto the modes ACP offers. A
+// session written before modes were persisted has none and keeps the historical
+// auto default. A stored value outside the three is never allowed to come back
+// weaker than ask, and unsafe can never be reached because ACP refuses to set
+// it in the first place.
+func restoredPermissionMode(saved string) agent.PermissionMode {
+	switch mode := agent.PermissionMode(strings.TrimSpace(saved)); mode {
+	case agent.PermissionModeAuto, agent.PermissionModeAsk, agent.PermissionModePlan:
+		return mode
+	case "":
+		return agent.PermissionModeAuto
+	default:
+		return agent.PermissionModeAsk
+	}
 }
 
 func (a *Agent) handleCancel(_ context.Context, params json.RawMessage) {
@@ -592,39 +913,179 @@ func (a *Agent) configOptions(s *acpSession) []SessionConfigOption {
 
 // ---- persistence + continuity ----
 
-func (a *Agent) persistTurn(sess *acpSession, user, assistant string) error {
-	defer sess.appendHistory(turnRecord{user: user, assistant: assistant})
+// persistTurn commits a completed turn's buffered events as one store batch, so
+// no other writer's records can land between them. A failure is the failure of
+// the whole batch: nothing after a failed prerequisite is appended on its own.
+func (a *Agent) persistTurn(sessionID string, inputs []sessions.AppendEventInput) error {
+	if len(inputs) == 0 {
+		return nil
+	}
+	if a.deps.PersistEvents != nil {
+		return a.deps.PersistEvents(sessionID, inputs)
+	}
 	if a.deps.Store == nil {
 		return nil
 	}
-	events := []sessions.AppendEventInput{
-		{
-			Type:    sessions.EventMessage,
-			Payload: map[string]any{"role": "user", "content": user},
-		},
-	}
-	if assistant != "" {
-		events = append(events, sessions.AppendEventInput{
-			Type:    sessions.EventMessage,
-			Payload: map[string]any{"role": "assistant", "content": assistant},
-		})
-	}
-	_, err := a.deps.Store.AppendEvents(sess.id, events)
+	_, err := a.deps.Store.AppendEvents(sessionID, inputs)
 	return err
 }
 
-func (a *Agent) loadHistory(sessionID string) ([]turnRecord, error) {
-	if a.deps.Store == nil {
-		return nil, nil
+func messageEvent(role, content string) sessions.AppendEventInput {
+	return sessions.AppendEventInput{
+		Type:    sessions.EventMessage,
+		Payload: map[string]any{"role": role, "content": content},
 	}
-	events, err := a.deps.Store.ReadEvents(sessionID)
+}
+
+// usageEvent records one provider usage report in the same persisted shape the
+// exec runtime writes (usage.EventUsagePayload is the single writer).
+func usageEvent(u agent.Usage) sessions.AppendEventInput {
+	return sessions.AppendEventInput{
+		Type:    sessions.EventUsage,
+		Payload: usage.EventUsagePayload(u),
+	}
+}
+
+func toolCallEvent(call agent.ToolCall) sessions.AppendEventInput {
+	return sessions.AppendEventInput{
+		Type: sessions.EventToolCall,
+		Payload: map[string]any{
+			"toolCallId": call.ID,
+			"name":       call.Name,
+			"arguments":  call.Arguments,
+		},
+	}
+}
+
+func toolResultEvent(result agent.ToolResult) sessions.AppendEventInput {
+	return sessions.AppendEventInput{
+		Type: sessions.EventToolResult,
+		Payload: map[string]any{
+			"toolCallId":   result.ToolCallID,
+			"name":         result.Name,
+			"status":       result.Status,
+			"output":       result.Output,
+			"changedFiles": append([]string(nil), result.ChangedFiles...),
+		},
+	}
+}
+
+// persistedMessage is one entry of the restored transcript in stored order. It
+// is either a message (role/content) or a tool-call notification (tool), never
+// both: keeping them in ONE ordered slice is what preserves the interleaving a
+// client needs to redraw the conversation as it originally happened.
+type persistedMessage struct {
+	eventID string
+	role    string
+	content string
+	// tool is set for a replayed tool call or its result, and is already in wire
+	// shape — it comes from the same toolCallStart/toolCallResult mapping the
+	// live turn uses, so a replayed tool call renders identically to a fresh one
+	// and there is no second mapping to drift out of sync.
+	tool *ToolCallUpdate
+}
+
+func (a *Agent) loadHistory(sessionID string, requireHistoryLog bool) ([]turnRecord, []persistedMessage, error, error) {
+	if a.deps.Store == nil {
+		return nil, nil, nil, nil
+	}
+	// THE EFFECTIVE CONVERSATION, NOT THE RAW LOG. A compacted session keeps its
+	// original prefix on disk alongside an EventCompaction that names the events
+	// it replaced and carries their durable summary. ReadEvents hands back both,
+	// so restoring from it replayed superseded turns AND dropped the summary that
+	// replaced them — resume then seeded the next turn with context the
+	// conversation had already moved past, and load visibly resurrected
+	// transcript entries the user had seen compacted away.
+	//
+	// ReadRehydratedEvents is the projection the TUI and exec paths already use
+	// (internal/tui/session.go, internal/sessions/exec_session.go), so all three
+	// now agree on what the conversation IS. Switching readers alone is not
+	// enough: rehydration substitutes the compaction event in place of the events
+	// it replaced, so a loop that skips everything but EventMessage would drop the
+	// summary exactly as before. It is projected below. Reported by @jatmn.
+	//
+	// The session was picked from its metadata a moment ago. Make sure it is
+	// still there, and held, before restoring it: see sessions.HoldToContinue.
+	if err := a.deps.Store.HoldToContinue(sessionID); err != nil {
+		return nil, nil, nil, err
+	}
+	events, eventLogPresent, err := a.deps.Store.ReadRehydratedEventsWithPresence(sessionID)
+	var rehydrateWarning error
 	if err != nil {
-		return nil, err
+		if errors.Is(err, sessions.ErrPruning) {
+			// Not a rehydration failure: the raw read would continue the session
+			// without holding it while zero sessions prune may be removing it.
+			return nil, nil, nil, err
+		}
+		rehydrateWarning = err
+		events, eventLogPresent, err = a.deps.Store.ReadEventsWithPresence(sessionID)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	if requireHistoryLog && !eventLogPresent {
+		return nil, nil, nil, fmt.Errorf("zero session %s event log is missing", sessionID)
 	}
 	var records []turnRecord
+	var messages []persistedMessage
+	activeToolCalls := make(map[string]string)
 	var pendingUser string
 	havePending := false
 	for _, e := range events {
+		if e.Type == sessions.EventCompaction {
+			// The summary stands in for the turns it replaced, so it enters the
+			// history as an assistant message: it is prior context the next turn
+			// must see, and the wire has no separate role for it.
+			raw, marshalErr := json.Marshal(e.Payload)
+			if marshalErr != nil {
+				continue
+			}
+			var payload struct {
+				Summary string `json:"summary"`
+			}
+			if json.Unmarshal(raw, &payload) != nil || strings.TrimSpace(payload.Summary) == "" {
+				continue
+			}
+			messages = append(messages, persistedMessage{
+				eventID: persistedMessageIdentity(sessionID, e),
+				role:    "assistant",
+				content: payload.Summary,
+			})
+			records = append(records, turnRecord{user: pendingUser, assistant: payload.Summary})
+			pendingUser = ""
+			havePending = false
+			continue
+		}
+		// TOOL ACTIVITY IS PART OF THE TRANSCRIPT, NOT DECORATION. A restored
+		// conversation that shows only the prose reads as if the agent asserted
+		// its edits and command output from nowhere: the user sees "I updated
+		// scope.go" with no record that any tool ran. These are collected for
+		// replay only. They deliberately do NOT enter turnRecord, so the prompt
+		// context a resumed turn receives stays byte-identical to what it was —
+		// load and resume continue to consume the SAME effective history, and
+		// only the wire rendering differs. Reported by @jatmn.
+		if e.Type == sessions.EventToolCall || e.Type == sessions.EventToolResult {
+			if upd := replayToolUpdate(e); upd != nil {
+				rawID := upd.ToolCallID
+				if e.Type == sessions.EventToolResult {
+					replayID, ok := activeToolCalls[rawID]
+					if !ok {
+						continue
+					}
+					upd.ToolCallID = replayID
+					delete(activeToolCalls, rawID)
+				} else {
+					replayID := replayToolCallID(persistedMessageIdentity(sessionID, e))
+					activeToolCalls[rawID] = replayID
+					upd.ToolCallID = replayID
+				}
+				messages = append(messages, persistedMessage{
+					eventID: persistedMessageIdentity(sessionID, e),
+					tool:    upd,
+				})
+			}
+			continue
+		}
 		if e.Type != sessions.EventMessage {
 			continue
 		}
@@ -641,12 +1102,14 @@ func (a *Agent) loadHistory(sessionID string) ([]turnRecord, error) {
 		}
 		switch msg.Role {
 		case "user":
+			messages = append(messages, persistedMessage{eventID: persistedMessageIdentity(sessionID, e), role: msg.Role, content: msg.Content})
 			if havePending {
 				records = append(records, turnRecord{user: pendingUser})
 			}
 			pendingUser = msg.Content
 			havePending = true
 		case "assistant":
+			messages = append(messages, persistedMessage{eventID: persistedMessageIdentity(sessionID, e), role: msg.Role, content: msg.Content})
 			records = append(records, turnRecord{user: pendingUser, assistant: msg.Content})
 			pendingUser = ""
 			havePending = false
@@ -655,10 +1118,89 @@ func (a *Agent) loadHistory(sessionID string) ([]turnRecord, error) {
 	if havePending {
 		records = append(records, turnRecord{user: pendingUser})
 	}
-	return records, nil
+	return records, messages, rehydrateWarning, nil
 }
 
-func (a *Agent) warnPersistence(note *notifier, action string, message string, err error) {
+// replayToolUpdate rebuilds the ACP notification for one stored tool event.
+//
+// The stored toolCallId is returned here as a correlation key. loadHistory maps
+// each call occurrence to a stable session-wide replay identity and applies that
+// identity to its result. Older records wrote the field as "id", so both
+// spellings are accepted — the TUI projection already does the same
+// (internal/tui/session.go).
+//
+// A record that carries no usable id is skipped rather than replayed under a
+// synthesized one: an unpairable update is worse than a missing row.
+func replayToolUpdate(event sessions.Event) *ToolCallUpdate {
+	raw, err := json.Marshal(event.Payload)
+	if err != nil {
+		return nil
+	}
+	var payload struct {
+		Name         string   `json:"name"`
+		ToolCallID   string   `json:"toolCallId"`
+		ID           string   `json:"id"`
+		Arguments    string   `json:"arguments"`
+		Status       string   `json:"status"`
+		Output       string   `json:"output"`
+		ChangedFiles []string `json:"changedFiles"`
+	}
+	if json.Unmarshal(raw, &payload) != nil {
+		return nil
+	}
+	id := payload.ToolCallID
+	if id == "" {
+		id = payload.ID
+	}
+	if id == "" {
+		return nil
+	}
+	if event.Type == sessions.EventToolCall {
+		upd := toolCallStart(agent.ToolCall{ID: id, Name: payload.Name, Arguments: payload.Arguments})
+		return &upd
+	}
+	status := tools.Status(payload.Status)
+	if status == "" {
+		status = tools.StatusOK
+	}
+	upd := toolCallResult(agent.ToolResult{
+		ToolCallID:   id,
+		Name:         payload.Name,
+		Status:       status,
+		Output:       payload.Output,
+		ChangedFiles: append([]string(nil), payload.ChangedFiles...),
+	})
+	return &upd
+}
+
+func persistedMessageIdentity(sessionID string, event sessions.Event) string {
+	if event.ID != "" {
+		return event.ID
+	}
+	return fmt.Sprintf("%s:%d", sessionID, event.Sequence)
+}
+
+// replayMessageID maps ZERO's stable event identity to a standards-shaped UUID
+// without leaking or parsing the event id on the wire. The same stored message
+// receives the same opaque id across loads, which also gives clients an exact
+// chunk boundary when two adjacent persisted messages have the same role.
+func replayMessageID(eventID string) string {
+	return replayOpaqueID("message", eventID)
+}
+
+func replayToolCallID(eventID string) string {
+	return replayOpaqueID("tool-call", eventID)
+}
+
+func replayOpaqueID(kind, eventID string) string {
+	sum := sha256.Sum256([]byte("zero-acp-" + kind + ":" + eventID))
+	b := sum[:16]
+	b[6] = (b[6] & 0x0f) | 0x50
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+func (a *Agent) warnPersistence(note *notifier, action string, message string, err error, notify bool) {
 	if err == nil {
 		return
 	}
@@ -667,7 +1209,7 @@ func (a *Agent) warnPersistence(note *notifier, action string, message string, e
 		sessionID = note.sessionID
 	}
 	log.Printf("zero acp: failed to %s for session %s: %v", action, sessionID, err)
-	if note != nil {
+	if note != nil && notify {
 		note.text("\n\n[zero warning] " + message + "\n")
 	}
 }
@@ -714,18 +1256,35 @@ func promptImages(blocks []ContentBlock) []zeroruntime.ImageBlock {
 
 // registerSession publishes a session under the agent's lock. If one is already
 // registered for id (e.g. a re-load of an in-flight session) the existing live
-// session is returned unchanged rather than orphaning its turn or resetting its
-// mode/model. history is set BEFORE publishing so no concurrent prompt can read a
-// half-initialized session.
-func (a *Agent) registerSession(id, cwd string, history []turnRecord, model string, models []SessionConfigOptionValue, restrictModels bool) *acpSession {
+// session is returned rather than orphaning its turn or resetting its mode/model.
+// The bool reports that case so persisted activation can re-read and apply disk
+// history under turnMu. history is set BEFORE first publication so no concurrent
+// prompt can read a half-initialized session. mode is the session's initial
+// permission mode: auto for a new session, the restored value for load/resume.
+func (a *Agent) registerSession(id, cwd string, history []turnRecord, model string, models []SessionConfigOptionValue, restrictModels bool, readOnly bool, mode agent.PermissionMode) (*acpSession, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if existing := a.sessions[id]; existing != nil {
-		return existing
+		return existing, true
 	}
-	sess := &acpSession{id: id, cwd: cwd, mode: agent.PermissionModeAuto, model: model, models: models, restrictModels: restrictModels, history: history}
+	sess := &acpSession{id: id, cwd: cwd, mode: mode, model: model, models: models, restrictModels: restrictModels, history: history, readOnly: readOnly}
 	a.sessions[id] = sess
-	return sess
+	return sess, false
+}
+
+// refreshSessionHistory is the activation apply boundary for an already-live
+// session. The history is read while prompts are excluded, then applied to the
+// same object the prompt path uses. Re-reading here avoids overwriting a turn
+// that committed between activatePersistedSession's pre-publication read and
+// discovering that another activation had already registered the session.
+func (a *Agent) refreshSessionHistory(sess *acpSession, requireHistoryLog bool) ([]turnRecord, []persistedMessage, error, error) {
+	sess.turnMu.Lock()
+	defer sess.turnMu.Unlock()
+	history, messages, warning, err := a.loadHistory(sess.id, requireHistoryLog)
+	if err == nil {
+		sess.setHistory(history)
+	}
+	return history, messages, warning, err
 }
 
 func (a *Agent) session(id string) *acpSession {
@@ -808,8 +1367,77 @@ func (s *acpSession) appendHistory(rec turnRecord) {
 	s.mu.Unlock()
 }
 
+func (s *acpSession) setHistory(history []turnRecord) {
+	s.mu.Lock()
+	s.history = append([]turnRecord(nil), history...)
+	s.mu.Unlock()
+}
+
 func (s *acpSession) snapshotHistory() []turnRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]turnRecord(nil), s.history...)
+}
+
+// sameWorkspace reports whether two resolved roots name the same directory.
+//
+// STRING EQUALITY IS NOT DIRECTORY IDENTITY. ResolveWorkspaceRoot is abs plus
+// filepath.Clean plus a stat: it does not fold case and does not resolve
+// junctions, so one directory reached by two spellings produces two different
+// roots. A session persisted from the TUI was then unresumable from an editor
+// holding a different spelling of the same project folder, and session/list
+// filtered by the other spelling returned nothing — not a failed resume but an
+// invisible one, on exactly the case this feature exists for.
+//
+// filepath.EvalSymlinks is NOT the fix on Windows: it normalises a drive letter
+// but returns a junction path unchanged, so the alias survives it. Junctions need
+// no privilege, so this is ordinary rather than exotic. os.SameFile compares the
+// filesystem's own identity for the two directories, which is the question being
+// asked.
+//
+// The string comparison stays as the fast path, and a stat failure falls back to
+// it rather than widening the match — this gate refuses access to another
+// workspace's files and configuration, so an unanswerable comparison denies.
+func sameWorkspace(left, right string) bool {
+	if left == right {
+		return true
+	}
+	leftInfo, err := os.Stat(left)
+	if err != nil {
+		return false
+	}
+	rightInfo, err := os.Stat(right)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(leftInfo, rightInfo)
+}
+
+func (a *Agent) modelSupportsVision(ctx context.Context, profile config.ProviderProfile, modelID string) bool {
+	trimmed := strings.TrimSpace(modelID)
+	if trimmed == "" {
+		return false
+	}
+	if a.deps.DiscoverModels != nil {
+		if discovered, err := a.deps.DiscoverModels(ctx, profile); err == nil {
+			for _, dm := range discovered {
+				if strings.EqualFold(strings.TrimSpace(dm.ID), trimmed) {
+					if len(dm.InputModalities) > 0 {
+						for _, mod := range dm.InputModalities {
+							if strings.EqualFold(strings.TrimSpace(mod), "image") {
+								return true
+							}
+						}
+						return false
+					}
+					break
+				}
+			}
+		}
+	}
+	reg, _ := modelregistry.DefaultRegistry()
+	if entry, known := reg.Resolve(trimmed); known {
+		return entry.Supports(modelregistry.ModelCapabilityVision)
+	}
+	return modelregistry.SupportsVision(reg, trimmed)
 }

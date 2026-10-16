@@ -434,6 +434,14 @@ func providerProfileForAdd(options providerAddOptions) (config.ProviderProfile, 
 			catalogHeaders = aimlapi.WithResolvedPartnerHeader(catalogHeaders)
 		}
 	}
+	// Discovery fallback can pass the nonempty catalog placeholder through
+	// either CLI setup path. Never persist it as an Atomic Chat model.
+	if descriptor.ID == "atomic-chat-local" {
+		model := strings.TrimSpace(options.model)
+		if model == "" || model == "local-model" {
+			return config.ProviderProfile{}, fmt.Errorf("provider %q serves a locally loaded model; pass --model <id> (run `zero providers detect` to see the served model)", descriptor.ID)
+		}
+	}
 	profile := config.ProviderProfile{
 		Name:            name,
 		ProviderKind:    providerKindForDescriptor(descriptor),

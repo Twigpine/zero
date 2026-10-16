@@ -17,6 +17,7 @@ const (
 	commandPermissions
 	commandPS
 	commandStop
+	commandAttach
 	commandSandboxSetup
 	commandProvider
 	commandModel
@@ -36,6 +37,7 @@ const (
 	commandFast
 	commandStyle
 	commandTheme
+	commandNotify
 	commandTranscript
 	commandBash
 	commandImage
@@ -139,6 +141,13 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupRuntime,
 		description: "Stop running background terminal sessions.",
 		kind:        commandStop,
+	},
+	{
+		name:        "/attach",
+		usage:       "/attach [session_id]",
+		group:       commandGroupRuntime,
+		description: "Type directly into a running interactive terminal session.",
+		kind:        commandAttach,
 	},
 	{
 		name:        "/sandbox-setup",
@@ -399,6 +408,13 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupSession,
 		description: "Pick a color theme (no arg opens the picker; auto detects the terminal background).",
 		kind:        commandTheme,
+	},
+	{
+		name:        "/notify",
+		usage:       "/notify [list|off|bell|notify|both [unfocused|always|focused]]",
+		group:       commandGroupSession,
+		description: "Pick when Zero alerts you (completion and needs-input). No arg opens the picker.",
+		kind:        commandNotify,
 	},
 	{
 		name:        "/exit",

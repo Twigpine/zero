@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -125,19 +126,82 @@ func TestPermissionMismatchHoldsPeerMessageForExplicitDecision(t *testing.T) {
 		}
 	}
 
-	approvedModel, _ := next.resolvePermission(permissionDecisionAllow)
+	approvedModel, approveCmd := next.resolvePermission(permissionDecisionAllow)
 	approved := approvedModel.(model)
 	if approved.pendingPermission != nil {
 		t.Fatal("approval prompt did not close")
 	}
+	decision, ok := peerDecisionFromCmd(approveCmd)
+	if !ok || !decision.allow || decision.message.ID != "held-1" {
+		t.Fatalf("approval did not return a peer decision command: %#v", decision)
+	}
 	select {
 	case raw := <-messages:
-		decision, ok := raw.(peerDecisionMsg)
-		if !ok || !decision.allow || decision.message.ID != "held-1" {
-			t.Fatalf("decision = %#v", raw)
-		}
+		t.Fatalf("approval sent %#v through the runtime sink from Update", raw)
 	default:
-		t.Fatal("approval did not enqueue a peer decision")
+	}
+}
+
+// peerDecisionFromCmd runs cmd (flattening tea.Batch) and returns the first
+// peerDecisionMsg it produces.
+func peerDecisionFromCmd(cmd tea.Cmd) (peerDecisionMsg, bool) {
+	if cmd == nil {
+		return peerDecisionMsg{}, false
+	}
+	switch msg := cmd().(type) {
+	case peerDecisionMsg:
+		return msg, true
+	case tea.BatchMsg:
+		for _, inner := range msg {
+			if decision, ok := peerDecisionFromCmd(inner); ok {
+				return decision, true
+			}
+		}
+	}
+	return peerDecisionMsg{}, false
+}
+
+// The runtime sink forwards to program.Send, which blocks on the unbuffered
+// message channel the event loop reads between Update calls. Resolving a held
+// peer prompt must therefore never call the sink from Update.
+func TestPeerApprovalDecisionDoesNotCallBlockingSinkFromUpdate(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		decision permissionDecision
+		allow    bool
+	}{
+		{"allow", permissionDecisionAllow, true},
+		{"deny", permissionDecisionDeny, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			release := make(chan struct{})
+			t.Cleanup(func() { close(release) })
+			m := newModel(context.Background(), Options{
+				PermissionMode:     agent.PermissionModeAsk,
+				RuntimeMessageSink: func(tea.Msg) { <-release },
+			})
+			m, _ = m.handlePeerMessage(peermsg.InboundMessage{
+				ID: "held-blocking", From: peermsg.Peer{Ref: "11223344"}, Body: "hold me", RequiresApproval: true,
+			})
+
+			type result struct {
+				cmd tea.Cmd
+			}
+			done := make(chan result, 1)
+			go func() {
+				_, cmd := m.resolvePermission(tc.decision)
+				done <- result{cmd: cmd}
+			}()
+			select {
+			case res := <-done:
+				decision, ok := peerDecisionFromCmd(res.cmd)
+				if !ok || decision.allow != tc.allow || decision.message.ID != "held-blocking" {
+					t.Fatalf("decision = %#v ok=%v", decision, ok)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("resolving a held peer prompt blocked on the runtime sink")
+			}
+		})
 	}
 }
 
@@ -170,7 +234,7 @@ func TestPeerApprovalDecisionWaitsForCompletionBeforeOpeningNext(t *testing.T) {
 	second := peermsg.InboundMessage{ID: "second", From: peermsg.Peer{Ref: "22222222"}, Body: "second", RequiresApproval: true}
 	m, _ = m.handlePeerMessage(first)
 	m, _ = m.handlePeerMessage(second)
-	resolvedModel, _ := m.resolvePermission(permissionDecisionDeny)
+	resolvedModel, resolveCmd := m.resolvePermission(permissionDecisionDeny)
 	resolved := resolvedModel.(model)
 	if resolved.pendingPermission != nil {
 		t.Fatal("next approval opened before peer decision completed")
@@ -178,11 +242,8 @@ func TestPeerApprovalDecisionWaitsForCompletionBeforeOpeningNext(t *testing.T) {
 	if len(resolved.peerApprovalQueue) != 1 {
 		t.Fatalf("queue = %#v", resolved.peerApprovalQueue)
 	}
-	var decision peerDecisionMsg
-	select {
-	case raw := <-messages:
-		decision = raw.(peerDecisionMsg)
-	default:
+	decision, ok := peerDecisionFromCmd(resolveCmd)
+	if !ok {
 		t.Fatal("peer decision was not emitted")
 	}
 	next, _ := resolved.handlePeerDecision(decision.message, decision.allow)

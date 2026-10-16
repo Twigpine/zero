@@ -237,10 +237,11 @@ type credentialDenyPaths struct {
 // the preserved caller environment and Zero's own config/token stores. Four
 // deliberate limits:
 //
-//   - Windows is skipped: a non-empty profile DenyRead switches the Windows
-//     runner onto the capability-SID/ACL deny path and away from the
-//     WRITE_RESTRICTED token, which the unelevated tier depends on. Revisit
-//     once the Windows deny-read model is settled.
+//   - Windows is skipped: a non-empty profile DenyRead is unsupported on both
+//     restricted-token runner levels under the narrow SID set (PR #640). The
+//     fully restricted token cannot load ordinary system binaries without
+//     Users/AuthUsers, and adding those groups reopens write grants outside
+//     WriteRoots. Revisit once access-time confinement exists.
 //   - A candidate nested under a user-configured AllowRead entry is dropped,
 //     so `allowRead: ["~/.aws"]` remains an explicit opt-out.
 //   - Candidates are emitted whether or not they currently exist on disk.

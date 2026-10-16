@@ -70,21 +70,26 @@ const dragEdgeScrollInterval = 70 * time.Millisecond
 const dragEdgeScrollStep = 1
 
 type model struct {
-	ctx                         context.Context
-	cwd                         string
-	appVersion                  string
-	userCommands                []usercommands.Command // file-sourced /commands (.zero/commands)
-	loadSkills                  func() []skills.Skill  // lazy installed-skills loader for /skills + /<skill-name>
-	userConfigPath              string
-	doctorUserConfigPath        string
-	projectConfigPath           string
-	gitBranch                   string
-	providerName                string
-	modelName                   string
-	modelCatalog                modelregistry.Registry
-	providerProfile             config.ProviderProfile
-	savedProviders              []config.ProviderProfile
-	provider                    zeroruntime.Provider
+	ctx                  context.Context
+	cwd                  string
+	appVersion           string
+	startupNotices       []string               // Options.StartupNotices, said again when a session is resumed
+	userCommands         []usercommands.Command // file-sourced /commands (.zero/commands)
+	loadSkills           func() []skills.Skill  // lazy installed-skills loader for /skills + /<skill-name>
+	userConfigPath       string
+	doctorUserConfigPath string
+	projectConfigPath    string
+	gitBranch            string
+	providerName         string
+	modelName            string
+	modelCatalog         modelregistry.Registry
+	providerProfile      config.ProviderProfile
+	savedProviders       []config.ProviderProfile
+	provider             zeroruntime.Provider
+	// allowEscalation mirrors Options.AllowEscalation: it gates the per-run model
+	// switchers, and the caller gates the escalate_model tool on the same flag.
+	allowEscalation             bool
+	modelRPM                    *zeroruntime.ModelRPMLimiter
 	newProvider                 func(config.ProviderProfile) (zeroruntime.Provider, error)
 	newTurnSessionProvider      func(config.ProviderProfile, zeroruntime.Provider) zeroruntime.TurnSessionProvider
 	probeProviderHealth         func(context.Context, providerhealth.Options) providerhealth.Result
@@ -212,16 +217,26 @@ type model struct {
 	keyBindings                   keyBindings
 	themeMode                     themeMode // palette preference: system (default) or named palette
 	hasDarkBg                     bool      // last terminal background-detection result, if one is delivered
-	userAgent                     string
-	compactRequests               int
-	compactInFlight               bool
-	compactFrame                  int
-	lastCompactResult             *CompactResult
-	lastCompactError              string
-	unpricedRequests              int
-	unpricedTokens                int
-	lastUsage                     usage.Normalized
-	lastUsageSeen                 bool
+	// notifyMode and notifyFocusMode track the user's in-session notify
+	// preference (from options.Notify, updated by /notify). The notifier built
+	// at startup is independent, so changes apply on the NEXT permission prompt.
+	notifyMode string
+	// notifyConfiguredMode holds the RAW configured mode ("" when the user
+	// never set one) so state output can label the effective default as
+	// "(default)" — mirroring the CLI's `mode: (default)` for the same state
+	// (maintainer review, PR #1001). Cleared once the user picks a mode.
+	notifyConfiguredMode string
+	notifyFocusMode      string
+	userAgent            string
+	compactRequests      int
+	compactInFlight      bool
+	compactFrame         int
+	lastCompactResult    *CompactResult
+	lastCompactError     string
+	unpricedRequests     int
+	unpricedTokens       int
+	lastUsage            usage.Normalized
+	lastUsageSeen        bool
 	// turnLatencySum / turnLatencyCount accumulate completed-run wall time so
 	// /context can show a rolling average turn latency (the "is it slow?" signal).
 	// Reset by /new.
@@ -250,6 +265,9 @@ type model struct {
 	composerSelection      composerSelectionState
 	dictation              dictationController
 	sttKeyPrompt           *sttKeyPromptState
+	terminalAttach         *terminalAttachState
+	terminalAutoAttach     *terminalAutoAttachState
+	terminalAttachSeen     map[int]bool
 	// plan holds the sticky plan panel state (steps, expansion, timings)
 	// synced from the update_plan tool. See plan_panel.go.
 	plan            planPanelState
@@ -583,6 +601,11 @@ type model struct {
 	// with. Nil in production; used by tests to assert image threading without a
 	// real provider round-trip.
 	captureRunImages func([]zeroruntime.ImageBlock)
+
+	// captureRunSupportsVision, when set, is invoked with the vision-support
+	// predicate wired into the run's agent options. Nil in production; used by
+	// tests to assert snapshot isolation and discovery scoping.
+	captureRunSupportsVision func(func(string) bool)
 }
 
 type agentTextMsg struct {
@@ -658,10 +681,16 @@ type agentUsageMsg struct {
 }
 
 type agentResponseMsg struct {
-	runID         int
-	rows          []transcriptRow
-	usageEvents   []zeroruntime.Usage
+	runID       int
+	rows        []transcriptRow
+	usageEvents []zeroruntime.Usage
+	// usageModelID is the model in force when the run ended. usageModelIDs is
+	// the model in force when each usageEvents entry fired: a mid-run
+	// escalation changes it partway through the run, and billing the events
+	// before the switch to the escalated model would be as wrong as billing
+	// the ones after it to the starting model. Read through usageModelIDAt.
 	usageModelID  string
+	usageModelIDs []string
 	sessionEvents []pendingSessionEvent
 	specReview    *pendingSpecReviewPrompt
 	err           error
@@ -672,6 +701,16 @@ type agentResponseMsg struct {
 	// ttft is time-to-first-token for the turn (0 when nothing streamed — a
 	// tool-only or errored turn). Set only on the success path.
 	ttft time.Duration
+}
+
+// usageModelIDAt is the model in force when usageEvents[index] fired. The
+// per-event record wins; usageModelID is the fallback for a message built
+// without one, which is what every constructor before escalation produced.
+func (msg agentResponseMsg) usageModelIDAt(index int) string {
+	if index < len(msg.usageModelIDs) && msg.usageModelIDs[index] != "" {
+		return msg.usageModelIDs[index]
+	}
+	return msg.usageModelID
 }
 
 type peerMessageMsg struct {
@@ -821,6 +860,11 @@ type permissionRequestMsg struct {
 type pendingPermissionPrompt struct {
 	request agent.PermissionRequest
 	decide  func(agent.PermissionDecision)
+	// decideCmd is the Update-safe alternative to decide for prompts the TUI
+	// itself raises: decide forwards through runtimeMessageSink, which blocks on
+	// the program's unbuffered message channel when called from Update, so these
+	// prompts return a command that yields the follow-up message instead.
+	decideCmd func(agent.PermissionDecision) tea.Cmd
 	// cursor is the highlighted option index (into permissionOptions): 0 is the
 	// resting approval choice. Moved by ↑/↓/Tab; confirmed by Enter or a click.
 	// Hotkeys resolve the matching request-provided option directly.
@@ -874,6 +918,22 @@ type tuiAgentRunOptions struct {
 	systemPrompt          string
 	transientSystemPrompt string
 	specDraft             bool
+}
+
+// effectiveTUINotifyMode returns the notification mode the TUI should use. An
+// empty/unconfigured mode falls back to the TUI's own effective default
+// ("both": terminal bell + OSC-9 desktop notification) so the needs-input
+// alert works for new users without requiring them to hand-edit config.json.
+// The default lives HERE, deliberately not in config.Resolve: the resolver is
+// shared with headless `zero exec`, which must stay byte-silent when
+// unconfigured (maintainer review, PR #1001). The /notify command persists
+// explicit choices; blank stays blank on disk.
+func effectiveTUINotifyMode(mode string) notify.Mode {
+	m := notify.Mode(strings.TrimSpace(mode))
+	if m == "" {
+		return notify.ModeBoth
+	}
+	return m
 }
 
 func newModel(ctx context.Context, options Options) model {
@@ -947,7 +1007,7 @@ func newModel(ctx context.Context, options Options) model {
 	runSpinner.Spinner.FPS = activeAnimationFrameInterval
 
 	notifier := notify.New(os.Stderr, notify.Config{
-		Mode:      notify.Mode(strings.TrimSpace(options.Notify.Mode)),
+		Mode:      effectiveTUINotifyMode(options.Notify.Mode),
 		FocusMode: notify.FocusMode(strings.TrimSpace(options.Notify.FocusMode)),
 	})
 	// Opt-in webhook fan-out (ZERO_NOTIFY_WEBHOOK_URL). Delivery failures stay
@@ -962,6 +1022,7 @@ func newModel(ctx context.Context, options Options) model {
 		ctx:                         ctx,
 		cwd:                         cwd,
 		appVersion:                  strings.TrimSpace(options.Version),
+		startupNotices:              options.StartupNotices,
 		swarmDoneAt:                 map[string]time.Time{},
 		userCommands:                loadedUserCommands,
 		loadSkills:                  options.LoadSkills,
@@ -999,6 +1060,8 @@ func newModel(ctx context.Context, options Options) model {
 		mcpCommand:                  options.MCPCommand,
 		sandboxSetupCommand:         options.SandboxSetupCommand,
 		agentOptions:                options.AgentOptions,
+		allowEscalation:             options.AllowEscalation,
+		modelRPM:                    options.ModelRPM,
 		sessionCompactor:            options.SessionCompactor,
 		runtimeMessageSink:          options.RuntimeMessageSink,
 		permissionMode:              permissionMode,
@@ -1009,6 +1072,9 @@ func newModel(ctx context.Context, options Options) model {
 		keyBindings:                 resolvedKeyBindings,
 		themeMode:                   resolveThemeMode(options.Theme, os.Getenv("ZERO_THEME"), options.SavedTheme),
 		hasDarkBg:                   true,
+		notifyMode:                  string(effectiveTUINotifyMode(options.Notify.Mode)),
+		notifyConfiguredMode:        strings.TrimSpace(options.Notify.Mode),
+		notifyFocusMode:             strings.TrimSpace(options.Notify.FocusMode),
 		userAgent:                   options.UserAgent,
 		usageTracker:                usageTracker,
 		transcript:                  initialTranscript(),
@@ -1072,7 +1138,26 @@ func newModel(ctx context.Context, options Options) model {
 	for _, warning := range keyBindingWarnings {
 		m = m.appendSystemNotice(warning)
 	}
+	m.transcript = m.withStartupNotices(m.transcript)
 	return m
+}
+
+// withStartupNotices appends the session's startup notices to rows as system
+// rows, in order, skipping blank ones so a caller can pass one unconditionally.
+//
+// EVERY SESSION THIS PROCESS OPENS IS TOLD. The notices describe the sandbox
+// every session here runs under, so they open the first session, and they come
+// back when /new or /resume rebuilds the transcript for another one; both
+// started from an empty transcript and dropped them. Rewind, compaction and
+// /clear stay in the same session and keep the notice in the scrollback above
+// their divider. Reported by CodeRabbit.
+func (m model) withStartupNotices(rows []transcriptRow) []transcriptRow {
+	for _, notice := range m.startupNotices {
+		if strings.TrimSpace(notice) != "" {
+			rows = appendRow(rows, rowSystem, notice)
+		}
+	}
+	return rows
 }
 
 func (m model) doctorOptions(connectivity bool) doctor.Options {
@@ -1225,7 +1310,7 @@ func (m *model) stopPRWatcher() {
 func (m model) noBlockingModal() bool {
 	return m.pendingPermission == nil && m.pendingAskUser == nil && m.pendingSpecReview == nil &&
 		m.providerWizard == nil && m.mcpAddWizard == nil && m.mcpManager == nil && m.picker == nil &&
-		m.sttKeyPrompt == nil && m.renamePrompt == nil
+		m.sttKeyPrompt == nil && m.renamePrompt == nil && m.terminalAttach == nil
 }
 
 func (m model) quit() (tea.Model, tea.Cmd) {
@@ -1427,6 +1512,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.MouseMsg:
+		// Attached to a live terminal: the overlay owns the viewport, so mouse
+		// events go nowhere rather than hitting transcript selection below.
+		if m.terminalAttach != nil {
+			return m, nil
+		}
 		if m.setup.visible {
 			return m.handleSetupMouse(msg)
 		}
@@ -1513,6 +1603,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.attachClipboardImage(msg.data, msg.mediaType), nil
 	case tea.PasteMsg:
+		// While attached to a live terminal, a paste forwards verbatim to the
+		// PTY stdin — never into the composer or transcript.
+		if m.terminalAttach != nil {
+			return m.handleTerminalAttachPaste(msg.Content)
+		}
 		// A paste into the cloud-STT key prompt fills the key (the common way to
 		// enter an API key), not the composer.
 		if m.sttKeyPrompt != nil {
@@ -1545,6 +1640,20 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleVoiceCaptureRelease()
 		}
 		return m, nil
+	case terminalAttachTickMsg:
+		return m.refreshTerminalAttach()
+	case interactiveExecStartMsg:
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		m.terminalAutoAttach = &terminalAutoAttachState{
+			runID:    msg.runID,
+			known:    msg.known,
+			deadline: m.now().Add(terminalAutoAttachTimeout),
+		}
+		return m, terminalAutoAttachTickCmd(msg.runID)
+	case terminalAutoAttachTickMsg:
+		return m.pollTerminalAutoAttach(msg)
 	case tea.KeyPressMsg:
 		if m.petDragActive {
 			pixelDrag := m.petPixelDrag
@@ -1583,6 +1692,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// input) until Enter saves or Esc cancels.
 		if m.sttKeyPrompt != nil {
 			return m.handleSTTKeyPromptKey(msg)
+		}
+		// Attached to a live terminal session: keystrokes (including Ctrl+C,
+		// which maps to 0x03 for the process) go to the PTY until Esc detaches.
+		if m.terminalAttach != nil {
+			return m.handleTerminalAttachKey(msg)
 		}
 		if m.renamePrompt != nil {
 			return m.handleSessionRenameKey(msg)
@@ -2437,6 +2551,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Size the composer so long input scrolls horizontally with the cursor
 		// visible instead of being clipped invisibly past the right edge.
 		m.input.SetWidth(maxInt(20, chatWidth(msg.Width)-14))
+		// An attached terminal fills the viewport, so the PTY tracks the
+		// live size instead of a fixed default.
+		m = m.resizeAttachedTerminalPTY()
 		// The title bar prints once into native scrollback when the inline
 		// renderer is active. In alt-screen mode it stays pinned inside View.
 		if !m.altScreen && !m.headerPrinted && msg.Width > 0 {
@@ -2546,7 +2663,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 						continue
 					}
 					var usageRows []transcriptRow
-					m, usageRows = m.recordUsageEvent(msg.usageModelID, event)
+					m, usageRows = m.recordUsageEvent(msg.usageModelIDAt(index), event)
 					for _, row := range usageRows {
 						m.transcript = appendTranscriptRow(m.transcript, row)
 					}
@@ -2612,6 +2729,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.runCancel = nil
 		m.activeRunID = 0
+		m.terminalAutoAttach = nil
 		m.plan.frozenAt = m.now() // freeze the plan clock while idle (no run in flight)
 		// A fully successful turn means the task is done. Weaker models often
 		// forget the final update_plan, leaving the panel stuck mid-progress;
@@ -2633,7 +2751,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				continue
 			}
 			var usageRows []transcriptRow
-			m, usageRows = m.recordUsageEvent(msg.usageModelID, event)
+			m, usageRows = m.recordUsageEvent(msg.usageModelIDAt(index), event)
 			for _, row := range usageRows {
 				m.transcript = appendTranscriptRow(m.transcript, row)
 			}
@@ -3115,8 +3233,11 @@ func (m model) transcriptView() string {
 	mcpOverlay := m.mcpManagerOverlay(width)
 	pickerOverlay := m.pickerOverlay(width)
 	sttKeyOverlay := m.sttKeyPromptOverlay(width)
+	terminalAttachOverlay := m.terminalAttachOverlay(width)
 	viewportOverlay := ""
 	switch {
+	case terminalAttachOverlay != "":
+		viewportOverlay = terminalAttachOverlay
 	case sttKeyOverlay != "":
 		viewportOverlay = sttKeyOverlay
 	case helpOverlayContent != "":
@@ -3184,6 +3305,13 @@ func (m model) pinnedTitleBar(width int) string {
 
 func (m model) footerView(width int) string {
 	var footer strings.Builder
+	// An attached terminal owns the keyboard and the viewport; the composer is
+	// inert, so like the ask_user and permission modals only the status line
+	// renders. Frame math routes through footerView, so this also shrinks the
+	// footer rect the overlay's row budget is derived from.
+	if m.terminalAttach != nil {
+		return m.footerStatusLine(width)
+	}
 	if m.renamePrompt != nil {
 		footer.WriteString(m.sessionRenamePromptView(width))
 		footer.WriteString("\n")
@@ -4398,11 +4526,13 @@ func (m model) resolvePermissionWithReason(decision permissionDecision, reason s
 		return m, nil
 	}
 
+	resolved := agent.PermissionDecision{Action: decision, Reason: reason}
 	if pending.decide != nil {
-		pending.decide(agent.PermissionDecision{
-			Action: decision,
-			Reason: reason,
-		})
+		pending.decide(resolved)
+	}
+	var decideCmd tea.Cmd
+	if pending.decideCmd != nil {
+		decideCmd = pending.decideCmd(resolved)
 	}
 	m.pendingPermission = nil
 	// Time spent at the prompt is user wait, not provider silence. Restart the
@@ -4412,9 +4542,10 @@ func (m model) resolvePermissionWithReason(decision permissionDecision, reason s
 	if pending.request.ToolName == peerPermissionToolName {
 		// Receipt delivery completes asynchronously. That completion advances
 		// the peer queue after this prompt is fully settled.
-		return m, nil
+		return m, decideCmd
 	}
-	return m.openNextPeerApproval()
+	next, cmd := m.openNextPeerApproval()
+	return next, tea.Batch(decideCmd, cmd)
 }
 
 func permissionDecisionReason(decision permissionDecision) string {
@@ -4464,19 +4595,20 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 	case pickerModel:
 		previousProvider, previousModel := m.providerName, m.modelName
 		text := ""
-		owner := strings.TrimSpace(item.OwnerProvider)
-		_, ownerIsSavedProvider := m.savedProviderByName(owner)
-		if owner != "" && !strings.EqualFold(owner, strings.TrimSpace(m.providerName)) && ownerIsSavedProvider {
+		var switchPersistErr error
+		// The row's owner label is derived from the same decision, so it always
+		// names the provider used here.
+		if owner := m.modelPickerSwitchOwner(item); owner != "" {
 			// A model from another saved provider: switch provider + model together.
-			m, text, _, cmd = m.switchProviderModel(owner, item.Value)
+			m, text, _, cmd, switchPersistErr = m.switchProviderModel(owner, item.Value)
 		} else {
-			// OwnerProvider is blank, matches the active provider, or (registry-fallback
-			// / stale-history rows) doesn't resolve to any saved provider: apply against
-			// the active provider instead of attempting an unresolvable provider switch.
-			m, text = m.handleModelCommand(item.Value)
+			// Apply against the active provider instead of attempting an
+			// unresolvable provider switch.
+			m, text, switchPersistErr = m.handleModelCommand(item.Value)
 		}
 		if m.providerName != previousProvider || m.modelName != previousModel {
-			return m.showTransientNoticeInline(m.modelAppliedNotice(), transientNoticeSuccess), cmd
+			notice, tone := m.modelAppliedNoticeFor(switchPersistErr)
+			return m.showTransientNoticeInline(notice, tone), cmd
 		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 	case pickerEffort:
@@ -4523,6 +4655,14 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		if validThemeMode(item.Value) && !strings.Contains(text, "could not save theme preference") {
 			return m.showTransientNotice(m.themeAppliedNotice(), transientNoticeSuccess)
 		}
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+	case pickerNotify:
+		// The picker item's Value is "<mode> <focus>"; reusing the text handler
+		// keeps validation, persistence, and the user-facing message in one
+		// place. There is no live preview for notify, so no follow-up command
+		// is needed here.
+		text := ""
+		m, text = m.handleNotifyCommand(item.Value)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 	}
 	return m, cmd
@@ -4717,6 +4857,8 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 	case commandStop:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.stopBackgroundTerminalsText(command.text)})
 		return m, nil
+	case commandAttach:
+		return m.attachTerminalCommand(command.text)
 	case commandSandboxSetup:
 		return m.startSandboxSetupCommand(command.text)
 	case commandProvider:
@@ -4750,9 +4892,13 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		}
 		previousProvider, previousModel := m.providerName, m.modelName
 		text := ""
-		m, text = m.handleModelCommand(command.text)
+		var persistErr error
+		m, text, persistErr = m.handleModelCommand(command.text)
 		if m.providerName != previousProvider || m.modelName != previousModel {
-			return m.showTransientNoticeInline(m.modelAppliedNotice(), transientNoticeSuccess), nil
+			// The status text this branch drops is the only other place the failure
+			// appears, so the typed command needs the qualifier as much as the picker.
+			notice, tone := m.modelAppliedNoticeFor(persistErr)
+			return m.showTransientNoticeInline(notice, tone), nil
 		}
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
@@ -4930,6 +5076,18 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		if validThemeMode(command.text) && !strings.Contains(text, "could not save theme preference") {
 			return m.showTransientNotice(m.themeAppliedNotice(), transientNoticeSuccess)
 		}
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		return m, nil
+	case commandNotify:
+		// Bare `/notify` opens the popup picker so the user can pick mode + focus
+		// with arrow keys, matching /model and /theme. An explicit
+		// `/notify off|bell|notify|both [unfocused|always]` runs the text handler.
+		if strings.TrimSpace(command.text) == "" {
+			m.picker = m.newNotifyPicker()
+			return m, nil
+		}
+		text := ""
+		m, text = m.handleNotifyCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandImage:
@@ -5214,6 +5372,7 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	}
 	m.runID++
 	m.activeRunID = m.runID
+	m.terminalAutoAttach = nil
 	m.runCancel = cancel
 	m.pending = true
 	// Clear per-run tracking state so stale specialists and plans from the
@@ -5371,6 +5530,7 @@ func (m *model) cancelRun() {
 	m.pending = false
 	m.runCancel = nil
 	m.activeRunID = 0
+	m.terminalAutoAttach = nil
 	m.cancelConfirmActive = false // whatever path got here, there's nothing left to confirm cancelling
 	m.plan.frozenAt = m.now()     // freeze the plan clock while idle (no run in flight)
 	m.pendingPermission = nil
@@ -5405,6 +5565,19 @@ func selfCorrectAutonomyForMode(mode agent.PermissionMode) string {
 }
 
 func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt string, images []zeroruntime.ImageBlock, runOptions tuiAgentRunOptions) tea.Cmd {
+	var activeDiscovered []providermodeldiscovery.Model
+	if models, ok := m.discoveredModelsForActiveRoute(); ok {
+		activeDiscovered = make([]providermodeldiscovery.Model, len(models))
+		for i, dm := range models {
+			copied := dm
+			if len(dm.InputModalities) > 0 {
+				copied.InputModalities = append([]string{}, dm.InputModalities...)
+			}
+			activeDiscovered[i] = copied
+		}
+	}
+	catalog := m.modelCatalog
+
 	return func() tea.Msg {
 		started := m.now()
 		if m.turnTimer != nil {
@@ -5427,6 +5600,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		usageEvents := []zeroruntime.Usage{}
 		sessionEvents := []pendingSessionEvent{}
 		usageModelID := m.modelName
+		// usageModelIDs records, per usage event, the model in force when it
+		// fired; the escalation switcher reassigns usageModelID mid-run.
+		usageModelIDs := []string{}
 		var specReview *pendingSpecReviewPrompt
 		if m.awaitToolReadiness != nil {
 			m.awaitToolReadiness(runCtx)
@@ -5495,6 +5671,46 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		// switch instead of keeping the original model's window.
 		options.ContextWindowFor = func(modelID string) int {
 			return modelregistry.AgentContextWindow(m.modelContextWindow(modelID))
+		}
+		// And make that switch reachable, when the operator asked for it. The
+		// consequences of an escalation were already handled here (the window
+		// above, and the summarizer resolved against the active profile) while
+		// nothing on this surface could cause one: escalate_model was registered
+		// only by exec.
+		//
+		// BUILT FROM THE ACTIVE PROFILE, NOT THE STARTUP ONE. A TUI session can
+		// change models with /model, so escalating from the profile captured at
+		// launch would switch from whatever the session began with rather than
+		// from what is in force now, and would carry that stale profile's base URL
+		// and credential with it. m.providerProfile tracks the switches, which is
+		// why this is built per turn rather than once in the caller.
+		if m.allowEscalation {
+			options.ModelSwitcher, options.ModelSessionSwitcher = providers.EscalationSwitchers(
+				m.providerProfile, m.provider, m.newProvider,
+				// Usage attribution follows the switch, as exec reassigns its
+				// currentModel: every usage event after a real escalation is billed
+				// to the escalated model, not the one the run started on.
+				func(modelID string) { usageModelID = modelID },
+				providers.Options{ModelRPM: m.modelRPM},
+			)
+		}
+		options.SupportsVision = func(modelID string) bool {
+			trimmed := strings.TrimSpace(modelID)
+			if trimmed == "" {
+				return false
+			}
+			if len(activeDiscovered) > 0 {
+				if supported, ok := discoveredVisionSupport(activeDiscovered, trimmed); ok {
+					return supported
+				}
+			}
+			if entry, known := catalog.Resolve(trimmed); known {
+				return entry.Supports(modelregistry.ModelCapabilityVision)
+			}
+			return modelregistry.SupportsVision(catalog, trimmed)
+		}
+		if m.captureRunSupportsVision != nil {
+			m.captureRunSupportsVision(options.SupportsVision)
 		}
 
 		// Post-edit self-correction is on by default in the TUI but kept FAST: it
@@ -5710,6 +5926,18 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			// live status. The child session ID is not known yet (it's created
 			// inside the executor), so we use the tool call ID as a temporary
 			// key and reconcile on the result.
+			// A tty exec_command wants the attach overlay: the session registers
+			// with the process manager inside the tool's Run, so the update loop
+			// polls for it on a tick.
+			if call.Name == tools.ExecCommandToolName && execCallWantsTTY(call.Arguments) && m.runtimeMessageSink != nil {
+				known := map[int]bool{}
+				if controller, ok := m.execSessionController(); ok {
+					for _, session := range controller.ExecSessions() {
+						known[session.ID] = true
+					}
+				}
+				m.runtimeMessageSink(interactiveExecStartMsg{runID: runID, known: known})
+			}
 			if call.Name == "Task" {
 				name, desc := parseTaskCallArgs(call.Arguments)
 				if m.runtimeMessageSink != nil {
@@ -5861,9 +6089,20 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		onUsage := options.OnUsage
 		options.OnUsage = func(event zeroruntime.Usage) {
 			usageEvents = append(usageEvents, event)
+			usageModelIDs = append(usageModelIDs, usageModelID)
+			payload := usage.EventUsagePayload(event)
+			// AND ON THE PERSISTED EVENT TOO, not only the in-memory record: the
+			// report reconstructs cost from the payload, falling back to the
+			// session-wide model, so an escalated run would be priced entirely at
+			// the model it started on. Written only under escalation, which is the
+			// only way the model in force can change mid-run, matching what exec
+			// records under the same flag.
+			if m.allowEscalation {
+				payload["model"] = usageModelID
+			}
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
 				Type:    sessions.EventUsage,
-				Payload: usage.EventUsagePayload(event),
+				Payload: payload,
 			})
 			m.sendAgentUsage(runID, usageModelID, event)
 			if onUsage != nil {
@@ -5878,7 +6117,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				Type:    sessions.EventError,
 				Payload: map[string]any{"message": err.Error()},
 			})
-			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
+			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, usageModelIDs: usageModelIDs, sessionEvents: sessionEvents, err: err, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
 		}
 		if runOptions.specDraft {
 			if result.StopReason != agent.StopReasonSpecReviewRequired || specReview == nil || specReview.SpecID == "" || specReview.SpecFilePath == "" {
@@ -5888,10 +6127,10 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 					Type:    sessions.EventError,
 					Payload: map[string]any{"message": err.Error()},
 				})
-				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, err: err, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
+				return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, usageModelIDs: usageModelIDs, sessionEvents: sessionEvents, err: err, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
 			}
 			flushReasoning(m.now())
-			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, specReview: specReview, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
+			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, usageModelIDs: usageModelIDs, sessionEvents: sessionEvents, specReview: specReview, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
 		}
 		flushReasoning(m.now())
 		elapsed := m.activeTurnElapsed(started)
@@ -5912,7 +6151,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				"content": result.FinalAnswer,
 			},
 		})
-		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, sessionEvents: sessionEvents, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: elapsed, ttft: firstTokenElapsed}
+		return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, usageModelIDs: usageModelIDs, sessionEvents: sessionEvents, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: elapsed, ttft: firstTokenElapsed}
 	}
 }
 

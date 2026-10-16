@@ -375,3 +375,46 @@ func TestAvailable(t *testing.T) {
 		t.Fatal("linux should be available")
 	}
 }
+
+// TestMaxSecretLenMatchesTheDarwinSetBoundary pins the budget to the boundary
+// Set actually enforces. A caller that splits an oversized value depends on the
+// two agreeing exactly: one byte of drift either wastes an entry or produces a
+// chunk security silently splits into two garbage commands.
+func TestMaxSecretLenMatchesTheDarwinSetBoundary(t *testing.T) {
+	k := newFake("darwin").keyring()
+	budget, bounded := k.MaxSecretLen("zero", "oauth-tokens")
+	if !bounded {
+		t.Fatal("MaxSecretLen reported darwin as unbounded")
+	}
+	if err := newFake("darwin").keyring().Set("zero", "oauth-tokens", strings.Repeat("a", budget)); err != nil {
+		t.Errorf("Set(budget=%d bytes): %v, want acceptance at the boundary", budget, err)
+	}
+	if err := newFake("darwin").keyring().Set("zero", "oauth-tokens", strings.Repeat("a", budget+1)); err == nil {
+		t.Errorf("Set(%d bytes) succeeded, want rejection one byte past the budget", budget+1)
+	}
+}
+
+// TestMaxSecretLenShrinksWithTheAccountName covers why the budget takes the
+// account: on macOS the account and the secret share one command line, so a
+// longer account name leaves less room for the secret.
+func TestMaxSecretLenShrinksWithTheAccountName(t *testing.T) {
+	k := newFake("darwin").keyring()
+	short, _ := k.MaxSecretLen("zero", "oauth-tokens")
+	long, _ := k.MaxSecretLen("zero", "oauth-tokens.a.63")
+	if want := short - len(".a.63"); long != want {
+		t.Fatalf("MaxSecretLen for the longer account = %d, want %d", long, want)
+	}
+	if err := newFake("darwin").keyring().Set("zero", "oauth-tokens.a.63", strings.Repeat("a", long+1)); err == nil {
+		t.Error("Set one byte past the longer account's budget succeeded")
+	}
+}
+
+// TestMaxSecretLenUnboundedOffDarwin keeps the limit platform-specific:
+// secret-tool reads the secret from stdin, so there is no command line to fill.
+func TestMaxSecretLenUnboundedOffDarwin(t *testing.T) {
+	for _, goos := range []string{"linux", "windows"} {
+		if n, bounded := newFake(goos).keyring().MaxSecretLen("zero", "oauth-tokens"); bounded || n != 0 {
+			t.Errorf("MaxSecretLen on %s = (%d, %v), want (0, false)", goos, n, bounded)
+		}
+	}
+}

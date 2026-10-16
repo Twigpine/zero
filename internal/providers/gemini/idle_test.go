@@ -14,6 +14,7 @@ import (
 // A stalled-but-open Gemini upstream (sends one chunk, then hangs without
 // closing) must abort on the idle timeout instead of blocking the agent forever.
 func TestStreamCompletionIdleTimeoutAbortsStalledStream(t *testing.T) {
+	t.Parallel()
 	released := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"candidates":[{"content":{"parts":[{"text":"hi"}]}}]}`)

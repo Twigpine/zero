@@ -73,6 +73,10 @@ func openLockFileAt(root, relative, displayPath string) (_ *os.File, resultErr e
 	return file, nil
 }
 
+func validateRootLockFile(file *os.File) error {
+	return validateWindowsLockHandle(windows.Handle(file.Fd()), false)
+}
+
 func openLockDirectoryAt(parent windows.Handle, name string) (windows.Handle, error) {
 	handle, err := openLockPathAt(
 		parent,

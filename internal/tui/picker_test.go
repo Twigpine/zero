@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -812,6 +813,12 @@ func TestModelCommandRecordsAndPersistsRecentHistory(t *testing.T) {
 // history, tagged with the provider actually switched to.
 func TestSwitchProviderModelRecordsRecentHistory(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	if _, err := config.UpsertProvider(configPath, config.ProviderProfile{Name: "openai", CatalogID: "openai", Model: "gpt-5.1"}, true); err != nil {
+		t.Fatalf("seed openai provider: %v", err)
+	}
+	if _, err := config.UpsertProvider(configPath, config.ProviderProfile{Name: "ollama", CatalogID: "ollama", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "http://localhost:11434/v1", Model: "kimi-k2.7-code:cloud"}, false); err != nil {
+		t.Fatalf("seed ollama provider: %v", err)
+	}
 	m := newModel(context.Background(), Options{
 		UserConfigPath:  configPath,
 		ProviderName:    "openai",
@@ -827,8 +834,8 @@ func TestSwitchProviderModelRecordsRecentHistory(t *testing.T) {
 		},
 	})
 
-	next, status, _, _ := m.switchProviderModel("ollama", "kimi-k2.7-code:cloud")
-	wantStatus := "Model\nSwitched to ollama · kimi-k2.7-code:cloud"
+	next, status, _, _, _ := m.switchProviderModel("ollama", "kimi-k2.7-code:cloud")
+	wantStatus := "Model\nSwitched to ollama · kimi-k2.7-code:cloud · saved"
 	if status != wantStatus {
 		t.Fatalf("switchProviderModel() status = %q, want %q (a mismatch here means the switch itself failed, not the recentModels assertion below)", status, wantStatus)
 	}
@@ -843,6 +850,238 @@ func TestSwitchProviderModelRecordsRecentHistory(t *testing.T) {
 	persisted := readTUIConfigFixture(t, configPath)
 	if !reflect.DeepEqual(persisted.Preferences.RecentModels, want) {
 		t.Fatalf("persisted RecentModels = %#v, want %#v", persisted.Preferences.RecentModels, want)
+	}
+}
+
+func TestSwitchProviderModelReportsLockedConfigAsNotSavedWithoutPartialSelection(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	if _, err := config.UpsertProvider(configPath, config.ProviderProfile{Name: "openai", CatalogID: "openai", Model: "gpt-5.1"}, true); err != nil {
+		t.Fatalf("seed openai provider: %v", err)
+	}
+	if _, err := config.UpsertProvider(configPath, config.ProviderProfile{
+		Name: "ollama", CatalogID: "ollama", ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL: "http://localhost:11434/v1", Model: "old-model",
+	}, false); err != nil {
+		t.Fatalf("seed ollama provider: %v", err)
+	}
+	before, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read seeded config: %v", err)
+	}
+	unlock, err := config.LockFile(configPath)
+	if err != nil {
+		t.Fatalf("hold config lock: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := unlock(); err != nil {
+			t.Errorf("release config lock: %v", err)
+		}
+	})
+
+	t.Setenv("ZERO_PROVIDER", "openai")
+	m := newModel(context.Background(), Options{
+		UserConfigPath:  configPath,
+		ProviderName:    "openai",
+		ModelName:       "gpt-5.1",
+		Provider:        &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{Name: "openai", CatalogID: "openai", Model: "gpt-5.1"},
+		SavedProviders: []config.ProviderProfile{
+			{Name: "openai", CatalogID: "openai", Model: "gpt-5.1"},
+			{Name: "ollama", CatalogID: "ollama", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "http://localhost:11434/v1", Model: "old-model"},
+		},
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+
+	started := time.Now()
+	next, status, switched, _, persistErr := m.switchProviderModel("ollama", "new-model")
+	if elapsed := time.Since(started); elapsed > 12*time.Second {
+		t.Fatalf("cross-provider switch blocked for %s; want one bounded persistence attempt", elapsed)
+	}
+	if !switched || next.providerName != "ollama" || next.modelName != "new-model" {
+		t.Fatalf("in-session switch was lost: switched=%v provider=%q model=%q", switched, next.providerName, next.modelName)
+	}
+	if persistErr == nil || !strings.Contains(persistErr.Error(), "timed out acquiring config lock") {
+		t.Fatalf("persistence error = %v, want config lock timeout", persistErr)
+	}
+	if !strings.Contains(status, "not saved (") || !strings.Contains(status, "timed out acquiring config lock") {
+		t.Fatalf("switch status = %q, want concrete not-saved lock failure", status)
+	}
+	after, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config after failed switch: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("failed switch partially changed config\nbefore: %s\nafter: %s", before, after)
+	}
+}
+
+func TestCrossProviderPickerShowsPersistenceFailure(t *testing.T) {
+	root := t.TempDir()
+	blockedParent := filepath.Join(root, "not-a-directory")
+	if err := os.WriteFile(blockedParent, []byte("block config directory creation"), 0o600); err != nil {
+		t.Fatalf("write blocking parent: %v", err)
+	}
+	m := newModel(context.Background(), Options{
+		UserConfigPath:  filepath.Join(blockedParent, "config.json"),
+		ProviderName:    "openai",
+		ModelName:       "gpt-5.1",
+		Provider:        &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{Name: "openai", CatalogID: "openai", Model: "gpt-5.1"},
+		SavedProviders: []config.ProviderProfile{
+			{Name: "openai", CatalogID: "openai", Model: "gpt-5.1"},
+			{Name: "ollama", CatalogID: "ollama", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "http://localhost:11434/v1", Model: "old-model"},
+		},
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+	m.picker = &commandPicker{
+		kind:  pickerModel,
+		items: []pickerItem{{Value: "new-model", OwnerProvider: "ollama"}},
+	}
+
+	updated, _ := m.choosePicker()
+	next := updated.(model)
+	if next.providerName != "ollama" || next.modelName != "new-model" {
+		t.Fatalf("in-session picker switch was lost: provider=%q model=%q", next.providerName, next.modelName)
+	}
+	if !strings.Contains(next.transientNotice.text, "not saved (") {
+		t.Fatalf("picker notice = %q, want persistence failure", next.transientNotice.text)
+	}
+	if next.transientNotice.tone != transientNoticeWarning {
+		t.Fatalf("picker notice tone = %v, want warning", next.transientNotice.tone)
+	}
+}
+
+// TestActiveProviderPickerShowsPersistenceFailure is the same-provider half of
+// TestCrossProviderPickerShowsPersistenceFailure. A picker row owned by the
+// ACTIVE provider goes through handleModelCommand, which reports a failed
+// persistence attempt inside its status text — and choosePicker discards that
+// text in favour of its own applied-notice. Without the outcome plumbed through
+// as a value, the user saw an unqualified success for a selection the config
+// never received, and only found out when the old model came back on restart.
+//
+// The elapsed-time bound is the second assertion, not decoration: the recent
+// model history is written under the same lock, so a version that still tried
+// to persist it after the selection write failed would pay TWO full lock
+// timeouts for one keystroke.
+func TestActiveProviderPickerShowsPersistenceFailure(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	if _, err := config.UpsertProvider(configPath, config.ProviderProfile{
+		Name: "openrouter", CatalogID: "openrouter", Model: "google/gemini-2.5-pro",
+	}, true); err != nil {
+		t.Fatalf("seed openrouter provider: %v", err)
+	}
+	before, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read seeded config: %v", err)
+	}
+	unlock, err := config.LockFile(configPath)
+	if err != nil {
+		t.Fatalf("hold config lock: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := unlock(); err != nil {
+			t.Errorf("release config lock: %v", err)
+		}
+	})
+
+	m := newModel(context.Background(), Options{
+		UserConfigPath: configPath,
+		ProviderName:   "openrouter",
+		ModelName:      "google/gemini-2.5-pro",
+		Provider:       &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{
+			Name:      "openrouter",
+			CatalogID: "openrouter",
+			Model:     "google/gemini-2.5-pro",
+			APIKeyEnv: "OPENROUTER_API_KEY",
+			Provider:  string(config.ProviderKindOpenAICompatible),
+			BaseURL:   "https://openrouter.ai/api/v1",
+			APIFormat: "chat-completions",
+		},
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+	// OwnerProvider left blank: the row resolves against the active provider,
+	// which is the branch that reaches handleModelCommand.
+	m.picker = &commandPicker{
+		kind:  pickerModel,
+		items: []pickerItem{{Value: "anthropic/claude-sonnet-4.5"}},
+	}
+
+	started := time.Now()
+	updated, _ := m.choosePicker()
+	elapsed := time.Since(started)
+	next := updated.(model)
+
+	if next.modelName != "anthropic/claude-sonnet-4.5" {
+		t.Fatalf("in-session picker selection was lost: model=%q", next.modelName)
+	}
+	if !strings.Contains(next.transientNotice.text, "not saved (") ||
+		!strings.Contains(next.transientNotice.text, "timed out acquiring config lock") {
+		t.Fatalf("picker notice = %q, want a concrete not-saved lock failure", next.transientNotice.text)
+	}
+	if next.transientNotice.tone != transientNoticeWarning {
+		t.Fatalf("picker notice tone = %v, want warning", next.transientNotice.tone)
+	}
+	if elapsed > 15*time.Second {
+		t.Fatalf("selection blocked for %s; want a single bounded persistence attempt", elapsed)
+	}
+	after, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config after failed selection: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("failed selection changed config\nbefore: %s\nafter: %s", before, after)
+	}
+}
+
+// TestTypedModelCommandShowsPersistenceFailure is the typed half of the same
+// gap: on a committed switch, dispatchCommand also replaces handleModelCommand's
+// status text with the applied-notice, so "· not saved (…)" was dropped there
+// too. An unwritable config path fails the persistence attempt immediately,
+// which keeps this case off the ten-second lock timeout the picker test needs.
+func TestTypedModelCommandShowsPersistenceFailure(t *testing.T) {
+	root := t.TempDir()
+	blockedParent := filepath.Join(root, "not-a-directory")
+	if err := os.WriteFile(blockedParent, []byte("block config directory creation"), 0o600); err != nil {
+		t.Fatalf("write blocking parent: %v", err)
+	}
+	m := newModel(context.Background(), Options{
+		UserConfigPath: filepath.Join(blockedParent, "config.json"),
+		ProviderName:   "openrouter",
+		ModelName:      "google/gemini-2.5-pro",
+		Provider:       &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{
+			Name:      "openrouter",
+			CatalogID: "openrouter",
+			Model:     "google/gemini-2.5-pro",
+			APIKeyEnv: "OPENROUTER_API_KEY",
+			Provider:  string(config.ProviderKindOpenAICompatible),
+			BaseURL:   "https://openrouter.ai/api/v1",
+			APIFormat: "chat-completions",
+		},
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+	m.input.SetValue("/model anthropic/claude-sonnet-4.5")
+
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+
+	if next.modelName != "anthropic/claude-sonnet-4.5" {
+		t.Fatalf("in-session switch was lost: model=%q", next.modelName)
+	}
+	if !strings.Contains(next.transientNotice.text, "not saved (") {
+		t.Fatalf("notice = %q, want persistence failure", next.transientNotice.text)
+	}
+	if next.transientNotice.tone != transientNoticeWarning {
+		t.Fatalf("notice tone = %v, want warning", next.transientNotice.tone)
 	}
 }
 
@@ -1112,6 +1351,127 @@ func TestModelPickerListsAllSavedProviders(t *testing.T) {
 	}
 }
 
+// A Recent or Favorites row's owner label must name the provider Enter actually
+// uses. A history owner that was renamed or removed no longer resolves, so
+// selection falls back to the active provider; the label must follow it rather
+// than show the stale name.
+func TestModelPickerOwnerLabelMatchesSelectedProvider(t *testing.T) {
+	const staleModel = "anthropic/claude-sonnet-4.5"
+	for _, group := range []string{"Recent", "Favorites"} {
+		t.Run(group, func(t *testing.T) {
+			active := config.ProviderProfile{
+				Name:         "openrouter",
+				CatalogID:    "openrouter",
+				ProviderKind: config.ProviderKindOpenAICompatible,
+				Model:        "google/gemini-2.5-pro",
+				APIKeyEnv:    "OPENROUTER_API_KEY",
+				BaseURL:      "https://openrouter.ai/api/v1",
+				APIFormat:    "chat-completions",
+			}
+			options := Options{
+				ProviderName:    "openrouter",
+				ModelName:       "google/gemini-2.5-pro",
+				Provider:        &fakeProvider{},
+				ProviderProfile: active,
+				SavedProviders:  []config.ProviderProfile{active, {Name: "xai", CatalogID: "xai", Model: "grok-4"}},
+				// "chatgpt" was removed after this model was used from it.
+				RecentModels: []config.RecentModelEntry{
+					{Provider: "chatgpt", Model: staleModel},
+					{Provider: "xai", Model: "grok-4"},
+				},
+				NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+					return &fakeProvider{}, nil
+				},
+			}
+			if group == "Favorites" {
+				options.FavoriteModels = []string{staleModel}
+			}
+			m := newModel(context.Background(), options)
+			m.picker = m.newModelPicker()
+			if m.picker == nil {
+				t.Fatal("expected model picker")
+			}
+			target := -1
+			for index, item := range m.picker.items {
+				if item.Group == group && item.Value == staleModel {
+					target = index
+				}
+				if item.Group == "Recent" && item.Value == "grok-4" && item.OwnerLabel != "xai" {
+					t.Fatalf("resolvable owner label = %q, want xai", item.OwnerLabel)
+				}
+			}
+			if target < 0 {
+				t.Fatalf("expected %s row for %s, got %#v", group, staleModel, m.picker.items)
+			}
+			if got := m.picker.items[target].OwnerLabel; got != "openrouter" {
+				t.Fatalf("stale owner label = %q, want the active provider", got)
+			}
+			row := plainRender(t, renderModelPickerRow(60, false, m.picker.items[target]))
+			assertContains(t, row, "openrouter · ")
+			assertNotContains(t, row, "chatgpt")
+
+			m.picker.selected = target
+			updated, _ := m.Update(testKey(tea.KeyEnter))
+			m = updated.(model)
+			if m.providerName != "openrouter" || m.modelName != staleModel {
+				t.Fatalf("selection used %s/%s, want the labeled provider openrouter/%s", m.providerName, m.modelName, staleModel)
+			}
+		})
+	}
+}
+
+func TestModelPickerAbbreviatedOwnersMatchSelection(t *testing.T) {
+	t.Setenv(config.ActiveProviderEnv, "")
+	home := t.TempDir()
+	for _, variable := range []string{"HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "APPDATA", "LOCALAPPDATA"} {
+		t.Setenv(variable, home)
+	}
+	for _, names := range [][]string{
+		{"work-subscription-provider-east", "work-subscription-provider-west"},
+		{"east-subscription-provider-shared", "west-subscription-provider-shared"},
+		{"東-subscription-provider-shared", "西-subscription-provider-shared"},
+	} {
+		for _, favorite := range []bool{false, true} {
+			for _, terminalWidth := range []int{76, 30} {
+				rows := map[string]bool{}
+				for selectedOwner, name := range names {
+					profiles := []config.ProviderProfile{}
+					for _, owner := range names {
+						profiles = append(profiles, config.ProviderProfile{Name: owner, CatalogID: "openrouter", ProviderKind: config.ProviderKindOpenAICompatible, Model: "gpt-5.6", APIKey: "test-key", BaseURL: "https://openrouter.ai/api/v1", APIFormat: "chat-completions"})
+					}
+					m := newModel(context.Background(), Options{ProviderName: names[0], ProviderProfile: profiles[0], ModelName: "gpt-5.6", Provider: &fakeProvider{}, SavedProviders: profiles,
+						NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) { return &fakeProvider{}, nil },
+					})
+					m.favoriteModels = map[string]bool{"gpt-5.6": favorite}
+					// Put each owner first in turn: Favorites retains only one row per model.
+					recent := []pickerItem{{Label: "GPT-5.6", Value: "gpt-5.6", OwnerProvider: name}, {Label: "GPT-5.6", Value: "gpt-5.6", OwnerProvider: names[1-selectedOwner]}}
+					items := m.assembleModelPickerItems(recent, nil)
+					m.picker = &commandPicker{kind: pickerModel, title: "Choose a model", items: items, allItems: items}
+					width := modelPickerOverlayWidth(terminalWidth, m.picker)
+					for _, selected := range []bool{false, true} {
+						row := plainRender(t, renderModelPickerRow(width-4, selected, items[0]))
+						assertContains(t, row, "GPT-5.6")
+						if selected {
+							if rows[row] {
+								t.Fatalf("different destinations have identical rows: %q", row)
+							}
+							rows[row] = true
+						}
+					}
+					overlay := plainRender(t, m.modelPickerOverlay(terminalWidth))
+					joined := strings.NewReplacer(" ", "", "\n", "", "│", "").Replace(overlay)
+					assertContains(t, joined, fmt.Sprintf("[%d]%s", selectedOwner+1, name))
+					updated, _ := m.Update(testKey(tea.KeyEnter))
+					got := updated.(model)
+					if got.providerName != name || got.modelName != "gpt-5.6" {
+						t.Fatalf("selection = %s/%s, want %s/gpt-5.6", got.providerName, got.modelName, name)
+					}
+				}
+			}
+		}
+	}
+}
+
 func pickerGroups(items []pickerItem) []string {
 	groups := []string{}
 	seen := map[string]bool{}
@@ -1347,7 +1707,7 @@ func TestSwitchProviderModelWarmsDiscoveryForTheNewProvider(t *testing.T) {
 		},
 	})
 
-	next, text, ok, cmd := m.switchProviderModel("ollama", "kimi-k2.7-code:cloud")
+	next, text, ok, cmd, _ := m.switchProviderModel("ollama", "kimi-k2.7-code:cloud")
 	if !ok || !strings.Contains(text, "Switched to ollama") {
 		t.Fatalf("switch notice = %q (ok=%v), want a committed switch", text, ok)
 	}
@@ -1439,7 +1799,7 @@ func TestSwitchProviderModelUsesOAuthLoginWithoutInliningBearer(t *testing.T) {
 		},
 	})
 
-	next, text, ok, _ := m.switchProviderModel("chatgpt", "gpt-5.5")
+	next, text, ok, _, _ := m.switchProviderModel("chatgpt", "gpt-5.5")
 	if !ok || !strings.Contains(text, "Switched to chatgpt") {
 		t.Fatalf("switch should succeed on the stored OAuth login, got %q (ok=%v)", text, ok)
 	}
@@ -1472,7 +1832,7 @@ func TestSwitchProviderModelStillRejectsProviderWithNoCredential(t *testing.T) {
 		},
 	})
 
-	_, text, ok, _ := m.switchProviderModel("chatgpt", "gpt-5.5")
+	_, text, ok, _, _ := m.switchProviderModel("chatgpt", "gpt-5.5")
 	if ok || !strings.Contains(text, "no usable credential") {
 		t.Fatalf("expected the credential gate to refuse, got %q (ok=%v)", text, ok)
 	}

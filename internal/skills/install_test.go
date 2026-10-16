@@ -7,8 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/Gitlawb/zero/internal/installtxn"
 )
 
 // initGitSkillRepo creates a real local git repo holding a skill and returns a
@@ -70,6 +73,18 @@ func writeSourceSkill(t *testing.T, dir string, content string) string {
 		t.Fatalf("write SKILL.md: %v", err)
 	}
 	return dir
+}
+
+// writeWorkspaceMarker plants the ownership marker installtxn writes inside a
+// workspace before it moves any tree. Recovery acts on a workspace only when
+// this marker proves the workspace is one of its own, so a planted interrupted
+// state is invisible to it without one.
+func writeWorkspaceMarker(t *testing.T, workspace string, name string) {
+	t.Helper()
+	marker := []byte("zero-install-txn v1\ntarget " + name + "\n")
+	if err := os.WriteFile(filepath.Join(workspace, ".zero-install-txn"), marker, 0o600); err != nil {
+		t.Fatalf("write workspace marker: %v", err)
+	}
 }
 
 func TestInstallCopiesLocalSkillAndRecordsHash(t *testing.T) {
@@ -430,5 +445,591 @@ func TestSkillHashDriftUnreadableLockedPath(t *testing.T) {
 	}
 	if skillHashDrift(Skill{Path: missing}, "") {
 		t.Fatal("missing lock hash must not count as drift")
+	}
+}
+
+// skills.Install carries the same recovery call as plugins.Install, so it needs
+// the same proof. An install killed mid-commit leaves the skill's only copy in
+// a workspace backup; the next install over the same directory has to put it
+// back rather than leave it stranded where nothing reads it.
+func TestInstallRecoversASkillLeftByAnInterruptedCommit(t *testing.T) {
+	dir := t.TempDir()
+	src := writeSourceSkill(t, filepath.Join(t.TempDir(), "src"),
+		"---\nname: alpha\ndescription: first.\n---\nalpha body\n")
+	if _, err := Install(context.Background(), InstallOptions{Source: src, Dir: dir}); err != nil {
+		t.Fatalf("seeding the install: %v", err)
+	}
+
+	// The state a kill between CommitDir's two renames leaves behind.
+	staged, _, err := installtxn.StageDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Dir(staged)
+	writeWorkspaceMarker(t, workspace, "alpha")
+	if err := os.Rename(filepath.Join(dir, "alpha"), filepath.Join(workspace, "previous")); err != nil {
+		t.Fatal(err)
+	}
+
+	src2 := writeSourceSkill(t, filepath.Join(t.TempDir(), "src2"),
+		"---\nname: beta\ndescription: second.\n---\nbeta body\n")
+	if _, err := Install(context.Background(), InstallOptions{Source: src2, Dir: dir}); err != nil {
+		t.Fatalf("later install: %v", err)
+	}
+
+	got, ok := Get(dir, "alpha")
+	if !ok || !strings.Contains(got.Content, "alpha body") {
+		t.Fatalf("the interrupted skill install was not put back: ok=%v skill=%+v", ok, got)
+	}
+	if _, err := os.Stat(workspace); !os.IsNotExist(err) {
+		t.Errorf("the recovered workspace should be cleared, got %v", err)
+	}
+}
+
+// skills.Remove carries the same recovery call as plugins.Remove, so it needs
+// the same proof. A commit killed after its publish rename leaves the tree the
+// install replaced in a backup beside the live skill; removing the skill must
+// not leave that backup for the next install's recovery to publish, since Get
+// reads the directory rather than the lockfile and would find the removed skill
+// loadable again.
+func TestRemoveLeavesNoSupersededBackupARecoveryCanResurrect(t *testing.T) {
+	dir := t.TempDir()
+	src := writeSourceSkill(t, filepath.Join(t.TempDir(), "src"),
+		"---\nname: alpha\ndescription: first.\n---\nalpha body\n")
+	if _, err := Install(context.Background(), InstallOptions{Source: src, Dir: dir}); err != nil {
+		t.Fatalf("seeding the install: %v", err)
+	}
+
+	// The state a kill after CommitDir's second rename leaves behind.
+	staged, _, err := installtxn.StageDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Dir(staged)
+	writeWorkspaceMarker(t, workspace, "alpha")
+	previous := filepath.Join(workspace, "previous")
+	if err := os.MkdirAll(previous, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(previous, skillFileName),
+		[]byte("---\nname: alpha\ndescription: superseded.\n---\nold alpha body\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Remove(dir, "alpha"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	src2 := writeSourceSkill(t, filepath.Join(t.TempDir(), "src2"),
+		"---\nname: beta\ndescription: second.\n---\nbeta body\n")
+	if _, err := Install(context.Background(), InstallOptions{Source: src2, Dir: dir}); err != nil {
+		t.Fatalf("later install: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "alpha")); !os.IsNotExist(err) {
+		t.Errorf("a removed skill was put back on disk: %v", err)
+	}
+	if _, ok := Get(dir, "alpha"); ok {
+		t.Errorf("a removed skill is loadable again")
+	}
+	lock, err := ReadLock(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := lock["alpha"]; ok {
+		t.Errorf("the lockfile still names a removed skill")
+	}
+}
+
+// The recovery states an interrupted update of an installed skill can be killed
+// in. Each is planted by hand rather than by killing a real commit, because a
+// real kill cannot be aimed at a single step between two renames.
+const (
+	oldAlphaSkill = "---\nname: alpha\ndescription: old.\n---\nold alpha body\n"
+	newAlphaSkill = "---\nname: alpha\ndescription: new.\n---\nnew alpha body\n"
+	gammaSkill    = "---\nname: gamma\ndescription: unrelated.\n---\ngamma body\n"
+	betaSkill     = "---\nname: beta\ndescription: later.\n---\nbeta body\n"
+	deltaSkill    = "---\nname: delta\ndescription: later still.\n---\ndelta body\n"
+)
+
+// interruptedUpdate is a skills dir holding an installed alpha and an unrelated
+// gamma, plus the workspace an update of alpha to newAlphaSkill left behind when
+// it was killed partway through its commit.
+type interruptedUpdate struct {
+	dir       string
+	workspace string
+	oldSource string
+	newSource string
+}
+
+// plantInterruptedAlphaUpdate builds the on-disk state a kill at the named step
+// of CommitDir leaves. The steps are the commit's own order: write the marker,
+// move the target aside, move the staged tree in, publish the lockfile, clean up.
+func plantInterruptedAlphaUpdate(t *testing.T, step string) interruptedUpdate {
+	t.Helper()
+	dir := t.TempDir()
+	oldSource := writeSourceSkill(t, filepath.Join(t.TempDir(), "old-alpha"), oldAlphaSkill)
+	if _, err := Install(context.Background(), InstallOptions{Source: oldSource, Dir: dir}); err != nil {
+		t.Fatalf("seed alpha: %v", err)
+	}
+	gammaSource := writeSourceSkill(t, filepath.Join(t.TempDir(), "gamma"), gammaSkill)
+	if _, err := Install(context.Background(), InstallOptions{Source: gammaSource, Dir: dir}); err != nil {
+		t.Fatalf("seed gamma: %v", err)
+	}
+	newSource := writeSourceSkill(t, filepath.Join(t.TempDir(), "new-alpha"), newAlphaSkill)
+
+	staged, _, err := installtxn.StageDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Dir(staged)
+	writeWorkspaceMarker(t, workspace, "alpha")
+	writeSourceSkill(t, staged, newAlphaSkill)
+
+	target := filepath.Join(dir, "alpha")
+	previous := filepath.Join(workspace, "previous")
+	rename := func(from string, to string) {
+		if err := os.Rename(from, to); err != nil {
+			t.Fatalf("plant %s: %v", step, err)
+		}
+	}
+	switch step {
+	case "S1":
+		// The marker is down and no tree has moved yet.
+	case "S2":
+		rename(target, previous)
+	case "S3":
+		rename(target, previous)
+		rename(staged, target)
+	case "S4":
+		rename(target, previous)
+		rename(staged, target)
+		publishLockEntry(t, dir, "alpha", LockEntry{Source: canonicalSource(newSource), Hash: hashContent([]byte(newAlphaSkill))})
+	case "S5":
+		// An interrupted rollback: the failed tree was set aside and the backup is
+		// still the only complete copy.
+		rename(target, previous)
+		writeSourceSkill(t, filepath.Join(workspace, "failed"), newAlphaSkill)
+		if err := os.RemoveAll(staged); err != nil {
+			t.Fatal(err)
+		}
+	default:
+		t.Fatalf("unknown step %q", step)
+	}
+	// Compare against the source the installer records, not the path the test
+	// handed it. Install stores canonicalSource(source), so on macOS the recorded
+	// value is /private/var where t.TempDir returns /var, and on Windows it is the
+	// long user name where t.TempDir returns the 8.3 short one.
+	return interruptedUpdate{dir: dir, workspace: workspace, oldSource: canonicalSource(oldSource), newSource: canonicalSource(newSource)}
+}
+
+func publishLockEntry(t *testing.T, dir string, name string, entry LockEntry) {
+	t.Helper()
+	lock, err := ReadLock(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock[name] = entry
+	if err := writeLock(dir, lock); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// recoveredAlpha is what the skills dir must hold once recovery has resolved a
+// planted state: the SKILL.md at the target, the lock entry beside it, and
+// whether the workspace was resolved away or left for somebody else.
+type recoveredAlpha struct {
+	content           string
+	description       string
+	fromNewSource     bool
+	workspaceRetained bool
+}
+
+func assertRecoveredAlpha(t *testing.T, update interruptedUpdate, want recoveredAlpha) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(update.dir, "alpha", skillFileName))
+	if err != nil {
+		t.Fatalf("read recovered alpha: %v", err)
+	}
+	if string(data) != want.content {
+		t.Errorf("recovered tree is the wrong one: got %q want %q", data, want.content)
+	}
+	lock, err := ReadLock(update.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, locked := lock["alpha"]
+	if !locked {
+		t.Fatal("the lockfile no longer records the recovered skill")
+	}
+	wantSource := update.oldSource
+	if want.fromNewSource {
+		wantSource = update.newSource
+	}
+	if entry.Source != wantSource {
+		t.Errorf("lock source: got %q want %q", entry.Source, wantSource)
+	}
+	if wantHash := hashContent([]byte(want.content)); entry.Hash != wantHash {
+		t.Errorf("lock hash: got %q want %q (the recorded hash must describe the tree on disk)", entry.Hash, wantHash)
+	}
+	// The tree has to come back through the loader every other caller reads, not
+	// merely be present as bytes on disk.
+	skill, ok := Get(update.dir, "alpha")
+	if !ok {
+		t.Fatal("the recovered skill does not load")
+	}
+	if skill.Description != want.description {
+		t.Errorf("loaded skill is the wrong tree: got description %q want %q", skill.Description, want.description)
+	}
+	_, statErr := os.Stat(update.workspace)
+	if want.workspaceRetained && statErr != nil {
+		t.Errorf("a workspace recovery cannot attribute must be left alone: %v", statErr)
+	}
+	if !want.workspaceRetained && !os.IsNotExist(statErr) {
+		t.Errorf("a resolved workspace must be cleared, got %v", statErr)
+	}
+}
+
+// installDriver and removeDriver are the two entry points that take the install
+// lock, so every recovery state has to come out the same through both.
+func installDriver(t *testing.T, dir string) error {
+	return installSkill(t, dir, betaSkill)
+}
+
+// installSkill installs a skill unrelated to the planted state, so the drive is
+// an ordinary install that happens to run recovery first.
+func installSkill(t *testing.T, dir string, content string) error {
+	t.Helper()
+	source := writeSourceSkill(t, filepath.Join(t.TempDir(), "source"), content)
+	_, err := Install(context.Background(), InstallOptions{Source: source, Dir: dir})
+	return err
+}
+
+func removeDriver(t *testing.T, dir string) error {
+	t.Helper()
+	return Remove(dir, "gamma")
+}
+
+var recoveryDrivers = []struct {
+	name string
+	run  func(t *testing.T, dir string) error
+}{
+	{"install", installDriver},
+	{"remove", removeDriver},
+}
+
+// treeSnapshot records every path under dir and the content of every regular
+// file, so a caller that must not have touched anything can be held to it.
+func treeSnapshot(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	snapshot := map[string]string{}
+	if _, err := os.Lstat(dir); os.IsNotExist(err) {
+		// An absent tree is a state like any other, and a caller that must not have
+		// touched anything must not have created it either.
+		return snapshot
+	}
+	err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, relErr := filepath.Rel(dir, path)
+		if relErr != nil {
+			return relErr
+		}
+		if entry.IsDir() {
+			snapshot[rel] = "<dir>"
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		snapshot[rel] = string(data)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("snapshot %s: %v", dir, err)
+	}
+	return snapshot
+}
+
+func assertSnapshotUnchanged(t *testing.T, before map[string]string, after map[string]string) {
+	t.Helper()
+	for path, content := range before {
+		got, present := after[path]
+		if !present {
+			t.Errorf("%s was removed by a caller that must have aborted", path)
+			continue
+		}
+		if got != content {
+			t.Errorf("%s was rewritten by a caller that must have aborted: got %q want %q", path, got, content)
+		}
+	}
+	for path := range after {
+		if _, present := before[path]; !present {
+			t.Errorf("%s was created by a caller that must have aborted", path)
+		}
+	}
+}
+
+// readLockBytes returns the lockfile exactly as it sits on disk, so a caller
+// that must not have republished it can be held to the bytes.
+func readLockBytes(t *testing.T, dir string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, LockFileName))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ""
+		}
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+// Every step an interrupted update can be killed at, resolved through both entry
+// points that take the install lock. The recorded hash is what decides: the tree
+// the lockfile describes is the truthful one, and the tree it does not describe
+// is the one recovery undoes.
+func TestRecoveryResolvesEveryInterruptedUpdateStep(t *testing.T) {
+	steps := []struct {
+		step string
+		want recoveredAlpha
+	}{
+		// The marker is down but no tree moved, so there is nothing to put back and
+		// the workspace belongs to whoever made it.
+		{"S1", recoveredAlpha{content: oldAlphaSkill, description: "old.", workspaceRetained: true}},
+		// The target is gone and the backup is the only copy there is.
+		{"S2", recoveredAlpha{content: oldAlphaSkill, description: "old."}},
+		// Both trees are on disk and only the lockfile can say which one it records:
+		// it still names the old source and hash, so the swap landed and the publish
+		// never did.
+		{"S3", recoveredAlpha{content: oldAlphaSkill, description: "old."}},
+		// The lockfile records the new tree, so the publish committed and the backup
+		// beside it is superseded.
+		{"S4", recoveredAlpha{content: newAlphaSkill, description: "new.", fromNewSource: true}},
+		// An interrupted rollback looks like an interrupted swap and is repaired the
+		// same way.
+		{"S5", recoveredAlpha{content: oldAlphaSkill, description: "old."}},
+	}
+	for _, step := range steps {
+		for _, driver := range recoveryDrivers {
+			t.Run(step.step+"/"+driver.name, func(t *testing.T) {
+				update := plantInterruptedAlphaUpdate(t, step.step)
+
+				if err := driver.run(t, update.dir); err != nil {
+					t.Fatalf("%s over a recoverable state: %v", driver.name, err)
+				}
+
+				assertRecoveredAlpha(t, update, step.want)
+				// A second pass over an already resolved state must change nothing.
+				if err := installSkill(t, update.dir, deltaSkill); err != nil {
+					t.Fatalf("second recovery pass: %v", err)
+				}
+				assertRecoveredAlpha(t, update, step.want)
+			})
+			t.Run(step.step+"/"+driver.name+"/removal-is-final", func(t *testing.T) {
+				update := plantInterruptedAlphaUpdate(t, step.step)
+				if err := driver.run(t, update.dir); err != nil {
+					t.Fatalf("%s over a recoverable state: %v", driver.name, err)
+				}
+
+				if err := Remove(update.dir, "alpha"); err != nil {
+					t.Fatalf("remove alpha: %v", err)
+				}
+				// A later recovery reading a leftover backup would publish the removed
+				// skill again, and Get reads the directory rather than the lockfile, so
+				// the user would find it back.
+				if err := installSkill(t, update.dir, deltaSkill); err != nil {
+					t.Fatalf("install after removal: %v", err)
+				}
+
+				if _, err := os.Stat(filepath.Join(update.dir, "alpha")); !os.IsNotExist(err) {
+					t.Errorf("a removed skill came back on disk: %v", err)
+				}
+				if _, ok := Get(update.dir, "alpha"); ok {
+					t.Error("a removed skill is loadable again")
+				}
+				lock, err := ReadLock(update.dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, ok := lock["alpha"]; ok {
+					t.Error("the lockfile still names a removed skill")
+				}
+			})
+		}
+	}
+}
+
+// A recovery that could not be made is not the same as nothing to recover.
+// Installing over or reporting the removal of a tree that is still owed a
+// restore destroys the only copy of it, so the caller has to stop before it
+// reads the lockfile or touches the target.
+func TestCallersAbortWhenRecoveryCannotResolveAWorkspace(t *testing.T) {
+	injections := []struct {
+		name string
+		step string
+		// break renders the planted state unresolvable and returns a repair the test
+		// cleanup needs, so t.TempDir can still remove the tree.
+		breakState func(t *testing.T, update interruptedUpdate)
+		skipOnRoot bool
+		// wholeDirUntouched holds the injection to leaving every path in the skills
+		// dir exactly as it found it. A retirement that fails partway is the one
+		// exception: os.RemoveAll deletes what it can before the denied unlink, so
+		// the superseded backup it was clearing can be partly gone. That tree is
+		// already superseded by the committed target, which is why the failure is
+		// reported rather than acted on further.
+		wholeDirUntouched bool
+	}{
+		{
+			// Neither tree is the one the lockfile records, so recovery cannot tell
+			// which one the user is owed and either guess destroys the other.
+			name:              "neither tree matches the recorded hash",
+			step:              "S3",
+			wholeDirUntouched: true,
+			breakState: func(t *testing.T, update interruptedUpdate) {
+				t.Helper()
+				writeSourceSkill(t, filepath.Join(update.workspace, "previous"),
+					"---\nname: alpha\ndescription: drifted.\n---\ndrifted alpha body\n")
+			},
+		},
+		{
+			// The restore is the whole point of the transaction, so a rename it
+			// cannot complete is the loudest failure recovery has.
+			name:              "the backup cannot be restored",
+			step:              "S2",
+			wholeDirUntouched: true,
+			breakState: func(t *testing.T, update interruptedUpdate) {
+				t.Helper()
+				t.Cleanup(func() { _ = os.Chmod(update.workspace, 0o755) })
+				if err := os.Chmod(update.workspace, 0o555); err != nil {
+					t.Fatal(err)
+				}
+			},
+			skipOnRoot: true,
+		},
+		{
+			// A retirement that failed leaves a backup the next pass reads again, so
+			// it is reported rather than swallowed.
+			name: "the superseded workspace cannot be retired",
+			step: "S4",
+			breakState: func(t *testing.T, update interruptedUpdate) {
+				t.Helper()
+				t.Cleanup(func() { _ = os.Chmod(update.workspace, 0o755) })
+				if err := os.Chmod(update.workspace, 0o555); err != nil {
+					t.Fatal(err)
+				}
+			},
+			skipOnRoot: true,
+		},
+	}
+	for _, injection := range injections {
+		for _, driver := range recoveryDrivers {
+			t.Run(injection.name+"/"+driver.name, func(t *testing.T) {
+				if injection.skipOnRoot {
+					if runtime.GOOS == "windows" {
+						t.Skip("directory permissions do not block renames on windows")
+					}
+					if os.Geteuid() == 0 {
+						t.Skip("root ignores the directory permissions this test relies on")
+					}
+				}
+				update := plantInterruptedAlphaUpdate(t, injection.step)
+				injection.breakState(t, update)
+				target := filepath.Join(update.dir, "alpha")
+				lockBefore := readLockBytes(t, update.dir)
+				targetBefore := treeSnapshot(t, target)
+				dirBefore := treeSnapshot(t, update.dir)
+
+				err := driver.run(t, update.dir)
+
+				if err == nil {
+					t.Fatalf("%s continued over a transaction recovery could not resolve", driver.name)
+				}
+				assertSnapshotUnchanged(t, targetBefore, treeSnapshot(t, target))
+				if got := readLockBytes(t, update.dir); got != lockBefore {
+					t.Errorf("the lockfile was republished by a caller that must have aborted: got %q want %q", got, lockBefore)
+				}
+				if injection.wholeDirUntouched {
+					assertSnapshotUnchanged(t, dirBefore, treeSnapshot(t, update.dir))
+				}
+			})
+		}
+	}
+}
+
+// The workspace prefix is a public dot prefixed name and the loader enumerates
+// dot prefixed directories, so a user authored skill can carry that name and
+// hold the same entries a workspace does. Recovery acting on one would destroy
+// installed content, so the marker is the only evidence that counts.
+func TestRecoveryLeavesAUserSkillNamedLikeAWorkspaceAlone(t *testing.T) {
+	for _, driver := range recoveryDrivers {
+		t.Run(driver.name, func(t *testing.T) {
+			dir := t.TempDir()
+			gammaSource := writeSourceSkill(t, filepath.Join(t.TempDir(), "gamma"), gammaSkill)
+			if _, err := Install(context.Background(), InstallOptions{Source: gammaSource, Dir: dir}); err != nil {
+				t.Fatalf("seed gamma: %v", err)
+			}
+			notes := writeSourceSkill(t, filepath.Join(dir, ".zero-install-txn-notes"),
+				"---\nname: notes\ndescription: user authored.\n---\nnotes body\n")
+			if err := os.MkdirAll(filepath.Join(notes, "previous"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(notes, "target"), []byte("gamma"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before := treeSnapshot(t, notes)
+
+			if err := driver.run(t, dir); err != nil {
+				t.Fatalf("%s over a prefix colliding user skill: %v", driver.name, err)
+			}
+
+			assertSnapshotUnchanged(t, before, treeSnapshot(t, notes))
+			skill, ok := Get(dir, "notes")
+			if !ok {
+				t.Fatal("a user authored skill was made unloadable by recovery")
+			}
+			if skill.Description != "user authored." {
+				t.Errorf("the wrong tree loads as notes: %q", skill.Description)
+			}
+		})
+	}
+}
+
+// A directory at the target that the lockfile does not name is not proof that a
+// publish was interrupted. Anything can have created it, and a hand-written
+// skill is an ordinary thing to find in the skills directory. Recovery used to
+// read a missing entry as proof the publish never ran and replace that tree with
+// the retained backup, which deleted the user's own work.
+func TestAnUnrelatedSkillAtTheTargetIsNeverReplaced(t *testing.T) {
+	dir := t.TempDir()
+	workspace, err := os.MkdirTemp(dir, ".zero-install-txn-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := []byte("zero-install-txn v1\ntarget notes\n")
+	if err := os.WriteFile(filepath.Join(workspace, ".zero-install-txn"), marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeSourceSkill(t, filepath.Join(workspace, "previous"),
+		"---\nname: notes\ndescription: stale backup.\n---\nstale\n")
+	// The user's own skill, which no lockfile entry names.
+	mine := filepath.Join(dir, "notes")
+	writeSourceSkill(t, mine, "---\nname: notes\ndescription: my own.\n---\nmy careful notes\n")
+	if err := os.WriteFile(filepath.Join(mine, "research.md"), []byte("my research"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err = installSkill(t, dir, deltaSkill)
+
+	if err == nil {
+		t.Fatal("recovery must not act on a tree the lockfile does not describe")
+	}
+	if _, statErr := os.Stat(filepath.Join(mine, "research.md")); statErr != nil {
+		t.Fatalf("the user's own skill was destroyed: %v", statErr)
+	}
+	data, readErr := os.ReadFile(filepath.Join(mine, skillFileName))
+	if readErr != nil || !strings.Contains(string(data), "my own") {
+		t.Fatalf("the user's own SKILL.md was replaced: %q %v", data, readErr)
 	}
 }

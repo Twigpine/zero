@@ -129,6 +129,8 @@ func TestRunAuthRejectsWrongFlags(t *testing.T) {
 		{"auth", "logout", "demo", "--scope", "x"}, // scope is login-only
 		{"auth", "refresh", "demo", "--json"},      // json not for refresh
 		{"auth", "login", "demo", "--scope", ""},   // empty scope rejected
+		{"auth", "status", "--confirm"},            // confirm is reset-only
+		{"auth", "reset", "--confirm", "--watch"},  // confirmation does not allow unrelated flags
 	}
 	for _, args := range cases {
 		var stdout, stderr bytes.Buffer
@@ -196,10 +198,99 @@ func TestRunAuthHelp(t *testing.T) {
 	if code := runWithDeps([]string{"auth", "--help"}, &stdout, &stderr, appDeps{}); code != exitSuccess {
 		t.Fatalf("exit = %d", code)
 	}
-	for _, want := range []string{"zero auth", "login", "logout", "status", "refresh", "--device"} {
+	for _, want := range []string{"zero auth", "login", "logout", "status", "refresh", "reset --confirm", "--device"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("help missing %q:\n%s", want, stdout.String())
 		}
+	}
+}
+
+func TestRunAuthResetRequiresConfirmation(t *testing.T) {
+	for _, args := range [][]string{{}, {"--json"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			path := withAuthStore(t)
+			store, err := oauth.NewStore(oauth.StoreOptions{FilePath: path})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Save(oauth.ProviderKey("demo"), oauth.Token{AccessToken: "synthetic-reset-test-token"}); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			code := runAuthReset(args, &stdout, &stderr, appDeps{})
+			after, readErr := os.ReadFile(path)
+			if readErr != nil || !bytes.Equal(before, after) {
+				t.Fatalf("unconfirmed reset changed the store: %v", readErr)
+			}
+			if code == exitSuccess || !strings.Contains(stderr.String(), "--confirm") || stdout.Len() != 0 {
+				t.Fatalf("unconfirmed reset: exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunAuthResetJSON(t *testing.T) {
+	path := withAuthStore(t)
+	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.Save(oauth.ProviderKey("demo"), oauth.Token{AccessToken: "synthetic-reset-test-token"}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"auth", "reset", "--confirm", "--json"}, &stdout, &stderr, appDeps{}); code != exitSuccess {
+		t.Fatalf("exit = %d stderr=%s", code, stderr.String())
+	}
+	var payload struct {
+		Reset bool `json:"reset"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode JSON: %v (stdout=%q)", err, stdout.String())
+	}
+	if !payload.Reset {
+		t.Fatalf("payload = %+v, want reset=true", payload)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithDeps([]string{"auth", "status"}, &stdout, &stderr, appDeps{}); code != exitSuccess {
+		t.Fatalf("status exit = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "No OAuth provider logins are stored.") {
+		t.Fatalf("expected empty store after JSON reset, got: %q", stdout.String())
+	}
+}
+
+func TestRunAuthReset(t *testing.T) {
+	path := withAuthStore(t)
+	store, err := oauth.NewStore(oauth.StoreOptions{FilePath: path})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.Save(oauth.ProviderKey("demo"), oauth.Token{AccessToken: "secret"}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runWithDeps([]string{"auth", "reset", "--confirm"}, &stdout, &stderr, appDeps{}); code != exitSuccess {
+		t.Fatalf("exit = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Reset OAuth token store") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+
+	// Verify store is now empty.
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithDeps([]string{"auth", "status"}, &stdout, &stderr, appDeps{}); code != exitSuccess {
+		t.Fatalf("status exit = %d", code)
+	}
+	if !strings.Contains(stdout.String(), "No OAuth provider logins are stored.") {
+		t.Fatalf("expected empty store after reset, got: %q", stdout.String())
 	}
 }
 

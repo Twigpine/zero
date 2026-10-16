@@ -9,7 +9,9 @@
 // through `security -i` (interactive mode), whose command parser is line-based
 // with a fixed 4096-byte line buffer, so Set rejects secrets containing
 // newlines or exceeding that budget rather than silently corrupting them;
-// Linux's secret-tool has no such restriction.
+// Linux's secret-tool has no such restriction. MaxSecretLen reports that budget
+// so a caller holding a larger value can split it across entries instead of
+// being turned away.
 package keyring
 
 import (
@@ -82,7 +84,7 @@ func (k *Keyring) Set(service, account, secret string) error {
 			}
 		}
 		// -U updates the item if it already exists rather than failing.
-		line := "add-generic-password -U -s " + securityQuote(service) + " -a " + securityQuote(account) + " -w " + securityQuote(secret) + "\n"
+		line := securityAddLine(service, account, secret)
 		if len(line) > securityMaxLine {
 			return wrap("set", fmt.Errorf("secret too large for the macOS security tool's %d-byte command line; use the file backend instead", securityMaxLine))
 		}
@@ -162,10 +164,41 @@ func (k *Keyring) Delete(service, account string) (bool, error) {
 	}
 }
 
+// MaxSecretLen reports the largest secret, in bytes, that Set accepts under
+// (service, account) on this platform. ok is false when the backend imposes no
+// practical limit, which is the case for Linux's secret-tool: it reads the
+// secret from stdin rather than a command line. On macOS the secret shares the
+// `security -i` command line with the service and account, so the budget
+// depends on both and a caller that splits an oversized value must size each
+// part against the exact account name it will be stored under.
+//
+// The budget assumes the secret needs no quote escaping. securityQuote only
+// expands `\` and `"`, neither of which appears in base64 or hex, so a caller
+// storing encoded data gets the exact figure.
+func (k *Keyring) MaxSecretLen(service, account string) (int, bool) {
+	if k.goos != "darwin" {
+		return 0, false
+	}
+	// Measuring the real command with an empty secret counts the surrounding
+	// quotes too, so a secret of exactly this length lands on securityMaxLine.
+	budget := securityMaxLine - len(securityAddLine(service, account, ""))
+	if budget < 0 {
+		budget = 0
+	}
+	return budget, true
+}
+
 // securityMaxLine is the most `security -i` can read as one command: its line
 // buffer is MAX_LINE_LEN (4096) bytes in Apple's SecurityTool, one of which the
 // terminating NUL consumes.
 const securityMaxLine = 4095
+
+// securityAddLine renders the `security -i` command that stores secret under
+// (service, account). Set writes it and MaxSecretLen measures it, so the two
+// cannot disagree about how much of the line the overhead consumes.
+func securityAddLine(service, account, secret string) string {
+	return "add-generic-password -U -s " + securityQuote(service) + " -a " + securityQuote(account) + " -w " + securityQuote(secret) + "\n"
+}
 
 // securityQuote wraps s for one argument of a `security -i` command line. The
 // tool's parser (split_line in Apple's SecurityTool) treats a backslash inside

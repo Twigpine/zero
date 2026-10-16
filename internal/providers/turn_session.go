@@ -101,3 +101,25 @@ func DefaultTurnSessions(profile config.ProviderProfile, provider zeroruntime.Pr
 	}
 	return zeroruntime.NewProviderTurnSessionProvider(provider, caps)
 }
+
+// ConfiguredTurnSessions preserves transport selection and wraps the starting
+// session when RPM is configured. Without either feature, the default is nil.
+func ConfiguredTurnSessions(profile config.ProviderProfile, p zeroruntime.Provider, o Options) (zeroruntime.TurnSessionProvider, bool) {
+	s, ok := OptimizedTurnSessions(profile, p, o)
+	if o.ModelRPM == nil {
+		return s, ok
+	}
+	if !ok {
+		s = DefaultTurnSessions(profile, p, o)
+	}
+	return limitTurnSessions(profile, s, o), true
+}
+func limitTurnSessions(profile config.ProviderProfile, s zeroruntime.TurnSessionProvider, o Options) zeroruntime.TurnSessionProvider {
+	model := strings.TrimSpace(profile.Model)
+	if registry, err := defaultRegistry(o.ModelRegistry); err == nil {
+		if id, ok := registry.ResolveID(model); ok {
+			model = id
+		}
+	}
+	return o.ModelRPM.Wrap(model, s)
+}

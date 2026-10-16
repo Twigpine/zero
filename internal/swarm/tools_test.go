@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Gitlawb/zero/internal/testutil"
 	"github.com/Gitlawb/zero/internal/tools"
 )
 
@@ -94,7 +95,7 @@ func TestSpawnToolThroughRegistry(t *testing.T) {
 	if id == "" {
 		t.Fatal("spawn must return a task_id in Meta")
 	}
-	waitFor(t, "spec recorded", func() bool { return len(l.recorded()) == 1 })
+	testutil.WaitFor(t, "spec recorded", func() bool { return len(l.recorded()) == 1 })
 	spec := l.recorded()[0]
 	if spec.Model != "m1" || spec.Cwd != "/work" {
 		t.Fatalf("policy/cwd not threaded into member: model=%q cwd=%q", spec.Model, spec.Cwd)
@@ -165,7 +166,7 @@ func TestStatusAndCollectTools(t *testing.T) {
 		"agent_type": "teammate", "task": "compute", "team": "alpha",
 	}, tools.RunOptions{PermissionGranted: true, Model: "m"})
 	id := spawn.Meta["task_id"]
-	waitFor(t, "task done", func() bool {
+	testutil.WaitFor(t, "task done", func() bool {
 		task, ok := sw.Coordinator().Get(id)
 		return ok && task.Status == StatusDone
 	})
@@ -213,7 +214,7 @@ func TestCollectBlocksUntilMembersFinish(t *testing.T) {
 		"agent_type": "teammate", "task": "compute", "team": "alpha",
 	}, tools.RunOptions{PermissionGranted: true, Model: "m"})
 	id := spawn.Meta["task_id"]
-	waitFor(t, "member running", func() bool {
+	testutil.WaitFor(t, "member running", func() bool {
 		task, ok := sw.Coordinator().Get(id)
 		return ok && task.Status == StatusRunning
 	})
@@ -258,7 +259,7 @@ func TestCollectReturnsPartialOnTimeout(t *testing.T) {
 		"agent_type": "teammate", "task": "compute", "team": "alpha",
 	}, tools.RunOptions{PermissionGranted: true, Model: "m"})
 	id := spawn.Meta["task_id"]
-	waitFor(t, "member running", func() bool {
+	testutil.WaitFor(t, "member running", func() bool {
 		task, ok := sw.Coordinator().Get(id)
 		return ok && task.Status == StatusRunning
 	})
@@ -324,7 +325,7 @@ func TestNewWithUserDefinitions(t *testing.T) {
 	if _, err := sw.Spawn(Policy{Model: "m"}, "team", "researcher", "find things", ""); err != nil {
 		t.Fatalf("Spawn user-defined agent: %v", err)
 	}
-	waitFor(t, "researcher used", func() bool { return used })
+	testutil.WaitFor(t, "researcher used", func() bool { return used })
 
 	// A bad definition makes New fail closed.
 	if _, err := New(Options{BaseDir: t.TempDir(), Launcher: newLauncher(okFor), Definitions: []Definition{{AgentType: "  "}}}); err == nil {
@@ -341,7 +342,7 @@ func TestHandoffToolThroughRegistry(t *testing.T) {
 		"agent_type": "teammate", "task": "long", "team": "alpha",
 	}, tools.RunOptions{PermissionGranted: true, Model: "m"})
 	origID := spawn.Meta["task_id"]
-	waitFor(t, "running", func() bool {
+	testutil.WaitFor(t, "running", func() bool {
 		task, ok := sw.Coordinator().Get(origID)
 		return ok && task.Status == StatusRunning
 	})

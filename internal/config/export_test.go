@@ -3,6 +3,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -41,7 +42,7 @@ func ValidateFile(path string) (FileConfig, []Issue) {
 // SetProviderDescription sets a provider's description VERBATIM — including to
 // empty. The generic UpsertProvider merge treats empty fields as "leave
 // unchanged", so clearing a description needs this dedicated setter.
-func SetProviderDescription(path string, name string, description string) (FileConfig, error) {
+func SetProviderDescription(path string, name string, description string) (result FileConfig, err error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return FileConfig{}, fmt.Errorf("config path is required")
@@ -50,6 +51,17 @@ func SetProviderDescription(path string, name string, description string) (FileC
 	if name == "" {
 		return FileConfig{}, fmt.Errorf("provider name is required")
 	}
+	// Locks like the production mutators so this seam can stand in for one in a
+	// concurrency test rather than being the one unsynchronized writer.
+	unlock, err := lockConfigFileFn(path)
+	if err != nil {
+		return FileConfig{}, err
+	}
+	// Joined, not chosen between: a release failure annotates the result
+	// instead of masking the mutation error that actually explains what went
+	// wrong. Reporting success after a failed unlock would claim a state the
+	// next mutation cannot reproduce.
+	defer func() { err = errors.Join(err, unlock()) }()
 
 	data, err := os.ReadFile(path)
 	if err != nil {

@@ -11,10 +11,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Gitlawb/zero/internal/providers/providerio"
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
 
+func init() {
+	providerio.ShrinkBackoffForTest()
+}
+
 func TestStreamCompletionPostsChatCompletionRequest(t *testing.T) {
+	t.Parallel()
 	var gotPath string
 	var gotAuth string
 	var gotUserAgent string
@@ -120,6 +126,7 @@ func TestStreamCompletionPostsChatCompletionRequest(t *testing.T) {
 // "properties":null, because strict OpenAI-compatible servers (LM Studio)
 // reject the null form.
 func TestStreamCompletionSerializesTypedNilPropertiesAsEmptyObject(t *testing.T) {
+	t.Parallel()
 	var gotBody map[string]any
 	var gotRaw []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -175,6 +182,7 @@ func TestStreamCompletionSerializesTypedNilPropertiesAsEmptyObject(t *testing.T)
 }
 
 func TestNewRequiresModelButNotAPIKey(t *testing.T) {
+	t.Parallel()
 	if _, err := New(Options{}); err == nil {
 		t.Fatal("New without model returned nil error")
 	}
@@ -184,6 +192,7 @@ func TestNewRequiresModelButNotAPIKey(t *testing.T) {
 }
 
 func TestStreamCompletionOmitsAuthAndToolsWhenEmpty(t *testing.T) {
+	t.Parallel()
 	var gotAuth string
 	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -216,6 +225,7 @@ func TestStreamCompletionOmitsAuthAndToolsWhenEmpty(t *testing.T) {
 }
 
 func TestStreamCompletionAppliesCustomAuthAndHeaders(t *testing.T) {
+	t.Parallel()
 	var gotAuth string
 	var gotAltAuth string
 	var gotReferer string
@@ -258,6 +268,7 @@ func TestStreamCompletionAppliesCustomAuthAndHeaders(t *testing.T) {
 }
 
 func TestStreamCompletionEmitsTextUsageAndDone(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{"content":"hello "}}]}`)
 		writeSSE(w, `{"choices":[{"delta":{"content":"zero"}}],"usage":{"prompt_tokens":12,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":3,"cache_write_tokens":2}}}`)
@@ -276,6 +287,7 @@ func TestStreamCompletionEmitsTextUsageAndDone(t *testing.T) {
 }
 
 func TestStreamCompletionEmitsReasoningContentDeltas(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{"reasoning_content":"Thinking. "}}]}`)
 		writeSSE(w, `{"choices":[{"delta":{"reasoning_content":"Answering now."}}]}`)
@@ -296,6 +308,7 @@ func TestStreamCompletionEmitsReasoningContentDeltas(t *testing.T) {
 }
 
 func TestStreamCompletionEmitsReasoningAliasDeltas(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{"reasoning":"Thinking. "}}]}`)
 		writeSSE(w, `{"choices":[{"delta":{"reasoning":"Answering now."}}]}`)
@@ -316,6 +329,7 @@ func TestStreamCompletionEmitsReasoningAliasDeltas(t *testing.T) {
 }
 
 func TestStreamCompletionPrefersReasoningContentOverAlias(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{"reasoning_content":"standard","reasoning":"alias"}}]}`)
 		writeSSE(w, `[DONE]`)
@@ -329,6 +343,7 @@ func TestStreamCompletionPrefersReasoningContentOverAlias(t *testing.T) {
 }
 
 func TestStreamCompletionEmitsReasoningBeforeRegularContent(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{"reasoning_content":"Thinking. ","content":"Answer."}}]}`)
 		writeSSE(w, `[DONE]`)
@@ -346,6 +361,7 @@ func TestStreamCompletionEmitsReasoningBeforeRegularContent(t *testing.T) {
 }
 
 func TestStreamCompletionPreservesLiteralThinkTagsByDefault(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{"content":"show <think>literal</think> markup"}}]}`)
 		writeSSE(w, `[DONE]`)
@@ -359,6 +375,7 @@ func TestStreamCompletionPreservesLiteralThinkTagsByDefault(t *testing.T) {
 }
 
 func TestStreamCompletionSplitsInlineThinkTagsFromContent(t *testing.T) {
+	t.Parallel()
 	provider := newTestProviderWithThinkTags(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{"content":"<think>private reasoning</think>public answer"}}]}`)
 		writeSSE(w, `[DONE]`)
@@ -373,6 +390,7 @@ func TestStreamCompletionSplitsInlineThinkTagsFromContent(t *testing.T) {
 }
 
 func TestStreamCompletionSplitsInlineThinkTagsAcrossChunks(t *testing.T) {
+	t.Parallel()
 	provider := newTestProviderWithThinkTags(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{"content":"<thi"}}]}`)
 		writeSSE(w, `{"choices":[{"delta":{"content":"nk>reason"}}]}`)
@@ -393,6 +411,7 @@ func TestStreamCompletionSplitsInlineThinkTagsAcrossChunks(t *testing.T) {
 }
 
 func TestStreamCompletionBuffersToolArgsUntilIDAndNameArrive(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":"}}]}}]}`)
 		writeSSE(w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"\"README.md\"}"}}]},"finish_reason":"tool_calls"}]}`)
@@ -418,6 +437,7 @@ func TestStreamCompletionBuffersToolArgsUntilIDAndNameArrive(t *testing.T) {
 }
 
 func TestStreamCompletionTracksMultipleToolCallsByIndex(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\"query\":"}},{"index":0,"id":"call_a","function":{"name":"read_file","arguments":"{\"path\":\"a\"}"}}]}}]}`)
 		writeSSE(w, `{"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_b","function":{"name":"grep","arguments":"\"zero\"}"}}]},"finish_reason":"tool_calls"}]}`)
@@ -440,6 +460,7 @@ func TestStreamCompletionTracksMultipleToolCallsByIndex(t *testing.T) {
 }
 
 func TestStreamCompletionClassifiesHTTPErrorsAndRedactsToken(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name       string
 		status     int
@@ -480,6 +501,7 @@ func TestStreamCompletionClassifiesHTTPErrorsAndRedactsToken(t *testing.T) {
 }
 
 func TestStreamCompletionHumanizesUpstreamUnreachableGatewayError(t *testing.T) {
+	t.Parallel()
 	// A local Ollama daemon serving a "-cloud" model answers on localhost but
 	// returns HTTP 502 with an opaque proxied transport error when it cannot reach
 	// its cloud backend. The adapter must surface a clear connectivity message
@@ -507,6 +529,7 @@ func TestStreamCompletionHumanizesUpstreamUnreachableGatewayError(t *testing.T) 
 }
 
 func TestStreamCompletionEmitsStreamErrorObject(t *testing.T) {
+	t.Parallel()
 	provider := newTestProviderWithKey(t, "sk-secret", func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"error":{"message":"stream failed sk-secret","type":"server_error"}}`)
 	})
@@ -524,6 +547,7 @@ func TestStreamCompletionEmitsStreamErrorObject(t *testing.T) {
 }
 
 func TestStreamCompletionClassifiesStreamErrorCode(t *testing.T) {
+	t.Parallel()
 	// The error arrives inside a 200 OK SSE payload's "code" field, not the
 	// HTTP status, so this exercises openAIStreamErrorStatusByCode directly:
 	// both the numeric-string codes some providers send and the semantic
@@ -575,6 +599,7 @@ func TestStreamCompletionEmitsErrorForMalformedJSON(t *testing.T) {
 }
 
 func TestStreamCompletionEmitsErrorWhenContextCancels(t *testing.T) {
+	t.Parallel()
 	requestStarted := make(chan struct{})
 	release := make(chan struct{})
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
@@ -605,6 +630,7 @@ func TestStreamCompletionEmitsErrorWhenContextCancels(t *testing.T) {
 // caller timeout, NOT humanized into an "upstream unreachable" outage (the host
 // is reachable; the caller's clock ran out).
 func TestStreamCompletionContextDeadlineNotHumanizedAsUpstream(t *testing.T) {
+	t.Parallel()
 	release := make(chan struct{})
 	defer close(release)
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
@@ -631,6 +657,7 @@ func TestStreamCompletionContextDeadlineNotHumanizedAsUpstream(t *testing.T) {
 }
 
 func TestStreamCompletionFlushesBufferedContentWhenContextCancels(t *testing.T) {
+	t.Parallel()
 	release := make(chan struct{})
 	provider := newTestProviderWithThinkTags(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{"content":"visible <thi"}}]}`)
@@ -763,6 +790,7 @@ func eventsOfType(events []zeroruntime.StreamEvent, eventType zeroruntime.Stream
 }
 
 func TestStreamCompletionDoesNotHangOnEOFWithOpenToolCall(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{\"path\":\"README.md\"}"}}]}}]}`)
 	})
@@ -794,6 +822,7 @@ func TestStreamCompletionDoesNotHangOnEOFWithOpenToolCall(t *testing.T) {
 }
 
 func TestStreamCompletionSkipsNamelessToolCallOnEOF(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"arguments":"{\"path\":\"README.md\"}"}}]}}]}`)
 	})
@@ -814,6 +843,7 @@ func TestStreamCompletionSkipsNamelessToolCallOnEOF(t *testing.T) {
 }
 
 func TestStreamCompletionIdleTimeoutAbortsStalledStream(t *testing.T) {
+	t.Parallel()
 	released := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Send one token, then hang without sending [DONE] or closing —
@@ -869,6 +899,7 @@ func TestStreamCompletionIdleTimeoutAbortsStalledStream(t *testing.T) {
 }
 
 func TestStreamCompletionSendsMaxCompletionTokens(t *testing.T) {
+	t.Parallel()
 	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
@@ -900,6 +931,7 @@ func TestStreamCompletionSendsMaxCompletionTokens(t *testing.T) {
 }
 
 func TestStreamCompletionSendsReasoningEffort(t *testing.T) {
+	t.Parallel()
 	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
@@ -928,6 +960,7 @@ func TestStreamCompletionSendsReasoningEffort(t *testing.T) {
 }
 
 func TestStreamCompletionNormalizesServiceTier(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name  string
 		input string
@@ -973,6 +1006,7 @@ func TestStreamCompletionNormalizesServiceTier(t *testing.T) {
 }
 
 func TestStreamCompletionOmitsReasoningEffortWhenUnsetOrInvalid(t *testing.T) {
+	t.Parallel()
 	for _, effort := range []string{"", "none", "bogus"} {
 		var gotBody map[string]any
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1005,6 +1039,7 @@ func TestStreamCompletionOmitsReasoningEffortWhenUnsetOrInvalid(t *testing.T) {
 }
 
 func TestStreamCompletionOmitsMaxCompletionTokensWhenUnset(t *testing.T) {
+	t.Parallel()
 	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
@@ -1035,6 +1070,7 @@ func TestStreamCompletionOmitsMaxCompletionTokensWhenUnset(t *testing.T) {
 // The provider must surface it on the done event so a clipped answer is not
 // mistaken for a complete one.
 func TestStreamCompletionSurfacesLengthFinishReason(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{"content":"truncated"}}]}`)
 		writeSSE(w, `{"choices":[{"delta":{},"finish_reason":"length"}]}`)
@@ -1066,6 +1102,7 @@ func TestStreamCompletionSurfacesLengthFinishReason(t *testing.T) {
 
 // A content_filter finish_reason maps to the runtime's content-filter reason.
 func TestStreamCompletionSurfacesContentFilterFinishReason(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{},"finish_reason":"content_filter"}]}`)
 		writeSSE(w, `[DONE]`)
@@ -1088,6 +1125,7 @@ func TestStreamCompletionSurfacesContentFilterFinishReason(t *testing.T) {
 
 // A normal "stop" finish must leave FinishReason empty on the done event.
 func TestStreamCompletionNormalFinishHasNoReason(t *testing.T) {
+	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`)
 		writeSSE(w, `[DONE]`)
@@ -1112,6 +1150,7 @@ func TestStreamCompletionNormalFinishHasNoReason(t *testing.T) {
 // single payload (the OpenAI provider previously parsed one line at a time and
 // would drop the continuation, producing malformed JSON).
 func TestStreamCompletionJoinsMultiLineDataFields(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		// One SSE event whose JSON payload is split across two data: lines.
@@ -1152,6 +1191,7 @@ func replay(events []zeroruntime.StreamEvent) <-chan zeroruntime.StreamEvent {
 }
 
 func TestStreamCompletionEmitsDroppedOnNamelessToolCall(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// A tool call with arguments + finish_reason but no function name.
 		writeSSE(w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_x","function":{"arguments":"{}"}}]}}]}`)
@@ -1184,6 +1224,7 @@ func TestStreamCompletionEmitsDroppedOnNamelessToolCall(t *testing.T) {
 }
 
 func TestContentPartImageURLMarshalsDataURI(t *testing.T) {
+	t.Parallel()
 	parts := []contentPart{
 		{Type: "text", Text: "look"},
 		{Type: "image_url", ImageURL: &imageURLPart{URL: "data:image/png;base64,QUJD"}},
@@ -1209,6 +1250,7 @@ func TestContentPartImageURLMarshalsDataURI(t *testing.T) {
 }
 
 func TestMapMessageBuildsImageURLContentParts(t *testing.T) {
+	t.Parallel()
 	msg := mapMessage(zeroruntime.Message{
 		Role:    zeroruntime.MessageRoleUser,
 		Content: "describe these",
@@ -1240,6 +1282,7 @@ func TestMapMessageBuildsImageURLContentParts(t *testing.T) {
 }
 
 func TestMapMessageImageOnlyOmitsTextPart(t *testing.T) {
+	t.Parallel()
 	msg := mapMessage(zeroruntime.Message{
 		Role:    zeroruntime.MessageRoleUser,
 		Content: "",
@@ -1260,6 +1303,7 @@ func TestMapMessageImageOnlyOmitsTextPart(t *testing.T) {
 }
 
 func TestMapMessageTextOnlyKeepsStringContent(t *testing.T) {
+	t.Parallel()
 	msg := mapMessage(zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: "hi"})
 	if got, ok := msg.Content.(string); !ok || got != "hi" {
 		t.Fatalf("Content = %#v, want string \"hi\"", msg.Content)
@@ -1276,6 +1320,7 @@ func TestMapMessageTextOnlyKeepsStringContent(t *testing.T) {
 // assistant/tool/system message that happens to carry Images must still
 // serialize plain string content (never a content-parts array).
 func TestMapMessageNonUserRolesNeverCarryImages(t *testing.T) {
+	t.Parallel()
 	images := []zeroruntime.ImageBlock{{MediaType: "image/png", Data: []byte("ABC")}}
 	for _, role := range []zeroruntime.MessageRole{
 		zeroruntime.MessageRoleAssistant,
@@ -1293,6 +1338,7 @@ func TestMapMessageNonUserRolesNeverCarryImages(t *testing.T) {
 }
 
 func TestStreamCompletionSerializesImageContentParts(t *testing.T) {
+	t.Parallel()
 	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
@@ -1354,6 +1400,7 @@ func TestStreamCompletionSerializesImageContentParts(t *testing.T) {
 // message serializes an explicit `"content"` field (empty string when there is
 // no text) instead of omitting it.
 func TestOpenAIRequestEmptyContentHandling(t *testing.T) {
+	t.Parallel()
 	provider, err := New(Options{Model: "gpt-test"})
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
@@ -1490,6 +1537,7 @@ func TestOpenAIRequestPromptCacheKey(t *testing.T) {
 }
 
 func TestOpenAIRequestPreservesCacheablePrefixAcrossTurns(t *testing.T) {
+	t.Parallel()
 	provider, err := New(Options{Model: "gpt-test"})
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
@@ -1553,6 +1601,7 @@ func TestOpenAIRequestPreservesCacheablePrefixAcrossTurns(t *testing.T) {
 // be normalized to "properties":{} on the wire, never "properties":[] or
 // "properties":null.
 func TestStreamCompletionSerializesNonMapPropertiesAsEmptyObject(t *testing.T) {
+	t.Parallel()
 	var gotBody map[string]any
 	var gotRaw []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

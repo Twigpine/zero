@@ -6,6 +6,8 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/http/httptest"
+	"net/http/httptrace"
 	"runtime"
 	"strings"
 	"testing"
@@ -338,6 +340,10 @@ func TestStreamTimeoutMessage(t *testing.T) {
 // response-header wait + shorter idle-conn reuse) that defeats the macOS stale-
 // pooled-connection hang; an explicit client is returned untouched.
 func TestHTTPClientReturnsStallHardenedSharedClient(t *testing.T) {
+	// Package init must not bake the timeout. An ambient
+	// ZERO_RESPONSE_HEADER_TIMEOUT would otherwise make this assertion
+	// depend on whatever the process inherited.
+	t.Setenv("ZERO_RESPONSE_HEADER_TIMEOUT", "")
 	got := HTTPClient(nil)
 	if got == nil {
 		t.Fatal("HTTPClient(nil) returned nil")
@@ -370,4 +376,158 @@ func TestHTTPClientReturnsStallHardenedSharedClient(t *testing.T) {
 	if HTTPClient(custom) != custom {
 		t.Fatal("an explicit client must be returned unchanged")
 	}
+}
+
+// The shared transport must enforce the timeout ResolveResponseHeaderTimeout
+// returns. Checking the resolver alone stays green if the client still carries
+// the value captured at init.
+func TestHTTPClientTransportUsesResolvedHeaderTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		delay, err := time.ParseDuration(r.URL.Query().Get("delay"))
+		if err != nil {
+			http.Error(w, "bad delay", http.StatusBadRequest)
+			return
+		}
+		time.Sleep(delay)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	t.Setenv("ZERO_RESPONSE_HEADER_TIMEOUT", "200ms")
+	short := HTTPClient(nil)
+	tr, ok := short.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", short.Transport)
+	}
+	if tr.ResponseHeaderTimeout != ResolveResponseHeaderTimeout() || tr.ResponseHeaderTimeout != 200*time.Millisecond {
+		t.Fatalf("ResponseHeaderTimeout = %v, resolver = %v, want 200ms", tr.ResponseHeaderTimeout, ResolveResponseHeaderTimeout())
+	}
+	started := time.Now()
+	resp, err := short.Get(srv.URL + "?delay=1s")
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	if err == nil {
+		t.Fatal("slow header succeeded; the transport did not apply the 200ms timeout")
+	}
+	if !strings.Contains(err.Error(), "timeout awaiting response headers") {
+		t.Fatalf("error = %v, want the transport's response-header timeout", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 800*time.Millisecond {
+		t.Fatalf("header wait took %v; the transport waited on the handler instead of the resolved timeout", elapsed)
+	}
+
+	t.Setenv("ZERO_RESPONSE_HEADER_TIMEOUT", "2s")
+	long := HTTPClient(nil)
+	if long == short {
+		t.Fatal("a new resolved timeout reused the transport that still has the previous timeout")
+	}
+	if got := long.Transport.(*http.Transport).ResponseHeaderTimeout; got != 2*time.Second {
+		t.Fatalf("ResponseHeaderTimeout = %v, want 2s", got)
+	}
+	resp, err = long.Get(srv.URL + "?delay=50ms")
+	if err != nil {
+		t.Fatalf("header within the resolved timeout failed: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", resp.StatusCode)
+	}
+	if again := HTTPClient(nil); again != long {
+		t.Fatal("the same resolved timeout must keep one shared client")
+	}
+}
+
+// startIdleConnCloser periodically closes idle pooled connections so stale HTTP/2
+// connections are not reused across long idle periods.
+func TestStartIdleConnCloserClosesIdleConnections(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DisableKeepAlives = false
+	defer tr.CloseIdleConnections()
+
+	client := &http.Client{Transport: tr}
+
+	// First request creates a connection in the pool.
+	resp1, err := client.Get(server.URL)
+	if err != nil {
+		t.Fatalf("first request failed: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp1.Body)
+	_ = resp1.Body.Close()
+
+	// Immediate second request reuses the pooled connection.
+	var reusedFirst bool
+	trace1 := &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			reusedFirst = info.Reused
+		},
+	}
+	req2, err := http.NewRequestWithContext(httptrace.WithClientTrace(context.Background(), trace1), http.MethodGet, server.URL, nil)
+	if err != nil {
+		t.Fatalf("new request failed: %v", err)
+	}
+	resp2, err := client.Do(req2)
+	if err != nil {
+		t.Fatalf("second request failed: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp2.Body)
+	_ = resp2.Body.Close()
+
+	if !reusedFirst {
+		t.Fatal("expected immediate second request to reuse keep-alive connection")
+	}
+
+	// Start closer with a short interval and wait for it to fire.
+	stop := startIdleConnCloser(tr, 20*time.Millisecond)
+	defer stop()
+
+	// Poll until the idle closer evicts the connection and a fresh dial occurs.
+	deadline := time.Now().Add(2 * time.Second)
+	var closed bool
+	for time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+		var reused bool
+		trace := &httptrace.ClientTrace{
+			GotConn: func(info httptrace.GotConnInfo) {
+				reused = info.Reused
+			},
+		}
+		req, err := http.NewRequestWithContext(httptrace.WithClientTrace(context.Background(), trace), http.MethodGet, server.URL, nil)
+		if err != nil {
+			t.Fatalf("new request failed: %v", err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if !reused {
+			closed = true
+			break
+		}
+	}
+	if !closed {
+		t.Fatal("expected connection to be closed by idle closer and not reused")
+	}
+}
+
+func TestStartIdleConnCloserEdgeCases(t *testing.T) {
+	// Zero or negative interval returns a no-op stop func without starting goroutine.
+	stopZero := startIdleConnCloser(nil, 0)
+	stopZero()
+
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	stopNil := startIdleConnCloser(tr, -1*time.Second)
+	stopNil()
+
+	// Calling stop multiple times is idempotent.
+	stop := startIdleConnCloser(tr, 100*time.Millisecond)
+	stop()
+	stop()
 }

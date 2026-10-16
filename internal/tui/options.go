@@ -22,6 +22,7 @@ import (
 
 // Options configures the reusable Zero terminal UI shell.
 type Options struct {
+	ModelRPM             *zeroruntime.ModelRPMLimiter
 	Cwd                  string
 	Version              string // CLI build version, shown on the home screen; empty hides it
 	UserConfigPath       string
@@ -70,7 +71,13 @@ type Options struct {
 	// invocation. Called lazily per use so newly installed skills are picked up
 	// without a restart. Nil means the session has no skills wiring (skills stay
 	// model-pulled via the skill tool only).
-	LoadSkills      func() []skills.Skill
+	LoadSkills func() []skills.Skill
+	// AllowEscalation opts this session into mid-run model escalation, set from
+	// --allow-escalation. It wires the model switchers onto every turn's options;
+	// the escalate_model tool itself is registered by the caller on the same flag.
+	// Both halves are required: the tool without the switchers is inert, and the
+	// switchers without the tool are unreachable.
+	AllowEscalation bool
 	PermissionMode  agent.PermissionMode
 	ReasoningEffort modelregistry.ReasoningEffort
 	ResponseStyle   string
@@ -92,6 +99,11 @@ type Options struct {
 	// KeyBindings configures remappable TUI keybindings. An empty/zero
 	// KeyBindingsConfig means "use built-in defaults" for each action.
 	KeyBindings config.KeyBindingsConfig
+
+	// StartupNotices are shown as system notices when the session opens: facts
+	// about the session the user should see before the first prompt, decided by
+	// the caller that built it. Blank entries are skipped.
+	StartupNotices []string
 
 	// STT configures speech-to-text dictation (§ docs/dictation.md).
 	STT config.STTConfig

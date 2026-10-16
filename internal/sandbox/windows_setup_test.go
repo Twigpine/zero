@@ -63,6 +63,37 @@ func TestRunWindowsSandboxSetupRejectsInvalidArgs(t *testing.T) {
 	}
 }
 
+func TestRunWindowsSandboxSetupRejectsDenyReadUpfront(t *testing.T) {
+	home := t.TempDir()
+	args, err := BuildWindowsSandboxSetupArgs(WindowsSandboxSetupArgsOptions{
+		SandboxHome:    home,
+		CommandCWD:     `C:\workspace\src`,
+		WorkspaceRoots: []string{`C:\workspace`},
+		PermissionProfile: PermissionProfile{
+			FileSystem: FileSystemPolicy{
+				Kind:       FileSystemRestricted,
+				WriteRoots: []WritableRoot{{Root: `C:\workspace`}},
+				DenyRead:   []string{`C:\workspace\secret`},
+			},
+			Network: NetworkPolicy{Mode: NetworkDeny},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildWindowsSandboxSetupArgs: %v", err)
+	}
+	var stderr bytes.Buffer
+	code := RunWindowsSandboxSetup(args, &stderr)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 for unsupported DenyRead", code)
+	}
+	if !strings.Contains(stderr.String(), "DenyRead is not supported") {
+		t.Fatalf("stderr = %q, want DenyRead unsupported rejection before elevation check", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "Administrator rights are required") {
+		t.Fatalf("stderr = %q, should not claim Administrator rights when DenyRead is unsupported", stderr.String())
+	}
+}
+
 func TestWindowsSandboxSetupMarkerRefreshesWhenProfileChanges(t *testing.T) {
 	config := WindowsSandboxSetupConfig{
 		SandboxHome:    t.TempDir(),
@@ -126,8 +157,8 @@ func TestWindowsSandboxSetupMarkerValidatesBothNetworkModes(t *testing.T) {
 	}
 }
 
-// A pre-v4 marker on disk must be rejected as out of date so the schema bump
-// forces a clean re-setup (old markers scoped the filter to write SIDs).
+// A pre-v5 marker on disk must be rejected as out of date so the schema bump
+// forces a clean re-setup (old markers had legacy DenyWrite ACEs).
 func TestWindowsSandboxSetupMarkerRejectsOldSchema(t *testing.T) {
 	config := WindowsSandboxSetupConfig{
 		SandboxHome:    t.TempDir(),
@@ -142,7 +173,7 @@ func TestWindowsSandboxSetupMarkerRejectsOldSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildWindowsSandboxSetupMarker: %v", err)
 	}
-	marker.SchemaVersion = 3
+	marker.SchemaVersion = 4
 	bytes, err := json.Marshal(marker)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -152,7 +183,7 @@ func TestWindowsSandboxSetupMarkerRejectsOldSchema(t *testing.T) {
 	}
 	err = ValidateWindowsSandboxSetupMarker(config)
 	if err == nil || !strings.Contains(err.Error(), "out of date") {
-		t.Fatalf("schema-3 marker must be out of date, got: %v", err)
+		t.Fatalf("schema-4 marker must be out of date, got: %v", err)
 	}
 }
 

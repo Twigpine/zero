@@ -311,40 +311,35 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	// cache file on the machine. The refresh itself is fired in exec/TUI startup.
 	modelregistry.EnableModelsDevOverlay()
 
-	addDirs, args, err := splitLeadingAddDirFlags(args)
+	// --add-dir, --theme and --allow-escalation may be written in any order;
+	// see splitLeadingRootFlags for why they are split together.
+	root, args, err := splitLeadingRootFlags(args)
 	if err != nil {
 		return writeAppError(stderr, err.Error(), 1)
 	}
-	// --theme <name> selects the TUI palette non-interactively (auto or any registered
-	// theme; populates tui.Options.Theme, which resolveThemeMode prefers over
-	// ZERO_THEME). Re-split --add-dir afterward so it may appear on either side of --theme.
-	theme, args, err := splitLeadingThemeFlag(args)
-	if err != nil {
-		return writeAppError(stderr, err.Error(), 1)
-	}
-	moreDirs, args, err := splitLeadingAddDirFlags(args)
-	if err != nil {
-		return writeAppError(stderr, err.Error(), 1)
-	}
-	addDirs = append(addDirs, moreDirs...)
+	addDirs, theme, allowEscalation := root.addDirs, root.theme, root.allowEscalation
 
 	if len(args) == 0 {
-		return runInteractiveTUI(stderr, deps, agent.PermissionModeAsk, addDirs, theme)
+		return runInteractiveTUI(stderr, deps, agent.PermissionModeAsk, addDirs, theme, allowEscalation)
 	}
 
-	// --add-dir grants an extra write root, and only the interactive TUI and
-	// exec dispatch paths consume one. Fail loud everywhere else rather than
-	// silently discarding an explicit grant — including help/version, which
-	// run no agent and could only ignore it. The allowlist names exactly the
-	// cases below that forward addDirs; a future subcommand is rejected by
-	// default until it opts in here.
-	if len(addDirs) > 0 {
-		switch args[0] {
-		case "--skip-permissions-unsafe", "-p", "--prompt", "exec":
-			// Forwarded by the matching case below.
-		default:
-			return writeAppError(stderr, "--add-dir is only supported for the interactive TUI and exec", 1)
-		}
+	// --add-dir grants an extra write root and --allow-escalation opts a run
+	// into mid-run model escalation; only the interactive TUI and exec consume
+	// either. Both are forwarded to exec below and rejected loudly everywhere
+	// else rather than silently discarded, including help/version, which run
+	// no agent and could only ignore them. The allowlist names exactly the
+	// cases below that forward; a future subcommand is rejected by default
+	// until it opts in here.
+	forwardsRootFlags := false
+	switch args[0] {
+	case "--skip-permissions-unsafe", "-p", "--prompt", "exec":
+		forwardsRootFlags = true
+	}
+	if len(addDirs) > 0 && !forwardsRootFlags {
+		return writeAppError(stderr, "--add-dir is only supported for the interactive TUI and exec", 1)
+	}
+	if allowEscalation && !forwardsRootFlags {
+		return writeAppError(stderr, "--allow-escalation is only supported for the interactive TUI and exec", 1)
 	}
 
 	switch args[0] {
@@ -354,26 +349,24 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		// reach unsafe mode in the shell — and the "!" shell escape (which is
 		// gated behind unsafe) was therefore unreachable.
 		//
-		// --add-dir may legally appear on either side of the flag, so re-split
-		// the remaining args and merge with the dirs already collected. Any
-		// trailing non-flag args were ignored on this path before --add-dir
-		// existed and still are — but an --add-dir hidden BEHIND one would be
-		// silently dropped with them, so reject that misplacement loudly.
-		moreDirs, rest, err := splitLeadingAddDirFlags(args[1:])
+		// The root flags may legally appear on either side of this flag, so
+		// split them again from what follows it and merge with what the root
+		// already took. Any trailing non-flag args were ignored on this path
+		// before --add-dir existed and still are, but an --add-dir hidden
+		// BEHIND one would be silently dropped with them, so reject that
+		// misplacement loudly below.
+		more, rest, err := splitLeadingRootFlags(args[1:])
 		if err != nil {
 			return writeAppError(stderr, err.Error(), 1)
 		}
-		// --theme may appear here too; extract it before the stray-arg checks so it is
-		// not rejected as an unexpected positional, then re-split --add-dir after it.
-		skipTheme, rest, err := splitLeadingThemeFlag(rest)
-		if err != nil {
-			return writeAppError(stderr, err.Error(), 1)
+		moreDirs := more.addDirs
+		// A --theme written before the flag was taken at the root and used to be
+		// dropped here; one written after it wins, as the last occurrence does.
+		skipTheme := theme
+		if more.theme != "" {
+			skipTheme = more.theme
 		}
-		evenMoreDirs, rest, err := splitLeadingAddDirFlags(rest)
-		if err != nil {
-			return writeAppError(stderr, err.Error(), 1)
-		}
-		moreDirs = append(moreDirs, evenMoreDirs...)
+		skipAllowEscalation := more.allowEscalation
 		// A misplaced --add-dir anywhere in the remainder is the more specific error,
 		// so check for it across all of rest before rejecting stray args.
 		for _, arg := range rest {
@@ -390,7 +383,7 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 				return writeAppError(stderr, "--skip-permissions-unsafe launches the interactive TUI and takes no prompt or subcommand; for a one-shot unsafe run use `zero exec --skip-permissions-unsafe -p \"...\"`", 1)
 			}
 		}
-		return runInteractiveTUI(stderr, deps, agent.PermissionModeUnsafe, append(append([]string{}, addDirs...), moreDirs...), skipTheme)
+		return runInteractiveTUI(stderr, deps, agent.PermissionModeUnsafe, append(append([]string{}, addDirs...), moreDirs...), skipTheme, allowEscalation || skipAllowEscalation)
 	case "-h", "--help", "help":
 		if err := writeHelp(stdout); err != nil {
 			return 1
@@ -423,16 +416,16 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		if len(args) < 2 {
 			return writePromptRequired(stderr)
 		}
-		// Forward leading --add-dir occurrences so exec's own parser collects them.
+		// Forward the root flags exec consumes so its own parser collects them.
 		// Use the inline --prompt=<value> form so a prompt whose first character is a
 		// dash (e.g. `zero -p "-foo"`) is taken verbatim instead of being mistaken for
 		// a flag and rejected with "--prompt requires a value" (matches the cron path).
-		execArgs := append(addDirFlagArgs(addDirs), "--prompt="+args[1])
+		execArgs := append(rootFlagArgs(addDirs, allowEscalation), "--prompt="+args[1])
 		execArgs = append(execArgs, args[2:]...)
 		return runExec(execArgs, stdout, stderr, deps)
 	case "exec":
-		// Forward leading --add-dir occurrences so exec's own parser collects them.
-		return runExec(append(addDirFlagArgs(addDirs), args[1:]...), stdout, stderr, deps)
+		// Forward the root flags exec consumes so its own parser collects them.
+		return runExec(append(rootFlagArgs(addDirs, allowEscalation), args[1:]...), stdout, stderr, deps)
 	case "completions":
 		return runCompletions(args[1:], stdout, stderr)
 	case "daemon":
@@ -696,15 +689,15 @@ func fillAppDeps(deps appDeps) appDeps {
 	return deps
 }
 
-func runInteractiveTUI(stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, addDirs []string, theme string) int {
-	return runInteractiveTUIWithSetup(stderr, deps, permissionMode, addDirs, theme, false)
+func runInteractiveTUI(stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, addDirs []string, theme string, allowEscalation bool) int {
+	return runInteractiveTUIWithSetup(stderr, deps, permissionMode, addDirs, theme, false, allowEscalation)
 }
 
-func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, addDirs []string, theme string, forceSetup bool) int {
+func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode agent.PermissionMode, addDirs []string, theme string, forceSetup bool, allowEscalation bool) int {
 	// Refresh the models.dev pricing/limits cache in the background when stale;
 	// the overlay is read at registry construction from the cache file, so this
 	// benefits the next run and never blocks or fails this one.
-	go func() { _ = modelregistry.RefreshModelsDevCache(context.Background()) }()
+	modelregistry.StartModelsDevRefresh()
 
 	workspaceRoot, err := deps.getwd()
 	if err != nil {
@@ -736,7 +729,13 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			resolved.Provider = usable
 			resolved.ActiveProvider = usable.Name
 		} else {
-			resolved = config.ResolvedConfig{}
+			// Fresh-onboarding reset, but the user's notification preference is
+			// NOT config-to-redo: clearing it here would surface as an empty
+			// Options.Notify, and the TUI's unconfigured default (both/unfocused)
+			// would then resurrect alerts a user explicitly turned off while the
+			// setup wizard runs (maintainer review, PR #1001). Carry the stored
+			// block through; other wizard-visible state starts clean as before.
+			resolved = config.ResolvedConfig{Notify: resolved.Notify}
 			forceSetup = true
 		}
 	}
@@ -792,6 +791,14 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 
 	registry := newCoreRegistryScoped(workspaceRoot, scope)
 	registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
+	// Mid-run model escalation is opt-in on this surface too. The tool is present
+	// only when the operator asked for it with --allow-escalation, and the
+	// switchers that make it do anything ride on the same flag through
+	// Options.AllowEscalation below. Registering one without the other ships a
+	// tool the loop will never act on, which looks like a feature and is not.
+	if allowEscalation {
+		registry.Register(tools.NewEscalateModelTool())
+	}
 	executionRunner := execution.NewRunner(nil)
 	sandboxStore, err := deps.newSandboxStore()
 	if err != nil {
@@ -960,7 +967,12 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// notice when project hooks/plugins were dropped for an untrusted workspace.
 	hookDispatcher, hookSkip := newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks, trustRoot, executionRunner)
 	emitTrustNotice(stderr, hookSkip, pluginActivation.trustSkip, mcpSkip)
+	// From the engine the session's commands run through, so the notice
+	// describes the sandbox they actually get.
+	startupNotices := []string{sandboxEngine.DegradedNotice()}
+	modelRPM := zeroruntime.NewModelRPMLimiter(resolved.ModelRPM)
 	return deps.runTUI(context.Background(), tui.Options{
+		ModelRPM:             modelRPM,
 		Cwd:                  workspaceRoot,
 		Version:              version,
 		Theme:                theme,
@@ -983,7 +995,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			if provider == nil {
 				return nil
 			}
-			if optimized, ok := providers.OptimizedTurnSessions(profile, provider, providers.Options{}); ok {
+			if optimized, ok := providers.ConfiguredTurnSessions(profile, provider, providers.Options{ModelRPM: modelRPM}); ok {
 				return optimized
 			}
 			return providers.DefaultTurnSessions(profile, provider, providers.Options{})
@@ -1035,6 +1047,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			Specialists:    specialistRuntime.specialists,
 			Skills:         pluginActivation.skillInfos(deps.skillsDir()),
 		},
+		AllowEscalation: allowEscalation,
 		// LoadSkills backs /skills and direct /<skill-name> invocation in the TUI.
 		// It resolves against the same merged set (default dir + plugin skill
 		// roots) as the skill tool and the system-prompt list, re-read per use so
@@ -1046,6 +1059,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		PermissionMode:            permissionMode,
 		Notify:                    resolved.Notify,
 		KeyBindings:               resolved.KeyBindings,
+		StartupNotices:            startupNotices,
 		STT:                       resolved.STT,
 		BuildDictationTranscriber: newDictationTranscriberFactory(resolved, userConfigPath, sttServerManager),
 		ShutdownDictationServer:   sttServerManager.Shutdown,
@@ -1381,6 +1395,7 @@ Flags:
   -v, --version                  Print version
   -p, --prompt                   Run a one-shot prompt
       --add-dir <path>           Allow writes in an extra directory (repeatable)
+      --allow-escalation         Let the agent escalate to a stronger model mid-run via escalate_model
       --skip-permissions-unsafe  Launch the interactive shell in unsafe mode (enables the ! shell escape)
 `)
 	return err
@@ -1393,6 +1408,17 @@ func addDirFlagArgs(addDirs []string) []string {
 	flags := make([]string, 0, 2*len(addDirs))
 	for _, dir := range addDirs {
 		flags = append(flags, "--add-dir", dir)
+	}
+	return flags
+}
+
+// rootFlagArgs re-synthesises the root flags exec consumes, in the spelling
+// its own parser accepts, so a flag written before the subcommand reaches
+// the run exactly as one written after it would.
+func rootFlagArgs(addDirs []string, allowEscalation bool) []string {
+	flags := addDirFlagArgs(addDirs)
+	if allowEscalation {
+		flags = append(flags, "--allow-escalation")
 	}
 	return flags
 }
@@ -1435,6 +1461,83 @@ func splitLeadingAddDirFlags(args []string) ([]string, []string, error) {
 		}
 	}
 	return addDirs, args, nil
+}
+
+// rootFlags is what the leading root flags amount to once every one of them
+// has been stripped from the front of the argument list.
+type rootFlags struct {
+	addDirs         []string
+	theme           string
+	allowEscalation bool
+}
+
+// splitLeadingRootFlags strips --add-dir, --theme and --allow-escalation from
+// the front of args in whatever order they were written, stopping at the
+// first token none of them claims.
+//
+// EACH SPLITTER STOPS AT THE FIRST TOKEN IT DOES NOT OWN, so running them once
+// in a fixed sequence made the order the operator wrote them in load-bearing:
+// a flag handled late in the sequence stranded every flag written after it as
+// an unknown command, and `zero --allow-escalation --theme auto` exited with
+// an argument error instead of launching. Running the sequence until it makes
+// no progress accepts every ordering, including a flag repeated on both sides
+// of another.
+func splitLeadingRootFlags(args []string) (rootFlags, []string, error) {
+	var flags rootFlags
+	for {
+		before := len(args)
+		addDirs, rest, err := splitLeadingAddDirFlags(args)
+		if err != nil {
+			return rootFlags{}, nil, err
+		}
+		flags.addDirs = append(flags.addDirs, addDirs...)
+		theme, rest, err := splitLeadingThemeFlag(rest)
+		if err != nil {
+			return rootFlags{}, nil, err
+		}
+		if theme != "" {
+			// The last occurrence wins across passes, as it does within one.
+			flags.theme = theme
+		}
+		allowEscalation, rest, err := splitLeadingAllowEscalationFlag(rest)
+		if err != nil {
+			return rootFlags{}, nil, err
+		}
+		flags.allowEscalation = flags.allowEscalation || allowEscalation
+		args = rest
+		if len(args) == before {
+			return flags, args, nil
+		}
+	}
+}
+
+// splitLeadingAllowEscalationFlag strips a leading --allow-escalation from the
+// root argument list, opting the interactive session into mid-run model
+// escalation.
+//
+// OPT-IN, THE SAME WAY exec IS. Escalation moves a run onto a different model,
+// which changes what the run costs and which provider sees the conversation, so
+// it is a decision the operator makes rather than a default. The exec flag
+// already answers this conservatively and the interactive surface should not
+// answer it differently.
+//
+// Bare flag only: repeating it is harmless, and an =value form is rejected so a
+// mistyped --allow-escalation=false is a loud error instead of silently enabling
+// the thing it was trying to turn off.
+func splitLeadingAllowEscalationFlag(args []string) (bool, []string, error) {
+	allow := false
+	for len(args) > 0 {
+		switch {
+		case args[0] == "--allow-escalation":
+			allow = true
+			args = args[1:]
+		case strings.HasPrefix(args[0], "--allow-escalation="):
+			return false, nil, errors.New("--allow-escalation takes no value; pass it bare to enable mid-run model escalation, or omit it")
+		default:
+			return allow, args, nil
+		}
+	}
+	return allow, args, nil
 }
 
 // splitLeadingThemeFlag strips a leading --theme <auto|theme-name> (space or =form)

@@ -120,6 +120,10 @@ type Result struct {
 	// entries under a granted extra write root are absolute, since
 	// workspace-relative would be ambiguous there.
 	ChangedFiles []string
+	// FileDiffs carries exact, bounded before/after text for built-in file
+	// mutations. A missing entry means the client must fall back to ChangedFiles
+	// rather than inventing a partial diff.
+	FileDiffs []FileDiff
 	// ChangeSummaries contains bounded generated-tree changes. These are shown
 	// in session evidence and the Files panel but are never treated as files to
 	// open or diagnose individually.

@@ -83,7 +83,9 @@ func Build(input Input) Seed {
 }
 
 // BuildFromWorkspace scans the local filesystem with workspaceindex and builds
-// a seed from the resulting file list. It performs no git operations.
+// a seed from the resulting file list. Its only git operation is the read-only
+// ignored-path lookup inside workspaceindex.Scan; branch and dirty state come
+// from the caller's GitInfo.
 func BuildFromWorkspace(root string, git GitInfo) (Seed, error) {
 	summary, err := workspaceindex.Scan(root, workspaceindex.Options{
 		MaxFiles: workspaceindex.DefaultMaxFiles,

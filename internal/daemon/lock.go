@@ -30,15 +30,35 @@ var processAlive = osProcessAlive
 // only to enrich a contention error with the current holder's PID; the kernel
 // lock, not PID metadata, is authoritative.
 func acquireLock(path string, isAlive func(pid int) bool) (*fileLock, error) {
+	return acquireLockWith(isAlive, func() (*lockutil.FileLock, error) {
+		return lockutil.TryAcquireFileLock(path)
+	}, func() (int, error) {
+		return readPidFile(path)
+	})
+}
+
+func acquireLockRoot(root *os.Root, name, displayPath string, isAlive func(pid int) bool) (*fileLock, error) {
+	return acquireLockWith(isAlive, func() (*lockutil.FileLock, error) {
+		return lockutil.TryAcquireFileLockRoot(root, name, displayPath)
+	}, func() (int, error) {
+		return readPidFileRoot(root, name)
+	})
+}
+
+func acquireLockWith(
+	isAlive func(pid int) bool,
+	acquire func() (*lockutil.FileLock, error),
+	readPID func() (int, error),
+) (*fileLock, error) {
 	if isAlive == nil {
 		isAlive = processAlive
 	}
-	lock, err := lockutil.TryAcquireFileLock(path)
+	lock, err := acquire()
 	if err != nil {
 		if !errors.Is(err, lockutil.ErrLockHeld) {
 			return nil, err
 		}
-		pid, perr := readPidFile(path)
+		pid, perr := readPID()
 		if perr == nil && pid > 0 && isAlive(pid) {
 			return nil, fmt.Errorf("%w (pid %d)", ErrAlreadyRunning, pid)
 		}
@@ -62,6 +82,15 @@ func (l *fileLock) release() error {
 // readPidFile reads and parses the PID recorded in a lock file.
 func readPidFile(path string) (int, error) {
 	data, err := os.ReadFile(path)
+	return parsePidFile(data, err)
+}
+
+func readPidFileRoot(root *os.Root, name string) (int, error) {
+	data, err := root.ReadFile(name)
+	return parsePidFile(data, err)
+}
+
+func parsePidFile(data []byte, err error) (int, error) {
 	if err != nil {
 		return 0, err
 	}

@@ -255,12 +255,6 @@ func openRecoveryCopy(path string) (*os.File, error) {
 
 var renameRecoveryFileByHandle = renameOpenFile
 
-// clearOldBinaryPreserved models the operator accepting the installed binary
-// by deleting the recovery marker. The recovery copy itself remains preserved.
-func clearOldBinaryPreserved(oldPath string) {
-	_ = os.Remove(oldPath + oldBinaryPreservedSuffix)
-}
-
 // oldBinaryPreserved reports whether a failed restore marked oldPath as the last
 // known-good binary.
 //
@@ -278,12 +272,24 @@ type recoveryCleanupRecord struct {
 	VolumeSerial  uint32 `json:"volumeSerial"`
 	FileIndexHigh uint32 `json:"fileIndexHigh"`
 	FileIndexLow  uint32 `json:"fileIndexLow"`
+	// Unresolved marks a failed restore. Preflight consults these records
+	// alongside the sibling .keep marker so deleting that marker cannot
+	// silence the next run's tamper refusal (#868). Cleanup records from a
+	// successful promotion leave this false.
+	Unresolved bool `json:"unresolved,omitempty"`
 }
 
 type recoveryCleanupQueue struct {
 	Records []recoveryCleanupRecord `json:"records"`
 }
 
+// recoveryCleanupStateDir is per-user (%AppData% via UserConfigDir). The
+// recovery copy and its .keep marker live in the installation directory, which
+// is per-machine. A second Windows account therefore does not see the first
+// account's unresolved record; the sibling marker is the machine-visible
+// signal. A machine-wide store would need a writable shared location and ACL
+// rules this updater does not own, so the record stays in the existing
+// per-user update-recovery directory.
 var recoveryCleanupStateDir = func() (string, error) {
 	root, err := config.UserConfigDir()
 	if err != nil {
@@ -335,27 +341,36 @@ type recoveryCleanupCandidate struct {
 	record recoveryCleanupRecord
 }
 
-func loadRecoveryCleanupQueue(targetPath string) recoveryCleanupQueue {
+func loadRecoveryCleanupQueue(targetPath string) (recoveryCleanupQueue, error) {
 	recordPath, err := recoveryCleanupRecordPath(targetPath)
 	if err != nil {
-		return recoveryCleanupQueue{}
+		return recoveryCleanupQueue{}, err
 	}
 	data, err := os.ReadFile(recordPath)
 	if err != nil {
-		return recoveryCleanupQueue{}
+		if errors.Is(err, os.ErrNotExist) {
+			return recoveryCleanupQueue{}, nil
+		}
+		return recoveryCleanupQueue{}, fmt.Errorf("read recovery cleanup record %s: %w", recordPath, err)
 	}
 	var queue recoveryCleanupQueue
-	if json.Unmarshal(data, &queue) != nil || queue.Records == nil {
-		var legacy recoveryCleanupRecord
-		if json.Unmarshal(data, &legacy) == nil && legacy.Path != "" {
-			queue.Records = []recoveryCleanupRecord{legacy}
-		}
+	if err := json.Unmarshal(data, &queue); err == nil && queue.Records != nil {
+		return queue, nil
 	}
-	return queue
+	var legacy recoveryCleanupRecord
+	if json.Unmarshal(data, &legacy) == nil && legacy.Path != "" {
+		return recoveryCleanupQueue{Records: []recoveryCleanupRecord{legacy}}, nil
+	}
+	return recoveryCleanupQueue{}, fmt.Errorf("parse recovery cleanup record %s", recordPath)
 }
 
 func prepareRecoveryCleanup(targetPath string) []recoveryCleanupCandidate {
-	queue := loadRecoveryCleanupQueue(targetPath)
+	queue, err := loadRecoveryCleanupQueue(targetPath)
+	if err != nil {
+		// Unreadable trusted state is not "nothing to clean": skip destructive
+		// cleanup rather than treat the queue as empty.
+		return nil
+	}
 	var candidates []recoveryCleanupCandidate
 	// Records outlive a single attempt so a temporarily locked copy is still
 	// deleted on a later run, but a record that can never become actionable has
@@ -373,7 +388,7 @@ func prepareRecoveryCleanup(targetPath string) []recoveryCleanupCandidate {
 			continue
 		}
 		retained = append(retained, record)
-		if oldBinaryPreserved(record.Path) {
+		if oldBinaryPreserved(record.Path) || record.Unresolved {
 			continue
 		}
 		file, err := openRecoveryCopy(record.Path)
@@ -419,6 +434,49 @@ func recoveryFileIdentity(file *os.File) (recoveryIdentity, error) {
 // recorded as updater-owned: the next run reopens recoveryPath and only deletes
 // it if it is still that same object.
 func appendRecoveryCleanupRecord(targetPath string, recoveryPath string, identity recoveryIdentity) error {
+	return appendRecoveryCleanupRecordWithState(targetPath, recoveryPath, identity, false)
+}
+
+// appendUnresolvedRecoveryRecord records that a failed restore left recoveryPath
+// as the last verified binary. Unlike the sibling .keep marker in the
+// installation directory, this lives in per-user state an install-directory
+// writer cannot delete. Preflight consults it alongside the marker (#868).
+//
+// A var so a test can force the failure branch. Making the real per-user store
+// unwritable also takes down cleanup-queue writes this path does not own.
+var appendUnresolvedRecoveryRecord = func(targetPath string, recoveryPath string, identity recoveryIdentity) error {
+	return appendRecoveryCleanupRecordWithState(targetPath, recoveryPath, identity, true)
+}
+
+// persistFailedRestoreSignal keeps a durable fail-closed preflight signal after
+// restoreOriginalBinary has already written the sibling .keep marker. The
+// preferred signal is the per-user unresolved record. If that write fails, the
+// marker is the only remaining protection and an install-directory writer can
+// delete it; relocate the last verified copy to a .recovery name so the next
+// preflight still refuses (#868).
+//
+// Relocation is bound to the object still named by asidePath. restoreOriginalBinary
+// may already have moved the verified bytes back onto targetPath (the live
+// binary) or to a .recovery name; keepUnmarkedRecoveryCopy renames through the
+// handle without re-checking that path, so compensation must not run unless
+// verifyPromotedTarget says the handle still is the aside copy. Making a failed
+// record write worse by pulling the restored executable out of targetPath is
+// not an acceptable fallback.
+func persistFailedRestoreSignal(file *os.File, targetPath string, asidePath string, identity recoveryIdentity, restoreErr error) error {
+	if err := appendUnresolvedRecoveryRecord(targetPath, asidePath, identity); err == nil {
+		return restoreErr
+	} else if verifyPromotedTarget(file, asidePath) != nil {
+		return fmt.Errorf("%w (unresolved recovery record could not be written: %v)", restoreErr, err)
+	} else if kept, keepErr := keepUnmarkedRecoveryCopy(file, asidePath); keepErr == nil {
+		return fmt.Errorf("%w (unresolved recovery record could not be written: %v; the last binary this updater verified was moved to the distinct recovery path %s)", restoreErr, err, kept)
+	} else if kept != "" {
+		return fmt.Errorf("%w (unresolved recovery record could not be written: %v; the last binary this updater verified was moved to %s but could not be verified there: %v)", restoreErr, err, kept, keepErr)
+	} else {
+		return fmt.Errorf("%w (unresolved recovery record could not be written: %v)", restoreErr, err)
+	}
+}
+
+func appendRecoveryCleanupRecordWithState(targetPath string, recoveryPath string, identity recoveryIdentity, unresolved bool) error {
 	if !validUpdaterRecoveryPath(targetPath, recoveryPath) {
 		return fmt.Errorf("invalid updater recovery path %s", recoveryPath)
 	}
@@ -427,10 +485,48 @@ func appendRecoveryCleanupRecord(targetPath string, recoveryPath string, identit
 		VolumeSerial:  identity.VolumeSerial,
 		FileIndexHigh: identity.FileIndexHigh,
 		FileIndexLow:  identity.FileIndexLow,
+		Unresolved:    unresolved,
 	}
-	queue := loadRecoveryCleanupQueue(targetPath)
+	queue, err := loadRecoveryCleanupQueue(targetPath)
+	if err != nil {
+		return err
+	}
 	queue.Records = append(queue.Records, record)
 	return writeRecoveryCleanupQueue(targetPath, queue)
+}
+
+// unresolvedRecordedRecoveryPaths returns live recovery copies vouched for by
+// per-user unresolved-state records. Absence of the sibling .keep marker does
+// not drop them: that marker is attacker-deletable in the install directory.
+func unresolvedRecordedRecoveryPaths(targetPath string) ([]string, error) {
+	queue, err := loadRecoveryCleanupQueue(targetPath)
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, record := range queue.Records {
+		if !record.Unresolved || !validUpdaterRecoveryPath(targetPath, record.Path) {
+			continue
+		}
+		if _, err := os.Lstat(record.Path); errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		paths = append(paths, record.Path)
+	}
+	return paths, nil
+}
+
+var (
+	syncRecoveryCleanupFile = (*os.File).Sync
+	moveRecoveryCleanupFile = windows.MoveFileEx
+)
+
+func replaceRecoveryCleanupFile(sourcePath string, targetPath string) error {
+	return moveRecoveryCleanupFile(
+		windows.StringToUTF16Ptr(sourcePath),
+		windows.StringToUTF16Ptr(targetPath),
+		windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH,
+	)
 }
 
 func writeRecoveryCleanupQueue(targetPath string, queue recoveryCleanupQueue) error {
@@ -460,10 +556,18 @@ func writeRecoveryCleanupQueue(targetPath string, queue recoveryCleanupQueue) er
 		_ = temporary.Close()
 		return err
 	}
+	// This queue may carry an unresolved fail-closed promotion signal, not merely
+	// an advisory cleanup backlog. Flush its complete contents before publishing,
+	// then use Windows' write-through replacement so success is not reported in
+	// the crash window between the namespace update and durable storage.
+	if err := syncRecoveryCleanupFile(temporary); err != nil {
+		_ = temporary.Close()
+		return err
+	}
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	return os.Rename(temporaryPath, recordPath)
+	return replaceRecoveryCleanupFile(temporaryPath, recordPath)
 }
 
 type fileDispositionInfo struct {
@@ -503,7 +607,10 @@ func closeRecoveryCleanupCandidates(candidates []recoveryCleanupCandidate) {
 // full binaries.
 func cleanupSupersededRecoveryCopies(targetPath string, candidates []recoveryCleanupCandidate) {
 	defer closeRecoveryCleanupCandidates(candidates)
-	queue := loadRecoveryCleanupQueue(targetPath)
+	queue, err := loadRecoveryCleanupQueue(targetPath)
+	if err != nil {
+		return
+	}
 	deleted := make(map[recoveryCleanupRecord]bool)
 	for index := range candidates {
 		candidate := &candidates[index]

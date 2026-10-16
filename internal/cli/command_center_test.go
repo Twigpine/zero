@@ -880,6 +880,40 @@ func providerSetupDeps(configPath string) appDeps {
 	}
 }
 
+// providerEnvSetupDeps is providerSetupDeps plus a REAL resolver pinned to a
+// temporary user config and a fixed environment. providerSetupDeps only
+// redirects WRITES, so without this the `providers` subcommands resolve against
+// the developer's own config.json and ambient provider variables: a test that
+// exports OPENAI_API_KEY passes on a machine whose real config has an active
+// provider and fails on one that also has GEMINI_API_KEY exported (issue
+// #1130). Passing Env makes resolution fully hermetic — config.envValue prefers
+// the map over os.Getenv whenever it is non-nil.
+func providerEnvSetupDeps(t *testing.T, configPath string, env map[string]string) appDeps {
+	t.Helper()
+
+	cwd := t.TempDir()
+	deps := providerSetupDeps(configPath)
+	deps.getwd = func() (string, error) { return cwd, nil }
+	deps.resolveConfig = func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+		return config.Resolve(config.ResolveOptions{
+			UserConfigPath: configPath,
+			Env:            env,
+			Overrides:      overrides,
+		})
+	}
+	// summarizeConfig reads OAuth LOGIN state through the default store, which
+	// resolves the developer's own ZERO_OAUTH_TOKENS_PATH (or XDG keyring root)
+	// — a machine with a stored ChatGPT login would make `providers list`
+	// assertions flip. Pin the file and the backend per the coding guideline
+	// that no test may read the developer's real config, cache or state dirs:
+	// forcing "file" also prevents an ambient ZERO_OAUTH_STORAGE=keyring from
+	// pulling the OS keychain into these tests.
+	tokensPath := filepath.Join(t.TempDir(), "oauth-tokens.json")
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", tokensPath)
+	t.Setenv("ZERO_OAUTH_STORAGE", "file")
+	return deps
+}
+
 func readFileConfig(t *testing.T, path string) config.FileConfig {
 	t.Helper()
 
@@ -965,5 +999,12 @@ func TestProvidersListMarksOAuthLoginProviders(t *testing.T) {
 	rendered := formatProviderSummaries("list", summary.Providers)
 	if !strings.Contains(rendered, "oauth login") {
 		t.Fatalf("list should render the oauth login state, got:\n%s", rendered)
+	}
+}
+
+func TestAtomicCatalogSetupRequiresLoadedModel(t *testing.T) {
+	out := formatProviderCatalogLine(providerCatalogSummary{ID: "atomic-chat-local", RuntimeSupported: true})
+	if strings.Contains(out, "zero providers setup atomic-chat-local --set-active") || !strings.Contains(out, "zero setup") {
+		t.Fatalf("catalog advertises a failing setup command: %s", out)
 	}
 }

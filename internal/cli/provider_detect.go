@@ -40,7 +40,7 @@ type providerDetectReport struct {
 }
 
 // runProvidersDetect probes the machine for running local, OpenAI-compatible
-// model runtimes (Ollama, LM Studio) and prints a no-key adopt command for each
+// model runtimes (Ollama, LM Studio, Atomic Chat) and prints a no-key adopt command for each
 // one it finds, followed by the next-step actions for every already-configured
 // provider. It is the onboarding-advice surface — "what can I do right now?" —
 // and never errors on a machine with nothing running locally (it just reports an
@@ -146,6 +146,8 @@ func formatProviderDetectReport(report providerDetectReport) string {
 		}
 		if command := strings.TrimSpace(runtime.Action.Command); command != "" {
 			lines = append(lines, "    "+runtime.Action.Label+": "+command)
+		} else if detail := strings.TrimSpace(runtime.Action.Detail); detail != "" {
+			lines = append(lines, "    "+runtime.Action.Label+": "+detail)
 		}
 	}
 

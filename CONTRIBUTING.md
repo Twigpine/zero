@@ -9,9 +9,9 @@ reports, feature requests, reproduction details, logs, and discussion on existin
 issues.
 
 Questions and setup help belong in
-[GitHub Discussions](https://github.com/Gitlawb/zero/discussions) (see
+[GitHub Discussions](https://github.com/Twigpine/zero/discussions) (see
 [SUPPORT.md](SUPPORT.md)), not in the issue tracker. Feature ideas start in the
-[Ideas](https://github.com/Gitlawb/zero/discussions/categories/ideas) category;
+[Ideas](https://github.com/Twigpine/zero/discussions/categories/ideas) category;
 an idea that gains traction there is the path to an approved issue and,
 eventually, an accepted PR.
 
@@ -41,7 +41,7 @@ There are three primary ways to contribute:
 
 1. Open a bug report with clear reproduction steps.
 2. Propose a feature in
-   [Discussions Ideas](https://github.com/Gitlawb/zero/discussions/categories/ideas),
+   [Discussions Ideas](https://github.com/Twigpine/zero/discussions/categories/ideas),
    describing the problem, use case, and expected behavior. A feature-request
    issue is filed only after the idea gains traction there or a maintainer asks
    for one.
@@ -126,6 +126,31 @@ not enough. Dependency changes need a clear project benefit, such as fixing a
 specific bug, addressing a security issue, improving compatibility, or supporting
 an approved feature.
 
+## Supported platforms
+
+Zero publishes five native prebuilt artifacts from
+`.github/workflows/release-artifacts.yml`:
+
+- `linux-x64` (`linux/amd64`)
+- `linux-arm64` (`linux/arm64`)
+- `macos-arm64` (`darwin/arm64`)
+- `macos-x64` (`darwin/amd64`)
+- `windows-x64` (`windows/amd64`)
+
+The shell installer and npm wrapper resolve the applicable artifacts from that
+list. The PowerShell installer supports the published `windows-x64` artifact;
+there is no native Windows ARM64 artifact. Windows on ARM users can run the x64
+build under emulation or build from source.
+
+Android/Termux is also supported even though it has no distinct release
+artifact. The npm wrapper maps Android to the Linux artifact, and
+`docs/INSTALL.md` documents the native `android/arm64` source build needed on
+devices whose seccomp policy blocks the Linux build's syscall path.
+
+Other `GOOS`/`GOARCH` values, including Plan 9, are unsupported. They are not a
+review criterion. Do not block a pull request for failing to compile on an
+unsupported target. Tests may use `plan9` as a fixture for an unsupported OS.
+
 ## What We Prioritize
 
 The core team will prioritize:
@@ -168,7 +193,7 @@ Clear bug reports are the most useful way to help the project during this phase.
 ## Submitting a Feature Request
 
 Feature requests start as a thread in
-[Discussions Ideas](https://github.com/Gitlawb/zero/discussions/categories/ideas),
+[Discussions Ideas](https://github.com/Twigpine/zero/discussions/categories/ideas),
 not as an issue. The feature-request issue form exists for the step AFTER that:
 when an idea has gained traction in Discussions or a maintainer has asked for an
 issue to track it. Whether in the discussion or the eventual issue, please
@@ -197,7 +222,7 @@ contribution phase.
 
 General questions, setup help, and "is this a bug or my config" uncertainty all
 go to
-[Discussions Q&A](https://github.com/Gitlawb/zero/discussions/categories/q-a).
+[Discussions Q&A](https://github.com/Twigpine/zero/discussions/categories/q-a).
 If you are unsure whether a proposed code change is appropriate, raise it in
 Discussions Ideas or on the relevant issue first and ask. Please keep discussion
 focused, specific, and respectful of maintainer time.

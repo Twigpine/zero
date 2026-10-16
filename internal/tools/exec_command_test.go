@@ -373,20 +373,34 @@ func TestExecCommandForegroundServerReturnsSessionAndServesHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("foreground server should return session_id, meta=%#v output=%q", start.Meta, start.Output)
 	}
-	addr := parseListeningAddress(start.Output)
-	if addr == "" {
-		t.Fatalf("server output did not include listening address: %q", start.Output)
-	}
 	t.Cleanup(func() {
 		writeTool.Run(context.Background(), map[string]any{
 			"session_id": sessionID,
 			"chars":      "\u0003",
 		})
 	})
+	// Process start-up and net.Listen can outlast the first yield on a loaded
+	// runner, so keep polling the session until the address shows up.
+	output := start.Output
+	addr := parseListeningAddress(output)
+	for deadline := time.Now().Add(20 * time.Second); addr == "" && time.Now().Before(deadline); {
+		poll := writeTool.Run(context.Background(), map[string]any{
+			"session_id":    sessionID,
+			"yield_time_ms": 250,
+		})
+		if poll.Status != StatusOK {
+			t.Fatalf("write_stdin poll status = %s: %s", poll.Status, poll.Output)
+		}
+		output += "\n" + poll.Output
+		addr = parseListeningAddress(output)
+	}
+	if addr == "" {
+		t.Fatalf("server output did not include listening address: %q", output)
+	}
 
 	response, err := http.Get("http://" + addr)
 	if err != nil {
-		t.Fatalf("foreground exec server was not reachable at %s: %v; output=%q", addr, err, start.Output)
+		t.Fatalf("foreground exec server was not reachable at %s: %v; output=%q", addr, err, output)
 	}
 	defer response.Body.Close()
 	bytes, err := io.ReadAll(response.Body)
@@ -892,5 +906,58 @@ func TestTruncateExecOutputPreservesUTF8(t *testing.T) {
 	}
 	if !utf8.ValidString(truncated) {
 		t.Fatalf("truncated output is not valid UTF-8: %q", truncated)
+	}
+}
+
+func TestFormatExecCommandOutputTTYAttachHint(t *testing.T) {
+	running := formatExecCommandOutput("", 1007, false, 0, false, true)
+	if !strings.Contains(running, "/attach 1007 reopens it") || !strings.Contains(running, "Do not end your turn while it is running") {
+		t.Fatalf("tty running session should point at /attach and keep-poll guidance: %q", running)
+	}
+	exited := formatExecCommandOutput("", 1007, true, 0, false, true)
+	if strings.Contains(exited, "/attach") {
+		t.Fatalf("exited session should not mention /attach: %q", exited)
+	}
+	pipes := formatExecCommandOutput("", 1007, false, 0, false, false)
+	if strings.Contains(pipes, "/attach") {
+		t.Fatalf("non-tty session should not mention /attach: %q", pipes)
+	}
+}
+
+func TestExecCommandInteractiveBlockSuggestsTTY(t *testing.T) {
+	tool := NewScopedExecCommandTool(t.TempDir(), nil, newExecSessionManager())
+	result := tool.Run(context.Background(), map[string]any{"cmd": "ssh host.example.com"})
+	if result.Status != StatusError || result.Meta["safety_block"] != "interactive_command" {
+		t.Fatalf("expected interactive safety block, got meta=%#v output=%q", result.Meta, result.Output)
+	}
+	if !strings.Contains(result.Output, "tty:true") {
+		t.Fatalf("block output should suggest tty:true: %q", result.Output)
+	}
+}
+
+func TestExecCommandTTYSkipsInteractiveBlock(t *testing.T) {
+	tool := NewScopedExecCommandTool(t.TempDir(), nil, newExecSessionManager())
+	// ssh to a bogus host fails fast on its own; the point is that the
+	// interactive guard must not fire ahead of the tty path.
+	result := tool.Run(context.Background(), map[string]any{
+		"cmd": "ssh host.example.com", "tty": true, "yield_time_ms": 250,
+	})
+	if result.Meta["safety_block"] == "interactive_command" {
+		t.Fatalf("tty:true should not hit the interactive block: %#v", result.Meta)
+	}
+}
+
+func TestFormatExecCommandOutputNoNewPrivilegesHint(t *testing.T) {
+	blocked := formatExecCommandOutput(`sudo: The "no new privileges" flag is set`, 1007, true, 1, false, true)
+	if !strings.Contains(blocked, `sandbox_permissions "require_escalated"`) {
+		t.Fatalf("no_new_privs failure should hint at require_escalated: %q", blocked)
+	}
+	normal := formatExecCommandOutput("some other error", 1007, true, 1, false, true)
+	if strings.Contains(normal, "require_escalated") {
+		t.Fatalf("unrelated failure should not hint at require_escalated: %q", normal)
+	}
+	blockedOK := formatExecCommandOutput(`sudo: The "no new privileges" flag is set`, 1007, true, 0, false, true)
+	if strings.Contains(blockedOK, "require_escalated") {
+		t.Fatalf("zero-exit output should not hint at require_escalated: %q", blockedOK)
 	}
 }

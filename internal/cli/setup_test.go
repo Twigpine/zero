@@ -367,3 +367,14 @@ func TestVerifySetupProviderDistinguishesMissingFromRejectedKey(t *testing.T) {
 		t.Fatal("a keyless local provider should still be probed")
 	}
 }
+
+func TestSaveSetupProviderRejectsAtomicPlaceholderBeforeConfigAccess(t *testing.T) {
+	for _, model := range []string{"", "local-model", " local-model "} {
+		accessed := false
+		deps := appDeps{userConfigPath: func() (string, error) { accessed = true; return filepath.Join(t.TempDir(), "config.json"), nil }}
+		_, err := saveSetupProvider(deps, tui.SetupSelection{CatalogID: "atomic-chat-local", Model: model}, setupSaveOptions{})
+		if err == nil || !strings.Contains(err.Error(), "--model") || accessed {
+			t.Fatalf("invalid model %q reached config access: accessed=%v err=%v", model, accessed, err)
+		}
+	}
+}

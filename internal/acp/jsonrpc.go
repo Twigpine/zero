@@ -89,6 +89,13 @@ type Conn struct {
 
 	handlers  map[string]HandlerFunc
 	notifiers map[string]NotifyFunc
+	// Notifications for one method are an ordered stream: session/update in
+	// particular is stateful, so dispatching every frame in an unrelated
+	// goroutine can make a later chunk overtake an earlier one. Different
+	// methods retain independent tails, keeping session/cancel responsive while
+	// an update handler is busy.
+	notifyMu    sync.Mutex
+	notifyTails map[string]chan struct{}
 
 	mu      sync.Mutex
 	nextID  int64
@@ -106,11 +113,12 @@ type Conn struct {
 // lifetime.
 func NewConn(r io.Reader, w io.Writer) *Conn {
 	return &Conn{
-		rawReader: r,
-		w:         w,
-		handlers:  make(map[string]HandlerFunc),
-		notifiers: make(map[string]NotifyFunc),
-		pending:   make(map[int64]chan rpcMessage),
+		rawReader:   r,
+		w:           w,
+		handlers:    make(map[string]HandlerFunc),
+		notifiers:   make(map[string]NotifyFunc),
+		notifyTails: make(map[string]chan struct{}),
+		pending:     make(map[int64]chan rpcMessage),
 	}
 }
 
@@ -303,11 +311,7 @@ func (c *Conn) handleLine(ctx context.Context, line []byte) {
 		}(msg)
 	case msg.isNotify():
 		if fn := c.notifiers[msg.Method]; fn != nil {
-			c.wg.Add(1)
-			go func(m rpcMessage) {
-				defer c.wg.Done()
-				fn(ctx, m.Params)
-			}(msg)
+			c.dispatchNotification(ctx, msg, fn)
 		}
 	default:
 		// Malformed frame; reply only if we can identify a request id.
@@ -315,6 +319,35 @@ func (c *Conn) handleLine(ctx context.Context, line []byte) {
 			c.writeError(msg.ID, &rpcError{Code: codeInvalidRequest, Message: "invalid request"})
 		}
 	}
+}
+
+// dispatchNotification preserves wire order within one method without making
+// unrelated notification methods wait for each other. The read loop installs
+// each tail before starting its goroutine, so goroutine scheduling cannot
+// reorder the chain it observes.
+func (c *Conn) dispatchNotification(ctx context.Context, msg rpcMessage, fn NotifyFunc) {
+	c.notifyMu.Lock()
+	previous := c.notifyTails[msg.Method]
+	done := make(chan struct{})
+	c.notifyTails[msg.Method] = done
+	c.notifyMu.Unlock()
+
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		defer func() {
+			close(done)
+			c.notifyMu.Lock()
+			if c.notifyTails[msg.Method] == done {
+				delete(c.notifyTails, msg.Method)
+			}
+			c.notifyMu.Unlock()
+		}()
+		if previous != nil {
+			<-previous
+		}
+		fn(ctx, msg.Params)
+	}()
 }
 
 func (c *Conn) dispatchRequest(ctx context.Context, msg rpcMessage) {

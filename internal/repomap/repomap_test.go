@@ -90,7 +90,9 @@ func TestScanBuildsDeterministicSnapshot(t *testing.T) {
 func TestScanDoesNotFollowSymlinkedDirectories(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "main.go", "package main\n")
-	target := filepath.Join(root, "target")
+	// Not named "target": outside a git work tree Scan skips that name as Cargo build
+	// output, and the real directory must be scanned for this test to exercise the link.
+	target := filepath.Join(root, "real-dir")
 	writeFile(t, target, "hidden.go", "package hidden\n")
 	link := filepath.Join(root, "linked")
 	if err := os.Symlink(target, link); err != nil {
@@ -101,7 +103,7 @@ func TestScanDoesNotFollowSymlinkedDirectories(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
-	want := []string{"main.go", "target/hidden.go"}
+	want := []string{"main.go", "real-dir/hidden.go"}
 	if !reflect.DeepEqual(pathsOf(got.Files), want) {
 		t.Fatalf("Files=%v want %v", pathsOf(got.Files), want)
 	}

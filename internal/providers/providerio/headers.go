@@ -1,6 +1,7 @@
 package providerio
 
 import (
+	"crypto/rand"
 	"net/http"
 	"strings"
 )
@@ -50,6 +51,28 @@ func ApplyAuthHeaders(request *http.Request, options AuthHeaders) {
 		}
 	}
 	request.Header.Set(header, value)
+}
+
+type SessionHeader struct {
+	name     string
+	fallback string
+}
+
+func NewSessionHeader(name string) SessionHeader {
+	if name == "" {
+		return SessionHeader{}
+	}
+	return SessionHeader{name: name, fallback: rand.Text()}
+}
+
+func (header SessionHeader) Apply(request *http.Request, sessionID string) {
+	if header.name == "" {
+		return
+	}
+	if sessionID = strings.TrimSpace(sessionID); sessionID == "" {
+		sessionID = header.fallback
+	}
+	request.Header.Set(header.name, sessionID)
 }
 
 func CopyHeaders(headers map[string]string) map[string]string {

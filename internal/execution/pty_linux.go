@@ -48,6 +48,9 @@ func openPTY() (*os.File, *os.File, error) {
 		_ = master.Close()
 		return nil, nil, err
 	}
+	// A fresh PTY defaults to a 0x0 window; seed a sane size so the process
+	// never sees zero dimensions before an attached client reports its own.
+	_ = unix.IoctlSetWinsize(masterFD, unix.TIOCSWINSZ, &unix.Winsize{Row: 24, Col: 80})
 	pts, err := unix.IoctlGetInt(masterFD, unix.TIOCGPTN)
 	if err != nil {
 		_ = master.Close()
@@ -79,4 +82,17 @@ func hardenPTYProcess(command *exec.Cmd) {
 		}
 		return nil
 	}
+}
+
+// resizePTY reports a new window size to the PTY behind an interactive
+// process's stdin writer, so full-screen attached terminals drive the
+// session's own line wrapping.
+func resizePTY(w io.Writer, cols, rows int) error {
+	file, ok := w.(interface{ Fd() uintptr })
+	if !ok {
+		return errors.New("pty transport is unavailable on this platform")
+	}
+	return unix.IoctlSetWinsize(int(file.Fd()), unix.TIOCSWINSZ, &unix.Winsize{
+		Row: uint16(rows), Col: uint16(cols),
+	})
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/Gitlawb/zero/internal/execution"
 	"github.com/Gitlawb/zero/internal/hooks"
+	"github.com/Gitlawb/zero/internal/modelregistry"
 	"github.com/Gitlawb/zero/internal/redaction"
 	"github.com/Gitlawb/zero/internal/sandbox"
 	"github.com/Gitlawb/zero/internal/streamjson"
@@ -25,14 +26,18 @@ const maxTurnsAnswer = "Agent reached maximum number of turns without a final an
 const maxTurnsFinalAnswerPrompt = "You have reached the tool-turn limit. Do not call tools. Give a concise final answer now: summarize what you completed, what you found, and any remaining blockers."
 
 // maxStreamStallRetries bounds how many times a turn that timed out (idle/stall)
-// WITH NO OUTPUT yet is re-issued on a fresh connection before giving up. Only
-// the no-output case is retried (a partial turn would duplicate), so this is a
-// safe recovery for a stalled/dead pooled connection.
+// OR hit a mid-stream transport abort (#973) with no answer text yet is re-issued
+// on a fresh connection before giving up. Incomplete tool-call previews are
+// allowed through the gate (they are never dispatched before the error return).
+// The safety claim is only that visible answer prose is not duplicated on retry —
+// not that every partial stream shape is excluded. Covers a stalled/dead pooled
+// connection or a socket abort before tool dispatch.
 //
 // Set to 1 (not 2): each attempt can itself idle for the full stream timeout
 // (~5min) before the stall is even detected, so 2 retries left an interactive
 // session frozen for ~15min. One retry keeps the common single-hiccup recovery
-// while bounding the worst case to ~2× the idle timeout.
+// while bounding the worst case to ~2× the idle timeout. Mid-stream transport
+// aborts share this bound (do not raise it for #973).
 const maxStreamStallRetries = 1
 
 const (
@@ -374,7 +379,11 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 					rec.StampFirstToken()
 				}
 				if onText != nil {
-					forwardedVisibleText = true
+					// Zero-length chunks are not committed answer prose; counting
+					// them would block an eligible mid-stream abort retry.
+					if s != "" {
+						forwardedVisibleText = true
+					}
 					onText(s)
 				}
 			}
@@ -450,9 +459,14 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			result.Messages = copyMessages(messages)
 			return result, ctx.Err()
 		}
-		// A stream idle/stall timeout is safely re-issued when the turn committed NO
-		// answer text — no forwarded visible prose (forwardedVisibleText) and no
-		// collected final text (collected.Text). This covers two cases:
+		// A stream idle/stall timeout OR mid-stream transport abort (#973 — wsarecv /
+		// connection reset / unexpected EOF / connection closed / broken pipe) is
+		// safely re-issued when the turn committed NO answer text — no forwarded
+		// visible prose (forwardedVisibleText) and no collected final text
+		// (collected.Text). The abort gate matches midStreamAbortNeedles only, not
+		// the full shouldReconnect list: connect-phase timeouts and connection
+		// refused are NOT retried here (a slow healthy server must not cost a
+		// second prefill). This covers three cases:
 		//   1. Nothing streamed at all before the connection died (the original
 		//      macOS stale-pooled-connection hang past the response-header timeout).
 		//   2. The model streamed transient reasoning and began a tool call (e.g. a
@@ -463,13 +477,27 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		//      re-render is transient previews, not duplicated answer text. This is
 		//      why the gate no longer excludes collected.ToolCalls: an incomplete
 		//      tool call from a timed-out stream is discard-and-retry, not output.
+		//   3. Mid-stream socket abort after connect succeeded (Windows WSAECONNABORTED /
+		//      wsarecv, connection reset by peer). Same no-tool-executed safety: the
+		//      error returns before tool dispatch, so a bounded retry is safe.
 		// A turn that forwarded real prose is NOT retried (it would duplicate visible
 		// answer text) and falls through to the error return below. Capped +
 		// exponential backoff, with a user-visible notice per attempt.
 		for attempt := 1; attempt <= maxStreamStallRetries &&
-			isStreamTimeoutError(collected.Error) && !forwardedVisibleText &&
+			(isStreamTimeoutError(collected.Error) || isMidStreamTransportAbort(collected.Error)) &&
+			!forwardedVisibleText &&
 			collected.Text == ""; attempt++ {
-			if notify := stallRetryNoticeFor(options); notify != nil {
+			var notify reconnectNotifier
+			if isStreamTimeoutError(collected.Error) {
+				notify = stallRetryNoticeFor(options)
+			} else {
+				notify = reconnectNoticeFor(options)
+				// Count this post-connect reissue even when the replacement
+				// connect succeeds immediately. streamWithReconnect only
+				// increments reconnect_count after a failed connect attempt.
+				options.Trace.Counter(trace.CounterReconnectCount, 1)
+			}
+			if notify != nil {
 				notify(attempt, maxStreamStallRetries)
 			}
 			if err := sleepWithContext(ctx, backoffFor(attempt)); err != nil {
@@ -482,11 +510,21 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			retryStream, retryErr := streamWithReconnect(ctx, provider, retryRequest, reconnectNoticeFor(options))
 			if retryErr != nil {
 				result.Messages = copyMessages(messages)
+				if ctx.Err() != nil {
+					return result, ctx.Err()
+				}
 				return result, retryErr
 			}
 			stallGenSpan := options.Trace.Span(trace.SpanGeneration)
 			collected = zeroruntime.CollectStreamWithOptions(ctx, retryStream, forwardingOpts)
 			stallGenSpan.End()
+		}
+		// Recheck ctx after a retried CollectStream: helpers.go stores
+		// ctx.Err().Error() in collected.Error, and errors.New of that string
+		// drops the context.Canceled sentinel ACP branches on.
+		if ctx.Err() != nil {
+			result.Messages = copyMessages(messages)
+			return result, ctx.Err()
 		}
 		if collected.Error != "" {
 			// Route a reissued stream's non-stall error through the SAME recovery as
@@ -497,6 +535,10 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			if stop != nil {
 				result.Messages = copyMessages(messages)
 				return result, stop
+			}
+			if ctx.Err() != nil {
+				result.Messages = copyMessages(messages)
+				return result, ctx.Err()
 			}
 			if collected.Error != "" {
 				result.Messages = copyMessages(messages)
@@ -646,9 +688,25 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// recorded. They travel as user messages, and a user message between two
 		// tool_results breaks strict provider replay — Anthropic coalesces them
 		// into one user block list and requires the tool_result blocks first, so
-		// interleaving yields [tool_result, text, image, tool_result] and a 400.
-		// Same reason the self-correction feedback below is deferred.
-		var toolImageMessages []zeroruntime.Message
+		// Images ride a following USER message rather than the tool result
+		// above. Every provider drops images on a tool-role message —
+		// Anthropic's tool_result content is a string, Gemini's is a
+		// functionResponse, and OpenAI guards its image parts to the user role
+		// — so attaching them there would silently deliver nothing. A separate
+		// message also keeps the one-tool-result-per-tool-call pairing intact,
+		// which the providers validate. Vision-gate evaluation is deferred until
+		// after any model switch this turn resolves, so images can reach an
+		// escalated vision-capable model.
+		var toolResultsWithImages []ToolResult
+		buildToolImageMessages := func() []zeroruntime.Message {
+			var out []zeroruntime.Message
+			for _, tr := range toolResultsWithImages {
+				if imageMessage, ok := toolResultImageMessage(tr, options); ok {
+					out = append(out, imageMessage)
+				}
+			}
+			return out
+		}
 		// Parallel read-ahead state: results for calls[precomputedStart:precomputedEnd]
 		// executed concurrently, consumed strictly in order below.
 		var precomputed []precomputedToolResult
@@ -705,15 +763,8 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				IsError:            toolResult.Status == tools.StatusError,
 				ChangedFiles:       append([]string(nil), toolResult.ChangedFiles...),
 			})
-			// Images ride a following USER message rather than the tool result
-			// above. Every provider drops images on a tool-role message —
-			// Anthropic's tool_result content is a string, Gemini's is a
-			// functionResponse, and OpenAI guards its image parts to the user role
-			// — so attaching them there would silently deliver nothing. A separate
-			// message also keeps the one-tool-result-per-tool-call pairing intact,
-			// which the providers validate.
-			if imageMessage, ok := toolResultImageMessage(toolResult); ok {
-				toolImageMessages = append(toolImageMessages, imageMessage)
+			if len(toolResult.Images) > 0 {
+				toolResultsWithImages = append(toolResultsWithImages, toolResult)
 			}
 
 			// A tool may demand the run ABORT — a canceled/timed-out ask_user prompt
@@ -725,13 +776,13 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			}
 			if abortErr != nil {
 				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
-				messages = append(messages, toolImageMessages...)
+				messages = append(messages, buildToolImageMessages()...)
 				result.Messages = copyMessages(messages)
 				return result, abortErr
 			}
 			if stopReason := stopReasonFromToolResult(toolResult); stopReason != "" {
 				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
-				messages = append(messages, toolImageMessages...)
+				messages = append(messages, buildToolImageMessages()...)
 				result.FinalAnswer = toolResult.ModelOutput()
 				result.StopReason = stopReason
 				result.Messages = copyMessages(messages)
@@ -755,7 +806,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				// messages stay valid for a strict provider replay (Anthropic
 				// rejects a tool_use with no answering tool_result).
 				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
-				messages = append(messages, toolImageMessages...)
+				messages = append(messages, buildToolImageMessages()...)
 				result.FinalAnswer = toolFailureStopAnswer(call.Name, outcome.Count)
 				result.Messages = copyMessages(messages)
 				return result, nil
@@ -774,10 +825,6 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				postEditDiagnostics.enqueue(ctx, toolResult.ChangedFiles)
 			}
 		}
-		// Every tool_result for this turn is now recorded, including aborted
-		// placeholders, so the images can follow without splitting them.
-		messages = append(messages, toolImageMessages...)
-		toolImageMessages = nil
 
 		// Run post-edit self-correction once over the union of files this turn
 		// changed, then append any feedback after every tool_result is recorded so
@@ -864,6 +911,12 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				}
 			}
 		}
+
+		// Every tool_result, self-correct notice, and model-switch update for this
+		// turn is now in place; evaluate and append image messages against the
+		// effective (potentially escalated) model.
+		messages = append(messages, buildToolImageMessages()...)
+		toolResultsWithImages = nil
 
 		// A turn can mix valid tool calls with a dropped (nameless) one. The valid
 		// calls executed above; surface the dropped call too so it is never
@@ -1527,6 +1580,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		Images:          result.Images,
 		Redacted:        result.Redacted,
 		ChangedFiles:    result.ChangedFiles,
+		FileDiffs:       result.FileDiffs,
 		ChangeSummaries: result.ChangeSummaries,
 		Display:         result.HumanDisplay(),
 		Outcome:         result.Outcome,
@@ -1833,6 +1887,10 @@ func runToolForUnsandboxedRetry(ctx context.Context, registry *tools.Registry, n
 }
 
 func toolResultFromPrePermissionReject(call ToolCall, result tools.Result) ToolResult {
+	// PrePermissionRejecter runs before Registry.RunWithOptions, so it must
+	// explicitly cross the same transcript/redaction boundary before its result
+	// can be forwarded through ACP.
+	result = tools.ScrubResultSecrets(result)
 	output, outputRedacted := scrubInterceptedOutput(result.Output)
 	display := result.Display
 	summary, summaryRedacted := scrubInterceptedOutput(display.Summary)
@@ -1860,6 +1918,7 @@ func toolResultFromPrePermissionReject(call ToolCall, result tools.Result) ToolR
 		Meta:            meta,
 		Redacted:        result.Redacted || outputRedacted || summaryRedacted || metaRedacted,
 		ChangedFiles:    result.ChangedFiles,
+		FileDiffs:       result.FileDiffs,
 		ChangeSummaries: result.ChangeSummaries,
 		Display:         display,
 		LoadedTools:     loadedToolsFromResult(meta),
@@ -2153,6 +2212,7 @@ func askUserFallbackResult(ctx context.Context, registry *tools.Registry, call T
 			Meta:            result.Meta,
 			Redacted:        result.Redacted,
 			ChangedFiles:    result.ChangedFiles,
+			FileDiffs:       result.FileDiffs,
 			ChangeSummaries: result.ChangeSummaries,
 			Display:         result.HumanDisplay(),
 			Outcome:         result.Outcome,
@@ -3457,8 +3517,10 @@ func copyMessages(messages []Message) []Message {
 //
 // The text names the tool so the model can tell which call an image came from
 // when several ran in one turn — the images arrive detached from their tool
-// result, so nothing else associates them.
-func toolResultImageMessage(result ToolResult) (zeroruntime.Message, bool) {
+// result, so nothing else associates them. If the effective model cannot
+// accept images, the tool's text result is left unchanged and this follow-up
+// is a notice with no image parts, matching the CLI/TUI vision gate.
+func toolResultImageMessage(result ToolResult, options Options) (zeroruntime.Message, bool) {
 	images := make([]zeroruntime.ImageBlock, 0, len(result.Images))
 	for _, image := range result.Images {
 		if len(image.Data) == 0 {
@@ -3479,9 +3541,26 @@ func toolResultImageMessage(result ToolResult) (zeroruntime.Message, bool) {
 	if label == "" {
 		label = "tool"
 	}
+	if !modelAcceptsToolImages(options) {
+		return zeroruntime.Message{
+			Role:    zeroruntime.MessageRoleUser,
+			Content: "Image output from " + label + " was not sent because the current model does not support image input. Switch to a vision-capable model before retrying image delivery, including any images skipped by the tool's image budget.",
+		}, true
+	}
 	return zeroruntime.Message{
 		Role:    zeroruntime.MessageRoleUser,
 		Content: "Image output from " + label + ":",
 		Images:  images,
 	}, true
+}
+
+func modelAcceptsToolImages(options Options) bool {
+	if options.SupportsVision != nil {
+		return options.SupportsVision(options.Model)
+	}
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		return modelregistry.VisionCapableByName(options.Model)
+	}
+	return modelregistry.SupportsVision(registry, options.Model)
 }

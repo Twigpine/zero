@@ -24,7 +24,7 @@ func (m model) attachmentThumbnailVisible(width int) bool {
 	}
 	if m.pendingPermission != nil || m.pendingAskUser != nil || m.pendingSpecReview != nil ||
 		m.providerWizard != nil || m.mcpAddWizard != nil || m.mcpManager != nil || m.picker != nil ||
-		m.sttKeyPrompt != nil || m.renamePrompt != nil || m.setup.visible || m.helpOverlay || m.leaderHelpOverlay {
+		m.sttKeyPrompt != nil || m.renamePrompt != nil || m.terminalAttach != nil || m.setup.visible || m.helpOverlay || m.leaderHelpOverlay {
 		return false
 	}
 	for index := 0; index < m.attachmentThumbnailSlots(width); index++ {

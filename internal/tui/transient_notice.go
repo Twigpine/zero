@@ -12,6 +12,18 @@ func (m model) modelAppliedNotice() string {
 	return "Model: " + displayValue(m.modelName, "none") + " · " + displayValue(m.providerName, "default provider") + " · effort " + m.effortDisplay()
 }
 
+// modelAppliedNoticeFor renders the applied-notice for a committed model
+// switch, qualifying it when the switch was not durably saved. Both entry
+// points — typed /model and the picker — show this notice INSTEAD of the
+// handler status text that carries the same qualifier, so a persistence
+// failure is invisible on either path unless it is rendered here.
+func (m model) modelAppliedNoticeFor(persistErr error) (string, transientNoticeTone) {
+	if persistErr != nil {
+		return m.modelAppliedNotice() + " · not saved (" + persistErr.Error() + ")", transientNoticeWarning
+	}
+	return m.modelAppliedNotice(), transientNoticeSuccess
+}
+
 func (m model) effortAppliedNotice() string {
 	return "Reasoning effort: " + m.effortDisplay()
 }

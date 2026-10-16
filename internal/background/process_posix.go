@@ -3,7 +3,9 @@
 package background
 
 import (
+	"errors"
 	"os/exec"
+	"syscall"
 	"time"
 
 	"github.com/Gitlawb/zero/internal/execution"
@@ -45,6 +47,16 @@ func terminateProcess(pid int) error {
 // rediscovery after an owned leader exits. Ordinary commands fall back to the
 // safe PID/tree path rather than assuming their PID is also a process-group ID.
 //
+// The bool result is whether the leader had already exited before termination
+// was attempted — the POSIX analogue of Windows GetExitCodeProcess returning a
+// value other than STILL_ACTIVE. A waitable zombie is already-exited: Wait can
+// collect it, but kill(0) still succeeds, and when ps is unavailable
+// signalTargetRunning conservatively treats that as "still running".
+// TerminateCommand uses the flag to discard the resulting spurious
+// SIGKILL-timeout once the reap has independently succeeded. The flag is about
+// the leader only; group/tree termination is still invoked so live descendants
+// are signalled.
+//
 // The Setpgid && Pgid == 0 guard only recognizes ConfigureChildProcessGroup's
 // own convention. A command made its own session leader via Setsid (as opposed
 // to Setpgid) is also its own process-group leader in practice, but takes the
@@ -52,8 +64,20 @@ func terminateProcess(pid int) error {
 // because TerminateCommand has exactly one caller in this codebase; worth
 // covering explicitly if Setsid-configured commands start using this path too.
 func terminateOwnedProcess(cmd *exec.Cmd) (bool, error) {
+	alreadyExited := leaderWaitableExited(cmd.Process.Pid)
 	if cmd.SysProcAttr != nil && cmd.SysProcAttr.Setpgid && cmd.SysProcAttr.Pgid == 0 {
-		return false, execution.TerminateProcessGroup(cmd.Process.Pid, terminationGracePeriod, terminationPollInterval)
+		return alreadyExited, execution.TerminateProcessGroup(cmd.Process.Pid, terminationGracePeriod, terminationPollInterval)
 	}
-	return false, terminateProcess(cmd.Process.Pid)
+	return alreadyExited, terminateProcess(cmd.Process.Pid)
+}
+
+// terminationTargetGoneAfterReap independently checks the exact signal target
+// used for an owned command. In particular, reaping a zombie group leader does
+// not make this return true while any descendant still occupies that group.
+func terminationTargetGoneAfterReap(cmd *exec.Cmd) bool {
+	target := cmd.Process.Pid
+	if cmd.SysProcAttr != nil && cmd.SysProcAttr.Setpgid && cmd.SysProcAttr.Pgid == 0 {
+		target = -target
+	}
+	return errors.Is(syscall.Kill(target, syscall.Signal(0)), syscall.ESRCH)
 }

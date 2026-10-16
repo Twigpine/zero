@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -80,12 +81,21 @@ func ForgetProviderKey(provider string) (bool, error) {
 // config at path, so credential checks no longer claim a stored key after one is
 // removed. No-op when path/provider is empty, the config is absent, or the marker
 // is already unset.
-func ClearProviderKeyStored(path, provider string) (bool, error) {
+func ClearProviderKeyStored(path, provider string) (cleared bool, err error) {
 	path = strings.TrimSpace(path)
 	provider = strings.TrimSpace(provider)
 	if path == "" || provider == "" {
 		return false, nil
 	}
+	unlock, err := lockConfigFileFn(path)
+	if err != nil {
+		return false, err
+	}
+	// Joined, not chosen between: a release failure annotates the result
+	// instead of masking the mutation error that actually explains what went
+	// wrong. Reporting success after a failed unlock would claim a state the
+	// next mutation cannot reproduce.
+	defer func() { err = errors.Join(err, unlock()) }()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -116,11 +126,22 @@ func ClearProviderKeyStored(path, provider string) (bool, error) {
 // leaves the plaintext key in place and never strands a credential. Returns how
 // many keys were migrated; a no-op (0, nil) when path is empty/absent or nothing
 // needs migrating. Safe to run on every startup (idempotent).
-func MigratePlaintextProviderKeys(path string, store APIKeySetter) (int, error) {
+func MigratePlaintextProviderKeys(path string, store APIKeySetter) (count int, err error) {
 	path = strings.TrimSpace(path)
 	if path == "" || store == nil {
 		return 0, nil
 	}
+	// This runs on every startup, so it is the most likely writer to be racing
+	// an interactive mutation in another Zero process.
+	unlock, err := lockConfigFileFn(path)
+	if err != nil {
+		return 0, err
+	}
+	// Joined, not chosen between: a release failure annotates the result
+	// instead of masking the mutation error that actually explains what went
+	// wrong. Reporting success after a failed unlock would claim a state the
+	// next mutation cannot reproduce.
+	defer func() { err = errors.Join(err, unlock()) }()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {

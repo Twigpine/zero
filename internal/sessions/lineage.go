@@ -10,6 +10,9 @@ func (store *Store) CreateChild(parentSessionID string, input ChildInput) (Metad
 	if !ValidSessionID(parentSessionID) {
 		return Metadata{}, fmt.Errorf("invalid zero session id %q", parentSessionID)
 	}
+	if err := store.holdParent(parentSessionID); err != nil {
+		return Metadata{}, err
+	}
 	parent, err := store.Get(parentSessionID)
 	if err != nil {
 		return Metadata{}, err

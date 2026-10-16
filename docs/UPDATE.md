@@ -7,7 +7,7 @@ downloads, verifies, and installs it.
 ```bash
 zero update --check
 zero update --check --json
-zero update --check --repo Gitlawb/zero
+zero update --check --repo Twigpine/zero
 zero update --check --target windows-x64
 
 zero upgrade
@@ -28,7 +28,11 @@ them explicitly; `zero upgrade` is `zero update` with `--apply` implied.
 
 `--apply` installs the update in place:
 
-- npm installs delegate to `npm install -g @gitlawb/zero@latest`.
+- npm installs delegate to `npm install -g @twigpine/zero@latest`. An install
+  of the old `@gitlawb/zero` package refuses, without a release check, and
+  prints the steps to switch to `@twigpine/zero` (see
+  [INSTALL.md](INSTALL.md#moving-from-gitlawbzero)); `--check` prints them
+  too.
 - Standalone installs download the release archive, verify its checksum,
   extract it, and atomically replace the running binary plus any installed
   optional sandbox helpers.
@@ -38,7 +42,7 @@ them explicitly; `zero upgrade` is `zero update` with `--apply` implied.
 - `--target` cannot be combined with `--apply`; it only applies to `--check`,
   since applying always installs onto the current machine.
 - `--repo` and `--endpoint` are ignored when applying to an npm-managed
-  install: that path delegates to `npm install -g @gitlawb/zero@latest` and
+  install: that path delegates to `npm install -g @twigpine/zero@latest` and
   takes its release from the npm registry, not from GitHub. They still apply to
   `--check` there.
 - `--json` serializes Zero's final result. For npm-managed installs, npm may
@@ -65,7 +69,7 @@ Endpoint resolution order:
 1. `--endpoint`
 2. `ZERO_UPDATE_RELEASE_URL`
 3. `--repo`
-4. `https://api.github.com/repos/Gitlawb/zero/releases/latest`
+4. `https://api.github.com/repos/Twigpine/zero/releases/latest`
 
 Installer scripts download the matching release asset for the local platform and
 verify its `.sha256` file. If Zero is already installed, run `zero upgrade`
@@ -93,14 +97,24 @@ binary:
 
 | State on disk | Meaning |
 |---|---|
-| `<binary>.old` (or `<binary>.<suffix>.old`) plus a `.keep` marker | A previous update could not restore the original binary. The `.old` file may be the last binary the updater verified; the installed one may be unverified. |
+| `<binary>.old` (or `<binary>.<suffix>.old`) plus a `.keep` marker, or a per-user update-recovery record naming that copy | A previous update could not restore the original binary. The `.old` file may be the last binary the updater verified; the installed one may be unverified. The `.keep` marker is in the installation directory and can be deleted; the identity-bound record is not, so deleting the marker alone does not end the refusal. |
 | `<binary>.…old.<suffix>.recovery` | A previous update could not even write the marker, so it moved the last verified binary to that name. |
 | The binary is missing and one or more `*.old` files exist | The previous attempt was interrupted between moves. |
 
 The refusal names the paths involved and the two moves that end the state:
 either move the recovery binary back over the executable path, or — if the
-installed binary is the one you want — delete the `.keep` marker (or the
-`.recovery` copy, once you have verified the installed binary) and update again.
+installed binary is the one you want — delete the recovery copy itself (not
+only the `.keep` marker) after verifying the installed binary, then update
+again. Deleting the marker alone is not enough: a failed restore also records
+that copy in per-user state outside the installation directory, and the next
+update consults that record even if the marker is gone.
+
+That trusted record lives under `%AppData%\zero\update-recovery` (per-user).
+The recovery copy and its `.keep` marker sit in the installation directory
+(per-machine). A second Windows account on the same machine does not see the
+first account's unresolved record; the sibling marker is the machine-visible
+signal for every account. There is no separate machine-wide store: writing one
+would need a shared writable location and ACL rules the updater does not own.
 
 This is deliberately fail-closed and differs from older releases, which deleted
 `<binary>.old` and proceeded. The trade-off is that anyone who can write in the

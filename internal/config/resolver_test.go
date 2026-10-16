@@ -1109,6 +1109,34 @@ func TestResolveProviderCommandOverridesEnvProviderFields(t *testing.T) {
 	}
 }
 
+func TestResolveProviderCommandCannotRelaxUserModelRPM(t *testing.T) {
+	userPath := writeConfig(t, `{
+		"modelRPM": {
+			"gpt-command": 5
+		}
+	}`)
+
+	command := writeCommand(t, commandScript{
+		Stdout: `{"activeProvider":"cmd","providers":[{"name":"cmd","provider":"openai","apiKey":"sk-command","model":"gpt-command"}],"modelRPM":{"gpt-command":10}}`,
+	})
+
+	resolved, err := Resolve(ResolveOptions{
+		UserConfigPath:  userPath,
+		ProviderCommand: command,
+		Env:             map[string]string{},
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+
+	if got := resolved.ModelRPM["gpt-command"]; got != 5 {
+		t.Fatalf(
+			"ModelRPM[gpt-command] = %d, want user cap 5 preserved against provider-command relaxation",
+			got,
+		)
+	}
+}
+
 func TestResolveAllowsNoConfiguredProviders(t *testing.T) {
 	resolved, err := Resolve(ResolveOptions{Env: map[string]string{}})
 	if err != nil {
@@ -1151,8 +1179,13 @@ func TestResolveRejectsActiveProviderWithoutConfiguredProfiles(t *testing.T) {
 	if HasProviderProfile(resolved.Provider) {
 		t.Fatalf("Provider = %#v, want zero value", resolved.Provider)
 	}
-	if resolved.MaxTurns != 0 {
-		t.Fatalf("MaxTurns = %d, want zero on failed resolve", resolved.MaxTurns)
+	// The error path now carries the parsed non-provider fields through
+	// (maintainer review, PR #1001): the TUI's provider-recovery startup
+	// forwards this partial config, and a zero MaxTurns there would silently
+	// discard the user's turn budget. Matches the no-providers SUCCESS path,
+	// which has always defaulted MaxTurns.
+	if resolved.MaxTurns != defaultMaxTurns {
+		t.Fatalf("MaxTurns = %d, want default %d carried through the partial resolve", resolved.MaxTurns, defaultMaxTurns)
 	}
 }
 
@@ -1161,10 +1194,13 @@ func TestResolveKeepsNormalizedProvidersWhenNoneMarkedActive(t *testing.T) {
 	// activeProvider is blank/stale — a caller like the interactive TUI still
 	// needs the normalized list to fall back to an already-usable provider
 	// instead of forcing a full re-onboarding wizard.
-	path := writeConfig(t, `{"providers":[
-		{"name":"work","provider_kind":"openai","apiKey":"sk-test","model":"gpt-test"},
-		{"name":"other","provider_kind":"openai","apiKey":"sk-other","model":"gpt-test"}
-	]}`)
+	path := writeConfig(t, `{
+    "modelRPM":{"gpt-test":1},
+    "providers":[
+        {"name":"work","provider_kind":"openai","apiKey":"sk-test","model":"gpt-test"},
+        {"name":"other","provider_kind":"openai","apiKey":"sk-other","model":"gpt-test"}
+    ]
+}`)
 
 	resolved, err := Resolve(ResolveOptions{ProjectConfigPath: path, Env: map[string]string{}})
 	if !errors.Is(err, ErrNoActiveProvider) {
@@ -1172,6 +1208,9 @@ func TestResolveKeepsNormalizedProvidersWhenNoneMarkedActive(t *testing.T) {
 	}
 	if len(resolved.Providers) != 2 {
 		t.Fatalf("Providers = %#v, want the 2 normalized profiles preserved despite the error", resolved.Providers)
+	}
+	if got := resolved.ModelRPM["gpt-test"]; got != 1 {
+		t.Fatalf("ModelRPM[gpt-test] = %d, want 1 preserved despite ErrNoActiveProvider", got)
 	}
 }
 
@@ -1864,14 +1903,43 @@ func TestResolveNotifyInvalidFocusMode(t *testing.T) {
 	}
 }
 
-func TestResolveNotifyDefaultEmpty(t *testing.T) {
-	path := writeConfig(t, `{}`)
-	resolved, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}})
+// An unconfigured notify block must resolve EMPTY. Defaults live in the TUI
+// (effectiveTUINotifyMode) and in `zero config notify`'s display, not in the
+// resolver: a filled-in default here leaks into headless `zero exec` (BEL +
+// OSC-9 bytes on stderr under -o json) and into the CLI/TUI preserve paths,
+// which must treat "user never chose" differently from "user chose both"
+// (maintainer review, PR #1001).
+func TestResolveNotifyUnconfiguredStaysEmpty(t *testing.T) {
+	// No config file at all.
+	resolved, err := Resolve(ResolveOptions{Env: map[string]string{}})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 	if resolved.Notify.Mode != "" || resolved.Notify.FocusMode != "" {
-		t.Fatalf("unset notify should be empty, got %+v", resolved.Notify)
+		t.Fatalf("no config file: notify = %+v, want empty (resolver must not default)", resolved.Notify)
+	}
+
+	for name, body := range map[string]string{
+		"empty config": `{}`,
+		"empty block":  `{"notify":{}}`,
+		"mode only":    `{"notify":{"mode":"off"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			resolved, err := Resolve(ResolveOptions{UserConfigPath: writeConfig(t, body), Env: map[string]string{}})
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if name == "mode only" {
+				if resolved.Notify.Mode != "off" {
+					t.Errorf("notify.mode = %q, want preserved off", resolved.Notify.Mode)
+				}
+			} else if resolved.Notify.Mode != "" {
+				t.Errorf("notify.mode = %q, want empty (resolver must not default)", resolved.Notify.Mode)
+			}
+			if resolved.Notify.FocusMode != "" {
+				t.Errorf("notify.focusMode = %q, want empty (resolver must not default)", resolved.Notify.FocusMode)
+			}
+		})
 	}
 }
 
@@ -2250,5 +2318,66 @@ func TestResolveRejectsInvalidCrossSessionInbound(t *testing.T) {
 	_, err := Resolve(ResolveOptions{UserConfigPath: path, Env: map[string]string{}})
 	if err == nil || !strings.Contains(err.Error(), "expected accept, hold, or refuse") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestResolveReportsExplicitMaxTurns(t *testing.T) {
+	// A nil ResolveOptions.Env means "read the real process environment" (see
+	// envValue), so a case that leaves it nil inherits whatever the developer
+	// happens to export. ANTHROPIC_BASE_URL alone is enough: applyProviderEnv
+	// synthesizes a second, keyless "anthropic" profile from a base URL on its
+	// own, the single-provider shortcut in normalizeProviders stops applying,
+	// and Resolve fails with `active provider "" not found` before this test
+	// reaches its assertion. Every variable the resolver reads does it, so the
+	// cases below state an EMPTY environment rather than no environment, and
+	// these three are set to a hostile value so the test proves it.
+	t.Setenv("ANTHROPIC_BASE_URL", "https://proxy.example/v1")
+	t.Setenv("OPENAI_API_KEY", "from-the-developer-shell")
+	t.Setenv(MaxTurnsEnv, "7")
+
+	const providerJSON = `{
+		"activeProvider": "p",
+		"providers": [{"name": "p", "provider_kind": "openai-compatible", "base_url": "https://x.example/v1", "apiKey": "k", "model": "m"}]
+	}`
+	providerWithTurns := strings.Replace(providerJSON, `"activeProvider": "p"`, `"activeProvider": "p", "maxTurns": 40`, 1)
+
+	cases := []struct {
+		name string
+		opts ResolveOptions
+		set  bool
+	}{
+		{"built-in default only", ResolveOptions{
+			Env:       map[string]string{},
+			Overrides: Overrides{Provider: ProviderProfile{Name: "p", ProviderKind: "openai-compatible", BaseURL: "https://x.example/v1", APIKey: "k", Model: "m"}},
+		}, false},
+		{"user config", ResolveOptions{
+			Env:            map[string]string{},
+			UserConfigPath: writeConfig(t, providerWithTurns),
+		}, true},
+		{"project config", ResolveOptions{
+			Env:               map[string]string{},
+			UserConfigPath:    writeConfig(t, providerJSON),
+			ProjectConfigPath: writeConfig(t, `{"maxTurns": 40}`),
+		}, true},
+		{"env", ResolveOptions{
+			Env:       map[string]string{MaxTurnsEnv: "120"},
+			Overrides: Overrides{Provider: ProviderProfile{Name: "p", ProviderKind: "openai-compatible", BaseURL: "https://x.example/v1", APIKey: "k", Model: "m"}},
+		}, true},
+		{"cli override", ResolveOptions{
+			Env: map[string]string{},
+			Overrides: Overrides{
+				MaxTurns: 42,
+				Provider: ProviderProfile{Name: "p", ProviderKind: "openai-compatible", BaseURL: "https://x.example/v1", APIKey: "k", Model: "m"},
+			},
+		}, true},
+	}
+	for _, tc := range cases {
+		resolved, err := Resolve(tc.opts)
+		if err != nil {
+			t.Fatalf("%s: Resolve() error = %v", tc.name, err)
+		}
+		if resolved.MaxTurnsSet != tc.set {
+			t.Fatalf("%s: MaxTurnsSet = %v, want %v (MaxTurns=%d)", tc.name, resolved.MaxTurnsSet, tc.set, resolved.MaxTurns)
+		}
 	}
 }

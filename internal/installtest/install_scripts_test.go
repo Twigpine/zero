@@ -22,7 +22,7 @@ func TestUnixInstallerScriptMatchesReleaseContracts(t *testing.T) {
 	}
 	containsAll(t, script, []string{
 		"set -euo pipefail",
-		`ZERO_REPO="${ZERO_REPO:-Gitlawb/zero}"`,
+		`ZERO_REPO="${ZERO_REPO:-Twigpine/zero}"`,
 		`ZERO_INSTALL_DIR="${ZERO_INSTALL_DIR:-$HOME/.local/bin}"`,
 		`archive_name="zero-v${version}-${platform}-${arch}.tar.gz"`,
 		`checksum_name="${archive_name}.sha256"`,
@@ -220,7 +220,7 @@ func runUnixInstaller(t *testing.T, fixture unixInstallFixture) (string, string,
 	command.Env = append(os.Environ(),
 		"PATH="+fixture.mockBin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"ZERO_GITHUB_BASE_URL=https://example.test",
-		"ZERO_REPO=Gitlawb/zero",
+		"ZERO_REPO=Twigpine/zero",
 	)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
