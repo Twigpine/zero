@@ -142,6 +142,40 @@ func (startup *optionalMCPStartup) closeRuntime() {
 	})
 }
 
+// Skipped reports the optional servers that failed, or nothing while startup is
+// still running.
+//
+// A NIL RETURN WAS NOT "NOT READY", IT WAS "NONE". These servers are ordinary
+// rows on the /mcp panel: splitMCPStartupConfig moves them off the critical path
+// so a slow one cannot delay the first response, it does not make them invisible.
+// Discarding their failures here left every one of them rendered from
+// configuration alone, which reports a server that never connected as enabled --
+// the single thing that panel exists to prevent.
+// completed exposes the completion signal so an already-open surface can be
+// told to rebuild. Nil when there is no background registration, which is what
+// the consumer treats as "nothing to wait for".
+func (startup *optionalMCPStartup) completed() <-chan struct{} {
+	if startup == nil {
+		return nil
+	}
+	return startup.done
+}
+
 func (startup *optionalMCPStartup) Skipped() []mcp.SkippedServer {
-	return nil
+	if startup == nil {
+		return nil
+	}
+	select {
+	case <-startup.done:
+	default:
+		// Still connecting. There is no observation yet, and blocking here would
+		// stall a render on a server deliberately kept off the critical path.
+		return nil
+	}
+	startup.mu.Lock()
+	defer startup.mu.Unlock()
+	if startup.runtime == nil {
+		return nil
+	}
+	return startup.runtime.Skipped()
 }

@@ -363,8 +363,21 @@ func runMCPCheck(ctx context.Context, args []string, stdout io.Writer, stderr io
 		return writeAppError(stderr, fmt.Sprintf("MCP server %q is disabled", serverName), exitCrash)
 	}
 	scoped := config.MCPConfig{Servers: map[string]config.MCPServerConfig{serverName: raw}}
-	if _, err := mcp.NormalizeConfig(scoped); err != nil {
+	normalized, err := mcp.NormalizeConfig(scoped)
+	if err != nil {
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+	// TWO IDENTITIES, CONVERTED ON PURPOSE AT THIS BOUNDARY. serverName is the
+	// exact configuration KEY, which is what addresses the stored entry above.
+	// Registration reports its outcome under the RUNTIME name, which
+	// normalization derives from that key, so a key such as " docs " registers
+	// and fails as "docs". Matching the failure below against the key skipped it,
+	// and the command printed "is reachable" with exit 0 for a server that never
+	// started. The manager made that reachable when it began dispatching the
+	// exact key. Reported by @jatmn.
+	runtimeName := serverName
+	if len(normalized) == 1 {
+		runtimeName = normalized[0].Name
 	}
 
 	store, err := deps.newMCPStore()
@@ -389,7 +402,7 @@ func runMCPCheck(ctx context.Context, args []string, stdout io.Writer, stderr io
 	// a server is misbehaving, and reporting "is reachable" for a server that never
 	// started sends them looking somewhere else.
 	for _, skipped := range mcpRuntime.Skipped() {
-		if skipped.Name != serverName {
+		if skipped.Name != runtimeName {
 			continue
 		}
 		message := fmt.Sprintf("MCP server %s is not reachable", serverName)
@@ -715,10 +728,43 @@ func (cfg *mcpWritableConfig) ensureRaw() {
 	}
 }
 
+// refuseColliding validates the PROSPECTIVE configuration with the same rule the
+// read and startup paths use.
+//
+// This used to compare key spellings here and reject every trimmed collision,
+// which is a second and weaker implementation of the active-identity rule.
+// ValidateUniqueNames skips disabled entries, because registration skips them
+// and a disabled server claims no runtime identity; the write side did not, so
+// `zero mcp add docs` failed when a disabled " docs" was configured, and even a
+// plain update of an enabled "docs" was refused while its disabled alias
+// existed. It also could not decide the inverse case at all, because it never
+// saw whether the incoming server was itself disabled.
+//
+// Building the combined map and handing it to the shared rule removes the
+// second implementation rather than teaching it the same exceptions.
+func (cfg *mcpWritableConfig) refuseColliding(name string, incoming config.MCPServerConfig) error {
+	prospective := make(map[string]config.MCPServerConfig, len(cfg.file.MCP.Servers)+1)
+	for key, server := range cfg.file.MCP.Servers {
+		prospective[key] = server
+	}
+	prospective[name] = incoming
+	return mcp.ValidateUniqueNames(config.MCPConfig{Servers: prospective})
+}
+
 func (cfg *mcpWritableConfig) upsertServer(name string, server config.MCPServerConfig) (bool, error) {
 	cfg.ensureRaw()
 	if cfg.file.MCP.Servers == nil {
 		cfg.file.MCP.Servers = map[string]config.MCPServerConfig{}
+	}
+	// One config key per runtime identity. Registration trims the key, so a new
+	// "docs" written next to an existing "  docs" produces two entries that are
+	// one server everywhere downstream: they share a tool count and a failure,
+	// map iteration decides which configuration survives, and each redacts that
+	// shared failure with its own credentials, so the one that did not fail can
+	// print the other's. Refusing at the write boundary keeps the collision out
+	// of the file rather than reporting it on every later load.
+	if err := cfg.refuseColliding(name, server); err != nil {
+		return false, err
 	}
 	existingRaw, updated := cfg.serverRaw[name]
 	existingServer := cfg.file.MCP.Servers[name]
@@ -859,6 +905,30 @@ func (cfg *mcpWritableConfig) setServerDisabled(name string, disabled bool) (boo
 	current := false
 	if rawDisabled, ok := server["disabled"]; ok && len(rawDisabled) > 0 && string(rawDisabled) != "null" {
 		if err := json.Unmarshal(rawDisabled, &current); err != nil {
+			return false, false, err
+		}
+	}
+	// ENABLING CLAIMS A RUNTIME IDENTITY, SO IT IS VALIDATED LIKE AN ADD.
+	//
+	// A disabled entry claims no active name, which is why "docs" and a disabled
+	// " docs" may sit in one file. Clearing the flag is the moment that stops
+	// being true, and this setter cleared it unchecked: `zero mcp enable ' docs'`
+	// persisted two enabled keys that both resolve to "docs" and reported
+	// success, and the next load refused the file and aborted startup. The rule
+	// is the one upsertServer already applies, handed the PROSPECTIVE entry, and
+	// it runs before anything below is written, so a refused enable leaves the
+	// configuration exactly as it was. Disabling is never refused: it is how a
+	// colliding file is repaired. Reported by @jatmn.
+	if !disabled {
+		prospective := cfg.file.MCP.Servers[name]
+		if len(raw) > 0 && string(raw) != "null" {
+			var decoded config.MCPServerConfig
+			if err := json.Unmarshal(raw, &decoded); err == nil {
+				prospective = decoded
+			}
+		}
+		prospective.Disabled = false
+		if err := cfg.refuseColliding(name, prospective); err != nil {
 			return false, false, err
 		}
 	}

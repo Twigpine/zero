@@ -250,6 +250,51 @@ func (store *TokenStore) DeleteForServerName(serverName string) (bool, error) {
 	return removed, nil
 }
 
+// SecretValues returns the bearer material of every stored MCP token, for
+// callers that must redact it out of untrusted text. It is the deliberate
+// inverse of Status, which exists to be printable.
+//
+// Three properties matter, and each is a trap avoided:
+//
+// It is READ ONLY. LoadForServer is what the runtime bearer path uses, but it
+// migrates a legacy name-only entry to the identity key as a side effect, and a
+// redaction pass must never write to the token store, let alone take its
+// cross-process lock, just because someone opened a panel.
+//
+// It reads EVERY key rather than one server's. Tokens are stored identity-bound
+// (the login path calls SaveForServer), so a per-name Load finds nothing for
+// precisely the servers that hold a real bearer. Enumerating also sidesteps
+// deriving an identity here, which would otherwise mean normalizing the whole
+// config and losing every server's redaction because one entry is malformed.
+//
+// It returns material from ALL servers, and a caller should redact all of it out
+// of any one server's message. A bearer issued for one server has no business
+// appearing in another's error, so if it does, that is the leak worth closing,
+// not a false positive.
+//
+// Errors are swallowed by design: an unreadable store must degrade to redacting
+// less, never to failing the render. It therefore returns nothing in that case,
+// so a caller cannot read a non-empty result as proof the store was legible.
+func (store *TokenStore) SecretValues() []string {
+	if store == nil {
+		return nil
+	}
+	statuses, err := store.store.Status(oauth.KeyPrefixMCP)
+	if err != nil {
+		return nil
+	}
+	values := make([]string, 0, len(statuses)*2)
+	for _, status := range statuses {
+		token, ok, err := store.store.Load(status.Key)
+		if err != nil || !ok {
+			continue
+		}
+		stored := tokenToStored(token)
+		values = append(values, stored.AccessToken, stored.RefreshToken)
+	}
+	return values
+}
+
 // Status returns a redaction-safe summary of every stored MCP token, sorted by
 // server name. It never includes the token material.
 func (store *TokenStore) Status() ([]TokenStatus, error) {
