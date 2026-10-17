@@ -711,6 +711,55 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// executed concurrently, consumed strictly in order below.
 		var precomputed []precomputedToolResult
 		precomputedStart, precomputedEnd := 0, 0
+		// closeOutRemaining terminates every advertised call from `from` onward
+		// TRUTHFULLY, and every early return in this loop goes through it.
+		//
+		// Read-ahead broke the assumption the abort placeholders were written
+		// under. executeParallelReadBatch runs an entire eligible run before the
+		// loop consumes any of it, so "not consumed yet" stopped meaning "not
+		// executed": a sibling can already have run, committed its side effects
+		// and any authorization credit they carry, and still sit past the index
+		// where a terminal branch fires. Recording it as aborted threw that result
+		// away, so the transcript disagreed with what had actually happened, and
+		// its callbacks, trace counter, task observation and images went with it.
+		//
+		// So each remaining call is put in the one state that is true of it:
+		// completed, and finalized exactly once with the same bookkeeping the main
+		// path performs, or unstarted, and aborted. The guard is deliberately NOT
+		// consulted for a drained sibling: these results cannot reverse a stop
+		// decision that has already been made, they are only owed an honest record.
+		closeOutRemaining := func(from int) {
+			for next := from; next < len(collected.ToolCalls); next++ {
+				sibling, ran := precomputedResultFor(precomputed, precomputedStart, precomputedEnd, next)
+				if !ran {
+					messages = appendAbortedToolResults(messages, collected.ToolCalls[next:next+1])
+					continue
+				}
+				nextCall := collected.ToolCalls[next]
+				if options.OnToolCall != nil {
+					options.OnToolCall(nextCall)
+				}
+				options.Trace.Counter(trace.CounterToolCalls, 1)
+				recordOutputBudgetTrace(options.Trace, sibling)
+				task.observe(taskStateEvent{kind: taskStateEventToolResult, arguments: nextCall.Arguments, toolResult: sibling})
+				if options.OnToolResult != nil {
+					options.OnToolResult(sibling)
+				}
+				for _, name := range sibling.LoadedTools {
+					loaded[name] = true
+				}
+				messages = append(messages, zeroruntime.Message{
+					Role:         zeroruntime.MessageRoleTool,
+					Content:      sibling.ModelOutput(),
+					ToolCallID:   sibling.ToolCallID,
+					IsError:      sibling.Status == tools.StatusError,
+					ChangedFiles: append([]string(nil), sibling.ChangedFiles...),
+				})
+				if len(sibling.Images) > 0 {
+					toolResultsWithImages = append(toolResultsWithImages, sibling)
+				}
+			}
+		}
 		for index, call := range collected.ToolCalls {
 			// When this call starts a consecutive run of >= 2 auto-allowed read-only
 			// calls, execute the whole run concurrently now (see parallel_tools.go).
@@ -775,13 +824,13 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				abortErr = ctx.Err()
 			}
 			if abortErr != nil {
-				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
+				closeOutRemaining(index + 1)
 				messages = append(messages, buildToolImageMessages()...)
 				result.Messages = copyMessages(messages)
 				return result, abortErr
 			}
 			if stopReason := stopReasonFromToolResult(toolResult); stopReason != "" {
-				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
+				closeOutRemaining(index + 1)
 				messages = append(messages, buildToolImageMessages()...)
 				result.FinalAnswer = toolResult.ModelOutput()
 				result.StopReason = stopReason
@@ -796,8 +845,29 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			// aren't fixed by reformatting the call, so a "match this schema" hint
 			// would misdirect the model toward JSON shape or blocked behavior.
 			retriableFailure := isRetriableToolError(toolResult)
-			outcome := guards.observeToolResult(call.Name, retriableFailure, toolResult.ModelOutput())
-			posture.observeToolOutcome(outcome, toolResult)
+			// A categorized denial is NOT retriable — retrying it verbatim is
+			// pointless — but it is still a failure the streaks must count, or a
+			// refused tool loops until the turn limit. Passing retriableFailure for
+			// both is what let that happen: observeToolResult took its success
+			// branch and deleted the record before it could key on the category.
+			// isPolicyRefusal rather than DenialReason alone: the categories are
+			// only attached where a typed denial is built, so a headless prompt
+			// refusal and an uncategorized sandbox block were counted as SUCCESS
+			// and cleared the record they were supposed to accumulate.
+			policyRefusal := isPolicyRefusal(toolResult)
+			countedFailure := retriableFailure || policyRefusal
+			outcome := guards.observeToolResult(call.Name, countedFailure, retriableFailure, toolResult.ModelOutput(), toolResult.DenialReason)
+			// The profile's failure-streak trigger is for RETRIABLE failures: it
+			// restores the displaced turn budget and reasoning effort on the theory
+			// that the tool is struggling and needs room. A policy refusal is not a
+			// struggling tool, it is an answer, and spending the one-shot
+			// escalation on one contradicts that trigger's own contract. Denials
+			// still count for the halt above; they just do not buy more budget.
+			if policyRefusal {
+				posture.observeToolOutcome(toolFailureOutcome{}, toolResult)
+			} else {
+				posture.observeToolOutcome(outcome, toolResult)
+			}
 			if outcome.Stop {
 				// The assistant message advertised EVERY collected tool call, but
 				// the guard halts mid-turn so the calls after this one never run.
@@ -805,10 +875,22 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				// every tool_use has a matching tool_result and the recorded
 				// messages stay valid for a strict provider replay (Anthropic
 				// rejects a tool_use with no answering tool_result).
-				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
+				closeOutRemaining(index + 1)
 				messages = append(messages, buildToolImageMessages()...)
-				result.FinalAnswer = toolFailureStopAnswer(call.Name, outcome.Count)
+				result.FinalAnswer = toolFailureStopAnswer(call.Name, outcome.Count, outcome.Cause)
 				result.Messages = copyMessages(messages)
+				// THE HALT HAS TO CROSS THE TERMINAL-STATUS BOUNDARY TOO.
+				//
+				// This branch returns straight out, so it never reached the
+				// completion gate that the max-turns paths below go through. Under
+				// RequireCompletionSignal `zero exec` treats only Incomplete as exit
+				// 4 and otherwise emits run_end("success", 0), so a task that was
+				// denied six times, or failed through the twelve-call bound, became
+				// a successful automation result having done none of the work.
+				if options.RequireCompletionSignal {
+					result.Incomplete = true
+					result.IncompleteReason = toolFailureIncompleteReason(call.Name, outcome.Cause)
+				}
 				return result, nil
 			}
 			if outcome.InjectHint && failureHint == "" {
@@ -1590,7 +1672,39 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		// the Run turn loop performs the actual provider switch. Empty for every
 		// ordinary tool result.
 		RequestedModel: result.Meta["escalate_to_model"],
+		// ONE REFUSAL IDENTITY, derived here so classification and streak
+		// accounting cannot disagree.
+		//
+		// The registry marks its pre-execution refusals in metadata, and
+		// isPolicyRefusal read that marker while observeToolResult keyed on
+		// DenialReason, which those paths leave empty. The guard therefore fell
+		// back to errorSignature(output), and two refusals of the same category
+		// with different wording looked like two different failures. A model
+		// alternating capture_artifact's browser_screenshot and browser_pdf against
+		// a disabled driver is refused identically each time, and never tripped the
+		// six-call refusal halt: only the generic twelve-error fallback stopped it,
+		// reporting varied errors rather than a repeated refusal.
+		DenialReason: denialCategoryForResult(result),
 	}, nil
+}
+
+// denialCategoryForResult gives every pre-execution refusal a stable category,
+// whether it was built as a typed denial or only marked in metadata.
+//
+// The mapping lives here, at the one boundary tools.Result becomes ToolResult,
+// rather than at each producer. A marker without a category is the shape that
+// caused this: it classified as a refusal and keyed as an error signature.
+func denialCategoryForResult(result tools.Result) DenialCategory {
+	switch result.Meta[tools.PolicyRefusalMeta] {
+	case tools.PolicyRefusalToolNotEnabled:
+		return DenialFiltered
+	case tools.PolicyRefusalPermissionDenied, tools.PolicyRefusalPermissionRequired:
+		return DenialPermissionDenied
+	case tools.PolicyRefusalSandboxDenied, tools.PolicyRefusalSandboxApproval:
+		return DenialSandboxBlock
+	default:
+		return DenialNone
+	}
 }
 
 const sandboxNamespaceLimitedReason = "sandbox output is limited to the sandbox PID namespace; host/global state requires approval"
@@ -1923,6 +2037,10 @@ func toolResultFromPrePermissionReject(call ToolCall, result tools.Result) ToolR
 		Display:         display,
 		LoadedTools:     loadedToolsFromResult(meta),
 		RequestedModel:  meta["escalate_to_model"],
+		// The SAME identity the executed path derives. This is the route a
+		// RejectBeforePermission refusal takes, so leaving it empty here is what
+		// made the marker classify as a refusal and key as an error signature.
+		DenialReason: denialCategoryForResult(tools.Result{Meta: meta}),
 	}
 }
 
@@ -2094,21 +2212,64 @@ func isRetriableToolError(result ToolResult) bool {
 	// A categorized denial (filtered / permission / sandbox) is a policy decision,
 	// not a transient failure — never retry it. This is robust to message wording
 	// (the text checks below remain as a fallback for results lacking the field).
-	if result.DenialReason != DenialNone {
+	return !isPolicyRefusal(result)
+}
+
+// isPolicyRefusal reports a result the run refused on policy grounds: a
+// permission gate, a filter, a sandbox preflight, or a hook.
+//
+// Split out of isRetriableToolError so the two questions cannot drift apart,
+// which is exactly what they had done. The halt guard asked
+// `DenialReason != DenialNone`, and a category is only attached on the paths
+// that build a TYPED denial. A headless run leaves OnPermissionRequest nil, so
+// the loop never reaches its typed-denial branch and the registry returns a bare
+// `Error: Permission required ...` carrying no category. A sandbox preflight
+// denial on a non-shell tool loses its SandboxDecision converting to ToolResult
+// and arrives as an uncategorized `Sandbox block`.
+//
+// Both are refusals, and both were counted as SUCCESS, so observeToolResult
+// cleared the record and the same refused call could repeat to MaxTurns. That is
+// the loop this guard exists to stop. The text checks below already enumerated
+// these outcomes for the retriable question; they simply were not reachable from
+// the counting one.
+func isPolicyRefusal(result ToolResult) bool {
+	// A REFUSAL IS A FAILURE. Everything below inspects metadata and then output
+	// text, and neither is meaningful on a result the tool completed.
+	//
+	// isRetriableToolError gates on this before it calls here, so the boundary
+	// held while that was the only caller. Extracting this helper and calling it
+	// straight from the counting path dropped the gate: an allowed `bash`
+	// printing "Sandbox block", or a read_file returning a document that quotes
+	// one of these phrases, was counted as a denial. Six such successes tripped
+	// the same-signature stop and ended a healthy run with a refusal answer.
+	//
+	// The gate belongs here rather than at each caller, because the next caller
+	// will forget it too.
+	if result.Status != tools.StatusError {
 		return false
+	}
+	if result.DenialReason != DenialNone {
+		return true
 	}
 	if result.Meta["permission_action"] == string(PermissionActionDeny) {
-		return false
+		return true
 	}
-	switch {
-	case strings.Contains(result.Output, "is not enabled for this run"),
-		strings.Contains(result.Output, "Permission denied for "),
-		strings.Contains(result.Output, "Permission required for "),
-		strings.Contains(result.Output, "Sandbox block"),
-		strings.Contains(result.Output, "Sandbox approval required for "):
-		return false
-	}
-	return true
+	// STRUCTURED ONLY. This used to fall back to matching phrases in Output
+	// ("Sandbox block", "Permission denied for ", and so on), which cannot work:
+	// Output is tool-controlled. `bash` preserves arbitrary stdout and stderr on
+	// a StatusError for any nonzero exit, so an ALLOWED command running
+	// `printf 'Sandbox block\n' >&2; exit 1` has actually executed, carries no
+	// DenialReason, and was still classified as refused. The loop then withheld
+	// the schema hint and the profile failure-streak recovery, counted the
+	// executed failure toward the refusal halt, and a later stop told the user a
+	// tool had been refused when it had run.
+	//
+	// read_file returning a document that quotes one of those phrases did the
+	// same thing, which is the more likely way a real session hits it.
+	//
+	// The registry now marks every path that returns BEFORE the tool runs, so
+	// the question is answerable from provenance. Nothing below reads Output.
+	return tools.IsPolicyRefusalResult(tools.Result{Meta: result.Meta})
 }
 
 // scrubInterceptedOutput mirrors the registry's scrubResultSecrets boundary for
@@ -3552,6 +3713,33 @@ func toolResultImageMessage(result ToolResult, options Options) (zeroruntime.Mes
 		Content: "Image output from " + label + ":",
 		Images:  images,
 	}, true
+}
+
+// precomputedResultFor reports the read-ahead result for call index, and whether
+// that call actually produced one. A batch entry that never started is still
+// unstarted as far as the transcript is concerned.
+//
+// PRODUCING A RESULT AND ASKING THE RUN TO STOP ARE DIFFERENT FACTS. Treating a
+// non-nil abortErr as "unstarted" conflated them, and a cancelled permission
+// request is exactly the case where they disagree: executeToolCall builds the
+// cancellation result and returns it WITH ErrPermissionApprovalCanceled, so an
+// earlier sibling reaching a terminal branch discarded a real result and wrote
+// an aborted placeholder in its place. The transcript then denied that the call
+// had completed permission handling, and the cancellation was missing from
+// OnToolResult, the trace counters and the task observation even though the
+// permission event had already happened.
+//
+// The terminal decision is not affected: draining such a sibling only records
+// what occurred, it cannot reverse a stop already selected.
+func precomputedResultFor(precomputed []precomputedToolResult, start, end, index int) (ToolResult, bool) {
+	if index < start || index >= end {
+		return ToolResult{}, false
+	}
+	entry := precomputed[index-start]
+	if !entry.completed {
+		return ToolResult{}, false
+	}
+	return entry.result, true
 }
 
 func modelAcceptsToolImages(options Options) bool {

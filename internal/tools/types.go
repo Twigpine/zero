@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"strings"
 
 	"github.com/Twigpine/zero/internal/execution"
 	"github.com/Twigpine/zero/internal/sandbox"
@@ -58,6 +59,49 @@ const (
 	SandboxDenialKindSandbox = "sandbox"
 	SandboxDenialKindNetwork = "network"
 )
+
+// PolicyRefusalMeta marks a Result the registry produced INSTEAD of running the
+// tool, and its value names which gate refused.
+//
+// This exists because output is tool-controlled and therefore cannot classify
+// anything. `bash` preserves arbitrary stdout and stderr on a StatusError for
+// any nonzero exit, so an ALLOWED command that prints "Sandbox block" and exits
+// 1 is indistinguishable, by text, from a sandbox refusal that never ran. The
+// two have opposite meanings for retry and for the failure-streak accounting:
+// one is a command that executed and failed, the other is a command the policy
+// stopped. markStructuredSandboxDenial already states this rule for the sandbox
+// adapter ("Classification is never inferred from stdout or stderr"); this
+// carries the same guarantee across the rest of the pre-execution gates.
+//
+// Set it on every path that returns before the tool runs. A refusal without it
+// reads as an ordinary execution failure, which is the safe direction (retried
+// rather than counted as a denial) but still wrong.
+const PolicyRefusalMeta = "policy_refusal"
+
+// The gates that can refuse before execution. Values are stable strings because
+// they are written into result metadata that session readers persist.
+const (
+	PolicyRefusalSandboxDenied      = "sandbox_denied"
+	PolicyRefusalSandboxApproval    = "sandbox_approval_required"
+	PolicyRefusalPermissionRequired = "permission_required"
+	PolicyRefusalPermissionDenied   = "permission_denied"
+	PolicyRefusalToolNotEnabled     = "tool_not_enabled"
+)
+
+// refusalResult builds the error Result for a gate that refused to run a tool,
+// carrying the marker so classification never has to read Output.
+func refusalResult(output string, category string) Result {
+	result := errorResult(output)
+	result.Meta = map[string]string{PolicyRefusalMeta: category}
+	return result
+}
+
+// IsPolicyRefusalResult reports whether the registry refused this call before
+// the tool ran. Exported so the agent loop classifies from the marker rather
+// than from model-visible text.
+func IsPolicyRefusalResult(result Result) bool {
+	return strings.TrimSpace(result.Meta[PolicyRefusalMeta]) != ""
+}
 
 type Safety struct {
 	SideEffect SideEffect
@@ -293,4 +337,41 @@ func promptSafety(sideEffect SideEffect, reason string) Safety {
 		Permission: PermissionPrompt,
 		Reason:     reason,
 	}
+}
+
+// executedToolResult strips the pre-execution refusal marker from a result the
+// tool produced by RUNNING.
+//
+// THE MARKER IS A CLAIM ABOUT THE REGISTRY, NOT ABOUT THE TOOL. It says this
+// call never executed, and the loop spends that claim: the retry hint is
+// withheld, the profile failure streak does not recover, the call is counted in
+// refusal-oriented guard accounting, and a recognized category can make the
+// final answer tell the user the tool was refused. A result that came back from
+// Run is proof the opposite happened, so a tool setting the key, by mistake, by
+// copying metadata forward from something it called, or deliberately, would
+// forge that claim one layer below the output text this branch stopped trusting.
+//
+// Stripping rather than validating the value keeps it unforgeable for future
+// implementations as well: there is no spelling a tool can return that survives
+// execution. Genuine pre-execution refusals are untouched, including
+// RejectBeforePermission, which decides before any of this and never runs the
+// tool. Ordinary metadata is preserved.
+func executedToolResult(result Result) Result {
+	if _, marked := result.Meta[PolicyRefusalMeta]; !marked {
+		return result
+	}
+	// Copied rather than deleted in place: the map belongs to the tool, and a
+	// tool that reuses one across calls would see this mutation.
+	meta := make(map[string]string, len(result.Meta))
+	for key, value := range result.Meta {
+		if key == PolicyRefusalMeta {
+			continue
+		}
+		meta[key] = value
+	}
+	if len(meta) == 0 {
+		meta = nil
+	}
+	result.Meta = meta
+	return result
 }

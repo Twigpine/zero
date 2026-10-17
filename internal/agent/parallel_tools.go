@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"sync"
 
 	"github.com/Twigpine/zero/internal/tools"
@@ -36,6 +37,15 @@ const maxParallelReadTools = 8
 type precomputedToolResult struct {
 	result   ToolResult
 	abortErr error
+	// completed records whether this call PRODUCED a result, which is a
+	// different question from whether it asks the enclosing run to stop.
+	//
+	// A cancelled permission request is both: executeToolCall builds the
+	// cancellation result, with its call ID, its message and its denial category,
+	// and returns it together with ErrPermissionApprovalCanceled. Reading the
+	// error as "never started" throws that result away, and the transcript then
+	// denies that permission handling happened at all.
+	completed bool
 }
 
 // parallelSafeToolCall reports whether call may run concurrently with its
@@ -189,7 +199,15 @@ func executeParallelReadBatch(ctx context.Context, registry *tools.Registry, cal
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 			result, abortErr := executeToolCall(ctx, registry, calls[index], permissionMode, batchOptions)
-			results[index-start] = precomputedToolResult{result: result, abortErr: abortErr}
+			// Recorded HERE, where both halves are in hand, rather than inferred later
+			// from the error. A populated call ID is what every path that produced a
+			// result sets and what a context cancellation before execution leaves
+			// empty.
+			results[index-start] = precomputedToolResult{
+				result:    result,
+				abortErr:  abortErr,
+				completed: strings.TrimSpace(result.ToolCallID) != "",
+			}
 		}(index)
 	}
 	waitGroup.Wait()
