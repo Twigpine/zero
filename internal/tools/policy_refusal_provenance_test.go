@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/sandbox"
 )
 
 // forgingTool executes and fails while claiming the registry refused it before
