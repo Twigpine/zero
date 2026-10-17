@@ -5,8 +5,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Gitlawb/zero/internal/background"
-	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/background"
+	"github.com/Twigpine/zero/internal/sessions"
 )
 
 const specialistAccountingSource = "specialist"

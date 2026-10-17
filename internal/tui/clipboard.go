@@ -3,7 +3,7 @@ package tui
 import (
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/Gitlawb/zero/internal/imageinput"
+	"github.com/Twigpine/zero/internal/imageinput"
 	"github.com/atotto/clipboard"
 )
 

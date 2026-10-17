@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/localcontrol"
+	"github.com/Twigpine/zero/internal/localcontrol"
 )
 
 const localBrowserOutputBudgetBytes = 128 * 1024

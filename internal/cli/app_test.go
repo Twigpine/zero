@@ -14,15 +14,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/agent"
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/mcp"
-	"github.com/Gitlawb/zero/internal/redaction"
-	"github.com/Gitlawb/zero/internal/tools"
-	"github.com/Gitlawb/zero/internal/tui"
-	"github.com/Gitlawb/zero/internal/update"
-	"github.com/Gitlawb/zero/internal/workspacetrust"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/mcp"
+	"github.com/Twigpine/zero/internal/redaction"
+	"github.com/Twigpine/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/tui"
+	"github.com/Twigpine/zero/internal/update"
+	"github.com/Twigpine/zero/internal/workspacetrust"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 var errWriteFailed = errors.New("write failed")
@@ -343,8 +343,10 @@ func TestRunNoArgsFallsBackToUsableProviderWhenNoneMarkedActive(t *testing.T) {
 			// config.json has providers configured but none marked active (e.g. a
 			// blank/stale activeProvider field) — Resolve returns the successfully
 			// normalized providers list alongside ErrNoActiveProvider.
-			return config.ResolvedConfig{Providers: []config.ProviderProfile{usable}},
-				fmt.Errorf("%w: active provider %q not found", config.ErrNoActiveProvider, "")
+			return config.ResolvedConfig{
+				Providers: []config.ProviderProfile{usable},
+				ModelRPM:  map[string]int{"gpt-test": 1},
+			}, fmt.Errorf("%w: active provider %q not found", config.ErrNoActiveProvider, "")
 		},
 		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
 			providerProfile = profile
@@ -374,6 +376,10 @@ func TestRunNoArgsFallsBackToUsableProviderWhenNoneMarkedActive(t *testing.T) {
 	}
 	if providerProfile.Name != "work" {
 		t.Fatalf("provider used = %q, want fallback to the usable saved provider %q", providerProfile.Name, "work")
+
+	}
+	if launchedOptions.ModelRPM == nil {
+		t.Fatal("ModelRPM = nil, want limiter preserved through provider fallback")
 	}
 }
 
@@ -1372,7 +1378,7 @@ func TestRunUpdateCheckTextAndJSON(t *testing.T) {
 	result := update.Result{
 		CurrentVersion: "dev",
 		LatestVersion:  "0.2.0",
-		ReleaseURL:     "https://github.com/Gitlawb/zero/releases/tag/v0.2.0",
+		ReleaseURL:     "https://github.com/Twigpine/zero/releases/tag/v0.2.0",
 		TagName:        "v0.2.0",
 		ReleaseAsset: update.AssetCheck{
 			Platform:      "linux",
@@ -1623,7 +1629,7 @@ func TestRunUpdateReportsUpToDate(t *testing.T) {
 			return update.Result{
 				CurrentVersion:  "dev",
 				LatestVersion:   "dev",
-				ReleaseURL:      "https://github.com/Gitlawb/zero/releases/tag/dev",
+				ReleaseURL:      "https://github.com/Twigpine/zero/releases/tag/dev",
 				TagName:         "dev",
 				UpdateAvailable: false,
 			}, nil

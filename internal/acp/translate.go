@@ -8,8 +8,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/Gitlawb/zero/internal/agent"
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 // translate.go maps ZERO's agent events onto ACP session/update payloads. The
@@ -83,7 +83,7 @@ func browserToolDetails(name string) (*BrowserToolDetails, bool) {
 	}
 }
 
-const zeroBrowserMetaKey = "github.com/Gitlawb/zero/browser"
+const zeroBrowserMetaKey = "github.com/Twigpine/zero/browser"
 
 // attachBrowserToolDetails stores ZERO's browser descriptor in ACP's reserved
 // extension channel. Keeping this in one helper prevents start, result, and

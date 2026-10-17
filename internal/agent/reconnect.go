@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/errhint"
-	"github.com/Gitlawb/zero/internal/trace"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/errhint"
+	"github.com/Twigpine/zero/internal/trace"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 // Mid-stream reconnect: a long autonomous task (a big refactor, a swarm member,

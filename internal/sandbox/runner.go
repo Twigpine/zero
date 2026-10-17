@@ -14,8 +14,8 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/Gitlawb/zero/internal/execution"
-	"github.com/Gitlawb/zero/internal/providercatalog"
+	"github.com/Twigpine/zero/internal/execution"
+	"github.com/Twigpine/zero/internal/providercatalog"
 )
 
 var errNativeSandboxUnavailable = errors.New("native sandbox backend is unavailable")
@@ -253,6 +253,7 @@ func linuxSandboxHelperCommandPlan(execRequest SandboxExecutionRequest, policy P
 	helper := LinuxSandboxHelperCommand{}
 	if execRequest.Backend.Name == BackendLinuxBwrap && execRequest.Backend.Executable != "" {
 		helper.Name = execRequest.Backend.Executable
+		helper.ArgsPrefix = append([]string{}, execRequest.Backend.ExecutableArgsPrefix...)
 	} else {
 		resolved, err := linuxSandboxHelperCommand()
 		if err != nil {

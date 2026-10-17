@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/testutil"
+	"github.com/Twigpine/zero/internal/testutil"
 )
 
 func drain(t *testing.T, buffered []string, live <-chan string) []string {

@@ -7,9 +7,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/agent"
-	"github.com/Gitlawb/zero/internal/specmode"
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/specmode"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 var toolNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)

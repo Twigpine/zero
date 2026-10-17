@@ -1,11 +1,11 @@
 blank_issues_enabled: false
 contact_links:
   - name: Questions and setup help
-    url: https://github.com/Gitlawb/zero/discussions/categories/q-a
+    url: https://github.com/Twigpine/zero/discussions/categories/q-a
     about: Ask in Discussions Q&A. Include zero --version, your OS, provider/model, and zero doctor output for setup problems.
   - name: Feature ideas
-    url: https://github.com/Gitlawb/zero/discussions/categories/ideas
+    url: https://github.com/Twigpine/zero/discussions/categories/ideas
     about: Propose and discuss ideas in Discussions before opening a PR (Zero is in controlled development, see CONTRIBUTING.md).
   - name: Security vulnerability
-    url: https://github.com/Gitlawb/zero/security/advisories/new
+    url: https://github.com/Twigpine/zero/security/advisories/new
     about: Report security issues privately via GitHub Security Advisories (see SECURITY.md). Do not file a public issue.

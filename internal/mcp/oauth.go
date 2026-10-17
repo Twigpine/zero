@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/oauth"
+	"github.com/Twigpine/zero/internal/oauth"
 )
 
 // ServerAuthOAuth is the value of an MCP server's auth field that selects the

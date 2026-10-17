@@ -49,6 +49,13 @@ func TestResolveStreamIdleTimeout(t *testing.T) {
 		}
 	})
 
+	t.Run("bare seconds that overflow time.Duration keep the default", func(t *testing.T) {
+		t.Setenv(env, "36028797018963968")
+		if got := ResolveStreamIdleTimeout(0); got != DefaultStreamIdleTimeout {
+			t.Fatalf("got %v, want default %v (overflow must not disable the watchdog)", got, DefaultStreamIdleTimeout)
+		}
+	})
+
 	t.Run("invalid env falls back to default, not disabled", func(t *testing.T) {
 		t.Setenv(env, "banana")
 		if got := ResolveStreamIdleTimeout(0); got != DefaultStreamIdleTimeout {

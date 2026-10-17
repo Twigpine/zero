@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/installtxn"
+	"github.com/Twigpine/zero/internal/installtxn"
 )
 
 // initGitSkillRepo creates a real local git repo holding a skill and returns a

@@ -7,7 +7,7 @@ downloads, verifies, and installs it.
 ```bash
 zero update --check
 zero update --check --json
-zero update --check --repo Gitlawb/zero
+zero update --check --repo Twigpine/zero
 zero update --check --target windows-x64
 
 zero upgrade
@@ -28,7 +28,11 @@ them explicitly; `zero upgrade` is `zero update` with `--apply` implied.
 
 `--apply` installs the update in place:
 
-- npm installs delegate to `npm install -g @gitlawb/zero@latest`.
+- npm installs delegate to `npm install -g @twigpine/zero@latest`. An install
+  of the old `@gitlawb/zero` package refuses, without a release check, and
+  prints the steps to switch to `@twigpine/zero` (see
+  [INSTALL.md](INSTALL.md#moving-from-gitlawbzero)); `--check` prints them
+  too.
 - Standalone installs download the release archive, verify its checksum,
   extract it, and atomically replace the running binary plus any installed
   optional sandbox helpers.
@@ -38,7 +42,7 @@ them explicitly; `zero upgrade` is `zero update` with `--apply` implied.
 - `--target` cannot be combined with `--apply`; it only applies to `--check`,
   since applying always installs onto the current machine.
 - `--repo` and `--endpoint` are ignored when applying to an npm-managed
-  install: that path delegates to `npm install -g @gitlawb/zero@latest` and
+  install: that path delegates to `npm install -g @twigpine/zero@latest` and
   takes its release from the npm registry, not from GitHub. They still apply to
   `--check` there.
 - `--json` serializes Zero's final result. For npm-managed installs, npm may
@@ -65,7 +69,7 @@ Endpoint resolution order:
 1. `--endpoint`
 2. `ZERO_UPDATE_RELEASE_URL`
 3. `--repo`
-4. `https://api.github.com/repos/Gitlawb/zero/releases/latest`
+4. `https://api.github.com/repos/Twigpine/zero/releases/latest`
 
 Installer scripts download the matching release asset for the local platform and
 verify its `.sha256` file. If Zero is already installed, run `zero upgrade`

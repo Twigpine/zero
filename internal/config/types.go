@@ -364,6 +364,7 @@ func (cfg *ToolsConfig) UnmarshalJSON(data []byte) error {
 }
 
 type FileConfig struct {
+	ModelRPM            map[string]int     `json:"modelRPM,omitempty"`
 	ActiveProvider      string             `json:"activeProvider,omitempty"`
 	Providers           []ProviderProfile  `json:"providers,omitempty"`
 	MaxTurns            int                `json:"maxTurns,omitempty"`
@@ -389,6 +390,7 @@ type FileConfig struct {
 
 func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 	type rawConfig struct {
+		ModelRPM            map[string]int      `json:"modelRPM,omitempty"`
 		ActiveProvider      string              `json:"activeProvider,omitempty"`
 		Providers           []ProviderProfile   `json:"providers,omitempty"`
 		MaxTurns            int                 `json:"maxTurns,omitempty"`
@@ -405,6 +407,7 @@ func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 		Sessions            *SessionsConfig     `json:"sessions,omitempty"`
 	}
 	raw := rawConfig{
+		ModelRPM:            cfg.ModelRPM,
 		ActiveProvider:      cfg.ActiveProvider,
 		Providers:           cfg.Providers,
 		MaxTurns:            cfg.MaxTurns,
@@ -483,6 +486,7 @@ type Overrides struct {
 }
 
 type ResolvedConfig struct {
+	ModelRPM       map[string]int
 	ActiveProvider string
 	Providers      []ProviderProfile
 	Provider       ProviderProfile
@@ -551,6 +555,7 @@ type MCPOAuthConfig struct {
 
 func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	type rawConfig struct {
+		ModelRPM            map[string]int             `json:"modelRPM"`
 		ActiveProvider      string                     `json:"activeProvider"`
 		Providers           []ProviderProfile          `json:"providers"`
 		MaxTurns            int                        `json:"maxTurns"`
@@ -586,6 +591,11 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 		extra = nil
 	}
 	cfg.ActiveProvider = raw.ActiveProvider
+	limits, err := normalizeModelRPM(raw.ModelRPM)
+	if err != nil {
+		return err
+	}
+	cfg.ModelRPM = limits
 	cfg.Providers = raw.Providers
 	// A negative maxTurns is unambiguously invalid; without this it would be
 	// silently dropped by the `MaxTurns > 0` merge gates and fall back to the

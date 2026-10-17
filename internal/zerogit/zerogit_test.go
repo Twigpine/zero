@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/redaction"
+	"github.com/Twigpine/zero/internal/redaction"
 )
 
 func TestInspectSummarizesChangesAndRedactsDiff(t *testing.T) {
@@ -931,7 +931,7 @@ func TestCreatePRCommandConstruction(t *testing.T) {
 	t.Run("CreatePRWithAllOptions", func(t *testing.T) {
 		root := t.TempDir()
 		runner := &fakeRunner{results: []CommandResult{
-			{Stdout: "https://github.com/Gitlawb/zero/pull/123\n"},
+			{Stdout: "https://github.com/Twigpine/zero/pull/123\n"},
 		}}
 
 		result, err := CreatePR(context.Background(), PROptions{
@@ -946,7 +946,7 @@ func TestCreatePRCommandConstruction(t *testing.T) {
 			t.Fatalf("CreatePR returned error: %v", err)
 		}
 
-		if result.Output != "https://github.com/Gitlawb/zero/pull/123\n" {
+		if result.Output != "https://github.com/Twigpine/zero/pull/123\n" {
 			t.Fatalf("unexpected PR result: %#v", result)
 		}
 
@@ -965,7 +965,7 @@ func TestCreatePRCommandConstruction(t *testing.T) {
 	t.Run("CreatePRMinimal", func(t *testing.T) {
 		root := t.TempDir()
 		runner := &fakeRunner{results: []CommandResult{
-			{Stdout: "https://github.com/Gitlawb/zero/pull/124\n"},
+			{Stdout: "https://github.com/Twigpine/zero/pull/124\n"},
 		}}
 
 		_, err := CreatePR(context.Background(), PROptions{

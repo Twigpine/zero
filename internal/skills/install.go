@@ -18,7 +18,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/installtxn"
+	"github.com/Twigpine/zero/internal/installtxn"
 )
 
 // LockFileName is the name of the per-directory lockfile that maps an installed

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/agenteval"
+	"github.com/Twigpine/zero/internal/agenteval"
 )
 
 type agentEvalOptions struct {

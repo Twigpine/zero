@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/cron"
-	"github.com/Gitlawb/zero/internal/streamjson"
+	"github.com/Twigpine/zero/internal/cron"
+	"github.com/Twigpine/zero/internal/streamjson"
 )
 
 // execRunner runs a `zero exec ...` invocation and returns its exit code. The

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/modelregistry"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/modelregistry"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 type Normalized struct {

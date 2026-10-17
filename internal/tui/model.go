@@ -19,28 +19,28 @@ import (
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/Gitlawb/zero/internal/agent"
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/doctor"
-	"github.com/Gitlawb/zero/internal/errhint"
-	"github.com/Gitlawb/zero/internal/lsp"
-	internalmcp "github.com/Gitlawb/zero/internal/mcp"
-	"github.com/Gitlawb/zero/internal/modelregistry"
-	"github.com/Gitlawb/zero/internal/notify"
-	"github.com/Gitlawb/zero/internal/peermsg"
-	"github.com/Gitlawb/zero/internal/providerhealth"
-	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
-	"github.com/Gitlawb/zero/internal/providers"
-	"github.com/Gitlawb/zero/internal/providers/providerio"
-	"github.com/Gitlawb/zero/internal/sandbox"
-	"github.com/Gitlawb/zero/internal/sessions"
-	"github.com/Gitlawb/zero/internal/skills"
-	"github.com/Gitlawb/zero/internal/streamjson"
-	"github.com/Gitlawb/zero/internal/terminalpet"
-	"github.com/Gitlawb/zero/internal/tools"
-	"github.com/Gitlawb/zero/internal/usage"
-	"github.com/Gitlawb/zero/internal/usercommands"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/doctor"
+	"github.com/Twigpine/zero/internal/errhint"
+	"github.com/Twigpine/zero/internal/lsp"
+	internalmcp "github.com/Twigpine/zero/internal/mcp"
+	"github.com/Twigpine/zero/internal/modelregistry"
+	"github.com/Twigpine/zero/internal/notify"
+	"github.com/Twigpine/zero/internal/peermsg"
+	"github.com/Twigpine/zero/internal/providerhealth"
+	"github.com/Twigpine/zero/internal/providermodeldiscovery"
+	"github.com/Twigpine/zero/internal/providers"
+	"github.com/Twigpine/zero/internal/providers/providerio"
+	"github.com/Twigpine/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/skills"
+	"github.com/Twigpine/zero/internal/streamjson"
+	"github.com/Twigpine/zero/internal/terminalpet"
+	"github.com/Twigpine/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/usage"
+	"github.com/Twigpine/zero/internal/usercommands"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 const tuiToolOutputLimit = 240
@@ -89,6 +89,7 @@ type model struct {
 	// allowEscalation mirrors Options.AllowEscalation: it gates the per-run model
 	// switchers, and the caller gates the escalate_model tool on the same flag.
 	allowEscalation             bool
+	modelRPM                    *zeroruntime.ModelRPMLimiter
 	newProvider                 func(config.ProviderProfile) (zeroruntime.Provider, error)
 	newTurnSessionProvider      func(config.ProviderProfile, zeroruntime.Provider) zeroruntime.TurnSessionProvider
 	probeProviderHealth         func(context.Context, providerhealth.Options) providerhealth.Result
@@ -887,6 +888,11 @@ type permissionRequestMsg struct {
 type pendingPermissionPrompt struct {
 	request agent.PermissionRequest
 	decide  func(agent.PermissionDecision)
+	// decideCmd is the Update-safe alternative to decide for prompts the TUI
+	// itself raises: decide forwards through runtimeMessageSink, which blocks on
+	// the program's unbuffered message channel when called from Update, so these
+	// prompts return a command that yields the follow-up message instead.
+	decideCmd func(agent.PermissionDecision) tea.Cmd
 	// cursor is the highlighted option index (into permissionOptions): 0 is the
 	// resting approval choice. Moved by ↑/↓/Tab; confirmed by Enter or a click.
 	// Hotkeys resolve the matching request-provided option directly.
@@ -1091,6 +1097,7 @@ func newModel(ctx context.Context, options Options) model {
 		sandboxSetupCommand:         options.SandboxSetupCommand,
 		agentOptions:                options.AgentOptions,
 		allowEscalation:             options.AllowEscalation,
+		modelRPM:                    options.ModelRPM,
 		sessionCompactor:            options.SessionCompactor,
 		runtimeMessageSink:          options.RuntimeMessageSink,
 		permissionMode:              permissionMode,
@@ -4662,11 +4669,13 @@ func (m model) resolvePermissionWithReason(decision permissionDecision, reason s
 		return m, nil
 	}
 
+	resolved := agent.PermissionDecision{Action: decision, Reason: reason}
 	if pending.decide != nil {
-		pending.decide(agent.PermissionDecision{
-			Action: decision,
-			Reason: reason,
-		})
+		pending.decide(resolved)
+	}
+	var decideCmd tea.Cmd
+	if pending.decideCmd != nil {
+		decideCmd = pending.decideCmd(resolved)
 	}
 	m.pendingPermission = nil
 	// Time spent at the prompt is user wait, not provider silence. Restart the
@@ -4676,9 +4685,10 @@ func (m model) resolvePermissionWithReason(decision permissionDecision, reason s
 	if pending.request.ToolName == peerPermissionToolName {
 		// Receipt delivery completes asynchronously. That completion advances
 		// the peer queue after this prompt is fully settled.
-		return m, nil
+		return m, decideCmd
 	}
-	return m.openNextPeerApproval()
+	next, cmd := m.openNextPeerApproval()
+	return next, tea.Batch(decideCmd, cmd)
 }
 
 func permissionDecisionReason(decision permissionDecision) string {
@@ -5824,6 +5834,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				// currentModel: every usage event after a real escalation is billed
 				// to the escalated model, not the one the run started on.
 				func(modelID string) { usageModelID = modelID },
+				providers.Options{ModelRPM: m.modelRPM},
 			)
 		}
 		options.SupportsVision = func(modelID string) bool {

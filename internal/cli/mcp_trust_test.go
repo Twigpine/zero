@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/mcp"
-	"github.com/Gitlawb/zero/internal/tools"
-	"github.com/Gitlawb/zero/internal/workspacetrust"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/mcp"
+	"github.com/Twigpine/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/workspacetrust"
 )
 
 // mcpTrustDeps builds an appDeps whose resolveMCPConfig HONORS excludeProject: it

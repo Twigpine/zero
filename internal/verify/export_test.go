@@ -5,7 +5,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/redaction"
+	"github.com/Twigpine/zero/internal/redaction"
 )
 
 func RunLoop(ctx context.Context, plan Plan, options LoopOptions) LoopReport {
