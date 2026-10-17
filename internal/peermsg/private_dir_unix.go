@@ -12,7 +12,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func ensurePrivateDir(path string) error {
+func EnsurePrivateDir(path string) error {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return err
@@ -22,7 +22,13 @@ func ensurePrivateDir(path string) error {
 	if err != nil {
 		return err
 	}
-	defer unix.Close(parentFD)
+	// THE DESCRIPTOR THIS FUNCTION OWNS CHANGES ON EVERY ITERATION. The walk
+	// closes parentFD and replaces it with the child it just opened, so a defer
+	// that captured the first number would close a descriptor this function no
+	// longer owns (or one the kernel has since reused) and leave the last one it
+	// does own open. Close whatever is current when we leave, exactly once, on
+	// every path.
+	defer func() { unix.Close(parentFD) }()
 	for index, component := range components {
 		if component == "" {
 			continue

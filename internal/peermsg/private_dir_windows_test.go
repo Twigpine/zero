@@ -54,7 +54,7 @@ func TestEnsurePrivateDirAppliesOwnerOnlyProtectedDACL(t *testing.T) {
 	if !windowsDirectoryDACLContains(t, path, worldSID) {
 		t.Fatal("test setup did not grant the broad Everyone ACE")
 	}
-	if err := ensurePrivateDir(path); err != nil {
+	if err := EnsurePrivateDir(path); err != nil {
 		t.Fatal(err)
 	}
 	descriptor, err := windows.GetNamedSecurityInfo(
@@ -149,7 +149,7 @@ func windowsDirectoryDACLContains(t *testing.T, path string, wanted *windows.SID
 
 func TestSecurePrivateDirectoryRejectsOwnerMismatch(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "private")
-	if err := ensurePrivateDir(path); err != nil {
+	if err := EnsurePrivateDir(path); err != nil {
 		t.Fatal(err)
 	}
 	handle, err := openWindowsDirectory(path, windows.FILE_LIST_DIRECTORY|windows.FILE_TRAVERSE|windows.SYNCHRONIZE|windows.READ_CONTROL|windows.WRITE_DAC)
@@ -172,7 +172,7 @@ func TestSecurePrivateDirectoryRejectsOwnerMismatch(t *testing.T) {
 
 func TestSecurePrivateDirectoryReportsDACLWriteFailure(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "private")
-	if err := ensurePrivateDir(path); err != nil {
+	if err := EnsurePrivateDir(path); err != nil {
 		t.Fatal(err)
 	}
 	handle, err := openWindowsDirectory(path, windows.FILE_LIST_DIRECTORY|windows.FILE_TRAVERSE|windows.SYNCHRONIZE|windows.READ_CONTROL)
@@ -206,7 +206,7 @@ func TestEnsurePrivateDirRejectsWindowsReparseParent(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Skipf("cannot create Windows directory symlink: %v", err)
 	}
-	if err := ensurePrivateDir(filepath.Join(link, "peers")); err == nil {
+	if err := EnsurePrivateDir(filepath.Join(link, "peers")); err == nil {
 		t.Fatal("expected reparse-point parent to be rejected")
 	}
 }
@@ -217,7 +217,7 @@ func TestEnsurePrivateDirRejectsWindowsFileComponent(t *testing.T) {
 	if err := os.WriteFile(file, []byte("not a directory"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := ensurePrivateDir(filepath.Join(file, "peers")); err == nil {
+	if err := EnsurePrivateDir(filepath.Join(file, "peers")); err == nil {
 		t.Fatal("expected file path component to be rejected")
 	}
 }

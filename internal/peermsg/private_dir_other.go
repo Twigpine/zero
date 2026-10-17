@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-func ensurePrivateDir(path string) error {
+func EnsurePrivateDir(path string) error {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return err
