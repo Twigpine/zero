@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/config"
-	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
-	"github.com/Gitlawb/zero/internal/zerocommands"
+	"github.com/Twigpine/zero/internal/config"
+	zeroSandbox "github.com/Twigpine/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/zerocommands"
 )
 
 type sandboxCheckOptions struct {

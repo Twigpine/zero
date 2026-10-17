@@ -24,11 +24,15 @@ const (
 var (
 	ErrProcessNotFound      = errors.New("execution process not found")
 	ErrProcessStdinDisabled = errors.New("execution process does not accept stdin")
+	ErrProcessCapacity      = errors.New("execution process capacity reached; stop a running process before starting another")
 )
 
 type ProcessManagerOptions struct {
 	CompletedRetention time.Duration
-	MaxProcesses       int
+	// MaxProcesses bounds retained processes and in-flight launches. Completed
+	// history is pruned before rejecting a start; live processes are never evicted.
+	// Zero uses the default limit; a negative value disables the limit.
+	MaxProcesses int
 }
 
 // ProcessManager owns retained interactive-process identity, transport,
@@ -37,6 +41,7 @@ type ProcessManager struct {
 	mu                 sync.Mutex
 	nextID             int
 	processes          map[int]*managedProcess
+	starting           int
 	completedRetention time.Duration
 	maxProcesses       int
 	startTransport     processTransportStarter
@@ -120,12 +125,21 @@ func (manager *ProcessManager) Start(ctx context.Context, input ProcessStart, wa
 	if input.Prepared.Command == nil {
 		return ProcessResult{}, errors.New("prepared execution has no command")
 	}
+	if err := manager.reserve(); err != nil {
+		if input.Prepared.Cleanup != nil {
+			input.Prepared.Cleanup()
+		}
+		return ProcessResult{}, err
+	}
 	command := input.Prepared.Command
 	buffer := newProcessOutputBuffer()
 	request := input.Request
 	observer := NewChangeObserver(request.WorkspaceRoots[0])
 	stdin, tty, transportCleanup, err := manager.startTransport(command, buffer, input.TTY)
 	if err != nil {
+		manager.mu.Lock()
+		manager.starting--
+		manager.mu.Unlock()
 		if input.Prepared.Cleanup != nil {
 			input.Prepared.Cleanup()
 		}
@@ -331,9 +345,13 @@ func (manager *ProcessManager) StopAll() []int {
 	return ids
 }
 
+// Remove forgets completed history only. A live process must remain tracked
+// until completion, even if a termination attempt fails.
 func (manager *ProcessManager) Remove(id int) {
 	manager.mu.Lock()
-	delete(manager.processes, id)
+	if process, ok := manager.processes[id]; ok && process.doneClosed() {
+		delete(manager.processes, id)
+	}
 	manager.mu.Unlock()
 }
 
@@ -358,22 +376,25 @@ func (manager *ProcessManager) get(id int) (*managedProcess, bool) {
 	return process, ok
 }
 
+func (manager *ProcessManager) reserve() error {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if manager.maxProcesses > 0 && len(manager.processes)+manager.starting >= manager.maxProcesses {
+		completed := manager.processToPruneLocked()
+		if completed == nil {
+			return ErrProcessCapacity
+		}
+		delete(manager.processes, completed.id)
+	}
+	manager.starting++
+	return nil
+}
+
 func (manager *ProcessManager) store(process *managedProcess) {
 	manager.mu.Lock()
-	var evicted *managedProcess
-	if manager.maxProcesses > 0 && len(manager.processes) >= manager.maxProcesses {
-		evicted = manager.processToPruneLocked()
-		if evicted != nil && evicted.doneClosed() {
-			delete(manager.processes, evicted.id)
-			evicted = nil
-		}
-	}
+	manager.starting--
 	manager.processes[process.id] = process
 	manager.mu.Unlock()
-	if evicted != nil {
-		_, _ = evicted.output.Write([]byte("[zero] session evicted: too many background terminals\n"))
-		evicted.terminate()
-	}
 }
 
 func (manager *ProcessManager) processToPruneLocked() *managedProcess {
@@ -386,9 +407,6 @@ func (manager *ProcessManager) processToPruneLocked() *managedProcess {
 		if process.doneClosed() {
 			return process
 		}
-	}
-	if len(processes) > 8 {
-		return processes[0]
 	}
 	return nil
 }

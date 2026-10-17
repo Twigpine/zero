@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/skills"
+	"github.com/Twigpine/zero/internal/skills"
 )
 
 // skillTool lets the model pull a reusable instruction "skill" into context on

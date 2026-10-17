@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/oauth"
+	"github.com/Twigpine/zero/internal/oauth"
 )
 
 const testServerIdentity = "0123456789abcdef0123456789abcdef"

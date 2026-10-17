@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/modelregistry"
-	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/modelregistry"
+	"github.com/Twigpine/zero/internal/sessions"
 )
 
 func TestConfigSnapshotRedactsProviderURLsAndResolvesAPIModels(t *testing.T) {

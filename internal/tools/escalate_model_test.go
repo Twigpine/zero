@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Twigpine/zero/internal/modelregistry"
 )
 
 func TestEscalateModelToolMetadata(t *testing.T) {

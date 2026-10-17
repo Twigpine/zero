@@ -1,6 +1,6 @@
 package tools
 
-import "github.com/Gitlawb/zero/internal/localcontrol"
+import "github.com/Twigpine/zero/internal/localcontrol"
 
 // BuiltinCatalog returns every built-in tool that Zero can expose to the model
 // from this package (core + control + optional local-control helpers).

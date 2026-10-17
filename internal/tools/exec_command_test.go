@@ -13,8 +13,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/Gitlawb/zero/internal/execution"
-	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/execution"
+	"github.com/Twigpine/zero/internal/sandbox"
 )
 
 func TestIndependentExecCommandConstructorsShareDefaultManager(t *testing.T) {
@@ -373,20 +373,34 @@ func TestExecCommandForegroundServerReturnsSessionAndServesHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("foreground server should return session_id, meta=%#v output=%q", start.Meta, start.Output)
 	}
-	addr := parseListeningAddress(start.Output)
-	if addr == "" {
-		t.Fatalf("server output did not include listening address: %q", start.Output)
-	}
 	t.Cleanup(func() {
 		writeTool.Run(context.Background(), map[string]any{
 			"session_id": sessionID,
 			"chars":      "\u0003",
 		})
 	})
+	// Process start-up and net.Listen can outlast the first yield on a loaded
+	// runner, so keep polling the session until the address shows up.
+	output := start.Output
+	addr := parseListeningAddress(output)
+	for deadline := time.Now().Add(20 * time.Second); addr == "" && time.Now().Before(deadline); {
+		poll := writeTool.Run(context.Background(), map[string]any{
+			"session_id":    sessionID,
+			"yield_time_ms": 250,
+		})
+		if poll.Status != StatusOK {
+			t.Fatalf("write_stdin poll status = %s: %s", poll.Status, poll.Output)
+		}
+		output += "\n" + poll.Output
+		addr = parseListeningAddress(output)
+	}
+	if addr == "" {
+		t.Fatalf("server output did not include listening address: %q", output)
+	}
 
 	response, err := http.Get("http://" + addr)
 	if err != nil {
-		t.Fatalf("foreground exec server was not reachable at %s: %v; output=%q", addr, err, start.Output)
+		t.Fatalf("foreground exec server was not reachable at %s: %v; output=%q", addr, err, output)
 	}
 	defer response.Body.Close()
 	bytes, err := io.ReadAll(response.Body)

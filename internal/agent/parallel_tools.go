@@ -5,7 +5,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 // Parallel read-ahead for tool batches. When a turn requests several

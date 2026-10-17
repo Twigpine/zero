@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/usage"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/usage"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 // The context-fill gauge is empty before any request, then shows

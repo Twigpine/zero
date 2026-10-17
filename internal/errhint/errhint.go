@@ -24,6 +24,7 @@ const (
 	Connectivity
 	ModelNotFound
 	ContextOverflow
+	LocalRPM
 )
 
 // providerMarkers are the prefixes the provider layer attaches to every
@@ -59,6 +60,8 @@ func Classify(err error) Category {
 		return Unknown
 	}
 	switch {
+	case strings.Contains(m, "rate limit error: local rpm limit for"):
+		return LocalRPM
 	case containsAny(m, "auth error:", "unauthorized", "api key", "api_key", "invalid_api_key",
 		"authentication", "permission denied", "forbidden") || containsStatusCode(m, "401", "403"):
 		return Auth
@@ -89,6 +92,8 @@ func TUIHint(err error) string {
 		return "API key rejected — run /provider to re-check your credentials"
 	case RateLimit:
 		return "Rate limited — wait a moment, or switch model with /model"
+	case LocalRPM:
+		return "Local modelRPM cap reached — wait for the window to expire, or switch model with /model"
 	case Connectivity:
 		return "Can't reach the provider — run /doctor --connectivity"
 	case ModelNotFound:
@@ -109,6 +114,8 @@ func CLIHint(err error) string {
 		return "API key rejected — run `zero setup`, `zero auth openrouter` for OpenRouter, or set the provider's API key"
 	case RateLimit:
 		return "Rate limited — wait a moment, or switch model with --model"
+	case LocalRPM:
+		return "Local modelRPM cap reached — wait for the window to expire, or switch model with --model"
 	case Connectivity:
 		return "Can't reach the provider — run `zero doctor`"
 	case ModelNotFound:

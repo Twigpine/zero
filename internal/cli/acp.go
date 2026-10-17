@@ -7,14 +7,14 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/Gitlawb/zero/internal/acp"
-	"github.com/Gitlawb/zero/internal/agent"
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/execution"
-	"github.com/Gitlawb/zero/internal/mcp"
-	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
-	"github.com/Gitlawb/zero/internal/redaction"
-	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/acp"
+	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/execution"
+	"github.com/Twigpine/zero/internal/mcp"
+	"github.com/Twigpine/zero/internal/providermodeldiscovery"
+	"github.com/Twigpine/zero/internal/redaction"
+	"github.com/Twigpine/zero/internal/sandbox"
 )
 
 const acpUsage = `zero acp — serve the Agent Client Protocol (ACP) over stdio

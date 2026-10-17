@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/agent"
-	"github.com/Gitlawb/zero/internal/workspaceindex"
+	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/workspaceindex"
 )
 
 // commandSuggestion is one row in the slash-command autocomplete overlay: the

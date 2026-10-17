@@ -12,14 +12,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/redaction"
-	"github.com/Gitlawb/zero/internal/selfverify"
-	"github.com/Gitlawb/zero/internal/testrunner"
-	"github.com/Gitlawb/zero/internal/verify"
-	"github.com/Gitlawb/zero/internal/worktrees"
-	"github.com/Gitlawb/zero/internal/zerogit"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/redaction"
+	"github.com/Twigpine/zero/internal/selfverify"
+	"github.com/Twigpine/zero/internal/testrunner"
+	"github.com/Twigpine/zero/internal/verify"
+	"github.com/Twigpine/zero/internal/worktrees"
+	"github.com/Twigpine/zero/internal/zerogit"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 type worktreeCommandOptions struct {

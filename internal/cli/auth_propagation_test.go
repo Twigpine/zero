@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/providerhealth"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/providerhealth"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 // seedStoredProviderKey writes key into a credential store rooted beside the

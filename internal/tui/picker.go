@@ -9,13 +9,13 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/modelregistry"
-	"github.com/Gitlawb/zero/internal/notify"
-	"github.com/Gitlawb/zero/internal/providercatalog"
-	"github.com/Gitlawb/zero/internal/providermodelcatalog"
-	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
-	"github.com/Gitlawb/zero/internal/providers"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/modelregistry"
+	"github.com/Twigpine/zero/internal/notify"
+	"github.com/Twigpine/zero/internal/providercatalog"
+	"github.com/Twigpine/zero/internal/providermodelcatalog"
+	"github.com/Twigpine/zero/internal/providermodeldiscovery"
+	"github.com/Twigpine/zero/internal/providers"
 )
 
 // pickerKind identifies which command a picker selection feeds back into.

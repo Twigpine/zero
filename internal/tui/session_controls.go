@@ -9,15 +9,15 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/Gitlawb/zero/internal/agent"
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/execprofile"
-	"github.com/Gitlawb/zero/internal/modelregistry"
-	"github.com/Gitlawb/zero/internal/providercatalog"
-	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
-	"github.com/Gitlawb/zero/internal/sessions"
-	"github.com/Gitlawb/zero/internal/usage"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/execprofile"
+	"github.com/Twigpine/zero/internal/modelregistry"
+	"github.com/Twigpine/zero/internal/providercatalog"
+	"github.com/Twigpine/zero/internal/providermodeldiscovery"
+	"github.com/Twigpine/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/usage"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 var responseStyles = []string{"balanced", "concise", "explanatory", "review"}

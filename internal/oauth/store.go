@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/keyring"
+	"github.com/Twigpine/zero/internal/keyring"
 )
 
 const (

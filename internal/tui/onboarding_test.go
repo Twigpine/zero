@@ -11,9 +11,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/Gitlawb/zero/internal/aimlapi"
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
+	"github.com/Twigpine/zero/internal/aimlapi"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/providermodeldiscovery"
 )
 
 func TestSetupMethodOptionsDropsOAuthWithoutOAuthProviders(t *testing.T) {

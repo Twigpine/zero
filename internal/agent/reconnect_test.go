@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 // flakyProvider fails the first failBefore connect attempts with failErr, then

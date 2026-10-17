@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
   [string]$Version = $env:ZERO_VERSION,
-  [string]$Repository = $(if ($env:ZERO_REPO) { $env:ZERO_REPO } else { "Gitlawb/zero" }),
+  [string]$Repository = $(if ($env:ZERO_REPO) { $env:ZERO_REPO } else { "Twigpine/zero" }),
   [string]$InstallDir = $env:ZERO_INSTALL_DIR,
   [string]$GitHubApi = $(if ($env:ZERO_GITHUB_API) { $env:ZERO_GITHUB_API } else { "https://api.github.com" }),
   [string]$GitHubBaseUrl = $(if ($env:ZERO_GITHUB_BASE_URL) { $env:ZERO_GITHUB_BASE_URL } else { "https://github.com" })

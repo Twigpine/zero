@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/hooks"
-	"github.com/Gitlawb/zero/internal/plugins"
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/hooks"
+	"github.com/Twigpine/zero/internal/plugins"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 // fakePluginDeps builds appDeps whose loadPlugins returns the supplied plugins and

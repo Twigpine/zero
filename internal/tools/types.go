@@ -4,9 +4,9 @@ import (
 	"context"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/execution"
-	"github.com/Gitlawb/zero/internal/sandbox"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/execution"
+	"github.com/Twigpine/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 type SideEffect string

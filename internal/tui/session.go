@@ -9,12 +9,12 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/agent"
-	"github.com/Gitlawb/zero/internal/execution"
-	"github.com/Gitlawb/zero/internal/sandbox"
-	"github.com/Gitlawb/zero/internal/sessions"
-	"github.com/Gitlawb/zero/internal/tools"
-	"github.com/Gitlawb/zero/internal/usage"
+	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/execution"
+	"github.com/Twigpine/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/usage"
 )
 
 const tuiSessionTitleLimit = 80
@@ -311,9 +311,19 @@ func (m model) resolveResumeSession(args string) (*sessions.Metadata, error) {
 // the CLI's `zero exec --resume` (readExecContextEvents) and the in-TUI /compact
 // reload. Falls back to the raw log if rehydration fails.
 func (m model) resumeEvents(sessionID string) ([]sessions.Event, error) {
+	// Picked from its metadata a moment ago. Make sure it is still there, and
+	// held, before resuming it: see sessions.HoldToContinue.
+	if err := m.sessionStore.HoldToContinue(sessionID); err != nil {
+		return nil, err
+	}
 	events, err := m.sessionStore.ReadRehydratedEvents(sessionID)
 	if err == nil {
 		return events, nil
+	}
+	if errors.Is(err, sessions.ErrPruning) {
+		// Not a rehydration failure: the raw read would resume the session without
+		// holding it while zero sessions prune may be removing it.
+		return nil, err
 	}
 	raw, rawErr := m.sessionStore.ReadEvents(sessionID)
 	if rawErr != nil {

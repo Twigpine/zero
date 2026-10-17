@@ -1,6 +1,6 @@
 package mcp
 
-import "github.com/Gitlawb/zero/internal/zeroruntime"
+import "github.com/Twigpine/zero/internal/zeroruntime"
 
 // DroppedContentSummary describes the blocks that were not forwarded, e.g.
 // "1 audio/wav block" or "2 resource blocks, 1 image/png block". It returns ""

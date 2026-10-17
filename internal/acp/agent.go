@@ -13,17 +13,18 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Gitlawb/zero/internal/agent"
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/modelregistry"
-	"github.com/Gitlawb/zero/internal/providercatalog"
-	"github.com/Gitlawb/zero/internal/providermodelcatalog"
-	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
-	"github.com/Gitlawb/zero/internal/redaction"
-	"github.com/Gitlawb/zero/internal/sandbox"
-	"github.com/Gitlawb/zero/internal/sessions"
-	"github.com/Gitlawb/zero/internal/tools"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/modelregistry"
+	"github.com/Twigpine/zero/internal/providercatalog"
+	"github.com/Twigpine/zero/internal/providermodelcatalog"
+	"github.com/Twigpine/zero/internal/providermodeldiscovery"
+	"github.com/Twigpine/zero/internal/redaction"
+	"github.com/Twigpine/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/usage"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 // Deps are the ZERO capabilities the ACP Agent drives. The CLI fills these with
@@ -213,7 +214,7 @@ func (a *Agent) handleSessionNew(ctx context.Context, params json.RawMessage) (a
 	if err != nil {
 		return nil, RPCError(codeInternalError, "create session: "+err.Error())
 	}
-	sess, _ := a.registerSession(meta.SessionID, root, nil, model, models, restrictModels, false)
+	sess, _ := a.registerSession(meta.SessionID, root, nil, model, models, restrictModels, false, agent.PermissionModeAuto)
 	return NewSessionResult{
 		SessionID:     sess.id,
 		ConfigOptions: a.configOptions(sess),
@@ -310,6 +311,12 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 	if operation == persistedSessionResume && historyErr != nil {
 		return nil, RPCError(codeInternalError, "restore session history: "+historyErr.Error())
 	}
+	// Load stays best effort about a history it cannot read, but not about one
+	// prune holds: publishing it would leave the client using a session prune may
+	// be removing, one this process could not hold open.
+	if errors.Is(historyErr, sessions.ErrPruning) {
+		return nil, RPCError(codeInternalError, historyErr.Error())
+	}
 	model, models, restrictModels, err := a.resolveModelChoices(ctx, root)
 	if err != nil {
 		return nil, RPCError(codeInternalError, "config: "+err.Error())
@@ -323,7 +330,7 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 	// Resume has already refused a non-resumable kind above, so only load can
 	// reach here with one, and it publishes that session for viewing only.
 	readOnly := !sessions.IsResumableKind(meta.SessionKind)
-	sess, existed := a.registerSession(meta.SessionID, root, history, model, models, restrictModels, readOnly)
+	sess, existed := a.registerSession(meta.SessionID, root, history, model, models, restrictModels, readOnly, restoredPermissionMode(meta.PermissionMode))
 	if existed {
 		_, messages, historyWarning, historyErr = a.refreshSessionHistory(sess, requireHistoryLog)
 		if operation == persistedSessionResume && historyErr != nil {
@@ -561,6 +568,12 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 		SupportsVision: supportsVision,
 		OnText:         note.text,
 		OnReasoning:    note.thought,
+		// Persist token usage the same way `zero exec` does, so `zero usage report`
+		// sees ACP sessions too. It joins the turn's buffered batch: a hard run
+		// failure that aborts the turn drops its usage together with its history.
+		OnUsage: func(u agent.Usage) {
+			queue(usageEvent(u))
+		},
 		OnToolCall: func(call agent.ToolCall) {
 			queue(toolCallEvent(call))
 			note.toolCall(call)
@@ -689,7 +702,9 @@ func (a *Agent) handleSetMode(_ context.Context, params json.RawMessage) (any, e
 	mode := agent.PermissionMode(p.ModeID)
 	switch mode {
 	case agent.PermissionModeAuto, agent.PermissionModeAsk, agent.PermissionModePlan:
-		sess.setMode(mode)
+		if err := a.updateMode(sess, mode); err != nil {
+			return nil, err
+		}
 		(&notifier{conn: a.conn, sessionID: sess.id}).currentMode(string(mode))
 		return SetSessionModeResult{}, nil
 	case agent.PermissionModeUnsafe:
@@ -725,7 +740,9 @@ func (a *Agent) handleSetConfigOption(_ context.Context, params json.RawMessage)
 		mode := agent.PermissionMode(p.Value)
 		switch mode {
 		case agent.PermissionModeAuto, agent.PermissionModeAsk, agent.PermissionModePlan:
-			sess.setMode(mode)
+			if err := a.updateMode(sess, mode); err != nil {
+				return nil, err
+			}
 			(&notifier{conn: a.conn, sessionID: sess.id}).currentMode(string(mode))
 		case agent.PermissionModeUnsafe:
 			return nil, RPCError(codeInvalidParams, "mode not permitted over ACP: "+p.Value)
@@ -765,6 +782,35 @@ func (a *Agent) updateModel(sess *acpSession, model string, restrictModels bool)
 	}
 	sess.setModel(model)
 	return nil
+}
+
+// updateMode persists the mode BEFORE applying it, so a failed write fails the
+// request instead of leaving disk behind memory; the same order updateModel
+// uses. The caller holds sess.turnMu (both mode doors take it and it is not
+// reentrant, so this must not lock it again); the write under turnMu briefly
+// blocks that session's prompts, which is what makes the store authoritative.
+func (a *Agent) updateMode(sess *acpSession, mode agent.PermissionMode) error {
+	if _, err := a.deps.Store.UpdateMode(sess.id, string(mode)); err != nil {
+		return RPCError(codeInternalError, "save mode selection: "+err.Error())
+	}
+	sess.setMode(mode)
+	return nil
+}
+
+// restoredPermissionMode maps a persisted mode onto the modes ACP offers. A
+// session written before modes were persisted has none and keeps the historical
+// auto default. A stored value outside the three is never allowed to come back
+// weaker than ask, and unsafe can never be reached because ACP refuses to set
+// it in the first place.
+func restoredPermissionMode(saved string) agent.PermissionMode {
+	switch mode := agent.PermissionMode(strings.TrimSpace(saved)); mode {
+	case agent.PermissionModeAuto, agent.PermissionModeAsk, agent.PermissionModePlan:
+		return mode
+	case "":
+		return agent.PermissionModeAuto
+	default:
+		return agent.PermissionModeAsk
+	}
 }
 
 func (a *Agent) handleCancel(_ context.Context, params json.RawMessage) {
@@ -891,6 +937,15 @@ func messageEvent(role, content string) sessions.AppendEventInput {
 	}
 }
 
+// usageEvent records one provider usage report in the same persisted shape the
+// exec runtime writes (usage.EventUsagePayload is the single writer).
+func usageEvent(u agent.Usage) sessions.AppendEventInput {
+	return sessions.AppendEventInput{
+		Type:    sessions.EventUsage,
+		Payload: usage.EventUsagePayload(u),
+	}
+}
+
 func toolCallEvent(call agent.ToolCall) sessions.AppendEventInput {
 	return sessions.AppendEventInput{
 		Type: sessions.EventToolCall,
@@ -948,9 +1003,20 @@ func (a *Agent) loadHistory(sessionID string, requireHistoryLog bool) ([]turnRec
 	// enough: rehydration substitutes the compaction event in place of the events
 	// it replaced, so a loop that skips everything but EventMessage would drop the
 	// summary exactly as before. It is projected below. Reported by @jatmn.
+	//
+	// The session was picked from its metadata a moment ago. Make sure it is
+	// still there, and held, before restoring it: see sessions.HoldToContinue.
+	if err := a.deps.Store.HoldToContinue(sessionID); err != nil {
+		return nil, nil, nil, err
+	}
 	events, eventLogPresent, err := a.deps.Store.ReadRehydratedEventsWithPresence(sessionID)
 	var rehydrateWarning error
 	if err != nil {
+		if errors.Is(err, sessions.ErrPruning) {
+			// Not a rehydration failure: the raw read would continue the session
+			// without holding it while zero sessions prune may be removing it.
+			return nil, nil, nil, err
+		}
 		rehydrateWarning = err
 		events, eventLogPresent, err = a.deps.Store.ReadEventsWithPresence(sessionID)
 		if err != nil {
@@ -1193,14 +1259,15 @@ func promptImages(blocks []ContentBlock) []zeroruntime.ImageBlock {
 // session is returned rather than orphaning its turn or resetting its mode/model.
 // The bool reports that case so persisted activation can re-read and apply disk
 // history under turnMu. history is set BEFORE first publication so no concurrent
-// prompt can read a half-initialized session.
-func (a *Agent) registerSession(id, cwd string, history []turnRecord, model string, models []SessionConfigOptionValue, restrictModels bool, readOnly bool) (*acpSession, bool) {
+// prompt can read a half-initialized session. mode is the session's initial
+// permission mode: auto for a new session, the restored value for load/resume.
+func (a *Agent) registerSession(id, cwd string, history []turnRecord, model string, models []SessionConfigOptionValue, restrictModels bool, readOnly bool, mode agent.PermissionMode) (*acpSession, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if existing := a.sessions[id]; existing != nil {
 		return existing, true
 	}
-	sess := &acpSession{id: id, cwd: cwd, mode: agent.PermissionModeAuto, model: model, models: models, restrictModels: restrictModels, history: history, readOnly: readOnly}
+	sess := &acpSession{id: id, cwd: cwd, mode: mode, model: model, models: models, restrictModels: restrictModels, history: history, readOnly: readOnly}
 	a.sessions[id] = sess
 	return sess, false
 }

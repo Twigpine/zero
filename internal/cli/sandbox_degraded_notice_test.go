@@ -7,12 +7,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/mcp"
-	"github.com/Gitlawb/zero/internal/sandbox"
-	"github.com/Gitlawb/zero/internal/tools"
-	"github.com/Gitlawb/zero/internal/tui"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/mcp"
+	"github.com/Twigpine/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/tui"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 // hostSandboxNotice is the degraded-sandbox line exec prints on THIS machine for

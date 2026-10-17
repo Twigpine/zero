@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/oauth"
+	"github.com/Twigpine/zero/internal/oauth"
 )
 
 // tokenStoreSchemaVersion is the schema of the legacy mcp-oauth-tokens.json file,

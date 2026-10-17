@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/Gitlawb/zero/internal/fsutil"
+	"github.com/Twigpine/zero/internal/fsutil"
 )
 
 const (

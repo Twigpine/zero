@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/sessions"
-	"github.com/Gitlawb/zero/internal/streamjson"
+	"github.com/Twigpine/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/streamjson"
 )
 
 // argValue returns the value following flag in argv, and whether it was present.
@@ -229,8 +229,9 @@ func TestRunResumePassesTheParentModelThroughToTheChild(t *testing.T) {
 		Prompt: "keep going",
 		Resume: "child_task",
 	}, TaskRunOptions{
-		ParentSessionID: parent.SessionID,
-		ParentModel:     "claude-opus-4.1",
+		ParentSessionID:       parent.SessionID,
+		ParentModel:           "claude-opus-4.1",
+		ParentReasoningEffort: "high",
 	}); err != nil {
 		t.Fatalf("Run(resume): %v", err)
 	}
@@ -245,6 +246,9 @@ func TestRunResumePassesTheParentModelThroughToTheChild(t *testing.T) {
 	}
 	if model != "claude-opus-4.1" {
 		t.Fatalf("the resumed child was launched with --model %q, want the parent's %q", model, "claude-opus-4.1")
+	}
+	if effort, ok := argValue(captured, "--reasoning-effort"); !ok || effort != "high" {
+		t.Fatalf("the resumed child was launched with --reasoning-effort %q (present=%t), want the parent's", effort, ok)
 	}
 }
 

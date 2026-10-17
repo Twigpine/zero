@@ -2,7 +2,7 @@ name: ZERO
 description: >-
   Run the ZERO coding agent headlessly in a GitHub workflow. ZERO is
   model- and provider-agnostic: you supply the provider and API key as inputs.
-author: Gitlawb
+author: Twigpine
 
 branding:
   icon: terminal
@@ -110,7 +110,7 @@ inputs:
   zero-repo:
     description: Repository to install the ZERO release from (owner/repo).
     required: false
-    default: Gitlawb/zero
+    default: Twigpine/zero
 
 outputs:
   exit-code:

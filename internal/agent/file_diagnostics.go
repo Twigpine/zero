@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/lsp"
+	"github.com/Twigpine/zero/internal/lsp"
 )
 
 // fileDiagnosticsTimeout bounds one inline post-edit diagnostics check so a

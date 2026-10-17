@@ -8,11 +8,11 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/providercatalog"
-	"github.com/Gitlawb/zero/internal/sandbox"
-	"github.com/Gitlawb/zero/internal/tools"
-	"github.com/Gitlawb/zero/internal/zerocommands"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/providercatalog"
+	"github.com/Twigpine/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/zerocommands"
 )
 
 func (m model) toolsText() string {

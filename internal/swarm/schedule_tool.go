@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 // ScheduleToolName is the recurring-spawn scheduler tool.

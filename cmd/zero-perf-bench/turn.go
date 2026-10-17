@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/execprofile"
-	"github.com/Gitlawb/zero/internal/perfbench"
+	"github.com/Twigpine/zero/internal/execprofile"
+	"github.com/Twigpine/zero/internal/perfbench"
 )
 
 // turnOptions configures the `zero-perf-bench turn` subcommand: the per-turn

@@ -3,8 +3,8 @@ package tui
 import (
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/notify"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/notify"
 )
 
 // notifyChoice is one row in the /notify picker: a (mode, focusMode) pair and

@@ -8,7 +8,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/background"
+	"github.com/Twigpine/zero/internal/background"
 )
 
 func TestRuntimeCloseDoesNotCreateUnusedManager(t *testing.T) {

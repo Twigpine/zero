@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/redaction"
-	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/redaction"
+	"github.com/Twigpine/zero/internal/sessions"
 )
 
 func TestSearchSessionsFindsRedactedEventContextAndCachesIndex(t *testing.T) {

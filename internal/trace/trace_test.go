@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/agenteval"
+	"github.com/Twigpine/zero/internal/agenteval"
 )
 
 func TestRecorderSpanAccumulates(t *testing.T) {

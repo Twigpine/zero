@@ -19,13 +19,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/agent"
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
-	"github.com/Gitlawb/zero/internal/sandbox"
-	"github.com/Gitlawb/zero/internal/sessions"
-	"github.com/Gitlawb/zero/internal/tools"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/providermodeldiscovery"
+	"github.com/Twigpine/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 // fakeProvider streams a canned assistant message and ends the turn — enough to
@@ -2540,6 +2540,71 @@ func payloadString(payload any, key string) string {
 	}
 	value, _ := decoded[key].(string)
 	return value
+}
+
+// Load is best effort about a history it cannot read, but a session that zero
+// sessions prune holds is refused by load and resume alike, and not published:
+// this process could not hold it open while prune may be removing it.
+func TestACPLoadAndResumeAreRefusedWhilePruneHoldsTheSession(t *testing.T) {
+	deps := testDeps(t)
+	cwd := t.TempDir()
+	meta, err := deps.Store.Create(sessions.CreateInput{Title: "ACP session", Cwd: cwd})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	// Created by an earlier process, which has since exited.
+	deps.Store.Release(meta.SessionID)
+
+	release, locked, err := sessions.NewStore(sessions.StoreOptions{RootDir: deps.Store.RootDir}).HoldExclusive(meta.SessionID)
+	if err != nil || !locked {
+		t.Fatalf("take the lease the way prune does: locked=%v, %v", locked, err)
+	}
+	defer release()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	h := newHarness(t, deps)
+	defer h.stop()
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: meta.SessionID, Cwd: cwd, McpServers: []McpServer{}}, &LoadSessionResult{}); err == nil || !strings.Contains(err.Error(), "locked by zero sessions prune") {
+		t.Errorf("session/load while prune holds the session: err = %v, want it refused", err)
+	}
+	if err := h.client.Call(ctx, MethodSessionResume, ResumeSessionParams{SessionID: meta.SessionID, Cwd: cwd, McpServers: []McpServer{}}, &ResumeSessionResult{}); err == nil || !strings.Contains(err.Error(), "locked by zero sessions prune") {
+		t.Errorf("session/resume while prune holds the session: err = %v, want it refused", err)
+	}
+	if err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{
+		SessionID: meta.SessionID,
+		Prompt:    []ContentBlock{TextBlock("carry on")},
+	}, &PromptResult{}); err == nil {
+		t.Fatal("a session refused while prune held it was still promptable")
+	}
+}
+
+// Activation reads the session's metadata before it restores the history. A
+// session prune removes in between is refused as removed, which activation then
+// refuses to publish for load as well as resume, instead of restoring it as an
+// empty conversation.
+func TestACPLoadHistoryRefusesASessionRemovedAfterItWasPicked(t *testing.T) {
+	deps := testDeps(t)
+	meta, err := deps.Store.Create(sessions.CreateInput{Title: "ACP session", Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	deps.Store.Release(meta.SessionID)
+	dir := filepath.Join(deps.Store.RootDir, meta.SessionID)
+	if err := os.Remove(filepath.Join(dir, sessions.MetadataFile)); err != nil {
+		t.Fatal(err)
+	}
+
+	a := &Agent{deps: deps}
+	if _, _, _, err := a.loadHistory(meta.SessionID, false); !errors.Is(err, sessions.ErrPruning) {
+		t.Errorf("load history of a session prune is removing: err = %v, want it refused", err)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := a.loadHistory(meta.SessionID, false); !errors.Is(err, sessions.ErrPruning) {
+		t.Errorf("load history of a session prune removed: err = %v, want it refused", err)
+	}
 }
 
 func TestACPPromptUnsupportedModelDropsImagesAndNotifies(t *testing.T) {
