@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/Gitlawb/zero/internal/imageinput"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/imageinput"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/localcontrol"
+	"github.com/Twigpine/zero/internal/localcontrol"
 )
 
 const defaultArtifactBaseName = "capture"

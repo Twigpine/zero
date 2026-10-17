@@ -6,8 +6,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/Gitlawb/zero/internal/sessions"
-	"github.com/Gitlawb/zero/internal/usage"
+	"github.com/Twigpine/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/usage"
 )
 
 const (
@@ -217,6 +217,13 @@ func btwCommandUnavailable(command parsedCommand) bool {
 	case commandTurns, commandProfile:
 		return arg != "" && arg != "status"
 	case commandTheme:
+		return arg != "list"
+	case commandNotify:
+		// Mutations reconfigure the shared notifier pointer and write the
+		// global preference; inside a BTW side conversation that would mutate
+		// the hidden parent's live policy and the user's global file while
+		// only the side surface's display fields change. Read-only list stays
+		// available (maintainer review, PR #1001).
 		return arg != "list"
 	case commandConfig:
 		return arg != ""

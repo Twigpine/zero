@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/redaction"
-	"github.com/Gitlawb/zero/internal/secrets"
+	"github.com/Twigpine/zero/internal/redaction"
+	"github.com/Twigpine/zero/internal/secrets"
 )
 
 // Spill-to-disk for truncated tool output. When a command produces more than

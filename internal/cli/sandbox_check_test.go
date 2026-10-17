@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/sandbox"
 )
 
 func sandboxCheckDeps(t *testing.T) (appDeps, string) {

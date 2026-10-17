@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	DefaultRepository = "Gitlawb/zero"
+	DefaultRepository = "Twigpine/zero"
 	DefaultTimeout    = 5 * time.Second
 )
 
@@ -233,6 +233,10 @@ func Format(result Result) string {
 		"Latest release: " + result.ReleaseURL,
 	}
 	lines = appendAssetLines(lines, result.ReleaseAsset)
+	if result.installMethod == InstallMethodNpmLegacy {
+		// Up to date today, but the next release will not reach this install.
+		lines = append(lines, legacyPackageSwitchMessage())
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -321,6 +325,11 @@ func upgradeGuidance(asset AssetCheck, sourceFlag string, installMethod InstallM
 		// about a different target the answer belongs to that other machine, and
 		// `brew upgrade zero` would change this one instead.
 		return "This Homebrew-managed installation is updated with `brew upgrade zero`. `zero upgrade` refuses here, because replacing the keg binary would leave Homebrew's records describing a version that is no longer installed."
+	}
+	if installMethod == InstallMethodNpmLegacy {
+		// Placed like the Homebrew answer above, and for the same reason: it is a
+		// property of the install on this machine, and `zero upgrade` refuses it.
+		return legacyPackageSwitchMessage()
 	}
 	if sourceFlag != "" {
 		if installMethod == InstallMethodNpm {
@@ -457,7 +466,7 @@ func releasePlatform(goos string) (string, error) {
 		// self-updating release asset. Point users at `npm update` rather
 		// than a source rebuild, since that's the documented Termux
 		// install/upgrade path and doesn't require a Go toolchain.
-		return "", fmt.Errorf("no published release for %q (release assets: linux, macos, windows). Your build is the current version of record. Upgrade with `npm update -g @gitlawb/zero` to get the latest.", goos) //nolint:staticcheck // Preserve established user-facing error text.
+		return "", fmt.Errorf("no published release for %q (release assets: linux, macos, windows). Your build is the current version of record. Upgrade with `npm update -g %s` to get the latest.", goos, npmPackageName) //nolint:staticcheck // Preserve established user-facing error text.
 	}
 }
 

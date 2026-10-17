@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Twigpine/zero/internal/config"
 )
 
 // writeProjectMCPConfig drops a ./.zero/config.json under dir declaring one MCP server,

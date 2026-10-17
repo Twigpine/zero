@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Twigpine/zero/internal/config"
 )
 
 // userStateEnvNames is every per-user base directory the root command can
@@ -62,6 +62,10 @@ func TestCLILaunchHelpersLeaveUserStateAlone(t *testing.T) {
 		{"execAdvertisesEscalateModel", func(t *testing.T) {
 			_ = execAdvertisesEscalateModel(t, []string{"--allow-escalation", "exec", "say hi"})
 		}},
+		{"runExecWithSandbox", func(t *testing.T) {
+			_, _, _ = runExecWithSandbox(t, []string{"exec", "hello"}, unavailableTestSandbox, config.SandboxConfig{})
+		}},
+		{"launchTUIWithSandbox", func(t *testing.T) { _ = launchTUIWithSandbox(t, config.SandboxConfig{}) }},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			seedRoot, configPath, seeded, before := seedEmulatedUserConfig(t)

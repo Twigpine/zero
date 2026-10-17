@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/providercatalog"
+	"github.com/Twigpine/zero/internal/notify"
+	"github.com/Twigpine/zero/internal/providercatalog"
 )
 
 func UpsertProvider(path string, profile ProviderProfile, setActive bool) (result FileConfig, err error) {
@@ -756,6 +758,128 @@ func SetTheme(path string, theme string) (result FileConfig, err error) {
 	return cfg, nil
 }
 
+// UserNotify returns the notify block stored in the user's own config file at
+// path, trimmed. A missing file or missing/empty block returns the zero value:
+// callers that need to preserve "whatever the user already chose" on a partial
+// update must seed from THIS value, not from the resolved view — the resolver
+// merges project config and the TUI applies its own defaults, so seeding from
+// resolved copies choices the user never made into their global file (a
+// project's mode: off, or a pinned default) and across every other project.
+func UserNotify(path string) (NotifyConfig, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return NotifyConfig{}, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return NotifyConfig{}, nil
+		}
+		return NotifyConfig{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+	var cfg FileConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return NotifyConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+	}
+	cfg.Notify.Mode = strings.TrimSpace(cfg.Notify.Mode)
+	cfg.Notify.FocusMode = strings.TrimSpace(cfg.Notify.FocusMode)
+	return cfg.Notify, nil
+}
+
+// validateNotify trims both fields and checks them against the accepted vocab
+// (mode in {off,bell,notify,both}; focusMode in {unfocused,always,focused}) so
+// a bad caller cannot write a value the resolver would later reject at
+// startup. An empty Mode or FocusMode is stored as-is — blank means "use the
+// built-in defaults" (the TUI's effectiveTUINotifyMode maps an empty mode to
+// both; the notify package treats an empty focusMode as unfocused), not "off".
+func validateNotify(value NotifyConfig) (NotifyConfig, error) {
+	value.Mode = strings.TrimSpace(value.Mode)
+	value.FocusMode = strings.TrimSpace(value.FocusMode)
+	if mode := value.Mode; mode != "" {
+		switch notify.Mode(mode) {
+		case notify.ModeOff, notify.ModeBell, notify.ModeNotify, notify.ModeBoth:
+		default:
+			return NotifyConfig{}, fmt.Errorf("invalid notify.mode %q: expected off, bell, notify, or both", mode)
+		}
+	}
+	if focus := value.FocusMode; focus != "" {
+		switch notify.FocusMode(focus) {
+		case notify.FocusUnfocused, notify.FocusAlways, notify.FocusFocused:
+		default:
+			return NotifyConfig{}, fmt.Errorf("invalid notify.focusMode %q: expected unfocused, always, or focused", focus)
+		}
+	}
+	return value, nil
+}
+
+// UpdateNotify runs one SERIALIZED read-modify-write transaction on the user's
+// notify block. merge receives the currently stored block and returns the
+// block to store; it must preserve any field the caller is not explicitly
+// changing. The lock covers reading the stored block, applying merge, and
+// replacing the file, so two concurrent partial updates (for example
+// `--mode off` and `--focus always` from two terminals) cannot interleave
+// their reads and writes and silently undo each other's explicit change
+// (maintainer review, PR #1001 reproduced a 50/50 lost-update without it).
+//
+// The write replaces ONLY the notify member's bytes (setNotifyJSONObject),
+// preserving every unrelated value and its explicit presence — including
+// explicit zeros/falses like tools.deferThreshold: 0 or an MCP server's
+// disabled: false, which the typed serializer's omitempty cannot round-trip —
+// through the existing temp-file-and-rename atomic publish. Locking only the
+// final write would leave the stale-field merge outside the transaction, so
+// the whole sequence runs under one lock — the SAME lockConfigFileFn authority
+// every other config mutator uses (provider/theme/credential/MCP writes), not
+// a private lock: two authorities over the same file would not contend
+// (maintainer review, PR #1001). The release error is joined into the
+// result like every other writer: a failed unlock would leave the advisory
+// lock held and later updates blocked while the caller is told success.
+func UpdateNotify(path string, merge func(current NotifyConfig) NotifyConfig) (result NotifyConfig, err error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return NotifyConfig{}, fmt.Errorf("config path is required")
+	}
+	if merge == nil {
+		return NotifyConfig{}, fmt.Errorf("merge function is required")
+	}
+	release, err := lockConfigFileFn(path)
+	if err != nil {
+		return NotifyConfig{}, err
+	}
+	// Joined, not chosen between: a release failure annotates the result
+	// instead of masking the mutation error that actually explains what went
+	// wrong. Reporting success after a failed release would claim a state the
+	// next update cannot reproduce.
+	defer func() { err = errors.Join(err, release()) }()
+
+	current, err := UserNotify(path)
+	if err != nil {
+		return NotifyConfig{}, err
+	}
+	next, err := validateNotify(merge(current))
+	if err != nil {
+		return NotifyConfig{}, err
+	}
+
+	// Read the raw file and edit only the notify member. A missing file starts
+	// from an empty object so a first-time write does not need a pre-seeded
+	// config.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return NotifyConfig{}, fmt.Errorf("read config %s: %w", path, err)
+		}
+		data = []byte("{}")
+	}
+	updated, err := setNotifyJSONObject(data, next)
+	if err != nil {
+		return NotifyConfig{}, fmt.Errorf("invalid config JSON %s: %w", path, err)
+	}
+	if err := writeConfigData(path, updated); err != nil {
+		return NotifyConfig{}, err
+	}
+	return next, nil
+}
+
 // SetPet persists only the terminal-pet preference while preserving every
 // unrelated user setting through the config writer's atomic replace path.
 func SetPet(path string, pet string) (result FileConfig, err error) {
@@ -973,12 +1097,116 @@ func writeConfigFile(path string, cfg FileConfig) error {
 	return writeConfigData(path, data)
 }
 
+// Sync seams allow tests to inject persistence failures at each barrier.
+var syncConfigFileFn = (*os.File).Sync
+var syncConfigDirFn = syncConfigDir
+
+// Windows cannot sync directory handles, so rename durability is best effort
+// there, matching the sessions store. Elsewhere a directory the user can write
+// but not read cannot be opened for syncing either; that is also best effort,
+// because the write it follows has already succeeded. Every other failure to
+// open, sync, or close the directory is reported: the barrier was requested and
+// not reached, so the caller must not acknowledge the save.
+func syncConfigDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			return nil
+		}
+		return err
+	}
+	return errors.Join(d.Sync(), d.Close())
+}
+
+// ensureConfigDir is the ONE path that creates the config directory, shared by
+// lockConfigFile and writeConfigData. Every exported mutator locks before it
+// writes, and the lock file is a sibling of the config, so in practice the lock
+// path is what first creates the directory; a barrier that lived only in
+// writeConfigData would find nothing missing by then and never run.
+//
+// Each missing component is created with os.Mkdir rather than os.MkdirAll so
+// the call knows exactly which entries it created, then each new entry is
+// synced into its parent (deepest first) so a crash cannot lose the directory,
+// and with it the config, after a successful write. A component that appeared
+// between the lookup and the Mkdir belongs to another writer: it is not rolled
+// back, but its parent is still synced, because this write depends on the
+// entry being durable whoever created it.
+//
+// If a barrier fails, the directories this call created are removed again.
+// Leaving them would let a retry find nothing missing, skip the barrier, and
+// report a durability it never established. Only what this call created is
+// removed, with os.Remove so a directory another process has since populated
+// stays; a failed rollback is joined into the error, never swallowed.
+func ensureConfigDir(dir string) error {
+	if dir == "." || dir == "" {
+		return nil
+	}
+	missing := missingConfigDirs(dir)
+	if len(missing) == 0 {
+		return nil
+	}
+	var created []string
+	for i := len(missing) - 1; i >= 0; i-- {
+		d := missing[i]
+		err := os.Mkdir(d, 0o700)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return errors.Join(fmt.Errorf("create config directory %s: %w", d, err), removeConfigDirs(created))
+		}
+		created = append(created, d)
+	}
+	for _, d := range missing {
+		parent := filepath.Dir(d)
+		if err := syncConfigDirFn(parent); err != nil {
+			return errors.Join(fmt.Errorf("sync config directory %s: %w", parent, err), removeConfigDirs(created))
+		}
+	}
+	return nil
+}
+
+// removeConfigDirs rolls back directories ensureConfigDir created in this
+// call, deepest first. os.Remove refuses a non-empty directory, so an entry
+// another process already populated survives and its error is reported.
+func removeConfigDirs(created []string) error {
+	var errs []error
+	for i := len(created) - 1; i >= 0; i-- {
+		if err := os.Remove(created[i]); err != nil {
+			errs = append(errs, fmt.Errorf("roll back config directory %s: %w", created[i], err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// missingConfigDirs lists dir and each ancestor that does not exist yet,
+// deepest first, so ensureConfigDir can create them shallowest first and sync
+// each new entry into its parent deepest first.
+func missingConfigDirs(dir string) []string {
+	var missing []string
+	for d := dir; ; {
+		if _, err := os.Lstat(d); !errors.Is(err, os.ErrNotExist) {
+			return missing
+		}
+		missing = append(missing, d)
+		parent := filepath.Dir(d)
+		if parent == d {
+			return missing
+		}
+		d = parent
+	}
+}
+
 func writeConfigData(path string, data []byte) error {
 	dir := filepath.Dir(path)
-	if dir != "." && dir != "" {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return fmt.Errorf("create config directory %s: %w", dir, err)
-		}
+	// Usually a no-op: the lock path has already created and synced the
+	// directory. It still matters for the rare unlocked caller and for a
+	// directory removed between the lock and the write.
+	if err := ensureConfigDir(dir); err != nil {
+		return err
 	}
 	if len(data) == 0 || data[len(data)-1] != '\n' {
 		data = append(data, '\n')
@@ -999,11 +1227,19 @@ func writeConfigData(path string, data []byte) error {
 		_ = tmp.Close()
 		return fmt.Errorf("write config %s: %w", path, err)
 	}
+	// Persist the complete contents before making the replacement visible.
+	if err := syncConfigFileFn(tmp); err != nil {
+		return fmt.Errorf("sync config %s: %w", path, errors.Join(err, tmp.Close()))
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("write config %s: %w", path, err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("write config %s: %w", path, err)
+	}
+	// The replacement is already visible if this fails; do not roll it back.
+	if err := syncConfigDirFn(dir); err != nil {
+		return fmt.Errorf("sync config directory %s: %w", dir, err)
 	}
 	return nil
 }

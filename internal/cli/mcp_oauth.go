@@ -6,8 +6,8 @@ import (
 	"io"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/mcp"
-	"github.com/Gitlawb/zero/internal/redaction"
+	"github.com/Twigpine/zero/internal/mcp"
+	"github.com/Twigpine/zero/internal/redaction"
 )
 
 func runMCPOAuth(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {

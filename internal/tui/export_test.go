@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
-	"github.com/Gitlawb/zero/internal/dictation"
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/dictation"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 func renderMarkdownInline(text string) string {

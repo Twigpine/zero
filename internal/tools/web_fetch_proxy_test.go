@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/proxydial"
+	"github.com/Twigpine/zero/internal/proxydial"
 )
 
 // webFetchTransportWithProxy builds the guarded web_fetch round tripper and

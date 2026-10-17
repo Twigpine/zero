@@ -54,7 +54,9 @@ func gitSweepCmd(parent context.Context, cwd string, baseline bool) tea.Cmd {
 		defer cancel()
 		// --untracked-files=all enumerates files inside new directories; plain
 		// porcelain collapses them to "dir/", which is useless as a FILES row.
-		status, err := defaultPRCommandRunner(ctx, cwd, "git", "status", "--porcelain", "--untracked-files=all")
+		// --ignore-submodules=dirty keeps git out of submodule work trees, whose
+		// own config gitsafe does not check.
+		status, err := defaultPRCommandRunner(ctx, cwd, "git", "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=dirty")
 		if err != nil {
 			return gitSweepMsg{baseline: baseline, ok: false}
 		}
@@ -66,7 +68,7 @@ func gitSweepCmd(parent context.Context, cwd string, baseline bool) tea.Cmd {
 		// would never match a porcelain path). Best-effort: a failure (e.g. unborn
 		// HEAD in a fresh repo) keeps the file list with zero counts rather than
 		// dropping the sweep.
-		if numstat, err := defaultPRCommandRunner(ctx, cwd, "git", "diff", "HEAD", "--numstat", "-z"); err == nil {
+		if numstat, err := defaultPRCommandRunner(ctx, cwd, "git", "diff", "HEAD", "--numstat", "-z", "--ignore-submodules=dirty"); err == nil {
 			stats := parseGitNumstat(numstat)
 			for i := range files {
 				if counts, ok := stats[files[i].path]; ok {

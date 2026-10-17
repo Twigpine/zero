@@ -8,8 +8,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/dictation"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/dictation"
 )
 
 // sttDownloadProgressMsg carries a live download-status line (with a

@@ -8,8 +8,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 // capturingImageProvider records the images carried on the last user turn of the

@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/modelregistry"
-	"github.com/Gitlawb/zero/internal/sessions"
-	"github.com/Gitlawb/zero/internal/usage"
-	"github.com/Gitlawb/zero/internal/zerogit"
+	"github.com/Twigpine/zero/internal/modelregistry"
+	"github.com/Twigpine/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/usage"
+	"github.com/Twigpine/zero/internal/zerogit"
 )
 
 type usageOptions struct {

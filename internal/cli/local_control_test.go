@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 func TestCoreRegistryIncludesDefaultLocalControlTools(t *testing.T) {
@@ -69,7 +69,7 @@ func TestRunExecListToolsHonorsDisabledLocalControlConfig(t *testing.T) {
 	if exitCode != exitSuccess {
 		t.Fatalf("exitCode = %d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
 	}
-	if stderr.Len() != 0 {
+	if stderr.String() != hostSandboxNotice(t) {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
 	}
 	var payload struct {

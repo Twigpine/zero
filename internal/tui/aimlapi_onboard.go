@@ -10,8 +10,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/Gitlawb/zero/internal/aimlapi"
-	"github.com/Gitlawb/zero/internal/redaction"
+	"github.com/Twigpine/zero/internal/aimlapi"
+	"github.com/Twigpine/zero/internal/redaction"
 )
 
 // aimlapiOnboardState is the shared, event-driven aimlapi.com onboarding sub-flow

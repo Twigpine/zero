@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/lsp"
+	"github.com/Twigpine/zero/internal/lsp"
 )
 
 // lspNavigateTool exposes LSP code navigation (jump-to-definition, find-all-

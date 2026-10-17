@@ -6,11 +6,11 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/aimlapi"
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/providercatalog"
-	"github.com/Gitlawb/zero/internal/providerhealth"
-	"github.com/Gitlawb/zero/internal/zerocommands"
+	"github.com/Twigpine/zero/internal/aimlapi"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/providercatalog"
+	"github.com/Twigpine/zero/internal/providerhealth"
+	"github.com/Twigpine/zero/internal/zerocommands"
 )
 
 type providerAddOptions struct {

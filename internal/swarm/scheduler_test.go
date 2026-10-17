@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/testutil"
+	"github.com/Twigpine/zero/internal/testutil"
 )
 
 // testTicker returns a ticker factory backed by a single unbounded-handshake

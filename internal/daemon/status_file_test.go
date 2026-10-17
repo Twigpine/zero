@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/fsutil"
-	"github.com/Gitlawb/zero/internal/privatedir"
+	"github.com/Twigpine/zero/internal/fsutil"
+	"github.com/Twigpine/zero/internal/privatedir"
 )
 
 func TestWriteStatusFilePreservesPreviousDocumentWhenReplaceFails(t *testing.T) {

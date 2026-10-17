@@ -5,7 +5,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 // imageEchoProvider records the messages of the first request it receives, then

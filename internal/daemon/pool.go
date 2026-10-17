@@ -17,6 +17,28 @@ const (
 	ExitPermanent = 76
 )
 
+// Exit codes `zero exec` (internal/cli/exec.go) uses to report a run that
+// finished, or was stopped on purpose, rather than crashed. They are duplicated
+// here because the daemon cannot import the CLI package; keep them in sync.
+const (
+	exitUsage       = 2   // bad flags or arguments: a retry fails the same way
+	exitProvider    = 3   // provider failure the run already surfaced
+	exitIncomplete  = 4   // the agent ran (edits, commands) and stopped unfinished
+	exitInterrupted = 130 // SIGINT: someone stopped it on purpose
+)
+
+// isFinalExit reports whether a worker exit code means the run is over and must
+// not be retried. Retrying would repeat the agent's side effects and re-bill the
+// provider, and append a second run to the same session stream. Only crash-type
+// exits (1, signals) and launch/read errors are worth another attempt.
+func isFinalExit(code int) bool {
+	switch code {
+	case exitUsage, exitProvider, exitIncomplete, exitInterrupted:
+		return true
+	}
+	return false
+}
+
 // defaultPoolSize, defaultMaxAttempts and defaultKillTimeout are used when a
 // PoolOptions field is left zero.
 const (
@@ -176,7 +198,8 @@ type Sink interface {
 // Run leases a worker slot and dispatches spec to a worker, streaming its
 // stream-json lines to sink. It is at-least-once with bounded retries: a worker
 // that crashes (non-zero, non-permanent) is retried on a fresh worker after a
-// backoff; ExitPermanent or exhausting MaxAttempts returns ErrPermanent. Run
+// backoff; ExitPermanent, a final `zero exec` exit (usage, provider, incomplete,
+// interrupted) or exhausting MaxAttempts returns ErrPermanent. Run
 // queues when all slots are busy. The returned int is the final worker exit code.
 func (p *Pool) Run(ctx context.Context, spec WorkerSpec, sink Sink) (int, error) {
 	if err := p.acquire(ctx); err != nil {
@@ -209,6 +232,9 @@ func (p *Pool) Run(ctx context.Context, spec WorkerSpec, sink Sink) (int, error)
 		case code == ExitPermanent:
 			p.logf("worker %d exited permanently (code=%d) — not retrying", stat.id, code)
 			return code, ErrPermanent
+		case isFinalExit(code):
+			p.logf("worker %d finished with exit code %d — not retrying", stat.id, code)
+			return code, fmt.Errorf("%w: worker %d exited code=%d", ErrPermanent, stat.id, code)
 		case code == ExitTempfail:
 			lastErr = fmt.Errorf("worker %d tempfail (code=%d)", stat.id, code)
 			p.logf("worker %d tempfail — retry after %s", stat.id, p.opts.TempfailDelay)

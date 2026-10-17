@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/providercatalog"
-	"github.com/Gitlawb/zero/internal/providermodelcatalog"
+	"github.com/Twigpine/zero/internal/providercatalog"
+	"github.com/Twigpine/zero/internal/providermodelcatalog"
 )
 
 // LocalRuntime describes a local, OpenAI-compatible model server that ZERO can

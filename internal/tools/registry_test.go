@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/sandbox"
 )
 
 func tempDirOutsideDefaultTemp(t *testing.T) string {

@@ -57,7 +57,7 @@ type Sink interface {
 // attached Sinks. Safe for concurrent use.
 type Notifier struct {
 	w   io.Writer
-	cfg Config // immutable after New; reads outside the lock are safe
+	cfg Config // swap at runtime via Configure; reads outside the lock are safe
 
 	mu      sync.Mutex
 	focused bool
@@ -69,6 +69,16 @@ type Notifier struct {
 // interactive caller should call SetFocused(true) at launch.
 func New(w io.Writer, cfg Config) *Notifier {
 	return &Notifier{w: w, cfg: cfg}
+}
+
+// Configure swaps the mode/focus policy at runtime. Sinks, focus state, and the
+// writer are preserved, so an in-session preference change (e.g. the TUI's
+// /notify command) applies from the next Notify call. Safe to call concurrently
+// with Notify.
+func (n *Notifier) Configure(cfg Config) {
+	n.mu.Lock()
+	n.cfg = cfg
+	n.mu.Unlock()
 }
 
 // AddSink registers an additional destination that receives every eligible
@@ -102,18 +112,21 @@ func (n *Notifier) SetFocused(focused bool) {
 // Sinks are invoked outside the lock so a slow/blocking sink cannot stall a
 // concurrent Notify or SetFocused.
 func (n *Notifier) Notify(event Event, message string) {
-	if n.cfg.Mode == ModeOff || n.cfg.Mode == "" {
+	n.mu.Lock()
+	// cfg is mutable at runtime (Configure), so every read happens under the
+	// lock; shouldEmit/sequence work on the local copy.
+	cfg := n.cfg
+	if cfg.Mode == ModeOff || cfg.Mode == "" {
+		n.mu.Unlock()
 		return
 	}
-
-	n.mu.Lock()
-	eligible := shouldEmit(n.cfg, event, n.focused)
+	eligible := shouldEmit(cfg, event, n.focused)
 	var sinks []Sink
 	if eligible && len(n.sinks) > 0 {
 		sinks = append(sinks, n.sinks...)
 	}
 	if eligible && n.w != nil {
-		if seq := sequence(n.cfg.Mode, message); seq != "" {
+		if seq := sequence(cfg.Mode, message); seq != "" {
 			_, _ = io.WriteString(n.w, seq)
 		}
 	}

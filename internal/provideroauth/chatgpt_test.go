@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/oauth"
+	"github.com/Twigpine/zero/internal/oauth"
 )
 
 // makeIDToken signs a fake JWS for tests. We only need the payload to round-trip

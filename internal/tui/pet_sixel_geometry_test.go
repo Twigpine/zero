@@ -3,7 +3,7 @@ package tui
 import (
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/terminalpet"
+	"github.com/Twigpine/zero/internal/terminalpet"
 )
 
 // The erase rectangle has to describe what was PAINTED, not the reserved area.

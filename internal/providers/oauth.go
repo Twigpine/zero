@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/oauth"
-	"github.com/Gitlawb/zero/internal/providers/providerio"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/oauth"
+	"github.com/Twigpine/zero/internal/providers/providerio"
 )
 
 // OAuthLoginForProfile resolves the OAuth login used by profile once and

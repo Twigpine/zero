@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/providers/providerio"
+	"github.com/Twigpine/zero/internal/providers/providerio"
 	"github.com/coder/websocket"
 )
 
