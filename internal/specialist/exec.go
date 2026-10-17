@@ -576,16 +576,27 @@ func (executor Executor) runBackground(ctx context.Context, built BuildArgsResul
 		Background:      true,
 	}
 	executor.recordSpecialistStart(accounting)
+	// The launcher's exit callback runs the terminal accounting, which can claim
+	// and dispatch the specialistStop hook. A child that exits immediately would
+	// otherwise publish specialistStop before the start decision below completes
+	// (and before SetPID records the pid). The callback waits for startSettled
+	// from its own goroutine: waiting inline would deadlock a synchronous
+	// injected launcher whose onExit runs before it returns.
+	startSettled := make(chan struct{})
+	defer close(startSettled)
 	pid, err := executor.launchBackground(binaryPath, built.Args, outputFile, func(exitCode int) {
-		status := background.StatusCompleted
-		if exitCode != 0 {
-			status = background.StatusError
-		}
-		_ = manager.MarkExited(built.SessionID, status, exitCode)
-		if task, ok := manager.Get(built.SessionID); ok {
-			executor.recordBackgroundTaskAccounting(task, taskStreamSummary(task))
-		}
-		executor.cleanupBackgroundPromptFile(built.SessionID, built.PromptFile)
+		go func() {
+			<-startSettled
+			status := background.StatusCompleted
+			if exitCode != 0 {
+				status = background.StatusError
+			}
+			_ = manager.MarkExited(built.SessionID, status, exitCode)
+			if task, ok := manager.Get(built.SessionID); ok {
+				executor.recordBackgroundTaskAccounting(task, taskStreamSummary(task))
+			}
+			executor.cleanupBackgroundPromptFile(built.SessionID, built.PromptFile)
+		}()
 	})
 	if err != nil {
 		// The child never started: keep the attempt accounting, but publish no

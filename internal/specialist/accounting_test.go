@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Twigpine/zero/internal/background"
 	"github.com/Twigpine/zero/internal/sessions"
@@ -648,6 +649,104 @@ func TestBackgroundLaunchFailureDoesNotFireStopHookOnReap(t *testing.T) {
 	if claims := eventsOfType(events, specialistStopHookEvent); len(claims) != 1 {
 		t.Fatalf("stop-hook claim events = %d, want 1", len(claims))
 	}
+}
+
+// A background child that exits before the launcher returns must not run its
+// terminal accounting - and therefore must not fire the specialistStop hook -
+// until the start decision has completed. Otherwise a fast-exiting child
+// publishes specialistStop before specialistStart, and the recorded stop can
+// miss the pid that SetPID has not stored yet. The synchronous launcher below
+// also pins the deadlock requirement: the exit callback may not wait inline,
+// because onExit runs before the launcher (and the start decision) can return.
+func TestRunBackgroundDefersExitUntilStartDecisionCompletes(t *testing.T) {
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	parent, err := store.Create(sessions.CreateInput{SessionID: "parent_session"})
+	if err != nil {
+		t.Fatalf("Create parent returned error: %v", err)
+	}
+	manager, err := background.NewManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewManager returned error: %v", err)
+	}
+	var hookMu sync.Mutex
+	var hookEvents []string
+	stopDispatched := make(chan struct{}, 1)
+	executor := Executor{
+		BinaryPath:        "/usr/local/bin/zero",
+		SessionStore:      store,
+		BackgroundManager: manager,
+		NewSessionID:      func() (string, error) { return "child_task", nil },
+		LifecycleHooks: &LifecycleHooks{
+			Dispatch: func(_ context.Context, event string, _ string, _ map[string]any) {
+				hookMu.Lock()
+				hookEvents = append(hookEvents, event)
+				hookMu.Unlock()
+				if event == "specialistStop" {
+					select {
+					case stopDispatched <- struct{}{}:
+					default:
+					}
+				}
+			},
+		},
+		Load: func(LoadOptions) (LoadResult, error) {
+			return LoadResult{Specialists: []Manifest{{
+				Metadata:      Metadata{Name: "worker", Description: "Does focused work"},
+				SystemPrompt:  "Work carefully.",
+				ResolvedTools: []string{"read_file"},
+			}}}, nil
+		},
+		// The child exits before the launcher returns, so the exit callback runs
+		// synchronously - exactly the ordering hazard this test guards.
+		LaunchBackground: func(_ string, _ []string, _ string, onExit func(exitCode int)) (int, error) {
+			onExit(0)
+			return 1234, nil
+		},
+	}
+
+	runErr := make(chan error, 1)
+	go func() {
+		_, err := executor.Run(context.Background(), TaskParameters{
+			Name:            "worker",
+			Prompt:          "inspect auth",
+			RunInBackground: true,
+		}, TaskRunOptions{ParentSessionID: parent.SessionID})
+		runErr <- err
+	}()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("Run returned error: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("synchronous launcher deadlocked the background start decision")
+	}
+
+	// Run publishes specialistStart before it returns; the deferred exit handling
+	// publishes specialistStop afterwards.
+	select {
+	case <-stopDispatched:
+	case <-time.After(10 * time.Second):
+		t.Fatal("deferred exit accounting never dispatched specialistStop")
+	}
+	hookMu.Lock()
+	gotHooks := strings.Join(hookEvents, ",")
+	hookMu.Unlock()
+	if gotHooks != "specialistStart,specialistStop" {
+		t.Fatalf("lifecycle hooks = %q, want start before stop", gotHooks)
+	}
+
+	events, err := store.ReadEvents(parent.SessionID)
+	if err != nil {
+		t.Fatalf("ReadEvents returned error: %v", err)
+	}
+	stopEvents := eventsOfType(events, sessions.EventSpecialistStop)
+	if len(stopEvents) != 1 {
+		t.Fatalf("stop events = %#v", events)
+	}
+	// The deferred stop must observe the task after SetPID; a stop recorded
+	// before the start decision completes would omit the pid.
+	requirePayloadInt(t, eventPayload(t, stopEvents[0]), "pid", 1234)
 }
 
 // A recovered task stopped explicitly (launcher process gone) must record the
