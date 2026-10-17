@@ -1,9 +1,9 @@
 package cli
 
 import (
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/providers"
-	"github.com/Gitlawb/zero/internal/providers/providerio"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/providers"
+	"github.com/Twigpine/zero/internal/providers/providerio"
 )
 
 // oauthLoginForProfile resolves the user's OAuth login for a provider ONCE and

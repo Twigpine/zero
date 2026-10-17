@@ -5,8 +5,14 @@
 <p align="center"><strong>A terminal coding agent you own.</strong></p>
 
 <p align="center">
+  <a href="https://trendshift.io/repositories/70679?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-70679" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/70679/daily?language=Go" alt="Twigpine/zero | Trendshift" width="250" height="55"/></a>
+  <a href="https://trendshift.io/repositories/70679?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-70679" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/70679/weekly?language=Go" alt="Twigpine/zero | Trendshift" width="250" height="55"/></a>
+  <a href="https://trendshift.io/repositories/70679?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-70679" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/70679" alt="Twigpine/zero | Trendshift" width="250" height="55"/></a>
+</p>
+
+<p align="center">
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
-  <img alt="Go 1.26.6+" src="https://img.shields.io/badge/Go-1.26.6+-00ADD8?logo=go&logoColor=white">
+  <img alt="Go 1.26.9+" src="https://img.shields.io/badge/Go-1.26.9+-00ADD8?logo=go&logoColor=white">
   <img alt="25+ providers" src="https://img.shields.io/badge/providers-25+-34E2EA">
   <a href="https://discord.gg/CaQDS6wdFn"><img alt="Discord" src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white"></a>
   <br>
@@ -22,6 +28,70 @@ zero
 zero exec "fix the failing test in ./pkg"
 zero exec --output-format stream-json < turns.jsonl
 ```
+
+## Partners
+
+<table align="center">
+  <tr>
+    <td align="center" width="150" height="80">
+      <a href="https://twigpine.com">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="https://twigpine.com/logo-dark.png">
+          <img src="https://twigpine.com/logo.png" alt="Twigpine logo" width="72">
+        </picture>
+      </a>
+    </td>
+    <td align="center" width="150" height="80">
+      <a href="https://mimo.mi.com">
+        <img src="https://mimo.xiaomi.com/mimo-v2-pro/assets/logo.svg" alt="Xiaomi MiMo logo" width="136">
+      </a>
+    </td>
+    <td align="center" width="150" height="80">
+      <a href="https://novita.ai/">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/assets/novita-logo-dark.svg">
+          <img src="docs/assets/novita-logo.svg" alt="Novita AI logo" width="136">
+        </picture>
+      </a>
+    </td>
+    <td align="center" width="150" height="80">
+      <a href="https://concentrate.ai/">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/assets/concentrate-logo-dark.svg">
+          <img src="docs/assets/concentrate-logo.svg" alt="Concentrate logo" width="64">
+        </picture>
+      </a>
+    </td>
+    <td align="center" width="150" height="80">
+      <a href="https://exa.ai/">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/assets/exa-logo-dark.svg">
+          <img src="docs/assets/exa-logo.svg" alt="Exa logo" width="110">
+        </picture>
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center"><a href="https://twigpine.com"><strong>Twigpine</strong></a></td>
+    <td align="center"><a href="https://mimo.mi.com"><strong>Xiaomi MiMo</strong></a></td>
+    <td align="center"><a href="https://novita.ai/"><strong>Novita AI</strong></a></td>
+    <td align="center"><a href="https://concentrate.ai/"><strong>Concentrate</strong></a></td>
+    <td align="center"><a href="https://exa.ai/"><strong>Exa</strong></a></td>
+  </tr>
+  <tr>
+    <td align="center" width="150" height="80">
+      <a href="https://www.gmicloud.ai/">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/assets/gmi-cloud-logo-dark.svg">
+          <img src="docs/assets/gmi-cloud-logo.svg" alt="GMI Cloud logo" width="120">
+        </picture>
+      </a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center"><a href="https://www.gmicloud.ai/"><strong>GMI Cloud</strong></a></td>
+  </tr>
+</table>
 
 ## Why Zero
 
@@ -46,7 +116,7 @@ zero exec --output-format stream-json < turns.jsonl
 ### npm
 
 ```bash
-npm install -g @gitlawb/zero
+npm install -g @twigpine/zero
 zero
 ```
 
@@ -60,26 +130,38 @@ matching GitHub Release whenever it is missing. Windows on ARM runs the x64
 build under emulation. See [docs/NPM_PACKAGING.md](docs/NPM_PACKAGING.md) for
 how the package is put together.
 
+Installed Zero as `@gitlawb/zero`? The package moved to `@twigpine/zero` in
+0.10.0 and the old name gets no further releases. Both packages provide the
+`zero` command, so quit any running `zero`, then remove the old package first:
+
+```bash
+npm uninstall -g @gitlawb/zero
+npm install -g @twigpine/zero
+```
+
+Your config, sessions, and logins are kept; they live outside the package. For
+Bun, pnpm, and yarn, see [docs/INSTALL.md](docs/INSTALL.md#moving-from-gitlawbzero).
+
 ### Install scripts
 
 Linux/macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Twigpine/zero/main/scripts/install.sh | bash
 ```
 
 Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/Twigpine/zero/main/scripts/install.ps1 | iex
 ```
 
 ### From source
 
-Source builds require Go 1.26.6+.
+Source builds require Go 1.26.9+.
 
 ```bash
-git clone https://github.com/Gitlawb/zero.git
+git clone https://github.com/Twigpine/zero.git
 cd zero
 go run ./cmd/zero
 ```
@@ -91,17 +173,18 @@ If you are testing before the first public release, build from source:
 go build -o zero ./cmd/zero
 ```
 
-On Linux, build the sandbox helper too if you want native sandboxing:
+On Linux, native sandboxing needs Bubblewrap. The main `zero` binary re-executes
+itself as the helper when `zero-linux-sandbox` is absent. A separate helper next
+to `zero` or on `PATH` still takes precedence:
 
 ```bash
-go build -o zero-linux-sandbox ./cmd/zero-linux-sandbox
-go build -o zero-seccomp ./cmd/zero-seccomp   # optional compatibility wrapper
+go build -o zero-linux-sandbox ./cmd/zero-linux-sandbox   # optional
+go build -o zero-seccomp ./cmd/zero-seccomp               # optional compatibility wrapper
 ```
 
-Put `zero` and `zero-linux-sandbox` in the same directory on `PATH`
-(`~/.local/bin` is a good default). macOS does not need an extra helper binary.
-Windows source builds can use the main `zero.exe` as their sandbox helper; release
-archives still ship standalone Windows helper executables.
+Put `zero` on `PATH` (`~/.local/bin` is a good default). macOS does not need an
+extra helper binary. Windows source builds can use the main `zero.exe` as their
+sandbox helper; release archives still ship standalone Windows helper executables.
 
 More install details: [docs/INSTALL.md](docs/INSTALL.md).
 
@@ -133,6 +216,8 @@ export GEMINI_API_KEY=...
 export AIMLAPI_API_KEY=...
 export LONGCAT_API_KEY=...
 export FIREWORKS_API_KEY=...
+export GMI_API_KEY=...
+export CONCENTRATE_API_KEY=...
 export MINIMAX_API_KEY=...
 export MINIMAXI_API_KEY=...
 ```
@@ -153,6 +238,18 @@ To configure Fireworks AI directly, run:
 
 ```bash
 zero providers setup fireworks --set-active
+```
+
+To configure GMI Cloud directly, run:
+
+```bash
+zero providers setup gmicloud --set-active
+```
+
+To configure Concentrate directly, run:
+
+```bash
+zero providers setup concentrate --set-active
 ```
 
 MiniMax presets use the Anthropic-compatible endpoints for the global and China
@@ -313,7 +410,7 @@ zero context          context-budget report
 zero repo-map         deterministic repository map
 zero repo-info        local repository summary
 zero search | find    search local session history
-zero sessions         inspect, resume, fork, and rewind sessions
+zero sessions         inspect, resume, fork, rewind, and prune sessions
 zero spec             manage spec-mode drafts
 zero specialist       manage specialist subagents
 zero skills           manage markdown instruction skills
@@ -330,6 +427,13 @@ zero cron             scheduled agent jobs
 zero update --check   check for newer releases
 zero upgrade          download, verify, and install the latest release
 ```
+
+Cron keeps the newest 1,000 run outcomes per job in `runs.jsonl`. Each new run
+atomically replaces the history with the retained tail; existing larger histories
+are trimmed on their next run. Archive the file before that run if you need older
+outcomes. This retention does not delete session directories or reset fire counts.
+Malformed records and legacy lines of 1 MiB or more are skipped when reading or
+compacting history; new records of that size are rejected.
 
 ## Extending Zero
 
@@ -442,19 +546,19 @@ go run ./cmd/zero-release build --goos windows --goarch amd64 --output dist/zero
 Real-time chat happens on the [Discord server](https://discord.gg/CaQDS6wdFn).
 
 Questions, setup help, ideas, and sharing all live in
-[GitHub Discussions](https://github.com/Gitlawb/zero/discussions):
+[GitHub Discussions](https://github.com/Twigpine/zero/discussions):
 
 | Category | Use it for |
 |---|---|
-| [Q&A](https://github.com/Gitlawb/zero/discussions/categories/q-a) | Setup help, provider/model configuration, "how do I" questions |
-| [Ideas](https://github.com/Gitlawb/zero/discussions/categories/ideas) | Feature proposals and design discussion before any PR |
-| [Show and tell](https://github.com/Gitlawb/zero/discussions/categories/show-and-tell) | Your skills, plugins, MCP setups, themes, and workflows |
-| [Announcements](https://github.com/Gitlawb/zero/discussions/categories/announcements) | Releases and project news from the maintainers |
+| [Q&A](https://github.com/Twigpine/zero/discussions/categories/q-a) | Setup help, provider/model configuration, "how do I" questions |
+| [Ideas](https://github.com/Twigpine/zero/discussions/categories/ideas) | Feature proposals and design discussion before any PR |
+| [Show and tell](https://github.com/Twigpine/zero/discussions/categories/show-and-tell) | Your skills, plugins, MCP setups, themes, and workflows |
+| [Announcements](https://github.com/Twigpine/zero/discussions/categories/announcements) | Releases and project news from the maintainers |
 
 For a good Q&A answer fast, include `zero --version`, your OS and install
 method, the provider/model in use, and `zero doctor` output. See
 [SUPPORT.md](SUPPORT.md). Bugs belong in
-[issues](https://github.com/Gitlawb/zero/issues/new/choose); security reports
+[issues](https://github.com/Twigpine/zero/issues/new/choose); security reports
 follow [SECURITY.md](SECURITY.md), never a public thread.
 
 ## Contributing

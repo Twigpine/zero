@@ -255,7 +255,7 @@ func TestPromoteRefusesWhileRecoveryCopyIsMarked(t *testing.T) {
 
 	// Clearing the marker is the operator accepting the installed binary; the
 	// next promotion proceeds normally without destroying the recovery copy.
-	clearOldBinaryPreserved(oldPath)
+	_ = os.Remove(oldPath + oldBinaryPreservedSuffix)
 	stubRandomStagingSuffix(t, "deadbeef")
 	if err := installBinary(sourcePath, targetPath); err != nil {
 		t.Fatalf("installBinary after the operator cleared the marker: %v", err)
@@ -333,7 +333,7 @@ func TestPreflightRefusesWhenRecoveryMarkerIsDeletedButTrustedRecordRemains(t *t
 		t.Fatalf("trusted records = %+v, want one unresolved entry", queue.Records)
 	}
 
-	clearOldBinaryPreserved(recoveryPath)
+	_ = os.Remove(recoveryPath + oldBinaryPreservedSuffix)
 	if oldBinaryPreserved(recoveryPath) {
 		t.Fatal("marker deletion did not take effect")
 	}
@@ -427,7 +427,7 @@ func TestPreflightRefusesWhenRecordWriteFailsAndRecoveryMarkerIsDeleted(t *testi
 		}
 	}
 
-	clearOldBinaryPreserved(asidePath)
+	_ = os.Remove(asidePath + oldBinaryPreservedSuffix)
 	if oldBinaryPreserved(asidePath) {
 		t.Fatal("marker deletion did not take effect")
 	}

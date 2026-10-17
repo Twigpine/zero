@@ -11,8 +11,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/dictation"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/dictation"
 )
 
 // Transcriber and Recorder are re-exported so Options and the model can refer to
@@ -77,9 +77,12 @@ type dictationController struct {
 	regionStart  int
 	regionEnd    int
 	regionPrefix string
+	// regionRendered is the exact text last inserted into [regionStart,
+	// regionEnd). A later partial or cancel may remove that range only while it
+	// still matches, so stale bounds never consume user replacement text.
+	regionRendered string
 	// regionAnchor snapshots the text BEFORE the live region, so the next
-	// partial can detect external edits (typing, paste) and shift [start,end)
-	// to stay aligned. Updated alongside regionStart on each render.
+	// partial can detect edits before the tracked range.
 	regionAnchor string
 
 	// waveBars is the recording waveform's recent bar heights (a scrolling ring):
@@ -327,6 +330,7 @@ func (d *dictationController) reset() {
 	d.streamStop = nil
 	d.regionActive = false
 	d.regionPrefix = ""
+	d.regionRendered = ""
 	d.waveBars = nil
 	d.waveTick = 0
 }

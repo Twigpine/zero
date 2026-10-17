@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/proxydial"
+	"github.com/Twigpine/zero/internal/proxydial"
 )
 
 // connectivityClientWithProxy builds the real connectivity client and swaps in

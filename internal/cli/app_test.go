@@ -14,15 +14,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/agent"
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/mcp"
-	"github.com/Gitlawb/zero/internal/redaction"
-	"github.com/Gitlawb/zero/internal/tools"
-	"github.com/Gitlawb/zero/internal/tui"
-	"github.com/Gitlawb/zero/internal/update"
-	"github.com/Gitlawb/zero/internal/workspacetrust"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/mcp"
+	"github.com/Twigpine/zero/internal/redaction"
+	"github.com/Twigpine/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/tui"
+	"github.com/Twigpine/zero/internal/update"
+	"github.com/Twigpine/zero/internal/workspacetrust"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 var errWriteFailed = errors.New("write failed")
@@ -343,8 +343,10 @@ func TestRunNoArgsFallsBackToUsableProviderWhenNoneMarkedActive(t *testing.T) {
 			// config.json has providers configured but none marked active (e.g. a
 			// blank/stale activeProvider field) — Resolve returns the successfully
 			// normalized providers list alongside ErrNoActiveProvider.
-			return config.ResolvedConfig{Providers: []config.ProviderProfile{usable}},
-				fmt.Errorf("%w: active provider %q not found", config.ErrNoActiveProvider, "")
+			return config.ResolvedConfig{
+				Providers: []config.ProviderProfile{usable},
+				ModelRPM:  map[string]int{"gpt-test": 1},
+			}, fmt.Errorf("%w: active provider %q not found", config.ErrNoActiveProvider, "")
 		},
 		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
 			providerProfile = profile
@@ -374,6 +376,77 @@ func TestRunNoArgsFallsBackToUsableProviderWhenNoneMarkedActive(t *testing.T) {
 	}
 	if providerProfile.Name != "work" {
 		t.Fatalf("provider used = %q, want fallback to the usable saved provider %q", providerProfile.Name, "work")
+
+	}
+	if launchedOptions.ModelRPM == nil {
+		t.Fatal("ModelRPM = nil, want limiter preserved through provider fallback")
+	}
+}
+
+// Maintainer regression (PR #1001): a stored explicit notify opt-out must
+// survive the provider-recovery startup path. With a stale activeProvider and
+// another usable saved provider, Resolve returns the partial config alongside
+// ErrNoActiveProvider and the recovery branch forwards it — dropping the
+// notify policy there would surface an empty Options.Notify, and the TUI's
+// unconfigured default (both) would resurrect alerts the user explicitly
+// turned off. The same recovery branch that clears the resolved config for
+// the setup wizard carries the stored notify block through.
+func TestRunNoArgsPreservesNotifyOptOutThroughProviderRecovery(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cwd := t.TempDir()
+	setCLIUserConfigRoot(t)
+	userConfigPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	var launchedOptions tui.Options
+	launched := false
+
+	usable := config.ProviderProfile{
+		Name:         "work",
+		ProviderKind: config.ProviderKindOpenAI,
+		BaseURL:      config.OpenAIBaseURL,
+		APIKey:       "sk-test",
+		Model:        "gpt-test",
+	}
+
+	exitCode := runWithDeps([]string{}, &stdout, &stderr, appDeps{
+		getwd: func() (string, error) {
+			return cwd, nil
+		},
+		resolveConfig: func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+			// Stale activeProvider + usable saved provider, and the user's
+			// config.json explicitly opts out of notifications. The fixed
+			// resolver carries the parsed notify block through the error path.
+			return config.ResolvedConfig{
+				Providers: []config.ProviderProfile{usable},
+				Notify:    config.NotifyConfig{Mode: "off", FocusMode: "always"},
+			}, fmt.Errorf("%w: active provider %q not found", config.ErrNoActiveProvider, "ghost")
+		},
+		newProvider: func(profile config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &cliFakeProvider{}, nil
+		},
+		userConfigPath: func() (string, error) {
+			return userConfigPath, nil
+		},
+		registerMCPTools: func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error) {
+			return noopMCPRuntime{}, nil
+		},
+		runTUI: func(ctx context.Context, options tui.Options) int {
+			launched = true
+			launchedOptions = options
+			return 0
+		},
+	})
+
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0, stderr=%q", exitCode, stderr.String())
+	}
+	if !launched {
+		t.Fatal("TUI was not launched")
+	}
+	// The explicit opt-out reaches the TUI intact — NOT the both/unfocused
+	// unconfigured default.
+	if launchedOptions.Notify.Mode != "off" || launchedOptions.Notify.FocusMode != "always" {
+		t.Fatalf("Options.Notify = %+v, want the stored off/always opt-out preserved through recovery", launchedOptions.Notify)
 	}
 }
 
@@ -1305,7 +1378,7 @@ func TestRunUpdateCheckTextAndJSON(t *testing.T) {
 	result := update.Result{
 		CurrentVersion: "dev",
 		LatestVersion:  "0.2.0",
-		ReleaseURL:     "https://github.com/Gitlawb/zero/releases/tag/v0.2.0",
+		ReleaseURL:     "https://github.com/Twigpine/zero/releases/tag/v0.2.0",
 		TagName:        "v0.2.0",
 		ReleaseAsset: update.AssetCheck{
 			Platform:      "linux",
@@ -1556,7 +1629,7 @@ func TestRunUpdateReportsUpToDate(t *testing.T) {
 			return update.Result{
 				CurrentVersion:  "dev",
 				LatestVersion:   "dev",
-				ReleaseURL:      "https://github.com/Gitlawb/zero/releases/tag/dev",
+				ReleaseURL:      "https://github.com/Twigpine/zero/releases/tag/dev",
 				TagName:         "dev",
 				UpdateAvailable: false,
 			}, nil

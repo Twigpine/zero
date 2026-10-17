@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/release"
+	"github.com/Twigpine/zero/internal/release"
 )
 
 const SchemaVersion = 3

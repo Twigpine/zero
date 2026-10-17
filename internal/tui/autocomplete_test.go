@@ -9,7 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/agent"
 )
 
 // typeRunes feeds each rune of s through Update as an individual key press,

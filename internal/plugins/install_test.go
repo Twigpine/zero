@@ -11,7 +11,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/installtxn"
+	"github.com/Twigpine/zero/internal/installtxn"
 )
 
 // initGitPluginRepo creates a real local git repo holding a plugin and returns a

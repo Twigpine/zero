@@ -304,7 +304,7 @@ func DefaultBuildOutput(rootDir string, goos string) string {
 }
 
 func BuildLdflags(version string) string {
-	return "-s -w -X github.com/Gitlawb/zero/internal/cli.version=" + version
+	return "-s -w -X github.com/Twigpine/zero/internal/cli.version=" + version
 }
 
 func ReleasePlatform(goos string) (string, error) {

@@ -332,23 +332,6 @@ func TestDiffViewerFallsBackForOversizedSourceLine(t *testing.T) {
 	}
 }
 
-func TestDiffViewerSyntaxHighlighterKeepsSpans(t *testing.T) {
-	requireDiffViewerTrueColor(t)
-	styled, ok := highlightCodeForPathWithSpans(
-		[]string{"func greet(name string) string { return \"new\" }"},
-		"example.go",
-		200,
-		zeroTheme.addLine.GetBackground(),
-		[]highlightSpan{{line: 0, start: 39, end: 44, background: zeroTheme.addLineWord.GetBackground()}},
-	)
-	if !ok || len(styled) != 1 {
-		t.Fatalf("highlightCodeForPathWithSpans = %#v, %v", styled, ok)
-	}
-	if !strings.Contains(styled[0], "46;101;77") {
-		t.Fatalf("highlighted span lost its word-diff background: %q", styled[0])
-	}
-}
-
 func TestDiffViewerHighlightsEachFileWithItsOwnPath(t *testing.T) {
 	requireDiffViewerTrueColor(t)
 	rawLines := []string{

@@ -19,7 +19,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/Gitlawb/zero/internal/fsutil"
+	"github.com/Twigpine/zero/internal/fsutil"
 )
 
 type Handler func(InboundMessage) bool

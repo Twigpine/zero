@@ -17,8 +17,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/keyring"
-	"github.com/Gitlawb/zero/internal/securefile"
+	"github.com/Twigpine/zero/internal/keyring"
+	"github.com/Twigpine/zero/internal/securefile"
 )
 
 const (

@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/privatedir"
+	"github.com/Twigpine/zero/internal/privatedir"
 )
 
 // crashExitCode is returned when a top-level panic is recovered.

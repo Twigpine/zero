@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/specialist"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/specialist"
 )
 
 func TestRunSpecialistListShowAndPath(t *testing.T) {

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/execution"
+	"github.com/Twigpine/zero/internal/execution"
 )
 
 func TestGrantStorePersistsListsRevokesAndClears(t *testing.T) {

@@ -2,8 +2,8 @@
 package zerocommands
 
 import (
-	"github.com/Gitlawb/zero/internal/hooks"
-	"github.com/Gitlawb/zero/internal/mcp"
+	"github.com/Twigpine/zero/internal/hooks"
+	"github.com/Twigpine/zero/internal/mcp"
 )
 
 // HookSnapshotsWithSource converts a slice of hooks.Definition and

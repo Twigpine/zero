@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 // codexRequest captures the headers + body of one outgoing Codex request so a

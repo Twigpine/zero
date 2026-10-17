@@ -7,7 +7,7 @@ import (
 	osexec "os/exec"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/specialist"
+	"github.com/Twigpine/zero/internal/specialist"
 )
 
 type specialistOptions struct {

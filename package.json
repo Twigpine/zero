@@ -1,6 +1,6 @@
 {
-  "name": "@gitlawb/zero",
-  "version": "0.9.0",
+  "name": "@twigpine/zero",
+  "version": "0.11.0",
   "description": "Zero — a fast, multi-provider terminal coding agent.",
   "type": "module",
   "module": "bin/zero.js",
@@ -30,11 +30,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Gitlawb/zero.git"
+    "url": "git+https://github.com/Twigpine/zero.git"
   },
-  "homepage": "https://github.com/Gitlawb/zero#readme",
+  "homepage": "https://zero.twigpine.com",
   "bugs": {
-    "url": "https://github.com/Gitlawb/zero/issues"
+    "url": "https://github.com/Twigpine/zero/issues"
   },
   "license": "MIT"
 }

@@ -3,8 +3,8 @@ package verify
 import (
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/redaction"
-	"github.com/Gitlawb/zero/internal/testrunner"
+	"github.com/Twigpine/zero/internal/redaction"
+	"github.com/Twigpine/zero/internal/testrunner"
 )
 
 const RuntimeGo = "go"

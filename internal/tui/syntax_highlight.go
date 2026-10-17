@@ -206,111 +206,6 @@ func highlightCodeForPath(code []string, path string, measure int, bg color.Colo
 	return highlightCodeWithLexer(cachedLexerForPath(path), code, measure, bg)
 }
 
-// highlightShellCommand styles a one-line command for a tool-card heading.
-// Command output is deliberately left untouched: it may be structured data,
-// prose, or terminal control text rather than shell source.
-func highlightShellCommand(command string) (string, bool) {
-	if command == "" {
-		return "", false
-	}
-	lexer := cachedLexer("bash")
-	if lexer == nil {
-		return "", false
-	}
-	iterator, err := lexer.Tokenise(nil, command)
-	if err != nil {
-		return "", false
-	}
-	var builder strings.Builder
-	expectingCommand := true
-	for _, token := range iterator.Tokens() {
-		if token.Type == chroma.Text || token.Type == chroma.TextWhitespace {
-			builder.WriteString(highlightShellText(token.Value, &expectingCommand))
-			continue
-		}
-		builder.WriteString(tokenStyle(token.Type).Render(token.Value))
-		if token.Type.InCategory(chroma.Operator) || (token.Type.InCategory(chroma.Punctuation) && strings.ContainsAny(token.Value, ";|")) {
-			expectingCommand = true
-		}
-	}
-	return builder.String(), true
-}
-
-func highlightShellText(text string, expectingCommand *bool) string {
-	var builder strings.Builder
-	for start := 0; start < len(text); {
-		end := start
-		space := text[start] == ' ' || text[start] == '\t'
-		for end < len(text) {
-			isSpace := text[end] == ' ' || text[end] == '\t'
-			if isSpace != space {
-				break
-			}
-			end++
-		}
-		part := text[start:end]
-		if space {
-			builder.WriteString(part)
-			start = end
-			continue
-		}
-
-		clean := strings.Trim(part, "\"'")
-		style := tokenStyle(chroma.Text)
-		switch {
-		case isShellControlOperator(clean):
-			style = tokenStyle(chroma.Operator)
-			*expectingCommand = true
-		case *expectingCommand:
-			style = tokenStyle(chroma.NameFunction)
-			*expectingCommand = isShellCommandWrapper(clean)
-		case strings.HasPrefix(clean, "-"):
-			style = tokenStyle(chroma.NameAttribute)
-		case isShellNumber(clean):
-			style = tokenStyle(chroma.LiteralNumber)
-		case looksLikeShellPath(clean):
-			style = tokenStyle(chroma.LiteralString)
-		}
-		builder.WriteString(style.Render(part))
-		start = end
-	}
-	return builder.String()
-}
-
-func isShellControlOperator(value string) bool {
-	switch value {
-	case "&&", "||", "|", ";":
-		return true
-	default:
-		return false
-	}
-}
-
-func isShellCommandWrapper(value string) bool {
-	switch value {
-	case "sudo", "env", "command", "time", "xargs":
-		return true
-	default:
-		return false
-	}
-}
-
-func isShellNumber(value string) bool {
-	if value == "" {
-		return false
-	}
-	for _, r := range value {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-func looksLikeShellPath(value string) bool {
-	return strings.HasPrefix(value, "./") || strings.HasPrefix(value, "../") || strings.HasPrefix(value, "/") || strings.HasPrefix(value, "~/") || strings.Contains(value, "/")
-}
-
 // highlightSpan overlays a background on a rune range in one source line while
 // retaining the lexer-selected foreground. Diff rendering uses it to keep the
 // precise changed word visible inside a syntax-highlighted add/delete row.
@@ -318,10 +213,6 @@ type highlightSpan struct {
 	line       int
 	start, end int
 	background color.Color
-}
-
-func highlightCodeForPathWithSpans(code []string, path string, measure int, bg color.Color, spans []highlightSpan) ([]string, bool) {
-	return highlightCodeWithLexerAndSpans(cachedLexerForPath(path), code, measure, bg, spans)
 }
 
 // highlightCodeForPathWithLineBackgrounds applies syntax highlighting to a

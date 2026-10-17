@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/agent"
 )
 
 func permissionModel(t *testing.T) model {

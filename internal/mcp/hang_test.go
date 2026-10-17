@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 // TestMCPStdioHangHelperProcess is a stdio MCP server that starts but never
