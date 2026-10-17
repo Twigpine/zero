@@ -12,8 +12,8 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/Gitlawb/zero/internal/agent"
-	"github.com/Gitlawb/zero/internal/peermsg"
+	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/peermsg"
 )
 
 // peerDeliveriesForOfferTest is one production message of every peer type. The

@@ -8,7 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/Gitlawb/zero/internal/peermsg"
+	"github.com/Twigpine/zero/internal/peermsg"
 )
 
 // fakePeerService hands back the handlers the shell installs on it.

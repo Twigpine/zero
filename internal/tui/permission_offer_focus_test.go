@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/agent"
 )
 
 // The full-auto offer is valid only for the keypress immediately after it. A

@@ -3,7 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
-	"github.com/Gitlawb/zero/internal/terminalpet"
+	"github.com/Twigpine/zero/internal/terminalpet"
 	"github.com/charmbracelet/x/ansi"
 	"image"
 	"strings"
@@ -11,7 +11,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/agent"
 )
 
 // These drive the REAL key handler rather than the pure cycle functions.

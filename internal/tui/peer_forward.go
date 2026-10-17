@@ -6,7 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/Gitlawb/zero/internal/peermsg"
+	"github.com/Twigpine/zero/internal/peermsg"
 )
 
 // PEER CALLBACKS CAN FIRE ON THE EVENT LOOP'S OWN GOROUTINE.

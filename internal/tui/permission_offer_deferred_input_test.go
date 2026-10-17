@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/agent"
 )
 
 // armFullAutoOffer puts the model in the state where the very next ctrl+g would
