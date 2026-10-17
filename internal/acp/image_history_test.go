@@ -26,7 +26,7 @@ func TestACPImageAttachmentHistory(t *testing.T) {
 	}{
 		{name: "image only", images: 1, want: "[1 image]"},
 		{name: "text and images", text: "compare these", images: 2, want: "compare these [2 images]"},
-		{name: "ignored by model", images: 1, withoutVision: true, want: "[1 image]"},
+		{name: "ignored by model", images: 1, withoutVision: true, want: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			deps := testDeps(t)
@@ -89,8 +89,8 @@ func TestACPImageAttachmentHistory(t *testing.T) {
 			if err := json.Unmarshal(events[0].Payload, &user); err != nil {
 				t.Fatal(err)
 			}
-			if user.Role != "user" || user.Content != tc.text || user.Attachments.Images != tc.images {
-				t.Errorf("stored user event = %s, want original text and attachments.images=%d", events[0].Payload, tc.images)
+			if user.Role != "user" || user.Content != tc.text || user.Attachments.Images != wantLiveImages {
+				t.Errorf("stored user event = %s, want original text and attachments.images=%d", events[0].Payload, wantLiveImages)
 			}
 			for _, event := range events {
 				if bytes.Contains(event.Payload, []byte(encoded)) || bytes.Contains(event.Payload, []byte(imageData)) {
@@ -105,8 +105,8 @@ func TestACPImageAttachmentHistory(t *testing.T) {
 					t.Fatal(err)
 				}
 				got := <-turns
-				if !strings.Contains(got.prompt, "User: "+tc.want+"\n") {
-					t.Errorf("seeded prompt missing attachment marker %q: %q", tc.want, got.prompt)
+				if want := "User: " + tc.want + "\n"; !strings.Contains(got.prompt, want) {
+					t.Errorf("seeded prompt missing user history %q: %q", want, got.prompt)
 				}
 				if got.images != 0 {
 					t.Errorf("historical images reattached: %d", got.images)

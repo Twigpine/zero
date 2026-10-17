@@ -528,9 +528,6 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 	queue := func(input sessions.AppendEventInput) {
 		pendingEvents = append(pendingEvents, input)
 	}
-	attachments := sessions.MessageAttachments{Images: len(images)}
-	queue(messageEvent("user", userText, attachments))
-
 	visionCache := make(map[string]bool)
 	var visionCacheMu sync.Mutex
 	supportsVision := func(modelID string) bool {
@@ -554,6 +551,9 @@ func (a *Agent) runTurn(ctx context.Context, sess *acpSession, userText string, 
 		effectivePrompt = fmt.Sprintf("[Note: %s]\n\n%s", msg, userText)
 		images = nil
 	}
+	// Match the TUI: only images actually sent to the model enter history.
+	attachments := sessions.MessageAttachments{Images: len(images)}
+	queue(messageEvent("user", userText, attachments))
 
 	opts := agent.Options{
 		Cwd:            sess.cwd,

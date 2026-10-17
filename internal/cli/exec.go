@@ -425,7 +425,6 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// agent.Options.Images wiring below. Without this merge, images sent over
 	// stream-json are parsed and validated but never reach the agent.
 	images = append(images, streamImages...)
-	attachments := sessions.MessageAttachments{Images: len(images)}
 	// Gate against the EFFECTIVE resolved model (not the --model override). An
 	// unknown/custom id can't be confirmed vision-capable, so drop+warn rather
 	// than error: image input is best-effort, never fatal to the run.
@@ -435,6 +434,8 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		}
 		images = nil
 	}
+	// Match the TUI: only images actually sent to the model enter history.
+	attachments := sessions.MessageAttachments{Images: len(images)}
 	runReasoningEffort := options.reasoningEffort
 	if options.useSpec && options.specReasoningEffort != "" {
 		runReasoningEffort = options.specReasoningEffort

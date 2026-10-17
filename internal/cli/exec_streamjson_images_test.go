@@ -111,8 +111,8 @@ func TestRunExecImageAttachmentHistory(t *testing.T) {
 			if err := json.Unmarshal(events[0].Payload, &user); err != nil {
 				t.Fatal(err)
 			}
-			if user.Content != "" || user.Attachments.Images != wantImages {
-				t.Errorf("stored exec user event = %s, want empty content and attachments.images=%d", events[0].Payload, wantImages)
+			if user.Content != "" || user.Attachments.Images != wantLiveImages {
+				t.Errorf("stored exec user event = %s, want empty content and attachments.images=%d", events[0].Payload, wantLiveImages)
 			}
 			for _, event := range events {
 				if bytes.Contains(event.Payload, []byte(encoded)) {
@@ -132,8 +132,8 @@ func TestRunExecImageAttachmentHistory(t *testing.T) {
 			if wantImages > 1 {
 				marker = fmt.Sprintf("[%d images]", wantImages)
 			}
-			if !strings.Contains(provider.prompt, marker) {
-				t.Errorf("resume prompt missing attachment marker: %q", provider.prompt)
+			if hasMarker := strings.Contains(provider.prompt, marker); hasMarker != (wantLiveImages > 0) {
+				t.Errorf("resume marker %q present = %v, want %v: %q", marker, hasMarker, wantLiveImages > 0, provider.prompt)
 			}
 			if len(provider.images) != 0 {
 				t.Errorf("resume reattached %d historical images", len(provider.images))
