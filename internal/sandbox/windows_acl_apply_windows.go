@@ -859,6 +859,19 @@ func rollbackWindowsACLSnapshots(snapshots []windowsACLSnapshot) error {
 			errs = append(errs, fmt.Errorf("re-open windows ACL target %s for rollback: %w", snapshot.Path, err))
 			continue
 		}
+		// TWO DIFFERENT REFUSALS. A snapshot whose identity was never established
+		// fails the match below exactly as a replaced target does, and both must
+		// leave the object alone, but telling the operator it was replaced when it
+		// was never identified sends them looking for a substitution that did not
+		// happen. Reported by CodeRabbit.
+		if !snapshot.Identity.valid {
+			_ = windows.CloseHandle(handle)
+			errs = append(errs, fmt.Errorf(
+				"windows ACL target %s could not be identified when this setup changed it, "+
+					"so rollback cannot prove it is the same object and leaves it with this run's grant",
+				snapshot.Path))
+			continue
+		}
 		if !snapshot.Identity.matches(windowsIdentityFromHandle(handle)) {
 			_ = windows.CloseHandle(handle)
 			errs = append(errs, fmt.Errorf(
