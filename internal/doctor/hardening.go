@@ -162,10 +162,12 @@ func windowsSandboxSetupCheck(goos string, backend sandbox.Backend, workspaceRoo
 		// fails with nothing explaining why.
 		//
 		// Read from the marker rather than selected, so doctor takes no lease and
-		// creates nothing. A marker from an older schema records no root, which
-		// leaves this exactly as it was.
+		// creates nothing, and read ONCE: this is the root whose currentness was
+		// checked above, not a second read that a rewritten marker could change. A
+		// marker from an older schema records no root, which leaves this exactly as
+		// it was.
 		PermissionProfile: sandbox.WindowsSandboxProfileWithRuntimeRoots(
-			sandbox.PermissionProfileWithRuntimeRoot(profile, sandbox.WindowsSandboxRecordedRuntimeRoot(sandboxHome)),
+			sandbox.PermissionProfileWithRuntimeRoot(profile, recorded),
 			[]string{workspaceRoot},
 		),
 	}
