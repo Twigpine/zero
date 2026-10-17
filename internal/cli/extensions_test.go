@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -331,5 +332,125 @@ func TestRunMCPPermissionsHelpDoesNotOpenStore(t *testing.T) {
 				t.Fatalf("expected help output, got %q", stdout.String())
 			}
 		})
+	}
+}
+
+func TestRunPluginsEnableDisable(t *testing.T) {
+	cwd := t.TempDir()
+	pluginDir := filepath.Join(cwd, ".zero", "plugins", "demo")
+	if err := os.MkdirAll(pluginDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(pluginDir, "plugin.json")
+	if err := os.WriteFile(manifestPath, []byte(`{
+  "schemaVersion": 1,
+  "id": "zero.demo",
+  "name": "Demo",
+  "version": "1.0.0"
+}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	deps := appDeps{getwd: func() (string, error) { return cwd, nil }}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"plugins", "disable", "zero.demo", "--json"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("disable exit=%d stderr=%s", exitCode, stderr.String())
+	}
+	var disablePayload plugins.SetEnabledResult
+	if err := json.Unmarshal(stdout.Bytes(), &disablePayload); err != nil {
+		t.Fatalf("decode disable JSON: %v\n%s", err, stdout.String())
+	}
+	if disablePayload.ID != "zero.demo" || disablePayload.Enabled || !disablePayload.Changed {
+		t.Fatalf("unexpected disable payload: %#v", disablePayload)
+	}
+
+	raw, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"enabled": false`) {
+		t.Fatalf("manifest not disabled: %s", raw)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps([]string{"plugins", "disable", "zero.demo"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("noop disable exit=%d stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "was already disabled") {
+		t.Fatalf("noop disable output: %s", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps([]string{"plugins", "enable", "zero.demo"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("enable exit=%d stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "is now enabled") {
+		t.Fatalf("enable output: %s", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runWithDeps([]string{"plugins", "enable", "missing-plugin"}, &stdout, &stderr, deps)
+	if exitCode != exitUsage {
+		t.Fatalf("missing plugin exit=%d want %d stderr=%s", exitCode, exitUsage, stderr.String())
+	}
+}
+
+func TestRunPluginsDisableUserIgnoresProject(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("HOME", home)
+
+	userManifest := filepath.Join(home, "zero", "plugins", "demo", "plugin.json")
+	projectManifest := filepath.Join(cwd, ".zero", "plugins", "demo", "plugin.json")
+	for _, path := range []string{userManifest, projectManifest} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(`{
+  "schemaVersion": 1,
+  "id": "zero.demo",
+  "name": "Demo",
+  "version": "1.0.0",
+  "enabled": true
+}
+`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	deps := appDeps{getwd: func() (string, error) { return cwd, nil }}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"plugins", "disable", "zero.demo", "--user"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("disable --user exit=%d stderr=%s", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "is now disabled") {
+		t.Fatalf("disable --user output: %s", stdout.String())
+	}
+
+	userRaw, err := os.ReadFile(userManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(userRaw), `"enabled": false`) {
+		t.Fatalf("user manifest not disabled: %s", userRaw)
+	}
+	projectRaw, err := os.ReadFile(projectManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(projectRaw), `"enabled": false`) {
+		t.Fatalf("project manifest should stay enabled: %s", projectRaw)
 	}
 }

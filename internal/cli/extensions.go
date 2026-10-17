@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -82,9 +83,92 @@ func runPlugins(args []string, stdout io.Writer, stderr io.Writer, deps appDeps)
 		return runPluginInfo(args[1:], stdout, stderr, deps)
 	case "remove", "rm":
 		return runPluginRemove(args[1:], deps.pluginsDir(), stdout, stderr)
+	case "enable":
+		return runPluginsToggle(args[1:], stdout, stderr, deps, false)
+	case "disable":
+		return runPluginsToggle(args[1:], stdout, stderr, deps, true)
 	default:
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown plugins subcommand %q", args[0]))
 	}
+}
+
+type pluginToggleOptions struct {
+	json bool
+	user bool
+}
+
+func runPluginsToggle(args []string, stdout io.Writer, stderr io.Writer, deps appDeps, disabled bool) int {
+	commandName := "enable"
+	if disabled {
+		commandName = "disable"
+	}
+	options, positional, help, err := parsePluginToggleArgs(args, commandName)
+	if err != nil {
+		return writeExecUsageError(stderr, err.Error())
+	}
+	if help {
+		if err := writePluginsToggleHelp(stdout, commandName); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if len(positional) != 1 {
+		return writeExecUsageError(stderr, fmt.Sprintf("usage: zero plugins %s <id> [--user] [--json]", commandName))
+	}
+	pluginID := positional[0]
+
+	cwd, err := deps.getwd()
+	if err != nil {
+		return writeAppError(stderr, "failed to resolve workspace: "+err.Error(), exitCrash)
+	}
+	loadOptions := plugins.LoadOptions{Cwd: cwd, ExcludeProject: options.user}
+	result, err := plugins.SetEnabledByID(loadOptions, pluginID, !disabled)
+	if err != nil {
+		if errors.Is(err, plugins.ErrNotInstalled) {
+			return writeExecUsageError(stderr, err.Error())
+		}
+		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+	}
+
+	state := "enabled"
+	if disabled {
+		state = "disabled"
+	}
+	if options.json {
+		if err := writePrettyJSON(stdout, redaction.RedactValue(result, redaction.Options{})); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	if result.Changed {
+		if _, err := fmt.Fprintf(stdout, "Plugin %s is now %s in %s.\n", result.ID, state, result.ManifestPath); err != nil {
+			return exitCrash
+		}
+	} else if _, err := fmt.Fprintf(stdout, "Plugin %s was already %s in %s.\n", result.ID, state, result.ManifestPath); err != nil {
+		return exitCrash
+	}
+	return exitSuccess
+}
+
+func parsePluginToggleArgs(args []string, command string) (pluginToggleOptions, []string, bool, error) {
+	options := pluginToggleOptions{}
+	positional := []string{}
+	for _, arg := range args {
+		switch arg {
+		case "-h", "--help", "help":
+			return options, positional, true, nil
+		case "--json":
+			options.json = true
+		case "--user":
+			options.user = true
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return options, positional, false, execUsageError{fmt.Sprintf("unknown plugins %s flag %q", command, arg)}
+			}
+			positional = append(positional, arg)
+		}
+	}
+	return options, positional, false, nil
 }
 
 func runHooks(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -566,7 +650,21 @@ Commands:
   info <id>            Show plugin details and lockfile metadata
   add <git-url|path>   Install a plugin (manifest-validated, pinned in plugins.lock)
   remove <id>          Remove an installed plugin and its lockfile entry
+  enable <id>          Enable a plugin via its plugin.json
+  disable <id>         Disable a plugin via its plugin.json
 `)
+	return err
+}
+
+func writePluginsToggleHelp(w io.Writer, command string) error {
+	_, err := fmt.Fprintf(w, `Usage:
+  zero plugins %s <id> [flags]
+
+Flags:
+      --user    Target only user plugins (ignore ./.zero/plugins)
+      --json    Print command result as JSON
+  -h, --help    Show this help
+`, command)
 	return err
 }
 
