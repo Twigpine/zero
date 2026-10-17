@@ -792,7 +792,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			}
 			return exitInterrupted
 		}
-		sessionRecorder.append(sessions.EventError, map[string]any{"message": err.Error()})
+		sessionRecorder.append(sessions.EventError, sessions.ErrorEventPayload(err))
 		if options.outputFormat == execOutputStreamJSON {
 			writer.errorEvent("provider_error", err.Error(), false)
 			writer.runEnd("error", exitProvider)
