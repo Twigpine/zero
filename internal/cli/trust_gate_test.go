@@ -8,10 +8,10 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/hooks"
-	"github.com/Gitlawb/zero/internal/plugins"
-	"github.com/Gitlawb/zero/internal/tools"
-	"github.com/Gitlawb/zero/internal/workspacetrust"
+	"github.com/Twigpine/zero/internal/hooks"
+	"github.com/Twigpine/zero/internal/plugins"
+	"github.com/Twigpine/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/workspacetrust"
 )
 
 // setTrustConfigRoot redirects both the workspace-trust store and the user-level

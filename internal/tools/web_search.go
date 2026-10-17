@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/redaction"
-	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/redaction"
+	zeroSandbox "github.com/Twigpine/zero/internal/sandbox"
 )
 
 const (

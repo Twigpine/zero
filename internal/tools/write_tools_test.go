@@ -455,7 +455,9 @@ func TestWriteFileToolOmitsDiffWhenOverwritePreimageCannotBeRead(t *testing.T) {
 	path := filepath.Join(root, "private.txt")
 	writeTestFile(t, path, "before\n")
 	tool := NewScopedWriteFileTool(root, nil).(writeFileTool)
-	tool.readFile = func(string) ([]byte, error) { return nil, os.ErrPermission }
+	tool.readRooted = func(*os.Root, string) ([]byte, os.FileInfo, error) {
+		return nil, nil, os.ErrPermission
+	}
 	registry := NewRegistry()
 	registry.Register(tool)
 	result := registry.RunWithOptions(context.Background(), tool.Name(), map[string]any{

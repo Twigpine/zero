@@ -13,7 +13,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Twigpine/zero/internal/config"
 	"golang.org/x/sys/windows"
 )
 
@@ -254,12 +254,6 @@ func openRecoveryCopy(path string) (*os.File, error) {
 }
 
 var renameRecoveryFileByHandle = renameOpenFile
-
-// clearOldBinaryPreserved models the operator accepting the installed binary
-// by deleting the recovery marker. The recovery copy itself remains preserved.
-func clearOldBinaryPreserved(oldPath string) {
-	_ = os.Remove(oldPath + oldBinaryPreservedSuffix)
-}
 
 // oldBinaryPreserved reports whether a failed restore marked oldPath as the last
 // known-good binary.

@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/execution"
-	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/execution"
+	"github.com/Twigpine/zero/internal/sandbox"
 )
 
 func TestMain(m *testing.M) {

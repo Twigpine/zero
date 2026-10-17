@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 )
 
@@ -64,7 +63,16 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	if err != nil {
 		return errorResult("Error reading " + requestedPath + ": " + err.Error())
 	}
-	contentBytes, err := os.ReadFile(absolutePath)
+	// Anchor both the read and the write on the granted write root: bytes and
+	// identity come from the same descriptor-bound object, and the commit
+	// below writes back through that same root, so a parent swapped for an
+	// escaping symlink between validation and use cannot redirect either.
+	root, rootedRelative, err := openScopedWriteRoot(tool.workspaceRoot, tool.scope, absolutePath)
+	if err != nil {
+		return errorResult("Error reading " + relativePath + ": " + err.Error())
+	}
+	defer root.Close()
+	contentBytes, priorInfo, err := readRootedFile(root, rootedRelative)
 	if err != nil {
 		return errorResult("Error reading " + relativePath + ": " + err.Error())
 	}
@@ -80,10 +88,6 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 		}
 	}
 	content := string(contentBytes)
-	priorInfo, err := os.Stat(absolutePath)
-	if err != nil {
-		return errorResult("Error reading " + relativePath + ": " + err.Error())
-	}
 	occurrences := strings.Count(content, oldString)
 
 	// CRLF fallback: read_file normalizes \r\n → \n before presenting content to
@@ -157,7 +161,7 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
-	if err := commitFileContents(absolutePath, priorInfo, &content, updated); err != nil {
+	if err := commitRootedFileContents(root, absolutePath, rootedRelative, priorInfo, &content, updated); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
 	modelKnownContent := updated
@@ -171,7 +175,7 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	// compare against the current on-disk state, not the pre-edit version.
 	newInfo := formatting.Info
 	if newInfo == nil {
-		newInfo, _ = os.Stat(absolutePath)
+		newInfo, _ = root.Stat(rootedRelative)
 	}
 	if !finalContentKnown {
 		options.FileTracker.Forget(absolutePath)

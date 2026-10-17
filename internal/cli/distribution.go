@@ -15,10 +15,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/plugins"
-	"github.com/Gitlawb/zero/internal/redaction"
-	"github.com/Gitlawb/zero/internal/skills"
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/plugins"
+	"github.com/Twigpine/zero/internal/redaction"
+	"github.com/Twigpine/zero/internal/skills"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 // distributionAddOptions are the flags shared by `skill add` / `plugin add`.

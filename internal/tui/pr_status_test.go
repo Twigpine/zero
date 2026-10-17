@@ -15,7 +15,7 @@ func TestPrServiceDetectsGitHubPRAndDiffStats(t *testing.T) {
 		"git merge-base origin/main HEAD": {
 			output: "abc123\n",
 		},
-		"git diff --numstat abc123": {
+		"git diff --numstat --ignore-submodules=dirty abc123": {
 			output: "42\t7\tinternal/tui/view.go\n",
 		},
 	}}
@@ -49,7 +49,7 @@ func TestPrServiceFallsBackToGitLabMR(t *testing.T) {
 		"git merge-base origin/develop HEAD": {
 			output: "def456\n",
 		},
-		"git diff --numstat def456": {
+		"git diff --numstat --ignore-submodules=dirty def456": {
 			output: "4\t5\ta.go\n5\t6\tb.go\n",
 		},
 	}}
@@ -71,7 +71,7 @@ func TestGetLocalDiffStatsFallsBackToOriginBase(t *testing.T) {
 		"git merge-base origin/main HEAD": {
 			err: errors.New("unknown revision"),
 		},
-		"git diff --numstat origin/main": {
+		"git diff --numstat --ignore-submodules=dirty origin/main": {
 			output: "3\t0\tREADME.md\n",
 		},
 	}}

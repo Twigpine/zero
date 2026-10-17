@@ -10,9 +10,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/Gitlawb/zero/internal/agent"
-	"github.com/Gitlawb/zero/internal/peermsg"
-	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/peermsg"
+	"github.com/Twigpine/zero/internal/sessions"
 )
 
 const peerPermissionToolName = "cross_session_message"
@@ -119,10 +119,11 @@ func (m model) openNextPeerApproval() (model, tea.Cmd) {
 	}
 	m.pendingPermission = &pendingPermissionPrompt{
 		request: request,
-		decide: func(decision agent.PermissionDecision) {
-			if m.runtimeMessageSink != nil {
-				m.runtimeMessageSink(peerDecisionMsg{message: message, allow: decision.Action == agent.PermissionDecisionAllow})
-			}
+		// Resolved from Update, so the decision must come back as a command:
+		// runtimeMessageSink blocks on the event loop that is running Update.
+		decideCmd: func(decision agent.PermissionDecision) tea.Cmd {
+			decided := peerDecisionMsg{message: message, allow: decision.Action == agent.PermissionDecisionAllow}
+			return func() tea.Msg { return decided }
 		},
 	}
 	return m, nil

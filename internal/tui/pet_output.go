@@ -7,7 +7,7 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/Gitlawb/zero/internal/terminalpet"
+	"github.com/Twigpine/zero/internal/terminalpet"
 )
 
 const (

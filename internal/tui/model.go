@@ -19,28 +19,28 @@ import (
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/Gitlawb/zero/internal/agent"
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/doctor"
-	"github.com/Gitlawb/zero/internal/errhint"
-	"github.com/Gitlawb/zero/internal/lsp"
-	internalmcp "github.com/Gitlawb/zero/internal/mcp"
-	"github.com/Gitlawb/zero/internal/modelregistry"
-	"github.com/Gitlawb/zero/internal/notify"
-	"github.com/Gitlawb/zero/internal/peermsg"
-	"github.com/Gitlawb/zero/internal/providerhealth"
-	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
-	"github.com/Gitlawb/zero/internal/providers"
-	"github.com/Gitlawb/zero/internal/providers/providerio"
-	"github.com/Gitlawb/zero/internal/sandbox"
-	"github.com/Gitlawb/zero/internal/sessions"
-	"github.com/Gitlawb/zero/internal/skills"
-	"github.com/Gitlawb/zero/internal/streamjson"
-	"github.com/Gitlawb/zero/internal/terminalpet"
-	"github.com/Gitlawb/zero/internal/tools"
-	"github.com/Gitlawb/zero/internal/usage"
-	"github.com/Gitlawb/zero/internal/usercommands"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/doctor"
+	"github.com/Twigpine/zero/internal/errhint"
+	"github.com/Twigpine/zero/internal/lsp"
+	internalmcp "github.com/Twigpine/zero/internal/mcp"
+	"github.com/Twigpine/zero/internal/modelregistry"
+	"github.com/Twigpine/zero/internal/notify"
+	"github.com/Twigpine/zero/internal/peermsg"
+	"github.com/Twigpine/zero/internal/providerhealth"
+	"github.com/Twigpine/zero/internal/providermodeldiscovery"
+	"github.com/Twigpine/zero/internal/providers"
+	"github.com/Twigpine/zero/internal/providers/providerio"
+	"github.com/Twigpine/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/skills"
+	"github.com/Twigpine/zero/internal/streamjson"
+	"github.com/Twigpine/zero/internal/terminalpet"
+	"github.com/Twigpine/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/usage"
+	"github.com/Twigpine/zero/internal/usercommands"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 const tuiToolOutputLimit = 240
@@ -73,6 +73,7 @@ type model struct {
 	ctx                  context.Context
 	cwd                  string
 	appVersion           string
+	startupNotices       []string               // Options.StartupNotices, said again when a session is resumed
 	userCommands         []usercommands.Command // file-sourced /commands (.zero/commands)
 	loadSkills           func() []skills.Skill  // lazy installed-skills loader for /skills + /<skill-name>
 	userConfigPath       string
@@ -88,6 +89,7 @@ type model struct {
 	// allowEscalation mirrors Options.AllowEscalation: it gates the per-run model
 	// switchers, and the caller gates the escalate_model tool on the same flag.
 	allowEscalation             bool
+	modelRPM                    *zeroruntime.ModelRPMLimiter
 	newProvider                 func(config.ProviderProfile) (zeroruntime.Provider, error)
 	newTurnSessionProvider      func(config.ProviderProfile, zeroruntime.Provider) zeroruntime.TurnSessionProvider
 	probeProviderHealth         func(context.Context, providerhealth.Options) providerhealth.Result
@@ -231,16 +233,26 @@ type model struct {
 	keyBindings                   keyBindings
 	themeMode                     themeMode // palette preference: system (default) or named palette
 	hasDarkBg                     bool      // last terminal background-detection result, if one is delivered
-	userAgent                     string
-	compactRequests               int
-	compactInFlight               bool
-	compactFrame                  int
-	lastCompactResult             *CompactResult
-	lastCompactError              string
-	unpricedRequests              int
-	unpricedTokens                int
-	lastUsage                     usage.Normalized
-	lastUsageSeen                 bool
+	// notifyMode and notifyFocusMode track the user's in-session notify
+	// preference (from options.Notify, updated by /notify). The notifier built
+	// at startup is independent, so changes apply on the NEXT permission prompt.
+	notifyMode string
+	// notifyConfiguredMode holds the RAW configured mode ("" when the user
+	// never set one) so state output can label the effective default as
+	// "(default)" — mirroring the CLI's `mode: (default)` for the same state
+	// (maintainer review, PR #1001). Cleared once the user picks a mode.
+	notifyConfiguredMode string
+	notifyFocusMode      string
+	userAgent            string
+	compactRequests      int
+	compactInFlight      bool
+	compactFrame         int
+	lastCompactResult    *CompactResult
+	lastCompactError     string
+	unpricedRequests     int
+	unpricedTokens       int
+	lastUsage            usage.Normalized
+	lastUsageSeen        bool
 	// turnLatencySum / turnLatencyCount accumulate completed-run wall time so
 	// /context can show a rolling average turn latency (the "is it slow?" signal).
 	// Reset by /new.
@@ -605,6 +617,11 @@ type model struct {
 	// with. Nil in production; used by tests to assert image threading without a
 	// real provider round-trip.
 	captureRunImages func([]zeroruntime.ImageBlock)
+
+	// captureRunSupportsVision, when set, is invoked with the vision-support
+	// predicate wired into the run's agent options. Nil in production; used by
+	// tests to assert snapshot isolation and discovery scoping.
+	captureRunSupportsVision func(func(string) bool)
 }
 
 type agentTextMsg struct {
@@ -859,6 +876,11 @@ type permissionRequestMsg struct {
 type pendingPermissionPrompt struct {
 	request agent.PermissionRequest
 	decide  func(agent.PermissionDecision)
+	// decideCmd is the Update-safe alternative to decide for prompts the TUI
+	// itself raises: decide forwards through runtimeMessageSink, which blocks on
+	// the program's unbuffered message channel when called from Update, so these
+	// prompts return a command that yields the follow-up message instead.
+	decideCmd func(agent.PermissionDecision) tea.Cmd
 	// cursor is the highlighted option index (into permissionOptions): 0 is the
 	// resting approval choice. Moved by ↑/↓/Tab; confirmed by Enter or a click.
 	// Hotkeys resolve the matching request-provided option directly.
@@ -912,6 +934,22 @@ type tuiAgentRunOptions struct {
 	systemPrompt          string
 	transientSystemPrompt string
 	specDraft             bool
+}
+
+// effectiveTUINotifyMode returns the notification mode the TUI should use. An
+// empty/unconfigured mode falls back to the TUI's own effective default
+// ("both": terminal bell + OSC-9 desktop notification) so the needs-input
+// alert works for new users without requiring them to hand-edit config.json.
+// The default lives HERE, deliberately not in config.Resolve: the resolver is
+// shared with headless `zero exec`, which must stay byte-silent when
+// unconfigured (maintainer review, PR #1001). The /notify command persists
+// explicit choices; blank stays blank on disk.
+func effectiveTUINotifyMode(mode string) notify.Mode {
+	m := notify.Mode(strings.TrimSpace(mode))
+	if m == "" {
+		return notify.ModeBoth
+	}
+	return m
 }
 
 func newModel(ctx context.Context, options Options) model {
@@ -985,7 +1023,7 @@ func newModel(ctx context.Context, options Options) model {
 	runSpinner.Spinner.FPS = activeAnimationFrameInterval
 
 	notifier := notify.New(os.Stderr, notify.Config{
-		Mode:      notify.Mode(strings.TrimSpace(options.Notify.Mode)),
+		Mode:      effectiveTUINotifyMode(options.Notify.Mode),
 		FocusMode: notify.FocusMode(strings.TrimSpace(options.Notify.FocusMode)),
 	})
 	// Opt-in webhook fan-out (ZERO_NOTIFY_WEBHOOK_URL). Delivery failures stay
@@ -1000,6 +1038,7 @@ func newModel(ctx context.Context, options Options) model {
 		ctx:                         ctx,
 		cwd:                         cwd,
 		appVersion:                  strings.TrimSpace(options.Version),
+		startupNotices:              options.StartupNotices,
 		swarmDoneAt:                 map[string]time.Time{},
 		userCommands:                loadedUserCommands,
 		loadSkills:                  options.LoadSkills,
@@ -1043,6 +1082,7 @@ func newModel(ctx context.Context, options Options) model {
 		sandboxSetupCommand:         options.SandboxSetupCommand,
 		agentOptions:                options.AgentOptions,
 		allowEscalation:             options.AllowEscalation,
+		modelRPM:                    options.ModelRPM,
 		sessionCompactor:            options.SessionCompactor,
 		runtimeMessageSink:          options.RuntimeMessageSink,
 		permissionMode:              permissionMode,
@@ -1053,6 +1093,9 @@ func newModel(ctx context.Context, options Options) model {
 		keyBindings:                 resolvedKeyBindings,
 		themeMode:                   resolveThemeMode(options.Theme, os.Getenv("ZERO_THEME"), options.SavedTheme),
 		hasDarkBg:                   true,
+		notifyMode:                  string(effectiveTUINotifyMode(options.Notify.Mode)),
+		notifyConfiguredMode:        strings.TrimSpace(options.Notify.Mode),
+		notifyFocusMode:             strings.TrimSpace(options.Notify.FocusMode),
 		userAgent:                   options.UserAgent,
 		usageTracker:                usageTracker,
 		transcript:                  initialTranscript(),
@@ -1116,7 +1159,26 @@ func newModel(ctx context.Context, options Options) model {
 	for _, warning := range keyBindingWarnings {
 		m = m.appendSystemNotice(warning)
 	}
+	m.transcript = m.withStartupNotices(m.transcript)
 	return m
+}
+
+// withStartupNotices appends the session's startup notices to rows as system
+// rows, in order, skipping blank ones so a caller can pass one unconditionally.
+//
+// EVERY SESSION THIS PROCESS OPENS IS TOLD. The notices describe the sandbox
+// every session here runs under, so they open the first session, and they come
+// back when /new or /resume rebuilds the transcript for another one; both
+// started from an empty transcript and dropped them. Rewind, compaction and
+// /clear stay in the same session and keep the notice in the scrollback above
+// their divider. Reported by CodeRabbit.
+func (m model) withStartupNotices(rows []transcriptRow) []transcriptRow {
+	for _, notice := range m.startupNotices {
+		if strings.TrimSpace(notice) != "" {
+			rows = appendRow(rows, rowSystem, notice)
+		}
+	}
+	return rows
 }
 
 func (m model) doctorOptions(connectivity bool) doctor.Options {
@@ -4495,11 +4557,13 @@ func (m model) resolvePermissionWithReason(decision permissionDecision, reason s
 		return m, nil
 	}
 
+	resolved := agent.PermissionDecision{Action: decision, Reason: reason}
 	if pending.decide != nil {
-		pending.decide(agent.PermissionDecision{
-			Action: decision,
-			Reason: reason,
-		})
+		pending.decide(resolved)
+	}
+	var decideCmd tea.Cmd
+	if pending.decideCmd != nil {
+		decideCmd = pending.decideCmd(resolved)
 	}
 	m.pendingPermission = nil
 	// Time spent at the prompt is user wait, not provider silence. Restart the
@@ -4509,9 +4573,10 @@ func (m model) resolvePermissionWithReason(decision permissionDecision, reason s
 	if pending.request.ToolName == peerPermissionToolName {
 		// Receipt delivery completes asynchronously. That completion advances
 		// the peer queue after this prompt is fully settled.
-		return m, nil
+		return m, decideCmd
 	}
-	return m.openNextPeerApproval()
+	next, cmd := m.openNextPeerApproval()
+	return next, tea.Batch(decideCmd, cmd)
 }
 
 func permissionDecisionReason(decision permissionDecision) string {
@@ -4562,15 +4627,14 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		previousProvider, previousModel := m.providerName, m.modelName
 		text := ""
 		var switchPersistErr error
-		owner := strings.TrimSpace(item.OwnerProvider)
-		_, ownerIsSavedProvider := m.savedProviderByName(owner)
-		if owner != "" && !strings.EqualFold(owner, strings.TrimSpace(m.providerName)) && ownerIsSavedProvider {
+		// The row's owner label is derived from the same decision, so it always
+		// names the provider used here.
+		if owner := m.modelPickerSwitchOwner(item); owner != "" {
 			// A model from another saved provider: switch provider + model together.
 			m, text, _, cmd, switchPersistErr = m.switchProviderModel(owner, item.Value)
 		} else {
-			// OwnerProvider is blank, matches the active provider, or (registry-fallback
-			// / stale-history rows) doesn't resolve to any saved provider: apply against
-			// the active provider instead of attempting an unresolvable provider switch.
+			// Apply against the active provider instead of attempting an
+			// unresolvable provider switch.
 			m, text, switchPersistErr = m.handleModelCommand(item.Value)
 		}
 		if m.providerName != previousProvider || m.modelName != previousModel {
@@ -4622,6 +4686,14 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		if validThemeMode(item.Value) && !strings.Contains(text, "could not save theme preference") {
 			return m.showTransientNotice(m.themeAppliedNotice(), transientNoticeSuccess)
 		}
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+	case pickerNotify:
+		// The picker item's Value is "<mode> <focus>"; reusing the text handler
+		// keeps validation, persistence, and the user-facing message in one
+		// place. There is no live preview for notify, so no follow-up command
+		// is needed here.
+		text := ""
+		m, text = m.handleNotifyCommand(item.Value)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 	}
 	return m, cmd
@@ -5035,6 +5107,18 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		if validThemeMode(command.text) && !strings.Contains(text, "could not save theme preference") {
 			return m.showTransientNotice(m.themeAppliedNotice(), transientNoticeSuccess)
 		}
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		return m, nil
+	case commandNotify:
+		// Bare `/notify` opens the popup picker so the user can pick mode + focus
+		// with arrow keys, matching /model and /theme. An explicit
+		// `/notify off|bell|notify|both [unfocused|always]` runs the text handler.
+		if strings.TrimSpace(command.text) == "" {
+			m.picker = m.newNotifyPicker()
+			return m, nil
+		}
+		text := ""
+		m, text = m.handleNotifyCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandImage:
@@ -5512,6 +5596,19 @@ func selfCorrectAutonomyForMode(mode agent.PermissionMode) string {
 }
 
 func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt string, images []zeroruntime.ImageBlock, runOptions tuiAgentRunOptions) tea.Cmd {
+	var activeDiscovered []providermodeldiscovery.Model
+	if models, ok := m.discoveredModelsForActiveRoute(); ok {
+		activeDiscovered = make([]providermodeldiscovery.Model, len(models))
+		for i, dm := range models {
+			copied := dm
+			if len(dm.InputModalities) > 0 {
+				copied.InputModalities = append([]string{}, dm.InputModalities...)
+			}
+			activeDiscovered[i] = copied
+		}
+	}
+	catalog := m.modelCatalog
+
 	return func() tea.Msg {
 		started := m.now()
 		if m.turnTimer != nil {
@@ -5625,7 +5722,26 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				// currentModel: every usage event after a real escalation is billed
 				// to the escalated model, not the one the run started on.
 				func(modelID string) { usageModelID = modelID },
+				providers.Options{ModelRPM: m.modelRPM},
 			)
+		}
+		options.SupportsVision = func(modelID string) bool {
+			trimmed := strings.TrimSpace(modelID)
+			if trimmed == "" {
+				return false
+			}
+			if len(activeDiscovered) > 0 {
+				if supported, ok := discoveredVisionSupport(activeDiscovered, trimmed); ok {
+					return supported
+				}
+			}
+			if entry, known := catalog.Resolve(trimmed); known {
+				return entry.Supports(modelregistry.ModelCapabilityVision)
+			}
+			return modelregistry.SupportsVision(catalog, trimmed)
+		}
+		if m.captureRunSupportsVision != nil {
+			m.captureRunSupportsVision(options.SupportsVision)
 		}
 
 		// Post-edit self-correction is on by default in the TUI but kept FAST: it

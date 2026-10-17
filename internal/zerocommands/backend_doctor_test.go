@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/hooks"
-	"github.com/Gitlawb/zero/internal/plugins"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/hooks"
+	"github.com/Twigpine/zero/internal/plugins"
 )
 
 func TestNewBackendDoctorReportSurfacesDiagnosticsAndActions(t *testing.T) {

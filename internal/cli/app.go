@@ -15,35 +15,35 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/agent"
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/execution"
-	"github.com/Gitlawb/zero/internal/hooks"
-	"github.com/Gitlawb/zero/internal/localcontrol"
-	"github.com/Gitlawb/zero/internal/mcp"
-	"github.com/Gitlawb/zero/internal/modelregistry"
-	"github.com/Gitlawb/zero/internal/observability"
-	"github.com/Gitlawb/zero/internal/peermsg"
-	"github.com/Gitlawb/zero/internal/plugins"
-	"github.com/Gitlawb/zero/internal/providerhealth"
-	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
-	"github.com/Gitlawb/zero/internal/provideroauth"
-	"github.com/Gitlawb/zero/internal/provideronboarding"
-	"github.com/Gitlawb/zero/internal/providers"
-	"github.com/Gitlawb/zero/internal/redaction"
-	"github.com/Gitlawb/zero/internal/sandbox"
-	"github.com/Gitlawb/zero/internal/selfverify"
-	"github.com/Gitlawb/zero/internal/sessions"
-	"github.com/Gitlawb/zero/internal/skills"
-	"github.com/Gitlawb/zero/internal/specialist"
-	"github.com/Gitlawb/zero/internal/swarm"
-	"github.com/Gitlawb/zero/internal/tools"
-	"github.com/Gitlawb/zero/internal/tui"
-	"github.com/Gitlawb/zero/internal/update"
-	"github.com/Gitlawb/zero/internal/verify"
-	"github.com/Gitlawb/zero/internal/worktrees"
-	"github.com/Gitlawb/zero/internal/zerogit"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/execution"
+	"github.com/Twigpine/zero/internal/hooks"
+	"github.com/Twigpine/zero/internal/localcontrol"
+	"github.com/Twigpine/zero/internal/mcp"
+	"github.com/Twigpine/zero/internal/modelregistry"
+	"github.com/Twigpine/zero/internal/observability"
+	"github.com/Twigpine/zero/internal/peermsg"
+	"github.com/Twigpine/zero/internal/plugins"
+	"github.com/Twigpine/zero/internal/providerhealth"
+	"github.com/Twigpine/zero/internal/providermodeldiscovery"
+	"github.com/Twigpine/zero/internal/provideroauth"
+	"github.com/Twigpine/zero/internal/provideronboarding"
+	"github.com/Twigpine/zero/internal/providers"
+	"github.com/Twigpine/zero/internal/redaction"
+	"github.com/Twigpine/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/selfverify"
+	"github.com/Twigpine/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/skills"
+	"github.com/Twigpine/zero/internal/specialist"
+	"github.com/Twigpine/zero/internal/swarm"
+	"github.com/Twigpine/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/tui"
+	"github.com/Twigpine/zero/internal/update"
+	"github.com/Twigpine/zero/internal/verify"
+	"github.com/Twigpine/zero/internal/worktrees"
+	"github.com/Twigpine/zero/internal/zerogit"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 	"github.com/charmbracelet/x/term"
 )
 
@@ -695,7 +695,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// Refresh the models.dev pricing/limits cache in the background when stale;
 	// the overlay is read at registry construction from the cache file, so this
 	// benefits the next run and never blocks or fails this one.
-	go func() { _ = modelregistry.RefreshModelsDevCache(context.Background()) }()
+	modelregistry.StartModelsDevRefresh()
 
 	workspaceRoot, err := deps.getwd()
 	if err != nil {
@@ -727,7 +727,13 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			resolved.Provider = usable
 			resolved.ActiveProvider = usable.Name
 		} else {
-			resolved = config.ResolvedConfig{}
+			// Fresh-onboarding reset, but the user's notification preference is
+			// NOT config-to-redo: clearing it here would surface as an empty
+			// Options.Notify, and the TUI's unconfigured default (both/unfocused)
+			// would then resurrect alerts a user explicitly turned off while the
+			// setup wizard runs (maintainer review, PR #1001). Carry the stored
+			// block through; other wizard-visible state starts clean as before.
+			resolved = config.ResolvedConfig{Notify: resolved.Notify}
 			forceSetup = true
 		}
 	}
@@ -970,7 +976,12 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// notice when project hooks/plugins were dropped for an untrusted workspace.
 	hookDispatcher, hookSkip := newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks, trustRoot, executionRunner)
 	emitTrustNotice(stderr, hookSkip, pluginActivation.trustSkip, mcpSkip)
+	// From the engine the session's commands run through, so the notice
+	// describes the sandbox they actually get.
+	startupNotices := []string{sandboxEngine.DegradedNotice()}
+	modelRPM := zeroruntime.NewModelRPMLimiter(resolved.ModelRPM)
 	return deps.runTUI(context.Background(), tui.Options{
+		ModelRPM:             modelRPM,
 		Cwd:                  workspaceRoot,
 		Version:              version,
 		Theme:                theme,
@@ -993,7 +1004,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			if provider == nil {
 				return nil
 			}
-			if optimized, ok := providers.OptimizedTurnSessions(profile, provider, providers.Options{}); ok {
+			if optimized, ok := providers.ConfiguredTurnSessions(profile, provider, providers.Options{ModelRPM: modelRPM}); ok {
 				return optimized
 			}
 			return providers.DefaultTurnSessions(profile, provider, providers.Options{})
@@ -1071,6 +1082,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		PermissionMode:            permissionMode,
 		Notify:                    resolved.Notify,
 		KeyBindings:               resolved.KeyBindings,
+		StartupNotices:            startupNotices,
 		STT:                       resolved.STT,
 		BuildDictationTranscriber: newDictationTranscriberFactory(resolved, userConfigPath, sttServerManager),
 		ShutdownDictationServer:   sttServerManager.Shutdown,

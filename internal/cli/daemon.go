@@ -11,9 +11,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/background"
-	"github.com/Gitlawb/zero/internal/daemon"
-	"github.com/Gitlawb/zero/internal/daemon/remote"
+	"github.com/Twigpine/zero/internal/background"
+	"github.com/Twigpine/zero/internal/daemon"
+	"github.com/Twigpine/zero/internal/daemon/remote"
 )
 
 // runDaemon dispatches the `zero daemon ...` subcommands. The daemon supervises a

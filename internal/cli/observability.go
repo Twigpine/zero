@@ -7,11 +7,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/doctor"
-	"github.com/Gitlawb/zero/internal/providerhealth"
-	zsearch "github.com/Gitlawb/zero/internal/search"
-	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/doctor"
+	"github.com/Twigpine/zero/internal/providerhealth"
+	zsearch "github.com/Twigpine/zero/internal/search"
+	"github.com/Twigpine/zero/internal/sessions"
 )
 
 type doctorOptions struct {

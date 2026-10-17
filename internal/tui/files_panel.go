@@ -15,7 +15,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 // maxSidebarFiles caps the FILES rows so the section stays a glanceable set,

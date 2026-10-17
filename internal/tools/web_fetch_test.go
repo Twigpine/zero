@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/proxydial"
-	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/proxydial"
+	zeroSandbox "github.com/Twigpine/zero/internal/sandbox"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

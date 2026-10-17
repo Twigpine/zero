@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/lsp"
-	"github.com/Gitlawb/zero/internal/verify"
+	"github.com/Twigpine/zero/internal/lsp"
+	"github.com/Twigpine/zero/internal/verify"
 )
 
 type fakeVerifier struct {

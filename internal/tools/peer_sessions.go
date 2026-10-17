@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/peermsg"
+	"github.com/Twigpine/zero/internal/peermsg"
 )
 
 type peerSessionService interface {

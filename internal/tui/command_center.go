@@ -12,16 +12,16 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/credstore"
-	"github.com/Gitlawb/zero/internal/doctor"
-	"github.com/Gitlawb/zero/internal/modelregistry"
-	"github.com/Gitlawb/zero/internal/oauth"
-	"github.com/Gitlawb/zero/internal/providercatalog"
-	"github.com/Gitlawb/zero/internal/providermodelcatalog"
-	"github.com/Gitlawb/zero/internal/providers"
-	"github.com/Gitlawb/zero/internal/redaction"
-	zsearch "github.com/Gitlawb/zero/internal/search"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/credstore"
+	"github.com/Twigpine/zero/internal/doctor"
+	"github.com/Twigpine/zero/internal/modelregistry"
+	"github.com/Twigpine/zero/internal/oauth"
+	"github.com/Twigpine/zero/internal/providercatalog"
+	"github.com/Twigpine/zero/internal/providermodelcatalog"
+	"github.com/Twigpine/zero/internal/providers"
+	"github.com/Twigpine/zero/internal/redaction"
+	zsearch "github.com/Twigpine/zero/internal/search"
 )
 
 const doctorStatusRowID = "doctor/status"

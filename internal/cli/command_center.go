@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -8,9 +9,9 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/modelregistry"
-	"github.com/Gitlawb/zero/internal/zerocommands"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/modelregistry"
+	"github.com/Twigpine/zero/internal/zerocommands"
 )
 
 type commandCenterOptions struct {
@@ -26,6 +27,30 @@ type modelSummary = zerocommands.ModelSnapshot
 type providerCatalogSummary = zerocommands.ProviderCatalogSnapshot
 
 func runConfig(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
+	// The first non-flag argument is a subcommand. With no positional argument
+	// (or only flag arguments), the read-only summary path runs — this keeps
+	// `zero config` and `zero config --json` working unchanged.
+	command := "summary"
+	rest := args
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		command = strings.ToLower(strings.TrimSpace(args[0]))
+		rest = args[1:]
+	}
+	switch command {
+	case "summary":
+		return runConfigSummary(rest, stdout, stderr, deps)
+	case "notify":
+		return runConfigNotify(rest, stdout, stderr, deps)
+	case "help":
+		if err := writeConfigHelp(stdout); err != nil {
+			return exitCrash
+		}
+		return exitSuccess
+	}
+	return writeExecUsageError(stderr, fmt.Sprintf("unknown config command %q", command))
+}
+
+func runConfigSummary(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	options, help, err := parseCommandCenterArgs(args, false, false)
 	if err != nil {
 		return writeExecUsageError(stderr, err.Error())
@@ -120,7 +145,7 @@ func runProviders(args []string, stdout io.Writer, stderr io.Writer, deps appDep
 		return exitSuccess
 	}
 
-	resolved, exitCode := resolveCommandCenterConfig(stderr, deps)
+	resolved, exitCode := resolveProviderManagementConfig(stderr, deps)
 	if exitCode != exitSuccess {
 		return exitCode
 	}
@@ -193,12 +218,45 @@ func runModels(args []string, stdout io.Writer, stderr io.Writer) int {
 }
 
 func resolveCommandCenterConfig(stderr io.Writer, deps appDeps) (config.ResolvedConfig, int) {
+	return resolveCommandCenterConfigFor(stderr, deps, false)
+}
+
+// resolveProviderManagementConfig resolves for the `providers` subcommands that
+// only need the provider LIST (`list`, `current`, `use`, `remove`, `rename`).
+// Those keep working when nothing is selected (issue #1130). It is deliberately
+// NOT shared with the commands that REPORT the configuration — `zero config`
+// above all: per the resolver's headless contract, `zero config` / `zero exec`
+// still fail with the actionable resolve error, and only the interactive TUI
+// recovers from a missing active provider.
+func resolveProviderManagementConfig(stderr io.Writer, deps appDeps) (config.ResolvedConfig, int) {
+	return resolveCommandCenterConfigFor(stderr, deps, true)
+}
+
+func resolveCommandCenterConfigFor(stderr io.Writer, deps appDeps, allowMissingActiveProvider bool) (config.ResolvedConfig, int) {
 	workspaceRoot, err := resolveWorkspaceRoot("", deps)
 	if err != nil {
 		return config.ResolvedConfig{}, writeExecUsageError(stderr, err.Error())
 	}
 	resolved, err := deps.resolveConfig(workspaceRoot, config.Overrides{})
 	if err != nil {
+		// A missing active provider must not stop the `providers` subcommands
+		// that answer for profiles coming from the environment (OPENAI_API_KEY,
+		// GEMINI_API_KEY, ...), where an env-derived profile is never marked
+		// active in config.json. The resolver elects an active provider by
+		// itself only when there is exactly one, so two env providers (or one
+		// key plus one base URL) made every subcommand exit with `no active
+		// provider configured: active provider "" not found` (issue #1130). It
+		// still returns the successfully normalized list alongside the error,
+		// so hand that partial config back WITHOUT electing an active provider:
+		// these commands report what is configured, not what a run would use.
+		// Adopting firstUsableProvider here made `providers current`/`list`
+		// present a provider that `zero exec` would still refuse to run with,
+		// and made a base-URL-only profile (no API key) fail `providers list`
+		// because the election demands a credential. Electing a provider to RUN
+		// with stays in the interactive TUI's recovery path (app.go).
+		if allowMissingActiveProvider && errors.Is(err, config.ErrNoActiveProvider) {
+			return resolved, exitSuccess
+		}
 		return config.ResolvedConfig{}, writeAppError(stderr, err.Error(), exitProvider)
 	}
 	return resolved, exitSuccess
@@ -466,8 +524,12 @@ func formatProviderCatalogValue(value string, fallback string) string {
 func writeConfigHelp(w io.Writer) error {
 	_, err := fmt.Fprint(w, `Usage:
   zero config [flags]
+  zero config notify [flags]
 
-Inspects resolved Go configuration without printing secrets.
+Inspects resolved Go configuration without printing secrets. The notify
+subcommand reads or updates the stored global notification preference,
+which controls both the completion and needs-input alerts —
+run "zero config notify --help" for details.
 
 Flags:
       --json      Print JSON summary

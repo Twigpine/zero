@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/fsutil"
-	"github.com/Gitlawb/zero/internal/lockutil"
+	"github.com/Twigpine/zero/internal/fsutil"
+	"github.com/Twigpine/zero/internal/lockutil"
 )
 
 // Mailbox is a per-agent, per-team message inbox persisted as a JSON array on
