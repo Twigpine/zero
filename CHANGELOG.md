@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once the first release is
 tagged. Until then, source builds report the version `dev`.
 
+## [0.12.0](https://github.com/Twigpine/zero/compare/v0.11.0...v0.12.0) (2026-10-17)
+
+
+### Features
+
+* **sandbox:** support self-exec pattern to eliminate separate helper binary ([#946](https://github.com/Twigpine/zero/issues/946)) ([8c4e759](https://github.com/Twigpine/zero/commit/8c4e7597989ef9b3ca67b7703dfd15d92372aed2))
+
+
+### Bug Fixes
+
+* **sessions:** preserve image attachment summaries on resume ([#1152](https://github.com/Twigpine/zero/issues/1152)) ([1e84849](https://github.com/Twigpine/zero/commit/1e848492e5c1919d187fb5e1eb5e7ef9bc6140dc)), closes [#1135](https://github.com/Twigpine/zero/issues/1135)
+* **workspaceindex:** import gitsafe under the Twigpine module path ([#1153](https://github.com/Twigpine/zero/issues/1153)) ([ef4da13](https://github.com/Twigpine/zero/commit/ef4da1323f1097863ae278224b5f304c2fff909a))
+* **workspaceindex:** run Scan's git calls through gitsafe ([#1149](https://github.com/Twigpine/zero/issues/1149)) ([2ffe183](https://github.com/Twigpine/zero/commit/2ffe1831b0950b1463ec46d487d03a5fcb679cc6))
+
 ## [0.11.0](https://github.com/Twigpine/zero/compare/v0.10.0...v0.11.0) (2026-10-15)
 
 
