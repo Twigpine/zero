@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"unsafe"
@@ -35,13 +36,160 @@ type windowsACLSnapshot struct {
 	Path         string
 	Descriptor   *windows.SECURITY_DESCRIPTOR
 	Materialized bool
+	// Identity is the object the forward apply actually modified, captured from
+	// the open handle. Compensation reopens BY NAME, and a name is not an
+	// object: see rollbackWindowsACLSnapshots.
+	Identity windowsObjectIdentity
+}
+
+// windowsObjectIdentity identifies a filesystem object independently of the
+// name it currently answers to.
+type windowsObjectIdentity struct {
+	volume uint32
+	high   uint32
+	low    uint32
+	valid  bool
+}
+
+func windowsIdentityFromHandle(handle windows.Handle) windowsObjectIdentity {
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return windowsObjectIdentity{}
+	}
+	return windowsObjectIdentity{
+		volume: info.VolumeSerialNumber,
+		high:   info.FileIndexHigh,
+		low:    info.FileIndexLow,
+		valid:  true,
+	}
+}
+
+// matches is deliberately false when either side is unknown. A compensation
+// that cannot prove it is acting on the object it changed must not act.
+func (id windowsObjectIdentity) matches(other windowsObjectIdentity) bool {
+	return id.valid && other.valid &&
+		id.volume == other.volume && id.high == other.high && id.low == other.low
+}
+
+// windowsACLStampRequest asks the apply to write the runtime setup stamp THROUGH
+// THE SAME HANDLE it just applied the capability ACE through.
+//
+// The stamp exists to prove that the directory a command later uses is the
+// object setup granted the ACE to. Writing it afterwards by pathname cannot
+// prove that, however carefully the second open is done: the ACE goes on
+// through a rooted handle, that handle closes, network setup runs, and only then
+// does the marker write re-open the name. A local process that can reach the
+// user-owned runtime tree can remove the predictable root in that window and
+// put an ordinary directory in its place. The re-open correctly rejects a
+// junction, but an ordinary replacement is not a reparse point and is not the
+// ACL-bearing object either, so it collects a valid-looking stamp. Marker
+// validation then passes over a directory with no capability ACE, and the next
+// WRITE_RESTRICTED command fails its cache and TMP writes with setup insisting
+// it is current.
+//
+// Closing that means never naming the target again after the ACE lands. The
+// hash is known before the apply, so the stamp can simply ride along.
+type windowsACLStampRequest struct {
+	Root     string
+	PlanHash string
+	// RootIdentity is the file identity of the runtime directory the SNAPSHOT
+	// read, and RootIdentified says whether that capture actually succeeded.
+	//
+	// TWO OPENS OF ONE NAME ARE NOT ONE OBJECT. The snapshot proved "these prior
+	// bytes belong to B" through its own handle and then closed it; the apply
+	// resolved the same pathname again and mutated whatever answered, without
+	// either of them ever proving B and that object are the same. The root owner
+	// can rename the prior root aside, put an ordinary directory at the
+	// predictable name for the snapshot, and restore the original before the
+	// apply. The setup lease is a sibling and does not bind the root entry.
+	//
+	// The consequence was not merely a wrong ACL. On a later failure, stamp
+	// compensation compared the object it found against the snapshot's identity,
+	// refused to restore, and left this run's stamp on a directory whose marker
+	// still described the previous successful setup: a failed setup invalidating a
+	// good one.
+	RootIdentity   string
+	RootIdentified bool
+}
+
+// windowsACLStampSwapHook fires in the exact window this design closes: after
+// the capability ACE is on the object and before the stamp is written. Nil in
+// production; a test uses it to replace the runtime root with an ordinary
+// directory, which is what a local process would do.
+var windowsACLStampSwapHook func(path string)
+
+// windowsACLStampWriteHook replaces the ride-along stamp write. Nil in
+// production; a test uses it to reach the post-commit failure path, which no
+// ordinary input produces once the bound handle is already open.
+var windowsACLStampWriteHook func(path string) error
+
+// verifyStampRootIdentity refuses when the object this apply holds is not the one
+// the snapshot read.
+//
+// windowsACLStampIdentitySwapHook exists so a test can substitute the directory
+// in exactly the interval between the two opens, which is otherwise unreachable
+// from any ordinary input.
+func verifyStampRootIdentity(handle windows.Handle, path string, stamp *windowsACLStampRequest) error {
+	if !stamp.RootIdentified {
+		return fmt.Errorf("the sandbox runtime root %s could not be identified when its prior state was recorded, so this setup cannot prove it is about to change the same directory", path)
+	}
+	identity, err := handleRuntimeIdentity(handle)
+	if err != nil {
+		return fmt.Errorf("identify the sandbox runtime root %s before applying its ACL: %w", path, err)
+	}
+	if identity != stamp.RootIdentity {
+		return fmt.Errorf("the sandbox runtime root %s is no longer the directory this run recorded the prior state of, so applying the ACL and stamp here would attest to an object nobody inspected", path)
+	}
+	return nil
+}
+
+// windowsACLStampIdentitySwapHook fires in the interval between the snapshot's
+// close and the apply's open, which is where a substitution can actually land.
+// Nil in production.
+var windowsACLStampIdentitySwapHook func(path string)
+
+// windowsSameRuntimeRootPath compares two runtime roots the way the filesystem
+// does, so the stamp rides along with the right target regardless of spelling.
+// Beside its only caller: in the shared file it was dead code on every other
+// platform.
+func windowsSameRuntimeRootPath(left, right string) bool {
+	left = filepath.Clean(strings.TrimSpace(left))
+	right = filepath.Clean(strings.TrimSpace(right))
+	if left == "" || right == "" {
+		return false
+	}
+	return strings.EqualFold(left, right)
+}
+
+// writeRidingStamp writes the stamp through the handle the capability ACE was
+// applied on, or through the test hook when one is installed.
+func writeRidingStamp(handle windows.Handle, path string, planHash string) error {
+	if windowsACLStampWriteHook != nil {
+		return windowsACLStampWriteHook(path)
+	}
+	return writeWindowsRuntimeStampToDirectoryHandle(handle, windowsSandboxRuntimeStampName(planHash), planHash)
+}
+
+// restoreWindowsACLThroughHandle puts a captured DACL back on the object the
+// handle names, by handle rather than by pathname for the same reason the stamp
+// rides along: after the apply, the name is no longer proof of the object.
+func restoreWindowsACLThroughHandle(handle windows.Handle, descriptor *windows.SECURITY_DESCRIPTOR) error {
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		return fmt.Errorf("read the captured windows DACL: %w", err)
+	}
+	return windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
 }
 
 func applyWindowsACLPlan(plan WindowsACLPlan) (func() error, error) {
+	return applyWindowsACLPlanWithStamp(plan, nil)
+}
+
+func applyWindowsACLPlanWithStamp(plan WindowsACLPlan, stamp *windowsACLStampRequest) (func() error, error) {
 	groups := groupWindowsACLPlanByPath(plan)
 	snapshots := make([]windowsACLSnapshot, 0, len(groups))
 	for _, group := range groups {
-		snapshot, applied, err := applyWindowsACLPathGroup(group)
+		snapshot, applied, err := applyWindowsACLPathGroupWithStamp(group, stamp)
 		if err != nil {
 			rollbackErr := rollbackWindowsACLSnapshots(snapshots)
 			if rollbackErr != nil {
@@ -90,6 +238,10 @@ func groupWindowsACLPlanByPath(plan WindowsACLPlan) []windowsACLPathGroup {
 }
 
 func applyWindowsACLPathGroup(group windowsACLPathGroup) (windowsACLSnapshot, bool, error) {
+	return applyWindowsACLPathGroupWithStamp(group, nil)
+}
+
+func applyWindowsACLPathGroupWithStamp(group windowsACLPathGroup, stamp *windowsACLStampRequest) (windowsACLSnapshot, bool, error) {
 	path := strings.TrimSpace(group.Path)
 	if path == "" || len(group.Entries) == 0 {
 		return windowsACLSnapshot{}, false, nil
@@ -101,6 +253,13 @@ func applyWindowsACLPathGroup(group windowsACLPathGroup) (windowsACLSnapshot, bo
 	// elevated setup a lower-privileged local user could swap the target for a
 	// symlink/junction between operations and redirect the ACL change onto a
 	// system object it never validated (issue #728, a TOCTOU privilege boundary).
+	// THE INTERVAL IS HERE, BEFORE THIS OPEN. The snapshot read its object through
+	// its own handle and closed it; a handle already open cannot be renamed out
+	// from under itself, so the only place a substitution can land is between that
+	// close and this open. The hook exists so a test can put it exactly there.
+	if windowsACLStampIdentitySwapHook != nil && stamp != nil && windowsSameRuntimeRootPath(stamp.Root, path) {
+		windowsACLStampIdentitySwapHook(path)
+	}
 	materialized := false
 	handle, isDir, err := openWindowsACLTarget(path)
 	if err != nil {
@@ -169,6 +328,18 @@ func applyWindowsACLPathGroup(group windowsACLPathGroup) (windowsACLSnapshot, bo
 	} else {
 		nextDACL = baseDACL
 	}
+	// BEFORE THE FIRST MUTATION, NOT BEFORE THE STAMP. Checking later would leave
+	// the ACL already applied to the wrong object, which is the change that
+	// matters most.
+	//
+	// Fails CLOSED. An unestablished identity refuses rather than passing, because
+	// "we could not tell" is exactly the case this exists for; treating it as
+	// permission would make the guard a no-op precisely when it is needed.
+	if stamp != nil && windowsSameRuntimeRootPath(stamp.Root, path) {
+		if err := verifyStampRootIdentity(handle, path, stamp); err != nil {
+			return fail(err)
+		}
+	}
 	if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, nextDACL, nil); err != nil {
 		return fail(fmt.Errorf("apply windows ACL for %s: %w", path, err))
 	}
@@ -176,8 +347,33 @@ func applyWindowsACLPathGroup(group windowsACLPathGroup) (windowsACLSnapshot, bo
 	// The handle has served its purpose (read+write bound to one object) and is
 	// closed now — rollback re-opens no-follow rather than holding a handle for
 	// the whole sandbox lifetime, since one caller discards the rollback closure.
+	// BEFORE THE HANDLE CLOSES, and only for the target the stamp names. This is
+	// the whole point: the ACE and the stamp land on one kernel object with no
+	// pathname resolution in between.
+	if stamp != nil && windowsSameRuntimeRootPath(stamp.Root, path) {
+		if windowsACLStampSwapHook != nil {
+			windowsACLStampSwapHook(path)
+		}
+		if err := writeRidingStamp(handle, path, stamp.PlanHash); err != nil {
+			// THE ACE AND ITS STAMP ARE ONE TRANSACTION.
+			//
+			// SetSecurityInfo above has already committed, and this function
+			// returns no rollback closure on its error paths, so the caller has
+			// nothing to compensate with. Without this restore a failed setup
+			// reports failure while leaving the capability grant on a pre-existing
+			// runtime root: the tree stays writable by the restricted token and
+			// nothing on disk records that it should not be.
+			if restoreErr := restoreWindowsACLThroughHandle(handle, descriptor); restoreErr != nil {
+				return fail(fmt.Errorf("stamp windows ACL target %s: %w (the committed ACL could not be restored either: %v)", path, err, restoreErr))
+			}
+			return fail(fmt.Errorf("stamp windows ACL target %s: %w", path, err))
+		}
+	}
+	// Captured while the handle is still open, because this is the last moment
+	// the object and the name are known to be the same thing.
+	identity := windowsIdentityFromHandle(handle)
 	_ = windows.CloseHandle(handle)
-	return windowsACLSnapshot{Path: path, Descriptor: descriptor, Materialized: materialized}, true, nil
+	return windowsACLSnapshot{Path: path, Descriptor: descriptor, Materialized: materialized, Identity: identity}, true, nil
 }
 
 // openWindowsACLTarget opens path for reading and rewriting its DACL without
@@ -189,6 +385,24 @@ func applyWindowsACLPathGroup(group windowsACLPathGroup) (windowsACLSnapshot, bo
 // is exactly the redirection this guard exists to prevent. A missing target is
 // surfaced as os.ErrNotExist so the caller's materialize path still fires.
 func openWindowsACLTarget(path string) (windows.Handle, bool, error) {
+	// A RUNTIME ROOT IS OPENED BY HANDLE, NOT BY NAME.
+	//
+	// FILE_FLAG_OPEN_REPARSE_POINT below protects only the FINAL component; every
+	// ancestor in the pathname is resolved normally. The runtime tail is the one
+	// part of the tree Zero creates and therefore the one part an unprivileged
+	// local user can predict and pre-empt, and junctions need no privilege, so a
+	// swap at an owned ancestor between the last check and this open redirects the
+	// elevated capability ACL into a directory of their choosing.
+	//
+	// Everything else here is the user's own tree, where an ancestor reparse point
+	// is ordinary configuration and following it is correct.
+	if _, _, owned := windowsSandboxRuntimeOwnedTail(path); owned {
+		handle, err := openWindowsRuntimeTailDirectory(path, windows.READ_CONTROL|windows.WRITE_DAC|windows.FILE_TRAVERSE)
+		if err != nil {
+			return 0, false, err
+		}
+		return handle, true, nil
+	}
 	utf16Path, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return 0, false, fmt.Errorf("encode windows ACL target %s: %w", path, err)
@@ -602,25 +816,74 @@ func rollbackWindowsACLSnapshots(snapshots []windowsACLSnapshot) error {
 	var errs []error
 	for index := len(snapshots) - 1; index >= 0; index-- {
 		snapshot := snapshots[index]
+		// A NAME IS NOT AN OBJECT ONCE THE APPLY HANDLE HAS CLOSED.
+		//
+		// The forward apply and its stamp go through one handle, so they are
+		// provably about one object. Compensation runs later, after a network or
+		// marker failure, and resolves these names again. Opening no-follow stops
+		// a reparse point but accepts an ORDINARY directory moved into the name
+		// since: the original is renamed aside, a substitute is created, and
+		// rollback then restores the pre-apply DACL onto the substitute, strips a
+		// stamp there, and reports success, while the moved original keeps this
+		// run's capability ACE and a valid stamp. Setup would claim a completed
+		// rollback with the modified object still reachable elsewhere, having
+		// also mutated something it never touched going forward.
+		//
+		// So every compensation proves it holds the object it changed, and
+		// otherwise leaves the substitute alone and says plainly what was left
+		// behind.
 		if snapshot.Materialized {
+			// NOT identity-checked, and the reason is a real limit rather than an
+			// oversight. A materialized target is one this run created, and its
+			// plan routinely denies Everyone read (that is what a protected
+			// metadata carve-out IS), so the attributes identity needs cannot be
+			// read back even by the owner: the check turned rollback of every
+			// materialized directory into "Access is denied". Establishing
+			// identity here would mean holding the apply handle open until the
+			// last failure point, which is a larger change than this one.
 			if err := os.RemoveAll(snapshot.Path); err != nil {
 				errs = append(errs, fmt.Errorf("remove materialized windows ACL target %s: %w", snapshot.Path, err))
 			}
 			continue
 		}
-		dacl, _, err := snapshot.Descriptor.DACL()
-		if err != nil {
-			errs = append(errs, fmt.Errorf("read rollback windows DACL for %s: %w", snapshot.Path, err))
-			continue
-		}
-		// Re-open no-follow rather than restoring by pathname: the restore must
-		// land on the real object, not a reparse point swapped in since apply. The
-		// residual window is small because the target is ACL-restricted by now, but
-		// a handle keeps the restore honest. On a materialized-target rollback we
-		// remove it above, so only the restore-existing path opens here.
+		// ONE OPEN, AND THE IDENTITY COMES FROM THE HANDLE THAT GETS MUTATED.
+		//
+		// Checking identity through a separate open and then resolving the name
+		// again for the restore proves nothing about the second handle: the two
+		// opens are a check-then-use, and the fact established (this NAME resolved
+		// to the object we changed) is not the fact the write depends on (this
+		// HANDLE is that object). Opening once and asking the handle who it is
+		// removes the window rather than narrowing it.
 		handle, _, err := openWindowsACLTarget(snapshot.Path)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("re-open windows ACL target %s for rollback: %w", snapshot.Path, err))
+			continue
+		}
+		// TWO DIFFERENT REFUSALS. A snapshot whose identity was never established
+		// fails the match below exactly as a replaced target does, and both must
+		// leave the object alone, but telling the operator it was replaced when it
+		// was never identified sends them looking for a substitution that did not
+		// happen. Reported by CodeRabbit.
+		if !snapshot.Identity.valid {
+			_ = windows.CloseHandle(handle)
+			errs = append(errs, fmt.Errorf(
+				"windows ACL target %s could not be identified when this setup changed it, "+
+					"so rollback cannot prove it is the same object and leaves it with this run's grant",
+				snapshot.Path))
+			continue
+		}
+		if !snapshot.Identity.matches(windowsIdentityFromHandle(handle)) {
+			_ = windows.CloseHandle(handle)
+			errs = append(errs, fmt.Errorf(
+				"windows ACL target %s is no longer the object this setup modified; "+
+					"leaving the replacement untouched, and the original still carries this run's grant",
+				snapshot.Path))
+			continue
+		}
+		dacl, _, err := snapshot.Descriptor.DACL()
+		if err != nil {
+			_ = windows.CloseHandle(handle)
+			errs = append(errs, fmt.Errorf("read rollback windows DACL for %s: %w", snapshot.Path, err))
 			continue
 		}
 		if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
