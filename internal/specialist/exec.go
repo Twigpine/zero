@@ -25,6 +25,7 @@ import (
 
 const (
 	sessionTagSpecialist     = "specialist"
+	specialistTaskType       = "specialist"
 	promptFileThresholdBytes = 4 * 1024
 	maxSpecialistDepth       = 8 // hard cap to prevent infinite recursion/resource exhaustion via Task
 )
@@ -63,16 +64,21 @@ type LifecycleHooks struct {
 	// Dispatch runs configured hooks for event ("specialistStart"/"specialistStop").
 	// specialistName is used as the matcher subject. nil Dispatch is a no-op.
 	Dispatch func(ctx context.Context, event string, specialistName string, payload map[string]any)
-	// stopOnce dedupes specialistStop dispatch across concurrent finishers that
-	// share this bridge (Task onExit, TaskOutput poll, swarm members).
-	stopOnce sync.Map
+	// stopMu guards stopClaims, the in-process fallback used when no durable
+	// claim can be written (swarm members have no parent session) or the session
+	// store is unavailable.
+	stopMu     sync.Mutex
+	stopClaims map[string]map[string]struct{}
 }
 
-// claimStopDispatch reports whether this bridge should run specialistStop for
-// the given child/run. The first observer wins; later finishers return false so
-// hooks are not re-run. Decoupled from session-event append so swarm members
-// without a parent session and hook-carrying reap paths still fire once.
-func (h *LifecycleHooks) claimStopDispatch(childSessionID, runID string) bool {
+// claimInProcessStopDispatch reports whether this bridge should run
+// specialistStop for the given child/run. It is the process-local fallback for
+// callers without a durable ledger; the run-ID equivalence mirrors
+// specialistPayloadMatches: an empty runId is a catch-all for both the query and
+// any recorded claim, so a later observation with a runId cannot re-fire a stop
+// that was already claimed without one. An empty child session never dedups
+// (there is nothing to key on), matching the accounting matcher.
+func (h *LifecycleHooks) claimInProcessStopDispatch(childSessionID, runID string) bool {
 	if h == nil || h.Dispatch == nil {
 		return false
 	}
@@ -80,9 +86,30 @@ func (h *LifecycleHooks) claimStopDispatch(childSessionID, runID string) bool {
 	if childSessionID == "" {
 		return true
 	}
-	key := childSessionID + "\x00" + strings.TrimSpace(runID)
-	_, loaded := h.stopOnce.LoadOrStore(key, struct{}{})
-	return !loaded
+	runID = strings.TrimSpace(runID)
+
+	h.stopMu.Lock()
+	defer h.stopMu.Unlock()
+	if h.stopClaims == nil {
+		h.stopClaims = map[string]map[string]struct{}{}
+	}
+	claims := h.stopClaims[childSessionID]
+	if claims == nil {
+		claims = map[string]struct{}{}
+		h.stopClaims[childSessionID] = claims
+	}
+	claimed := false
+	if runID == "" {
+		claimed = len(claims) > 0
+	} else {
+		_, emptyClaim := claims[""]
+		_, exactClaim := claims[runID]
+		claimed = emptyClaim || exactClaim
+	}
+	if !claimed {
+		claims[runID] = struct{}{}
+	}
+	return !claimed
 }
 
 type BuildArgsInput struct {
@@ -511,7 +538,7 @@ func (executor Executor) runBackground(ctx context.Context, built BuildArgsResul
 	}
 	outputFile, err := manager.Register(background.RegisterInput{
 		TaskID:         built.SessionID,
-		Type:           "specialist",
+		Type:           specialistTaskType,
 		SpecialistName: manifest.Metadata.Name,
 		Description:    params.Description,
 		ParentID:       options.ParentSessionID,
@@ -556,27 +583,30 @@ func (executor Executor) runBackground(ctx context.Context, built BuildArgsResul
 		}
 		_ = manager.MarkExited(built.SessionID, status, exitCode)
 		if task, ok := manager.Get(built.SessionID); ok {
-			summary := StreamResult{ExitCode: task.ExitCode}
-			if data, err := os.ReadFile(task.OutputFile); err == nil {
-				summary, _ = summarizeTaskData(string(data), task.ExitCode)
-			}
-			executor.recordBackgroundTaskAccounting(task, summary)
+			executor.recordBackgroundTaskAccounting(task, taskStreamSummary(task))
 		}
 		executor.cleanupBackgroundPromptFile(built.SessionID, built.PromptFile)
 	})
 	if err != nil {
+		// The child never started: keep the attempt accounting, but publish no
+		// public lifecycle hooks for a sub-agent that did not exist.
+		accounting.LaunchFailed = true
 		_ = manager.UpdateStatus(built.SessionID, background.StatusError, -1)
 		executor.cleanupBackgroundPromptFile(built.SessionID, built.PromptFile)
 		executor.recordSpecialistStop(accounting, StreamResult{ExitCode: -1}, "error", -1, err, false)
 		return ExecResult{}, err
 	}
+	// Startup is confirmed (launchBackground only returns without error after the
+	// child process started), so the specialistStart hook can fire now.
+	executor.dispatchSpecialistStartHook(accounting)
 	if pid > 0 {
 		if err := manager.SetPID(built.SessionID, pid); err != nil {
 			// The child is running but its PID was never recorded, so nothing can
 			// track or stop it later. Kill it (and its process group) now, mark the
 			// task errored, and record the stop so it cannot become an untracked
-			// orphan. The dedup in recordSpecialistStop makes the later onExit
-			// accounting a no-op.
+			// orphan. The child started, so the stop is a real terminal transition:
+			// both the accounting dedup and the shared stop-hook claim make the
+			// later onExit accounting a no-op.
 			if killErr := background.TerminateProcess(pid); killErr != nil {
 				// Don't mask a failed kill: a surviving orphan is worse than the
 				// SetPID error alone, so surface both to the caller.
@@ -660,7 +690,23 @@ func (executor Executor) runBuiltArgs(ctx context.Context, built BuildArgsResult
 		Background:      false,
 	}
 	executor.recordSpecialistStart(accounting)
-	run, err := executor.runChild(ctx, binaryPath, built.Args, progress)
+	startDispatched := false
+	onStarted := func() {
+		if startDispatched {
+			return
+		}
+		startDispatched = true
+		executor.dispatchSpecialistStartHook(accounting)
+	}
+	run, err := executor.runChild(ctx, binaryPath, built.Args, progress, onStarted)
+	started := run.Started || err == nil
+	if started {
+		// A seam that returns a completed run without the explicit Started flag
+		// still proves the child existed; make sure the hook fired exactly once.
+		onStarted()
+	} else {
+		accounting.LaunchFailed = true
+	}
 	if err != nil {
 		exitCode := run.exitCodeOr(-1)
 		summary := SummarizeStream(run.Events, exitCode)
@@ -730,11 +776,20 @@ func (executor Executor) binaryPath() (string, error) {
 	return path, nil
 }
 
-func (executor Executor) runChild(ctx context.Context, binaryPath string, args []string, progress func(streamjson.Event)) (ChildRunResult, error) {
+// runChild runs one child process. onStarted, when non-nil, is invoked exactly
+// once as soon as the child process has actually started (after os/exec Start
+// succeeds), so public lifecycle hooks cannot fire for a launch that failed.
+// The injected RunChild seam cannot stream that signal, so a seam result marked
+// Started reports it when the seam returns.
+func (executor Executor) runChild(ctx context.Context, binaryPath string, args []string, progress func(streamjson.Event), onStarted func()) (ChildRunResult, error) {
 	if executor.RunChild != nil {
-		return executor.RunChild(ctx, binaryPath, append([]string(nil), args...), progress)
+		result, err := executor.RunChild(ctx, binaryPath, append([]string(nil), args...), progress)
+		if result.Started && onStarted != nil {
+			onStarted()
+		}
+		return result, err
 	}
-	return runChildProcess(ctx, binaryPath, args, progress)
+	return runChildProcess(ctx, binaryPath, args, progress, onStarted)
 }
 
 func (executor Executor) launchBackground(binaryPath string, args []string, outputFile string, onExit func(exitCode int)) (int, error) {
@@ -863,7 +918,7 @@ func cleanupPromptFile(promptFile string) {
 	_ = os.Remove(promptFile)
 }
 
-func runChildProcess(ctx context.Context, binaryPath string, args []string, progress func(streamjson.Event)) (ChildRunResult, error) {
+func runChildProcess(ctx context.Context, binaryPath string, args []string, progress func(streamjson.Event), onStarted func()) (ChildRunResult, error) {
 	var stderr bytes.Buffer
 	command := osexec.CommandContext(ctx, binaryPath, args...)
 	// Put the child in its own process group and group-kill on cancel/timeout, so a
@@ -876,6 +931,9 @@ func runChildProcess(ctx context.Context, binaryPath string, args []string, prog
 	}
 	if err := command.Start(); err != nil {
 		return ChildRunResult{Stderr: stderr.String()}, fmt.Errorf("start specialist child: %w", err)
+	}
+	if onStarted != nil {
+		onStarted()
 	}
 	events := []streamjson.Event{}
 	reader := bufio.NewReader(stdout)

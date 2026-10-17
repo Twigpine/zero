@@ -15,7 +15,7 @@ func RegisterTools(registry *tools.Registry, executor Executor) (*Runtime, error
 	toolExecutor.BackgroundManagerFunc = runtime.Manager
 	registry.Register(NewTaskTool(toolExecutor))
 	registry.Register(newOutputToolWithManagerFunc(runtime.Manager, executor.SessionStore, executor.LifecycleHooks))
-	registry.Register(newStopToolWithManagerFunc(runtime.Manager))
+	registry.Register(newStopToolWithManagerFunc(runtime.Manager, executor.SessionStore, executor.LifecycleHooks))
 	registry.Register(NewGenerateTool(NewStorage(executor.Paths)))
 	return runtime, nil
 }
