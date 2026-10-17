@@ -5,7 +5,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Twigpine/zero/internal/config"
 )
 
 // runConfigNotify implements `zero config notify`: with no flags it prints the

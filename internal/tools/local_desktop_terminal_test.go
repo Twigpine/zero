@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/localcontrol"
+	"github.com/Twigpine/zero/internal/localcontrol"
 )
 
 func TestDesktopSnapshotBuildsDriverJSON(t *testing.T) {

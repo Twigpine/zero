@@ -5,7 +5,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/Gitlawb/zero/internal/usercommands"
+	"github.com/Twigpine/zero/internal/usercommands"
 )
 
 // handleUserCommand resolves a "/name args" that wasn't a builtin command

@@ -5,9 +5,9 @@ import (
 	"math"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/modelregistry"
-	"github.com/Gitlawb/zero/internal/sessions"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/modelregistry"
+	"github.com/Twigpine/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 // The persistence round-trip is LOSSLESS for cost: a cache-heavy + reasoning turn

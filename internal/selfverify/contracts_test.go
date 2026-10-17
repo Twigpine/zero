@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/testrunner"
-	"github.com/Gitlawb/zero/internal/verify"
+	"github.com/Twigpine/zero/internal/testrunner"
+	"github.com/Twigpine/zero/internal/verify"
 )
 
 func TestSnapshotFromReportPreservesAttemptsAndRedactsRemediation(t *testing.T) {

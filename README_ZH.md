@@ -105,24 +105,33 @@ zero exec --output-format stream-json < turns.jsonl
 ### npm
 
 ```bash
-npm install -g @gitlawb/zero
+npm install -g @twigpine/zero
 zero
 ```
 
 npm 包是一个小型包装器，其平台构建（Linux 和 macOS 的 x64/arm64、Windows 的 x64，包含浏览器/终端控制辅助工具）作为可选依赖直接从 npm registry 安装——没有安装脚本，也不会从 npm 之外下载任何内容。Bun、pnpm 和 yarn 的行为完全一致，无需任何信任或批准步骤。跳过可选依赖的安装（`--omit=optional`）也能工作：只要二进制文件缺失，包装器就会从对应的 GitHub Release 下载。Windows on ARM 通过模拟运行 x64 构建。详见 [docs/NPM_PACKAGING.md](docs/NPM_PACKAGING.md)。
+
+之前通过 `@gitlawb/zero` 安装过 Zero？从 0.10.0 起，npm 包已迁移到 `@twigpine/zero`，旧包名不再发布新版本。两个包都提供 `zero` 命令，所以请先退出正在运行的 `zero`，再卸载旧包：
+
+```bash
+npm uninstall -g @gitlawb/zero
+npm install -g @twigpine/zero
+```
+
+配置、会话和登录信息都会保留，它们存放在包之外。Bun、pnpm 和 yarn 的命令见 [docs/INSTALL.md](docs/INSTALL.md#moving-from-gitlawbzero)。
 
 ### 安装脚本
 
 Linux/macOS：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Twigpine/zero/main/scripts/install.sh | bash
 ```
 
 Windows PowerShell：
 
 ```powershell
-irm https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/Twigpine/zero/main/scripts/install.ps1 | iex
 ```
 
 ### 从源码构建
@@ -130,7 +139,7 @@ irm https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.ps1 | ie
 源码构建需要 Go 1.26.9+。
 
 ```bash
-git clone https://github.com/Gitlawb/zero.git
+git clone https://github.com/Twigpine/zero.git
 cd zero
 go run ./cmd/zero
 ```
@@ -141,14 +150,14 @@ go run ./cmd/zero
 go build -o zero ./cmd/zero
 ```
 
-在 Linux 上，如果你需要原生沙箱，还需要构建沙箱辅助程序：
+在 Linux 上，原生沙箱需要 Bubblewrap。主程序 `zero` 在找不到 `zero-linux-sandbox` 时会以自身作为辅助进程重新执行。同目录或 PATH 上的独立 helper 仍优先：
 
 ```bash
-go build -o zero-linux-sandbox ./cmd/zero-linux-sandbox
-go build -o zero-seccomp ./cmd/zero-seccomp   # 可选的兼容性包装器
+go build -o zero-linux-sandbox ./cmd/zero-linux-sandbox   # 可选
+go build -o zero-seccomp ./cmd/zero-seccomp               # 可选的兼容性包装器
 ```
 
-将 `zero` 和 `zero-linux-sandbox` 放在 `PATH` 上的同一目录中（`~/.local/bin` 是一个好的默认选择）。macOS 不需要额外的辅助二进制文件。Windows 源码构建可以使用主 `zero.exe` 作为沙箱辅助程序；发布包仍然附带独立的 Windows 辅助可执行文件。
+将 `zero` 放在 `PATH` 上（`~/.local/bin` 是一个好的默认选择）。macOS 不需要额外的辅助二进制文件。Windows 源码构建可以使用主 `zero.exe` 作为沙箱辅助程序；发布包仍然附带独立的 Windows 辅助可执行文件。
 
 更多安装细节：[docs/INSTALL.md](docs/INSTALL.md)。
 
@@ -177,6 +186,7 @@ export ANTHROPIC_API_KEY=...
 export GEMINI_API_KEY=...
 export LONGCAT_API_KEY=...
 export GMI_API_KEY=...
+export CONCENTRATE_API_KEY=...
 ```
 
 要直接配置美团 LongCat（LongCat-2.0），运行：
@@ -189,6 +199,12 @@ zero providers setup longcat --set-active
 
 ```bash
 zero providers setup gmicloud --set-active
+```
+
+要直接配置 Concentrate，运行：
+
+```bash
+zero providers setup concentrate --set-active
 ```
 
 对于本地模型，运行 Ollama、LM Studio 或 [Atomic Chat](https://atomic.chat) 桌面应用，
@@ -358,14 +374,14 @@ go run ./cmd/zero-release build --goos windows --goarch amd64 --output dist/zero
 实时交流在 [Discord 服务器](https://discord.gg/CaQDS6wdFn) 进行。
 
 提问、安装帮助、想法和分享都在
-[GitHub Discussions](https://github.com/Gitlawb/zero/discussions)：
+[GitHub Discussions](https://github.com/Twigpine/zero/discussions)：
 
 | 分类 | 用途 |
 |---|---|
-| [Q&A](https://github.com/Gitlawb/zero/discussions/categories/q-a) | 安装帮助、提供商/模型配置、"如何做"类问题 |
-| [Ideas](https://github.com/Gitlawb/zero/discussions/categories/ideas) | 功能提议和 PR 之前的设计讨论 |
-| [Show and tell](https://github.com/Gitlawb/zero/discussions/categories/show-and-tell) | 你的技能、插件、MCP 配置、主题和工作流 |
-| [Announcements](https://github.com/Gitlawb/zero/discussions/categories/announcements) | 维护者发布的版本和项目动态 |
+| [Q&A](https://github.com/Twigpine/zero/discussions/categories/q-a) | 安装帮助、提供商/模型配置、"如何做"类问题 |
+| [Ideas](https://github.com/Twigpine/zero/discussions/categories/ideas) | 功能提议和 PR 之前的设计讨论 |
+| [Show and tell](https://github.com/Twigpine/zero/discussions/categories/show-and-tell) | 你的技能、插件、MCP 配置、主题和工作流 |
+| [Announcements](https://github.com/Twigpine/zero/discussions/categories/announcements) | 维护者发布的版本和项目动态 |
 
 ## 贡献
 

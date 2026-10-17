@@ -17,8 +17,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/trace"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/trace"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 const maxSSELineBytes = 16 * 1024 * 1024

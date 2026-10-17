@@ -116,7 +116,7 @@ zero exec --output-format stream-json < turns.jsonl
 ### npm
 
 ```bash
-npm install -g @gitlawb/zero
+npm install -g @twigpine/zero
 zero
 ```
 
@@ -130,18 +130,30 @@ matching GitHub Release whenever it is missing. Windows on ARM runs the x64
 build under emulation. See [docs/NPM_PACKAGING.md](docs/NPM_PACKAGING.md) for
 how the package is put together.
 
+Installed Zero as `@gitlawb/zero`? The package moved to `@twigpine/zero` in
+0.10.0 and the old name gets no further releases. Both packages provide the
+`zero` command, so quit any running `zero`, then remove the old package first:
+
+```bash
+npm uninstall -g @gitlawb/zero
+npm install -g @twigpine/zero
+```
+
+Your config, sessions, and logins are kept; they live outside the package. For
+Bun, pnpm, and yarn, see [docs/INSTALL.md](docs/INSTALL.md#moving-from-gitlawbzero).
+
 ### Install scripts
 
 Linux/macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Twigpine/zero/main/scripts/install.sh | bash
 ```
 
 Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/Twigpine/zero/main/scripts/install.ps1 | iex
 ```
 
 ### From source
@@ -149,7 +161,7 @@ irm https://raw.githubusercontent.com/Gitlawb/zero/main/scripts/install.ps1 | ie
 Source builds require Go 1.26.9+.
 
 ```bash
-git clone https://github.com/Gitlawb/zero.git
+git clone https://github.com/Twigpine/zero.git
 cd zero
 go run ./cmd/zero
 ```
@@ -161,17 +173,18 @@ If you are testing before the first public release, build from source:
 go build -o zero ./cmd/zero
 ```
 
-On Linux, build the sandbox helper too if you want native sandboxing:
+On Linux, native sandboxing needs Bubblewrap. The main `zero` binary re-executes
+itself as the helper when `zero-linux-sandbox` is absent. A separate helper next
+to `zero` or on `PATH` still takes precedence:
 
 ```bash
-go build -o zero-linux-sandbox ./cmd/zero-linux-sandbox
-go build -o zero-seccomp ./cmd/zero-seccomp   # optional compatibility wrapper
+go build -o zero-linux-sandbox ./cmd/zero-linux-sandbox   # optional
+go build -o zero-seccomp ./cmd/zero-seccomp               # optional compatibility wrapper
 ```
 
-Put `zero` and `zero-linux-sandbox` in the same directory on `PATH`
-(`~/.local/bin` is a good default). macOS does not need an extra helper binary.
-Windows source builds can use the main `zero.exe` as their sandbox helper; release
-archives still ship standalone Windows helper executables.
+Put `zero` on `PATH` (`~/.local/bin` is a good default). macOS does not need an
+extra helper binary. Windows source builds can use the main `zero.exe` as their
+sandbox helper; release archives still ship standalone Windows helper executables.
 
 More install details: [docs/INSTALL.md](docs/INSTALL.md).
 
@@ -204,6 +217,7 @@ export AIMLAPI_API_KEY=...
 export LONGCAT_API_KEY=...
 export FIREWORKS_API_KEY=...
 export GMI_API_KEY=...
+export CONCENTRATE_API_KEY=...
 export MINIMAX_API_KEY=...
 export MINIMAXI_API_KEY=...
 ```
@@ -230,6 +244,12 @@ To configure GMI Cloud directly, run:
 
 ```bash
 zero providers setup gmicloud --set-active
+```
+
+To configure Concentrate directly, run:
+
+```bash
+zero providers setup concentrate --set-active
 ```
 
 MiniMax presets use the Anthropic-compatible endpoints for the global and China
@@ -526,19 +546,19 @@ go run ./cmd/zero-release build --goos windows --goarch amd64 --output dist/zero
 Real-time chat happens on the [Discord server](https://discord.gg/CaQDS6wdFn).
 
 Questions, setup help, ideas, and sharing all live in
-[GitHub Discussions](https://github.com/Gitlawb/zero/discussions):
+[GitHub Discussions](https://github.com/Twigpine/zero/discussions):
 
 | Category | Use it for |
 |---|---|
-| [Q&A](https://github.com/Gitlawb/zero/discussions/categories/q-a) | Setup help, provider/model configuration, "how do I" questions |
-| [Ideas](https://github.com/Gitlawb/zero/discussions/categories/ideas) | Feature proposals and design discussion before any PR |
-| [Show and tell](https://github.com/Gitlawb/zero/discussions/categories/show-and-tell) | Your skills, plugins, MCP setups, themes, and workflows |
-| [Announcements](https://github.com/Gitlawb/zero/discussions/categories/announcements) | Releases and project news from the maintainers |
+| [Q&A](https://github.com/Twigpine/zero/discussions/categories/q-a) | Setup help, provider/model configuration, "how do I" questions |
+| [Ideas](https://github.com/Twigpine/zero/discussions/categories/ideas) | Feature proposals and design discussion before any PR |
+| [Show and tell](https://github.com/Twigpine/zero/discussions/categories/show-and-tell) | Your skills, plugins, MCP setups, themes, and workflows |
+| [Announcements](https://github.com/Twigpine/zero/discussions/categories/announcements) | Releases and project news from the maintainers |
 
 For a good Q&A answer fast, include `zero --version`, your OS and install
 method, the provider/model in use, and `zero doctor` output. See
 [SUPPORT.md](SUPPORT.md). Bugs belong in
-[issues](https://github.com/Gitlawb/zero/issues/new/choose); security reports
+[issues](https://github.com/Twigpine/zero/issues/new/choose); security reports
 follow [SECURITY.md](SECURITY.md), never a public thread.
 
 ## Contributing

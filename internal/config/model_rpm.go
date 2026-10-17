@@ -2,7 +2,7 @@ package config
 
 import (
 	"fmt"
-	"github.com/Gitlawb/zero/internal/modelregistry"
+	"github.com/Twigpine/zero/internal/modelregistry"
 	"strings"
 )
 

@@ -11,8 +11,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/notify"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/notify"
 )
 
 // A committed /notify choice is written to user config and reloaded at startup,

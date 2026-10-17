@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/trace"
+	"github.com/Twigpine/zero/internal/trace"
 )
 
 // fakeTurnRunner returns a canned *trace.TurnTrace per task so the harness's

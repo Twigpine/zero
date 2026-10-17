@@ -3,8 +3,8 @@ package providers
 import (
 	"context"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 // EscalationSwitchers builds the two mid-run model switchers a run installs when

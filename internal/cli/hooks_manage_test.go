@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/hooks"
+	"github.com/Twigpine/zero/internal/hooks"
 )
 
 func hooksManageDeps(cwd string) appDeps {

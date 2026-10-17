@@ -10,8 +10,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/Gitlawb/zero/internal/redaction"
-	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/redaction"
+	"github.com/Twigpine/zero/internal/sessions"
 )
 
 const (
@@ -261,6 +261,7 @@ func redactMetadata(session sessions.Metadata, options redaction.Options) sessio
 	session.Title = redaction.RedactString(session.Title, options)
 	session.Cwd = redaction.RedactString(session.Cwd, options)
 	session.ModelID = redaction.RedactString(session.ModelID, options)
+	session.PermissionMode = redaction.RedactString(session.PermissionMode, options)
 	session.Provider = redaction.RedactString(session.Provider, options)
 	session.Tag = redaction.RedactString(session.Tag, options)
 	session.ParentSessionID = redaction.RedactString(session.ParentSessionID, options)

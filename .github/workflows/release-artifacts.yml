@@ -100,19 +100,21 @@ jobs:
           gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "$tag" --generate-notes 2>/dev/null || true
           gh release upload "$tag" dist/release/* --repo "$GITHUB_REPOSITORY" --clobber
 
-  # Publishes @gitlawb/zero to npm: first the five platform payloads (versions
-  # of the SAME package at suffixed versions like X.Y.Z-linux-x64, carrying the
-  # native binary + vendored helpers), then the wrapper at X.Y.Z whose
-  # optionalDependencies alias those platform versions. Platform versions MUST
-  # publish first — the wrapper pins them exactly, so the reverse order would
-  # open a window where installs resolve aliases that 404. See
-  # docs/NPM_PACKAGING.md for the full contract.
+  # Publishes the npm package named in package.json (@twigpine/zero): first
+  # the five platform payloads (versions of the SAME package at suffixed
+  # versions like X.Y.Z-linux-x64, carrying the native binary + vendored
+  # helpers), then the wrapper at X.Y.Z whose optionalDependencies alias those
+  # platform versions. Platform versions MUST publish first — the wrapper pins
+  # them exactly, so the reverse order would open a window where installs
+  # resolve aliases that 404. See docs/NPM_PACKAGING.md for the full contract.
   #
   # Auth is npm OIDC trusted publishing: no NPM_TOKEN secret. The package's
-  # npmjs.com settings must list this repo + workflow file as a trusted
-  # publisher, and provenance is then generated automatically. Note npm only
-  # allows configuring a trusted publisher on an EXISTING package, so the very
-  # first @gitlawb/zero publish is a one-time manual `npm publish` bootstrap.
+  # npmjs.com settings must list this repo + workflow file + the npm-publish
+  # environment as a trusted publisher, and provenance is then generated
+  # automatically. npm checks provenance against package.json `repository`,
+  # so that must name this repository. Note npm only allows configuring a
+  # trusted publisher on an EXISTING package, so a new package name starts
+  # with a one-time manual `npm publish` of an empty 0.0.0 placeholder.
   # Because the platform payloads are versions of the same package, they reuse
   # that single trusted-publisher configuration.
   publish-npm:
@@ -125,7 +127,7 @@ jobs:
     # maintainer approves it in the Actions UI before anything reaches npm.
     environment:
       name: npm-publish
-      url: https://www.npmjs.com/package/@gitlawb/zero
+      url: https://www.npmjs.com/package/@twigpine/zero
     permissions:
       contents: read
       id-token: write # OIDC token exchange for npm trusted publishing + provenance
@@ -201,47 +203,13 @@ jobs:
       - name: Assemble npm packages
         run: node scripts/npm/build-platform-packages.mjs --artifacts-dir dist/artifacts --out-dir dist/npm
 
-      # Platform versions are semver PRERELEASES of the wrapper version
-      # (X.Y.Z-linux-x64), so they must never publish under the default
-      # `latest` dist-tag — that would make `npm install @gitlawb/zero`
-      # deliver a platform payload as the CLI. Publish them under a dedicated
-      # tag and assert `latest` survived before the wrapper goes out.
-      - name: Publish platform packages to npm
+      # Platform payloads first under the `platform` dist-tag, then the wrapper,
+      # with the `latest` dist-tag checked before and after (platform versions
+      # are semver PRERELEASES of the wrapper version and must never become
+      # `latest`). npm applies publishes asynchronously, so the script waits
+      # until npm shows every platform version before the wrapper goes out,
+      # and until `latest` moves after it. Versions already on the registry
+      # are skipped, so "Re-run failed jobs" is safe after a partial publish.
+      - name: Publish npm packages
         shell: bash
-        run: |
-          version="$(node -p "require('./package.json').version")"
-          for dir in dist/npm/platforms/*/; do
-            echo "publishing ${dir}"
-            (cd "$dir" && npm publish --access public --tag platform)
-          done
-          # Tolerate a failed lookup (registry lag, or no latest tag yet on a
-          # bootstrap publish): under set -e a bare failure here would abort
-          # AFTER the platform payloads went out, leaving no wrapper and a
-          # re-run that fails on republishing existing versions. An empty
-          # value falls through the guard below.
-          latest="$(npm view @gitlawb/zero dist-tags.latest || true)"
-          case "$latest" in
-            "${version}-"*)
-              echo "::error::dist-tag latest points at platform version ${latest} — a platform publish clobbered it. Fix the dist-tag before the wrapper publish." >&2
-              exit 1
-              ;;
-          esac
-          echo "dist-tag latest is ${latest} (unchanged by platform publishes)."
-
-      - name: Publish wrapper to npm
-        shell: bash
-        run: |
-          version="$(node -p "require('./package.json').version")"
-          (cd dist/npm/wrapper && npm publish --access public)
-          # Confirm the wrapper owns `latest` (retry: registry metadata can lag
-          # a publish by a few seconds).
-          for attempt in 1 2 3 4 5; do
-            latest="$(npm view @gitlawb/zero dist-tags.latest || true)"
-            if [ "$latest" = "$version" ]; then
-              echo "dist-tag latest is ${version}."
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "::error::dist-tag latest is ${latest}, expected ${version} after the wrapper publish." >&2
-          exit 1
+        run: scripts/npm/publish-packages.sh dist/npm

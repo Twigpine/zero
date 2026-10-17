@@ -1,10 +1,62 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, writeSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+
+const CURRENT_PACKAGE_NAME = '@twigpine/zero';
+// The npm package moved from @gitlawb/zero to @twigpine/zero in 0.10.0. That
+// release was also published once under the old name, so 0.9.0's `zero
+// upgrade` and anyone still installing the old name land on a working build
+// that says where the package went (docs/NPM_PACKAGING.md). Nothing is
+// published under the old name after that.
+const LEGACY_PACKAGE_NAME = '@gitlawb/zero';
+
+// The npm name this wrapper was published under, read from its own
+// package.json so the name lives in one place. The platform payload alias and
+// every reinstall hint below derive from it.
+function readPackageName(root) {
+  try {
+    const { name } = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+    if (typeof name === 'string' && name !== '') return name;
+  } catch {
+    // An unreadable manifest must not stop the CLI from launching.
+  }
+  return CURRENT_PACKAGE_NAME;
+}
+
+const packageName = readPackageName(packageRoot);
+
+// Same note as legacyPackageSwitchMessage in internal/update/installmethod.go.
+// Uninstalling first is the only safe order: both packages own the `zero` bin,
+// so npm refuses to install the new one over the old (EEXIST), and forcing it
+// lets a later uninstall of the old package delete the shared bin.
+function legacyPackageNotice() {
+  return (
+    `[zero] Zero has moved to ${CURRENT_PACKAGE_NAME} on npm, and ${LEGACY_PACKAGE_NAME} gets no further releases.\n` +
+    'To keep getting updates, quit zero and run:\n' +
+    `  npm uninstall -g ${LEGACY_PACKAGE_NAME}\n` +
+    `  npm install -g ${CURRENT_PACKAGE_NAME}\n` +
+    'Uninstall first: both packages provide the `zero` command. With bun, pnpm or yarn, use its global remove and add commands instead.\n'
+  );
+}
+
+// Printed when the wrapper exits rather than before zero starts, because the
+// TUI takes over the screen and would hide anything printed first. Only on a
+// terminal, so scripts that capture stderr see nothing new. `zero update` and
+// `zero upgrade` print the same note themselves.
+if (packageName === LEGACY_PACKAGE_NAME && !['update', 'upgrade'].includes(process.argv[2])) {
+  process.on('exit', () => {
+    if (process.stderr.isTTY || process.env.ZERO_WRAPPER_SIMULATE_TTY === '1') {
+      // Synchronous: an exit handler cannot wait for an asynchronous write.
+      writeSync(2, legacyPackageNotice());
+    }
+  });
+}
 
 function zeroBinaryName(platform = process.platform) {
   return platform === 'win32' ? 'zero.exe' : 'zero';
@@ -81,10 +133,10 @@ function bunRecoveryParagraph() {
   return (
     'You installed with Bun, which does not run dependency lifecycle scripts\n' +
     'by default. Trust the package to run the blocked postinstall:\n' +
-    '  bun pm trust @gitlawb/zero       (project install)\n' +
-    '  bun pm -g trust @gitlawb/zero    (global install)\n' +
+    `  bun pm trust ${packageName}       (project install)\n` +
+    `  bun pm -g trust ${packageName}    (global install)\n` +
     'On Bun versions without `bun pm trust`, add\n' +
-    '  "trustedDependencies": ["@gitlawb/zero"]\n' +
+    `  "trustedDependencies": ["${packageName}"]\n` +
     'to your project package.json and reinstall.\n' +
     '\n'
   );
@@ -93,14 +145,14 @@ function bunRecoveryParagraph() {
 function buildFromSourceParagraph() {
   return (
     'If this platform has no prebuilt binary, build from source:\n' +
-    'https://github.com/Gitlawb/zero (go run ./cmd/zero, requires Go 1.26+).'
+    'https://github.com/Twigpine/zero (go run ./cmd/zero, requires Go 1.26+).'
   );
 }
 
 function missingBinaryContextParagraph() {
   return (
-    'Normally npm installs it as an optional dependency of @gitlawb/zero\n' +
-    `(@gitlawb/zero-${process.platform}-${process.arch}), and the wrapper can\n` +
+    `Normally npm installs it as an optional dependency of ${packageName}\n` +
+    `(${packageName}-${process.platform}-${process.arch}), and the wrapper can\n` +
     'also download it from the GitHub Release when it is missing.'
   );
 }
@@ -113,7 +165,7 @@ function missingNativeRecoveryParagraphs(postinstallScript) {
     '\n' +
     'Things to try:\n' +
     '  - reinstall without omitting optional dependencies:\n' +
-    '      npm install -g @gitlawb/zero\n' +
+    `      npm install -g ${packageName}\n` +
     '  - run the downloader manually (needs write access to the package dir):\n' +
     `      node "${postinstallScript}"\n` +
     '\n' +
@@ -182,12 +234,12 @@ function missingNativeDoctorTextReport(postinstallScript) {
   );
 }
 
-// The platform payload is a version of @gitlawb/zero itself, installed under
-// an npm: alias (see docs/NPM_PACKAGING.md). The alias name is derived from
+// The platform payload is a version of this same package, installed under an
+// npm: alias (see docs/NPM_PACKAGING.md). The alias name is derived from
 // process.platform/process.arch, so an unsupported platform simply fails to
 // resolve and we fall through to the downloader.
 function platformPackageBinary() {
-  const aliasedName = `@gitlawb/zero-${process.platform}-${process.arch}`;
+  const aliasedName = `${packageName}-${process.platform}-${process.arch}`;
   let manifestPath;
   try {
     manifestPath = createRequire(import.meta.url).resolve(`${aliasedName}/package.json`);
@@ -226,8 +278,6 @@ function downloadMissingBinary(packageRoot) {
     stdio: ['ignore', 'inherit', 'inherit'],
   });
 }
-
-const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
 function resolveNativeBinary() {
   const fromPlatformPackage = platformPackageBinary();

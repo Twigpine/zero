@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/lockutil"
+	"github.com/Twigpine/zero/internal/lockutil"
 )
 
 // ErrLockUnavailable reports that the config lock was still held by another

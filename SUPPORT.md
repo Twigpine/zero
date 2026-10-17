@@ -2,8 +2,8 @@
 
 ## Questions, setup help, configuration
 
-Ask in [GitHub Discussions](https://github.com/Gitlawb/zero/discussions). Use
-[Q&A](https://github.com/Gitlawb/zero/discussions/categories/q-a) so answers can
+Ask in [GitHub Discussions](https://github.com/Twigpine/zero/discussions). Use
+[Q&A](https://github.com/Twigpine/zero/discussions/categories/q-a) so answers can
 be marked and found by the next person.
 
 The fastest way to a useful answer is to include:
@@ -18,19 +18,19 @@ The fastest way to a useful answer is to include:
 ## Bugs
 
 If Zero does something wrong (crashes, wrong output, broken behavior), file a
-[bug report](https://github.com/Gitlawb/zero/issues/new/choose). If you are not
+[bug report](https://github.com/Twigpine/zero/issues/new/choose). If you are not
 sure whether it is a bug or a setup problem, start in Discussions and we will
 promote it to an issue if it is one.
 
 ## Feature ideas
 
 Start a thread in
-[Ideas](https://github.com/Gitlawb/zero/discussions/categories/ideas). Zero is
+[Ideas](https://github.com/Twigpine/zero/discussions/categories/ideas). Zero is
 in controlled development (see CONTRIBUTING.md), so discussing an idea first is
 also the path to getting a PR accepted.
 
 ## Security issues
 
 Never file a public issue or discussion. Report privately via
-[GitHub Security Advisories](https://github.com/Gitlawb/zero/security/advisories/new)
+[GitHub Security Advisories](https://github.com/Twigpine/zero/security/advisories/new)
 (see SECURITY.md).

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/cron"
+	"github.com/Twigpine/zero/internal/cron"
 )
 
 func TestFireJobClaimPreventsDoubleFire(t *testing.T) {

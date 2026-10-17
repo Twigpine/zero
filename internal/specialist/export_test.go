@@ -8,8 +8,8 @@ import (
 	"io"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/background"
-	"github.com/Gitlawb/zero/internal/streamjson"
+	"github.com/Twigpine/zero/internal/background"
+	"github.com/Twigpine/zero/internal/streamjson"
 )
 
 func NewOutputTool(manager *background.Manager) *OutputTool {

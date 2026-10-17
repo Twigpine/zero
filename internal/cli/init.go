@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/agentinit"
+	"github.com/Twigpine/zero/internal/agentinit"
 )
 
 // runInit implements `zero init`: investigate the repo and generate an

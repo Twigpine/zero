@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/execution"
+	"github.com/Twigpine/zero/internal/execution"
 )
 
 // defaultHookTimeout bounds a single hook command so a hung or slow hook cannot
