@@ -444,6 +444,8 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		}
 		images = nil
 	}
+	// Match the TUI: only images actually sent to the model enter history.
+	attachments := sessions.MessageAttachments{Images: len(images)}
 	runReasoningEffort := options.reasoningEffort
 	if options.useSpec && options.specReasoningEffort != "" {
 		runReasoningEffort = options.specReasoningEffort
@@ -625,10 +627,14 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	sessionRecorder := execSessionRecorder{prepared: preparedSession}
 	// Surface a best-effort session-recording failure once, on every exit path.
 	defer sessionRecorder.warnIfRecordingFailed(stderr)
-	sessionRecorder.append(sessions.EventMessage, map[string]any{
+	userPayload := map[string]any{
 		"role":    "user",
 		"content": prompt,
-	})
+	}
+	if attachments.Images > 0 {
+		userPayload["attachments"] = attachments
+	}
+	sessionRecorder.append(sessions.EventMessage, userPayload)
 
 	// OnAskUser is intentionally left unset: headless runs have no interactive
 	// user, so ask_user degrades to a "proceed with your best assumption" result
