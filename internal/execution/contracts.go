@@ -173,6 +173,11 @@ type Enforcement struct {
 	Level           string `json:"level,omitempty"`
 	Degraded        bool   `json:"degraded,omitempty"`
 	DowngradeReason string `json:"downgradeReason,omitempty"`
+	// Notices are least-privilege disclosures about the enforcement actually
+	// applied to THIS command, as opposed to the diagnostic views produced by
+	// `zero sandbox policy` and `zero sandbox check`. A trade an operator only
+	// discovers by running a separate diagnostic command is not disclosed.
+	Notices []string `json:"notices,omitempty"`
 }
 
 type Outcome struct {
@@ -182,7 +187,18 @@ type Outcome struct {
 	Exit        *Exit       `json:"exit,omitempty"`
 	Denial      *Denial     `json:"denial,omitempty"`
 	Enforcement Enforcement `json:"enforcement"`
-	Changes     []Change    `json:"changes,omitempty"`
+	// Launched records whether an OS process was actually created, observed at
+	// the boundary that calls Run rather than inferred afterwards.
+	//
+	// OutcomeKind is not a launch-state field, and reading it as one is wrong in
+	// both directions. A child that ran and then produced an unreadable adapter
+	// report is rewritten to a setup failure, so inference drops a disclosure that
+	// did apply; a context already cancelled before os.StartProcess yields a
+	// cancellation, so inference claims reduced enforcement for a child that never
+	// existed. Report decoding can fail after launch without rewriting history,
+	// and cancellation happens on either side of Start.
+	Launched bool     `json:"launched,omitempty"`
+	Changes  []Change `json:"changes,omitempty"`
 }
 
 // AdapterReport is the structured, machine-readable result emitted by a
@@ -190,6 +206,51 @@ type Outcome struct {
 // command text cannot impersonate a policy decision.
 type AdapterReport struct {
 	Denial *Denial `json:"denial,omitempty"`
+	// ChildLaunched is the adapter's authoritative statement that the REQUESTED
+	// process started, for a plan where the command the runner starts is not that
+	// process.
+	//
+	// A wrapped plan starts a helper, and the helper creates the sandboxed child
+	// only after validating the setup marker, applying ACLs, checking the network
+	// policy, building capability SIDs and minting the restricted token. Any of
+	// those can fail with the helper already running, so the runner's own
+	// exec.Cmd.Process tells it the WRAPPER started and nothing about the child.
+	// Only the adapter sees that transition, so only the adapter may report it.
+	//
+	// nil means the adapter does not speak to this, and the runner keeps its own
+	// observation. That is correct for every direct, unwrapped command, where the
+	// process the runner starts IS the requested one.
+	ChildLaunched *bool `json:"childLaunched,omitempty"`
+}
+
+// ChildLaunched reports whether this outcome describes a process that actually
+// started, from the recorded fact rather than from the terminal outcome kind.
+func (outcome Outcome) ChildLaunched() bool {
+	return outcome.Launched
+}
+
+// AppliedEnforcementNotices returns the least-privilege disclosures that are
+// true of what actually happened.
+//
+// ONE DECISION, AT THE BOUNDARY WHERE THE OUTCOME IS KNOWN. Enforcement.Notices
+// is planned: it describes the shape the command was PREPARED to run under, and
+// planning is not proof that anything ran. Every consumer that copied the field
+// straight out therefore made the completed-enforcement claim for commands that
+// never launched, telling an operator the write jail had been traded away for a
+// child that failed before it existed.
+//
+// Keeping this on Outcome rather than repeating an outcome-kind switch in hooks,
+// plugins and tools is the point: a new pre-launch outcome kind has to be
+// classified once, here, instead of being silently disclosed by whichever
+// consumer was not updated.
+func (outcome Outcome) AppliedEnforcementNotices() []string {
+	if !outcome.ChildLaunched() {
+		return nil
+	}
+	if len(outcome.Enforcement.Notices) == 0 {
+		return nil
+	}
+	return append([]string(nil), outcome.Enforcement.Notices...)
 }
 
 func (outcome Outcome) Validate() error {

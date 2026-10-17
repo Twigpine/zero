@@ -46,6 +46,28 @@ func (outcome *ToolOutcome) UnmarshalJSON(data []byte) error {
 // boundaryOutput must already be redacted. It is the text seen immediately
 // before command reduction and semantic budgeting.
 func finalizeToolOutcome(result Result, boundaryOutput string) Result {
+	// PROMOTED HERE, at the one seam every tool result crosses, rather than at
+	// each construction site. addSandboxMeta already carries the plan's notices
+	// into metadata for both the bash and the exec_command paths, and any future
+	// command tool that calls it gets the same treatment for free. Setting the
+	// field at the call sites instead would be a third hand-maintained projection
+	// of the same fact, which is exactly how the disclosure went missing from the
+	// generic execution adapter in the first place.
+	if len(result.EnforcementNotices) == 0 {
+		// DERIVED FROM APPLIED STATE, NOT FROM THE PLAN. addSandboxMeta writes the
+		// plan's notices at plan time, before anything runs, so promoting them
+		// unconditionally claims a token trade for a command that may never have
+		// started. The execution outcome is the thing that knows, and it applies
+		// the same launched-and-planned rule hooks and plugins use.
+		//
+		// The metadata stays as diagnostics either way: it records what was
+		// planned, which is still worth having.
+		if result.ExecutionOutcome != nil {
+			result.EnforcementNotices = result.ExecutionOutcome.AppliedEnforcementNotices()
+		} else if notices := strings.TrimSpace(result.Meta[sandboxNoticesMeta]); notices != "" {
+			result.EnforcementNotices = strings.Split(notices, "\n")
+		}
+	}
 	previous := result.Outcome
 	human := result.Display
 	if human.Preview == "" && result.Meta["command_output_reduced"] == "true" {
@@ -65,8 +87,18 @@ func finalizeToolOutcome(result Result, boundaryOutput string) Result {
 		originalBytes = previous.Diagnostics.OriginalBytes
 		originalTokens = previous.Diagnostics.EstimatedOriginalTokens
 	}
-	modelBytes := len(result.Output)
-	modelTokens := estimateOutputTokens(result.Output)
+	// MEASURE WHAT THE MODEL ACTUALLY RECEIVES.
+	//
+	// The enforcement notices are prepended to the model view on the way out
+	// (agent.ToolResult.ModelOutput), so a result carrying them costs more context
+	// than result.Output alone. Measuring the bare output undercounts every
+	// disclosed call and hands the budget a figure the model never saw.
+	//
+	// ModelView below stays the bare output on purpose: ModelOutput prepends the
+	// notices itself, so storing them here would send them twice.
+	canonicalModelOutput := WithEnforcementNotices(result.Output, result.EnforcementNotices)
+	modelBytes := len(canonicalModelOutput)
+	modelTokens := estimateOutputTokens(canonicalModelOutput)
 
 	var artifact *ToolArtifact
 	if previous.Finalized() {

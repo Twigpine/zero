@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"strings"
 
 	"github.com/Twigpine/zero/internal/execution"
 	"github.com/Twigpine/zero/internal/sandbox"
@@ -52,6 +53,11 @@ const (
 	SandboxDenialKindMeta    = "sandbox_denial_kind"
 	SandboxDenialReasonMeta  = "sandbox_denial_reason"
 	SandboxDenialKeywordMeta = "sandbox_denial_keyword"
+	// sandboxNoticesMeta transports the plan notices from addSandboxMeta to
+	// finalizeToolOutcome, which promotes them onto Result.EnforcementNotices.
+	// Kept as metadata as well, because integrations reading the result JSON have
+	// no other way to see them.
+	sandboxNoticesMeta = "sandbox_notices"
 )
 
 const (
@@ -113,6 +119,16 @@ type Result struct {
 	// emits them as a following user message, which is also the only shape that
 	// keeps one tool result per tool call.
 	Images []zeroruntime.ImageBlock `json:"-"`
+	// EnforcementNotices are least-privilege disclosures about the enforcement
+	// actually applied to this command, and they are USER AND MODEL VISIBLE.
+	//
+	// A separate field rather than text baked into Output, so one canonical
+	// result carries it and every surface reads it through the accessors below.
+	// The first attempt put this in Meta alongside the sandbox metadata, which
+	// looked like the established channel and is not one: nothing in production
+	// reads those keys, ModelOutput and HumanDisplay never consult Meta, and the
+	// durable history drops it. The disclosure reached nobody.
+	EnforcementNotices []string `json:"enforcementNotices,omitempty"`
 	// Redacted is set when secret scrubbing altered Output before it left the
 	// tool-execution boundary.
 	Redacted bool
@@ -179,22 +195,95 @@ type OutcomeDiagnostics struct {
 	Reason                  string
 }
 
-// ModelOutput returns the finalized provider-facing text, falling back to the
-// legacy field for direct Tool.Run callers that have not crossed the registry.
-func (result Result) ModelOutput() string {
+// BaseModelOutput returns the UNDECORATED provider-facing text: the finalized
+// model view, falling back to the legacy field for direct Tool.Run callers that
+// have not crossed the registry. It carries no enforcement notices.
+//
+// Callers that PROJECT a result into another carrier (the agent loop building an
+// agent.ToolResult) must copy this, not ModelOutput, and copy the typed notice
+// slice alongside it. Storing already-rendered text next to the same notices is
+// two representations of one fact with no contract between them, and whichever
+// side of the projection loses its finalized outcome renders the disclosure
+// twice.
+func (result Result) BaseModelOutput() string {
 	if result.Outcome.finalized {
 		return result.Outcome.ModelView
 	}
 	return result.Output
 }
 
-// HumanDisplay returns the finalized presentation, falling back to the legacy
-// display for direct Tool.Run callers.
-func (result Result) HumanDisplay() Display {
+// BaseDisplay is BaseModelOutput for the presentation half, and carries no
+// enforcement notices for the same reason.
+func (result Result) BaseDisplay() Display {
 	if result.Outcome.finalized {
 		return result.Outcome.HumanView
 	}
 	return result.Display
+}
+
+// ModelOutput returns the finalized provider-facing text with the enforcement
+// disclosure rendered in front of it. This is the only place the model view is
+// decorated.
+func (result Result) ModelOutput() string {
+	return WithEnforcementNotices(result.BaseModelOutput(), result.EnforcementNotices)
+}
+
+// HumanDisplay returns the finalized presentation with the enforcement
+// disclosure rendered in front of the summary.
+func (result Result) HumanDisplay() Display {
+	display := result.BaseDisplay()
+	display.Summary = WithEnforcementNotices(display.Summary, result.EnforcementNotices)
+	return display
+}
+
+// WithEnforcementNotices puts the enforcement disclosure IN FRONT of the text.
+//
+// PREPENDED, not appended, because the output budget trims from the end: a
+// notice at the tail is the first thing a long result loses, and a disclosure
+// that survives only on short outputs is not a disclosure. It is also why this
+// lives on the accessors rather than at the call sites that build results.
+// The previous version wrote it into Result.Meta, and neither ModelOutput nor
+// HumanDisplay nor the durable history reads Meta, so it reached nobody at all.
+func WithEnforcementNotices(text string, notices []string) string {
+	if len(notices) == 0 {
+		return text
+	}
+	joined := strings.TrimSpace(strings.Join(notices, "\n"))
+	if joined == "" {
+		return text
+	}
+	if strings.TrimSpace(text) == "" {
+		return joined
+	}
+	return joined + "\n\n" + text
+}
+
+// WithoutEnforcementNotices is the inverse, for a reader of STORED text.
+//
+// A persisted tool result carries its output with the disclosure already
+// composed in, and the same notices again as a typed field. A reader that
+// rebuilds a result from both has to take the composed copy back off, or the
+// accessors above compose it a second time and the disclosure is drawn twice.
+// It lives beside WithEnforcementNotices so the two agree on the format by
+// construction rather than by a second spelling of it somewhere else.
+//
+// Text that was never decorated is returned unchanged, so a record whose writer
+// stored the undecorated output still round-trips to exactly one disclosure.
+func WithoutEnforcementNotices(text string, notices []string) string {
+	if len(notices) == 0 {
+		return text
+	}
+	joined := strings.TrimSpace(strings.Join(notices, "\n"))
+	if joined == "" {
+		return text
+	}
+	if rest, ok := strings.CutPrefix(text, joined+"\n\n"); ok {
+		return rest
+	}
+	if strings.TrimSpace(text) == joined {
+		return ""
+	}
+	return text
 }
 
 // Display carries a short, structured summary of a tool result for the TUI/stream.

@@ -244,8 +244,8 @@ func TestClassifyResultTimedOutFailsClosedForBeforeTool(t *testing.T) {
 	if status, blocked := classifyResult(EventAfterTool, timedOut); blocked || status != AuditError {
 		t.Fatalf("afterTool timeout classify = (%q, %v), want (error, false)", status, blocked)
 	}
-	if reason := blockReason(timedOut); !strings.Contains(reason, "timed out") {
-		t.Fatalf("blockReason = %q, want a timeout message", reason)
+	if reason := blockCause(timedOut); !strings.Contains(reason, "timed out") {
+		t.Fatalf("blockCause = %q, want a timeout message", reason)
 	}
 }
 
