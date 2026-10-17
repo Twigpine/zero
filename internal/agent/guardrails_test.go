@@ -554,3 +554,118 @@ func TestRunInjectsToolFailureHintWithSchema(t *testing.T) {
 		t.Fatalf("expected a tool-failure hint on the 3rd turn, messages: %+v", provider.requests[2].Messages)
 	}
 }
+
+// An absence-establishing sentence is a finding; the same sentence that also
+// says the work is blocked is an admission. Observation allowances such as
+// "reproduce" and "confirm any" can head both, so the tail prefix alone cannot
+// separate them — measured against real phrasings, TEN of eleven genuine
+// admissions passed the detector before blockedWorkMarkers existed.
+func TestIncompletionAllowanceYieldsToBlockedWork(t *testing.T) {
+	// Must FIRE: the inability is reported as leaving work undone.
+	for _, admission := range []string{
+		"I could not reproduce the crash, so the fix is unverified.",
+		"I was unable to reproduce the reported behaviour and stopped there.",
+		"I could not find the root cause; someone else will need to pick this up.",
+		"I could not find the bug in the time available.",
+		"I did not manage to reproduce the failure, so I cannot confirm the patch works.",
+		"I could not locate the source of the regression and have run out of ideas.",
+		"I could not find where to apply the change, so nothing was modified.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("admission passed the detector: %q", admission)
+		}
+	}
+
+	// Must NOT fire: establishing that something is absent is the job, and the
+	// motivating case is the audit that spent 53 tool calls proving a negative.
+	for _, finding := range []string{
+		"I could not find any remaining issues.",
+		"I could NOT find where AllowManifestToolAutoApproval is set to true in production code.",
+		"I could not find the flag being set anywhere outside tests, so the concern does not apply.",
+		"I could not reproduce the reported exploit, which confirms the guard holds.",
+		"I could not observe any regression across the suite.",
+		"I could not confirm any leak; every path is bounded.",
+		// Next steps and ownership belong in successful reports too. Both of
+		// these were flagged when blockedWorkMarkers could override an explicit
+		// "any", which is the model asserting exhaustive absence.
+		"I could not find any remaining issues, though a follow-up will need to cover the Windows path.",
+		"I could not find any blockers; someone else can take the release from here.",
+	} {
+		if reason := selfReportedIncompletion(finding); reason != "" {
+			t.Errorf("finding wrongly flagged as incomplete: %q -> %q", finding, reason)
+		}
+	}
+
+	// A strong-absence phrase still yields when its consequence explicitly says
+	// the work is unresolved.
+	if selfReportedIncompletion("I could not observe any effect, so the change may be inert.") == "" {
+		t.Error("an unresolved strong-absence report passed the detector")
+	}
+}
+
+func TestToolCaveatDoesNotHideGuessingOrFabrication(t *testing.T) {
+	for _, admission := range []string{
+		"I don't have a write tool available in this specialist context, so I guessed the line numbers.",
+		"No update_plan tool is available, so I fabricated the plan section.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("tool caveat hid a high-signal admission: %q", admission)
+		}
+	}
+}
+
+func TestToolCaveatAllowsCompletedObjectiveLanguage(t *testing.T) {
+	for _, completed := range []string{
+		"I don't have a write tool available in this specialist context, and the objective is complete.",
+		"I don't have a write tool available in this specialist context, but I completed the analysis as requested.",
+		"I don't have an update_plan tool available in this specialist context; here is what was asked for.",
+	} {
+		if reason := selfReportedIncompletion(completed); reason != "" {
+			t.Errorf("completed tool caveat was flagged: %q -> %q", completed, reason)
+		}
+	}
+
+	for _, admission := range []string{
+		"I could not do what was asked because no write tool is available.",
+		"I am unable to complete what was asked with the tools available.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("verb-anchored objective failure passed the detector: %q", admission)
+		}
+	}
+}
+
+// An admission with NO first-person subject must still fire. The subjectless
+// "unable to " stem was once deleted to silence a completed audit's section
+// heading, which also lost every impersonal admission — none of these names "i"
+// or "we", so no other stem sees them.
+func TestImpersonalAdmissionsAreStillCaught(t *testing.T) {
+	for _, admission := range []string{
+		"Unable to complete the task; the build never succeeded.",
+		"The agent was unable to finish the migration.",
+		"Unable to verify the fix, so the change is unverified.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("an impersonal admission passed the detector: %q", admission)
+		}
+	}
+}
+
+// The heading that motivated deleting the stem must stay exempt. It is a label
+// counting a bucket of findings in a COMPLETED audit, not a claim about the
+// objective — which is why it is recognised by shape rather than by removing a
+// stem that catches real admissions.
+func TestACountedHeadingIsNotAnAdmission(t *testing.T) {
+	for _, heading := range []string{
+		"**Unable to verify (1):** - MCP #3 claim was truncated",
+		"Unable to reproduce (3):",
+	} {
+		if reason := selfReportedIncompletion(heading); reason != "" {
+			t.Errorf("a counted heading was read as an admission: %q -> %q", heading, reason)
+		}
+	}
+	// But the same opening WITHOUT a count is a real admission.
+	if selfReportedIncompletion("Unable to verify the deployment; it never started.") == "" {
+		t.Error("a subjectless admission with no count was exempted as a heading")
+	}
+}
