@@ -146,3 +146,55 @@ func TestRollbackUnwindsDescendantsBeforeAncestors(t *testing.T) {
 		t.Errorf("restore order was %v; the descendant must be restored before its ancestor, because SetSecurityInfo propagates inheritable ACEs downward", order)
 	}
 }
+
+// The snapshots arrive in APPLY order, not path order. applyWindowsACLPlan's
+// deferred pass appends a group whose target only appeared during the first
+// pass, typically an ancestor (.git after .git\config), so the ancestor is LAST
+// in the list. Rollback must still unwind the descendant first.
+func TestRollbackUnwindsADeferredAncestorAfterItsDescendants(t *testing.T) {
+	root := t.TempDir()
+	ancestor := filepath.Join(root, ".git")
+	descendant := filepath.Join(ancestor, "config")
+	if err := os.MkdirAll(descendant, 0o700); err != nil {
+		t.Fatalf("seed the tree: %v", err)
+	}
+
+	snapshotFor := func(path string) windowsACLSnapshot {
+		t.Helper()
+		handle, _, err := openWindowsACLTarget(path)
+		if err != nil {
+			t.Fatalf("open %s: %v", path, err)
+		}
+		defer windows.CloseHandle(handle)
+		descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatalf("read the DACL for %s: %v", path, err)
+		}
+		identity, err := windowsIdentityOfHandle(handle)
+		if err != nil {
+			t.Fatalf("read the identity for %s: %v", path, err)
+		}
+		return windowsACLSnapshot{Path: path, Descriptor: descriptor, TargetID: identity}
+	}
+
+	// First pass applied the descendant; the deferred pass applied the ancestor.
+	snapshots := []windowsACLSnapshot{snapshotFor(descendant), snapshotFor(ancestor)}
+
+	var order []string
+	restore := windowsACLRestoreHook
+	windowsACLRestoreHook = func(path string) { order = append(order, path) }
+	t.Cleanup(func() { windowsACLRestoreHook = restore })
+
+	if err := rollbackWindowsACLSnapshots(snapshots); err != nil {
+		t.Fatalf("rollbackWindowsACLSnapshots: %v", err)
+	}
+	if len(order) != 2 {
+		t.Fatalf("restored %d targets, want 2: %v", len(order), order)
+	}
+	if order[0] != descendant || order[1] != ancestor {
+		t.Errorf("restore order was %v; a deferred ancestor must still be restored after its descendant", order)
+	}
+	if snapshots[0].Path != descendant || snapshots[1].Path != ancestor {
+		t.Errorf("rollback reordered the caller's slice: %v, %v", snapshots[0].Path, snapshots[1].Path)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"unsafe"
@@ -822,13 +823,24 @@ func windowsACLAccess(action WindowsACLAction) (windows.ACCESS_MODE, windows.ACC
 
 func rollbackWindowsACLSnapshots(snapshots []windowsACLSnapshot) error {
 	var errs []error
-	// Reverse order is load-bearing twice over. Groups are sorted ascending by
-	// path key and an ancestor key is always a proper prefix of its descendants,
-	// so walking backwards unwinds descendant before ancestor: a materialized
-	// directory is therefore empty by the time its own removal is attempted.
-	// Restoring ACLs in the same order is independently right, because
-	// SetSecurityInfo propagates inheritable ACEs down, so the ancestor must go
-	// last. TestRollbackUnwindsDescendantsBeforeAncestors pins it.
+	// Reverse order is load-bearing twice over. Sorted ascending by path key, an
+	// ancestor key is always a proper prefix of its descendants, so walking
+	// backwards unwinds descendant before ancestor: a materialized directory is
+	// therefore empty by the time its own removal is attempted. Restoring ACLs in
+	// the same order is independently right, because SetSecurityInfo propagates
+	// inheritable ACEs down, so the ancestor must go last.
+	// TestRollbackUnwindsDescendantsBeforeAncestors pins it.
+	//
+	// SORTED HERE, NOT ASSUMED. The groups are sorted, but the snapshots are in
+	// APPLY order, and applyWindowsACLPlan's deferred pass appends a group whose
+	// target only appeared during the first pass, which is typically an ancestor
+	// of first-pass groups (.git after .git\config). Walking that list backwards
+	// restored the ancestor first. Reported by CodeRabbit;
+	// TestRollbackUnwindsADeferredAncestorAfterItsDescendants pins it.
+	snapshots = slices.Clone(snapshots)
+	sort.SliceStable(snapshots, func(i, j int) bool {
+		return windowsCapabilityPathKey(snapshots[i].Path) < windowsCapabilityPathKey(snapshots[j].Path)
+	})
 	for index := len(snapshots) - 1; index >= 0; index-- {
 		snapshot := snapshots[index]
 		if snapshot.Created.createdAnything() {
