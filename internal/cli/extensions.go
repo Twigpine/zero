@@ -115,7 +115,10 @@ func runPluginsToggle(args []string, stdout io.Writer, stderr io.Writer, deps ap
 	if len(positional) != 1 {
 		return writeExecUsageError(stderr, fmt.Sprintf("usage: zero plugins %s <id> [--user] [--json]", commandName))
 	}
-	pluginID := positional[0]
+	pluginID := strings.TrimSpace(positional[0])
+	if pluginID == "" {
+		return writeExecUsageError(stderr, fmt.Sprintf("usage: zero plugins %s <id> [--user] [--json]", commandName))
+	}
 
 	cwd, err := deps.getwd()
 	if err != nil {
@@ -140,11 +143,11 @@ func runPluginsToggle(args []string, stdout io.Writer, stderr io.Writer, deps ap
 		}
 		return exitSuccess
 	}
-	if result.Changed {
-		if _, err := fmt.Fprintf(stdout, "Plugin %s is now %s in %s.\n", result.ID, state, result.ManifestPath); err != nil {
-			return exitCrash
-		}
-	} else if _, err := fmt.Fprintf(stdout, "Plugin %s was already %s in %s.\n", result.ID, state, result.ManifestPath); err != nil {
+	message := fmt.Sprintf("Plugin %s is now %s in %s.\n", result.ID, state, result.ManifestPath)
+	if !result.Changed {
+		message = fmt.Sprintf("Plugin %s was already %s in %s.\n", result.ID, state, result.ManifestPath)
+	}
+	if _, err := fmt.Fprint(stdout, redaction.RedactString(message, redaction.Options{})); err != nil {
 		return exitCrash
 	}
 	return exitSuccess
@@ -664,6 +667,9 @@ Flags:
       --user    Target only user plugins (ignore ./.zero/plugins)
       --json    Print command result as JSON
   -h, --help    Show this help
+
+Without --user, a project plugin with the same id takes precedence over a user
+plugin, matching the loader's discovery order.
 `, command)
 	return err
 }
