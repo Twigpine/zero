@@ -960,7 +960,11 @@ func TestACPHardTurnFailureDoesNotCommitHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{
-		SessionID: created.SessionID, Prompt: []ContentBlock{TextBlock("failed question")},
+		SessionID: created.SessionID,
+		Prompt: []ContentBlock{
+			TextBlock("failed question"),
+			ImageBlock(base64.StdEncoding.EncodeToString([]byte("failed image")), "image/png"),
+		},
 	}, &PromptResult{}); err == nil {
 		t.Fatal("hard RunAgent failure was reported as a successful turn")
 	}
