@@ -3,7 +3,7 @@ package tui
 import (
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Twigpine/zero/internal/config"
 )
 
 // A DISPLAY NAME IS NOT AN IDENTITY.

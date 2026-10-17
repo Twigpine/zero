@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Twigpine/zero/internal/config"
 )
 
 // A DELIMITER-HEAVY CONFIGURED VALUE MUST NOT EXPAND WITHOUT BOUND.

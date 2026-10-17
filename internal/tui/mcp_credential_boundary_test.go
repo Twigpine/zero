@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	mcppkg "github.com/Gitlawb/zero/internal/mcp"
+	"github.com/Twigpine/zero/internal/config"
+	mcppkg "github.com/Twigpine/zero/internal/mcp"
 )
 
 // aperiodicSecret builds an opaque credential with no period, so a suffix of it

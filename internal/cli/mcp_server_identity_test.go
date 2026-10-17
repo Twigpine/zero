@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/mcp"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/mcp"
 )
 
 // ONE CONFIG KEY PER RUNTIME IDENTITY, ENFORCED WHERE THE KEY IS WRITTEN.

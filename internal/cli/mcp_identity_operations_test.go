@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/mcp"
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/mcp"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 // AN EXACT KEY ADDRESSES THE STORED ENTRY, A RUNTIME NAME JOINS ITS OUTCOME.

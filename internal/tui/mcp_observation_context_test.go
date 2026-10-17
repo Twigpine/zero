@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	mcppkg "github.com/Gitlawb/zero/internal/mcp"
+	"github.com/Twigpine/zero/internal/config"
+	mcppkg "github.com/Twigpine/zero/internal/mcp"
 )
 
 func mcpViewFor(t *testing.T, state MCPViewState, name string) MCPServerView {

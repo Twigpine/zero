@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Twigpine/zero/internal/config"
 )
 
 // THE NORMALIZED NAME IS AN IDENTITY, SO IT HAS TO BE UNIQUE.

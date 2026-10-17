@@ -7,8 +7,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 // THE CONTEXT THAT MAKES AN ERROR SAFE IS RECORDED WHERE THE ERROR IS PRODUCED.

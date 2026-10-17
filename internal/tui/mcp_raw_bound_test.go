@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Twigpine/zero/internal/config"
 )
 
 // THE BOUND IS AT INGRESS, NOT AT THE END.

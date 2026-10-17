@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Twigpine/zero/internal/config"
 )
 
 // THE TARGET ROW IS ON THE SAME PANEL AS THE ERROR ROW.

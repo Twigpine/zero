@@ -6,7 +6,7 @@ import (
 	"testing"
 	"unicode"
 
-	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Twigpine/zero/internal/config"
 )
 
 // readerVisible is what a terminal actually shows: default-ignorable code points

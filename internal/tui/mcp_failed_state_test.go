@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/mcp"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/mcp"
 )
 
 // The panel has to report what is running, not what is written down. MCP

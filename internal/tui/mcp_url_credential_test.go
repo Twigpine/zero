@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Twigpine/zero/internal/config"
 )
 
 // AN ENDPOINT CAN BE A CREDENTIAL. HTTP and SSE send the configured URL

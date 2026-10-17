@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/mcp"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/mcp"
 )
 
 // A CREDENTIAL LONGER THAN THE OVERLAP MUST NOT LEAVE A VISIBLE PREFIX.

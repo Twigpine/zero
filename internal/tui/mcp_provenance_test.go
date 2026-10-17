@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Twigpine/zero/internal/config"
 )
 
 // THE KEY IS WHAT REMOVES THE AMBIGUITY, SO IT HAS TO SURVIVE TO THE DECISION.

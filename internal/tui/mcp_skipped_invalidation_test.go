@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/mcp"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/mcp"
 )
 
 func mcpConfigWith(name string, server config.MCPServerConfig) config.MCPConfig {

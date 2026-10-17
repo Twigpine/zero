@@ -7,8 +7,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/Gitlawb/zero/internal/config"
-	mcppkg "github.com/Gitlawb/zero/internal/mcp"
+	"github.com/Twigpine/zero/internal/config"
+	mcppkg "github.com/Twigpine/zero/internal/mcp"
 )
 
 // AN ALREADY-OPEN MANAGER HAS TO BE TOLD, NOT ASKED.

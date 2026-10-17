@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Twigpine/zero/internal/config"
 )
 
 // A CREDENTIAL BEHIND A HEADER FLAG IS STILL A CREDENTIAL.

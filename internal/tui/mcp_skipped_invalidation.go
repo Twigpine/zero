@@ -4,8 +4,8 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/mcp"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/mcp"
 )
 
 // adoptMCPConfig replaces the in-session MCP config and drops the startup

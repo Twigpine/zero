@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Twigpine/zero/internal/config"
 )
 
 // THE WRITE BOUNDARY MUST USE THE SAME ACTIVE-IDENTITY RULE AS THE READ PATH.
