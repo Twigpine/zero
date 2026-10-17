@@ -299,10 +299,6 @@ func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*
 	if !ownedLaunch {
 		publishLaunch(ctx, plannedEnforcement.Notices)
 	}
-	// publishAdapterLaunch announces a wrapped plan's launch, but only if the
-	// adapter confirms the requested child was created. Called on both ways this
-	// attempt can end, which is also where an attempt abandoned at the connect
-	// timeout eventually arrives, so a late disclosure is still delivered once.
 	// ONE ANSWER, AND IT IS ONLY CACHED ONCE IT CANNOT CHANGE.
 	//
 	// The adapter's report is a file the plan's cleanup deletes, so a decision made
