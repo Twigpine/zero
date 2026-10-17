@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
+	zeroSandbox "github.com/Twigpine/zero/internal/sandbox"
 )
 
 // envPrinterPlan returns a plan whose child prints its own environment, so the

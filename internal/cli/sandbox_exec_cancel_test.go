@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
+	zeroSandbox "github.com/Twigpine/zero/internal/sandbox"
 )
 
 // longLivedPlan returns a plan whose child outlives the test unless something

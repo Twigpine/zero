@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/sandbox"
 )
 
 // A VALID MARKER IS NOT A LIVE PRINCIPAL. Marker validation compares serialized

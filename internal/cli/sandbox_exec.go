@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/execution"
-	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/execution"
+	zeroSandbox "github.com/Twigpine/zero/internal/sandbox"
 )
 
 // runSandboxExec runs ONE command through the real sandbox and exits with its
