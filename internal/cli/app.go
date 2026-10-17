@@ -332,7 +332,7 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	// until it opts in here.
 	forwardsRootFlags := false
 	switch args[0] {
-	case "--skip-permissions-unsafe", "-p", "--prompt", "exec":
+	case "--skip-permissions-unsafe", "--full-auto", "-p", "--prompt", "exec":
 		forwardsRootFlags = true
 	}
 	if len(addDirs) > 0 && !forwardsRootFlags {
@@ -343,7 +343,7 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 	}
 
 	switch args[0] {
-	case "--skip-permissions-unsafe":
+	case "--skip-permissions-unsafe", "--full-auto":
 		// Launch the interactive TUI directly in unsafe mode. Without this, the
 		// flag fell through to the unknown-command path, so a user could never
 		// reach unsafe mode in the shell — and the "!" shell escape (which is
@@ -371,7 +371,7 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		// so check for it across all of rest before rejecting stray args.
 		for _, arg := range rest {
 			if arg == "--add-dir" || strings.HasPrefix(arg, "--add-dir=") {
-				return writeAppError(stderr, "--add-dir must come before any other arguments (it may precede or follow --skip-permissions-unsafe)", 1)
+				return writeAppError(stderr, "--add-dir must come before any other arguments (it may precede or follow --full-auto)", 1)
 			}
 		}
 		// This path launches the interactive TUI, which takes no positional prompt or
@@ -380,10 +380,10 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		// hang in the TUI with the prompt discarded. (AUDIT-L3)
 		for _, arg := range rest {
 			if strings.TrimSpace(arg) != "" {
-				return writeAppError(stderr, "--skip-permissions-unsafe launches the interactive TUI and takes no prompt or subcommand; for a one-shot unsafe run use `zero exec --skip-permissions-unsafe -p \"...\"`", 1)
+				return writeAppError(stderr, "--full-auto launches the interactive TUI and takes no prompt or subcommand; for a one-shot full-auto run use `zero exec --full-auto -p \"...\"`", 1)
 			}
 		}
-		return runInteractiveTUI(stderr, deps, agent.PermissionModeUnsafe, append(append([]string{}, addDirs...), moreDirs...), skipTheme, allowEscalation || skipAllowEscalation)
+		return runInteractiveTUI(stderr, deps, agent.PermissionModeFullAuto, append(append([]string{}, addDirs...), moreDirs...), skipTheme, allowEscalation || skipAllowEscalation)
 	case "-h", "--help", "help":
 		if err := writeHelp(stdout); err != nil {
 			return 1
@@ -886,9 +886,10 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// only PermissionAllow tools, so prompt-gated tools (write_file/edit_file/bash/
 	// apply_patch) would never be offered to the model — the TUI could neither edit
 	// files nor run shell. Ask advertises them and routes each through the existing
-	// OnPermissionRequest flow; shift+tab lets the user switch modes live. An
-	// explicit --skip-permissions-unsafe launch overrides this to unsafe (the only
-	// way to reach unsafe, since shift+tab deliberately cycles auto↔ask only).
+	// OnPermissionRequest flow; shift+tab lets the user switch modes live. A
+	// --full-auto launch overrides this to full-auto. Shift+tab cycles auto↔ask
+	// and never lands on full-auto by itself: it only OFFERS it, and the offer
+	// has to be accepted with ctrl+g before the mode changes.
 	//
 	// Resolve the effective mode BEFORE the deferral gate below so the registration
 	// count uses the SAME permission mode the agent loop's partition will use; an
@@ -898,7 +899,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	}
 	sessionStore := deps.newSessionStore()
 	peerClass := peermsg.PermissionPrompting
-	if permissionMode == agent.PermissionModeUnsafe {
+	if permissionMode == agent.PermissionModeFullAuto {
 		peerClass = peermsg.PermissionBypass
 	}
 	peerService, peerErr := peermsg.New(peermsg.Options{
@@ -1282,7 +1283,7 @@ func specialistSummaries(paths specialist.Paths) []agent.SpecialistInfo {
 	return summaries
 }
 
-func shouldRegisterExecSpecialistTools(options execOptions) bool {
+func shouldRegisterExecSpecialistTools(options execOptions, resolved agent.PermissionMode) bool {
 	if options.useSpec {
 		return false
 	}
@@ -1294,6 +1295,14 @@ func shouldRegisterExecSpecialistTools(options execOptions) bool {
 	// ones, so a non-trivial exec can auto-delegate exploration safely (a headless
 	// write spawn still gets denied at the prompt). Default "low" stays clean — no
 	// specialist tooling or swarm runtime for trivial/CI one-shots.
+	// The RESOLVED mode decides, not the raw flags. Every spelling that reaches
+	// full-auto (`--full-auto`, `--skip-permissions-unsafe`, `--auto high`,
+	// `--permission-mode full-auto|full_auto|unsafe|high`) resolves to the same
+	// value, so a new alias cannot create an unequal capability set the way
+	// `--permission-mode full-auto` did.
+	if resolved == agent.PermissionModeFullAuto {
+		return true
+	}
 	autonomy := strings.ToLower(strings.TrimSpace(options.autonomy))
 	return options.skipPermissionsUnsafe || autonomy == "high" || autonomy == "medium"
 }
@@ -1393,7 +1402,8 @@ Flags:
   -p, --prompt                   Run a one-shot prompt
       --add-dir <path>           Allow writes in an extra directory (repeatable)
       --allow-escalation         Let the agent escalate to a stronger model mid-run via escalate_model
-      --skip-permissions-unsafe  Launch the interactive shell in unsafe mode (enables the ! shell escape)
+      --full-auto                Launch the interactive shell in full-auto mode (enables the ! shell escape)
+      --skip-permissions-unsafe  Deprecated spelling of --full-auto
 `)
 	return err
 }
@@ -1627,13 +1637,14 @@ Flags:
                                     Override draft reasoning effort when --use-spec is set
       --plan                         Read-only planning mode: write and shell tools are hidden
       --permission-mode <mode>       Set permission mode directly (plan, spec-draft, auto, member,
-                                    ask, unsafe). Outranks --auto; prefer --plan / --auto for
+                                    ask, full-auto). Outranks --auto; prefer --plan / --auto for
                                     interactive use. Used by specialist/swarm child processes.
       --max-turns <number>           Override the maximum agent loop turns
       --exec-profile <name>          Apply an execution profile (balanced, fast, thorough): loop
                                     posture only (turn budget, effort, self-correction, escalation);
                                     composes with --mode (which picks the model) and explicit flags win
-      --auto <low|medium|high>       Set exec autonomy; high enables unsafe tools
+      --auto <low|medium|high>       Set exec autonomy; high is full-auto (prompt-gated tools run
+                                    without approval)
       --enabled-tools <tools>        Only expose these comma or space separated tools
       --disabled-tools <tools>       Hide these comma or space separated tools
       --list-tools                   List model-visible tools and exit
@@ -1656,7 +1667,8 @@ Flags:
       --depth <number>               Set specialist nesting depth metadata
       --session-title <text>         Set the created session title
       --init-session-id <id>         Create a new exec session with this id
-      --skip-permissions-unsafe      Allow prompt-gated tools without approval
+      --full-auto                    Allow prompt-gated tools without approval
+      --skip-permissions-unsafe      Deprecated spelling of --full-auto
       --allow-escalation             Let the agent escalate to a stronger model mid-run via escalate_model
       --self-correct                 Run the post-edit verify-and-correct loop (auto-fix needs --auto medium or high)
       --notify <off|bell|notify|both>

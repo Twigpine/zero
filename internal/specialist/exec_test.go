@@ -67,7 +67,13 @@ func TestBuildArgsCreatesFreshSpecialistExecInvocation(t *testing.T) {
 
 func TestSpecialistAutonomyByPermissionMode(t *testing.T) {
 	cases := map[string]string{
-		"":           "low", // fail-safe: an unset mode does NOT inherit unsafe autonomy
+		"": "low", // fail-safe: an unset mode does NOT inherit unsafe autonomy
+		// Both spellings of the most permissive mode. The value arrives here as a
+		// raw string, so the agent package's deprecated Go alias does not reach
+		// it: when this table listed only "unsafe", renaming the mode to
+		// "full-auto" silently dropped every full-auto parent's specialists to
+		// read-only "low" and nothing failed.
+		"full-auto":  "high",
 		"unsafe":     "high",
 		"auto":       "low",
 		"ask":        "low",
@@ -96,6 +102,8 @@ func TestMemberAwareAutonomy(t *testing.T) {
 		{"", true, "member"},     // member, fail-safe non-unsafe, still write-capable
 		{"unsafe", true, "high"}, // unsafe parent keeps full autonomy
 		{"unsafe", false, "high"},
+		{"full-auto", true, "high"}, // the current spelling must behave identically
+		{"full-auto", false, "high"},
 	}
 	for _, c := range cases {
 		if got := memberAwareAutonomy(c.mode, c.member); got != c.want {

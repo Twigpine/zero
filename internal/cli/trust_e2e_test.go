@@ -103,7 +103,7 @@ func TestTrustGateBlocksToolHookThroughAgentRun(t *testing.T) {
 		if _, err := agent.Run(context.Background(), "go", toolThenTextProvider{toolName: "marker_tool"}, agent.Options{
 			Registry:       reg,
 			Hooks:          disp,
-			PermissionMode: agent.PermissionModeUnsafe,
+			PermissionMode: agent.PermissionModeFullAuto,
 			MaxTurns:       3,
 		}); err != nil {
 			t.Fatalf("agent.Run: %v", err)

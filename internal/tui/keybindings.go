@@ -341,6 +341,7 @@ var reservedBindings = []struct {
 	{parseBinding("esc"), "cancel / close"},
 	{parseBinding("enter"), "submit"},
 	{parseBinding("shift+tab"), "cycle permission mode"},
+	{parseBinding("ctrl+g"), "confirm full-auto mode (only while it is offered)"},
 	{parseBinding("tab"), "navigation / completion"},
 	{parseBinding("backspace"), "composer edit / attachment removal"},
 	{parseBinding("up"), "history/navigation"},
