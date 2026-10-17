@@ -3,6 +3,7 @@ package update
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -17,7 +18,18 @@ import (
 const (
 	DefaultRepository = "Twigpine/zero"
 	DefaultTimeout    = 5 * time.Second
+	// EnvUpdateToken is read by fetchRelease to authenticate GitHub API
+	// requests. ZERO_GITHUB_TOKEN takes precedence over GITHUB_TOKEN.
+	EnvUpdateToken = "ZERO_GITHUB_TOKEN"
+	// EnvGitHubToken is the fallback token variable used for GitHub API requests.
+	EnvGitHubToken = "GITHUB_TOKEN"
+	// EnvUpdateReleaseURL overrides the release API endpoint.
+	EnvUpdateReleaseURL = "ZERO_UPDATE_RELEASE_URL"
 )
+
+// httpClient is the client used by fetchRelease. Overridden in tests to
+// intercept requests without mutating the global http.DefaultClient.
+var httpClient = http.DefaultClient
 
 type Release struct {
 	TagName string  `json:"tag_name"`
@@ -129,7 +141,7 @@ func Check(ctx context.Context, options Options) (Result, error) {
 		currentVersion = "0.0.0"
 	}
 	repository := strings.TrimSpace(firstNonEmpty(options.Repository, DefaultRepository))
-	endpoint, err := resolveEndpoint(firstNonEmpty(options.Endpoint, os.Getenv("ZERO_UPDATE_RELEASE_URL")), repository)
+	endpoint, err := resolveEndpoint(firstNonEmpty(options.Endpoint, os.Getenv(EnvUpdateReleaseURL)), repository)
 	if err != nil {
 		return Result{}, err
 	}
@@ -203,7 +215,7 @@ func upgradeSourceFlag(options Options) string {
 	if endpoint := strings.TrimSpace(options.Endpoint); endpoint != "" {
 		return "--endpoint " + shellQuote(endpoint)
 	}
-	if strings.TrimSpace(os.Getenv("ZERO_UPDATE_RELEASE_URL")) != "" {
+	if strings.TrimSpace(os.Getenv(EnvUpdateReleaseURL)) != "" {
 		return ""
 	}
 	if repository := strings.TrimSpace(options.Repository); repository != "" && repository != DefaultRepository {
@@ -340,6 +352,16 @@ func upgradeGuidance(asset AssetCheck, sourceFlag string, installMethod InstallM
 	return "Run `zero upgrade` to download, verify, and install the latest release."
 }
 
+func githubAPIToken(u *url.URL) string {
+	if u.Scheme != "https" || !strings.EqualFold(u.Hostname(), "api.github.com") {
+		return ""
+	}
+	if token := os.Getenv(EnvUpdateToken); token != "" {
+		return token
+	}
+	return os.Getenv(EnvGitHubToken)
+}
+
 func fetchRelease(ctx context.Context, endpoint string) (release Release, err error) {
 	if strings.HasPrefix(endpoint, "data:") {
 		return fetchDataRelease(endpoint)
@@ -350,7 +372,26 @@ func fetchRelease(ctx context.Context, endpoint string) (release Release, err er
 	}
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("User-Agent", "zero/update")
-	response, err := http.DefaultClient.Do(request)
+	if token := githubAPIToken(request.URL); token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	client := &http.Client{
+		Transport: httpClient.Transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			if req.URL.Scheme != "https" {
+				for _, prev := range via {
+					if githubAPIToken(prev.URL) != "" {
+						return errors.New("refusing redirect to non-HTTPS URL")
+					}
+				}
+			}
+			return nil
+		},
+	}
+	response, err := client.Do(request)
 	if err != nil {
 		return Release{}, err
 	}
