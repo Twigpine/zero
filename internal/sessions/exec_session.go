@@ -182,7 +182,11 @@ func FormatExecPrompt(prompt string, prepared PreparedExec) string {
 
 	lines := []string{}
 	for _, event := range events {
-		lines = append(lines, fmt.Sprintf("- #%d %s: %s", event.Sequence, event.Type, summarizePayload(event.Payload)))
+		payload := any(event.Payload)
+		if event.Type == EventMessage {
+			payload = messageContextPayload(event.Payload)
+		}
+		lines = append(lines, fmt.Sprintf("- #%d %s: %s", event.Sequence, event.Type, summarizePayload(payload)))
 	}
 	label := "Continuing"
 	sessionID := prepared.Session.SessionID
@@ -510,6 +514,28 @@ func forkTitle(title string) string {
 		return ""
 	}
 	return title + " (fork)"
+}
+
+// Project attachment counts into readable text before the generic summary walks
+// the payload. Keep other message metadata and non-message events unchanged.
+func messageContextPayload(payload json.RawMessage) any {
+	var message map[string]any
+	if json.Unmarshal(payload, &message) != nil || message["role"] != "user" {
+		return payload
+	}
+	content, ok := message["content"].(string)
+	if !ok {
+		return payload
+	}
+	var fields struct {
+		Attachments MessageAttachments `json:"attachments"`
+	}
+	if json.Unmarshal(payload, &fields) != nil {
+		return payload
+	}
+	message["content"] = fields.Attachments.WithContent(content)
+	delete(message, "attachments")
+	return message
 }
 
 func summarizePayload(payload any) string {
