@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/gitsafe"
+	"github.com/Twigpine/zero/internal/gitsafe"
 )
 
 // gitIgnoredPathsTimeout bounds how long Scan waits on git before giving up and falling

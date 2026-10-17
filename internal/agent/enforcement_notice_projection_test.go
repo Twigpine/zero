@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 // noticeProjectionTool stands in for any sandboxed command tool: it reports the

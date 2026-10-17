@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/agent"
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 // AN ACP CLIENT MUST SEE THE DISCLOSURE THE TUI SEES.

@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/execution"
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/execution"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 // THE DISCLOSURE HAS TO SURVIVE THE PROJECTION.

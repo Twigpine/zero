@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/execution"
-	"github.com/Gitlawb/zero/internal/hooks"
-	"github.com/Gitlawb/zero/internal/tools"
-	zeroruntime "github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/execution"
+	"github.com/Twigpine/zero/internal/hooks"
+	"github.com/Twigpine/zero/internal/tools"
+	zeroruntime "github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 // editMatchingDispatcher is beforeToolDispatcher for the edit tool, so the same

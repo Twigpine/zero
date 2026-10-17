@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
+	zeroSandbox "github.com/Twigpine/zero/internal/sandbox"
 )
 
 const testDenyReadNotice = "denyRead is set, so the restricted token drops WRITE_RESTRICTED and the workspace write jail no longer confines writes outside it (#869)."

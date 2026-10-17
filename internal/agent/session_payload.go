@@ -3,7 +3,7 @@ package agent
 import (
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 // CardBody is the card body source: the rich card-only Display.Preview (a

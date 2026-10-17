@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/execution"
+	"github.com/Twigpine/zero/internal/execution"
 )
 
 const appliedNotice = "denyRead is configured, so the write jail is not confining writes"

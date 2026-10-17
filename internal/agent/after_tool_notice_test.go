@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/execution"
-	"github.com/Gitlawb/zero/internal/hooks"
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/execution"
+	"github.com/Twigpine/zero/internal/hooks"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 // The tool's own disclosure and the afterTool hook's are the SAME STRING, which

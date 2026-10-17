@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/gitsafe"
+	"github.com/Twigpine/zero/internal/gitsafe"
 )
 
 // isolateGitConfig keeps the git child processes away from the developer's real global and

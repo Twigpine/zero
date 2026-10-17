@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
+	zeroSandbox "github.com/Twigpine/zero/internal/sandbox"
 )
 
 // THE DISCLOSURE HAS TO REACH THE OPERATOR, not just exist on the plan.
