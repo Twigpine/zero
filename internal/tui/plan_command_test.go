@@ -10,12 +10,12 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/Gitlawb/zero/internal/agent"
-	"github.com/Gitlawb/zero/internal/peermsg"
-	"github.com/Gitlawb/zero/internal/planmode"
-	"github.com/Gitlawb/zero/internal/sessions"
-	"github.com/Gitlawb/zero/internal/tools"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/peermsg"
+	"github.com/Twigpine/zero/internal/planmode"
+	"github.com/Twigpine/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 // isolatePlanConfig redirects user config/cache/profile directories so durable

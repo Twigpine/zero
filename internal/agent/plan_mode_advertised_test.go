@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/tools"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 // TestToolAdvertisedInPlanExcludesRequestPermissions guards against
