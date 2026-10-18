@@ -202,13 +202,12 @@ func writePlan(ctx context.Context, workspaceRoot, sessionID, content string, ba
 // editorStagingDirIsPrivate rejects that case instead of silently staging
 // somewhere unsafe.
 //
-// Two more layers close the remaining gap even when the directory itself is
-// private: the filename includes a random, per-invocation suffix (os.CreateTemp)
-// so a sandboxed process can't pre-plant a symlink at a path it can't predict,
-// and CreateTemp opens with O_EXCL, so even a guessed or colliding path is
-// refused rather than followed if something is already there. The random
-// suffix also means two Zero instances editing the same resumed session no
-// longer collide on the same staged file.
+// Inside the private directory, the staged file is created relative to the
+// opened directory handle with exclusive, no-follow semantics
+// (O_CREAT|O_EXCL|O_NOFOLLOW on Unix, createFileNoFollow on Windows), so a
+// pre-planted entry or symlink at a guessed name is refused, not followed.
+// The pid+nanosecond suffix only avoids collisions between Zero instances
+// editing the same resumed session; it is not a secrecy control.
 func StageForEditor(workspaceRoot, sessionID string) (string, func(), error) {
 	path, finish, err := StageEditor(workspaceRoot, sessionID)
 	if err != nil {

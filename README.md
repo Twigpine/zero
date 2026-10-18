@@ -330,11 +330,12 @@ the accepted plan available to the panel, status display, and later reloads.
 `/plan open` edits a protected copy through `$VISUAL` or `$EDITOR`. Newly saved
 plans include a `<!-- zero-plan-format: 2 -->` marker: keep it when editing so
 backslashes remain literal. To quote a literal `Notes:` line or a line beginning
-with a pipe and a space, insert `|` followed by one space after its indentation:
+with a pipe and a space, put `| ` directly after the three-space (or single-tab)
+continuation indent:
 
 ```text
-  | Notes: this is literal content
-  | | this line starts with a literal pipe and space
+   | Notes: this is literal content
+   | | this line starts with a literal pipe and space
 ```
 
 Existing plans remain readable and are converted with a concurrency check before
