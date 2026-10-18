@@ -5648,7 +5648,6 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 	}
 	catalog := m.modelCatalog
 
-	planBaseline, _, planBaselineErr := planmode.ReadPlan(m.cwd, m.activeSession.SessionID)
 	var publication *planPublication
 	if tool, ok := m.registry.Get("update_plan"); ok {
 		if reader, ok := tool.(currentPlanReader); ok {
