@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/lockutil"
+	"github.com/Twigpine/zero/internal/lockutil"
 )
 
 func TestPlanWriterHelperProcess(t *testing.T) {

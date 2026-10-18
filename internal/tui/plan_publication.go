@@ -3,8 +3,8 @@ package tui
 import (
 	"context"
 
-	"github.com/Gitlawb/zero/internal/planmode"
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/planmode"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 // planPublication is private to one TUI run. A candidate must reach durable

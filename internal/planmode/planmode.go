@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/lockutil"
-	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/lockutil"
+	"github.com/Twigpine/zero/internal/sandbox"
 )
 
 // PlanDirName is the config-relative directory (under UserConfigDir) where
