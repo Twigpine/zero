@@ -494,6 +494,10 @@ func TestPermissionsCommandListsPersistentSandboxGrants(t *testing.T) {
 }
 
 func TestPlanCommandShowsCurrentPlan(t *testing.T) {
+	// Main's TestMain isolates user dirs under the OS temp dir, which the
+	// plan store's containment check refuses; isolate like the other plan
+	// tests so the config root sits outside the effective temp root.
+	isolatePlanConfig(t)
 	registry := tools.NewRegistry()
 	planTool := tools.NewUpdatePlanTool()
 	result := planTool.Run(context.Background(), map[string]any{
