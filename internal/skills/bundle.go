@@ -42,8 +42,9 @@ func skipSkillEntry(name string) bool {
 // is executable, 0o644 otherwise), so a script stays runnable without carrying
 // over group- or world-writable bits. Symlinks are not followed or copied:
 // their relative paths come back in skipped, so the caller can say so. Other
-// non-regular entries (devices, sockets, pipes) are left out.
-func copySkillTree(src, dst string) (skipped []string, err error) {
+// non-regular entries (devices, sockets, pipes) are left out. bundled counts
+// the files copied besides SKILL.md.
+func copySkillTree(src, dst string) (bundled int, skipped []string, err error) {
 	files := 0
 	var total int64
 	err = filepath.WalkDir(src, func(path string, entry fs.DirEntry, walkErr error) error {
@@ -86,6 +87,9 @@ func copySkillTree(src, dst string) (skipped []string, err error) {
 		if total > maxSkillTreeBytes {
 			return fmt.Errorf("skill is larger than %d MiB; a skill directory should hold only what the skill uses", maxSkillTreeBytes>>20)
 		}
+		if filepath.ToSlash(rel) != skillFileName {
+			bundled++
+		}
 		mode := os.FileMode(0o644)
 		if info.Mode().Perm()&0o111 != 0 {
 			mode = 0o755
@@ -93,9 +97,9 @@ func copySkillTree(src, dst string) (skipped []string, err error) {
 		return copySkillFile(path, target, mode)
 	})
 	if err != nil {
-		return nil, err
+		return 0, nil, err
 	}
-	return skipped, nil
+	return bundled, skipped, nil
 }
 
 func copySkillFile(src, dst string, mode os.FileMode) error {

@@ -168,6 +168,9 @@ func TestReinstallWithOnlyABundledFileChangedIsAnUpdate(t *testing.T) {
 	if second.Hash != first.Hash || second.TreeHash == first.TreeHash {
 		t.Fatalf("hashes = %q/%q after %q/%q, want the same SKILL.md hash and a new tree hash", second.Hash, second.TreeHash, first.Hash, first.TreeHash)
 	}
+	if second.PreviousHash != first.Hash || second.PreviousTreeHash != first.TreeHash {
+		t.Fatalf("previous hashes = %q/%q, want the first install's %q/%q", second.PreviousHash, second.PreviousTreeHash, first.Hash, first.TreeHash)
+	}
 	got, err := os.ReadFile(filepath.Join(destDir, "pdf", "scripts", "fill.py"))
 	if err != nil || string(got) != "print('fill v2')\n" {
 		t.Fatalf("installed script = %q, %v; want the new version", got, err)
@@ -201,20 +204,7 @@ func TestLockEntryWithoutATreeHashChecksOnlySKILLmd(t *testing.T) {
 	if _, err := Install(context.Background(), InstallOptions{Source: src, Dir: destDir}); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-	lock, err := ReadLock(destDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	entry := lock["pdf"]
-	entry.TreeHash = ""
-	lock["pdf"] = entry
-	data, err := json.Marshal(lock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(destDir, LockFileName), data, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	dropTreeHash(t, destDir, "pdf")
 
 	if err := os.WriteFile(filepath.Join(destDir, "pdf", "scripts", "fill.py"), []byte("print('edited')\n"), 0o755); err != nil {
 		t.Fatal(err)
@@ -227,6 +217,72 @@ func TestLockEntryWithoutATreeHashChecksOnlySKILLmd(t *testing.T) {
 	}
 	if info, _ := Info(destDir, "pdf"); !info.HashDrift {
 		t.Fatal("an edited SKILL.md under an old lock entry is not reported as drift")
+	}
+}
+
+// Reinstalling over an entry from before tree hashes compares with what that
+// install left, SKILL.md alone: an unchanged skill that is only a SKILL.md is
+// not an update, and one whose bundled files this install adds is.
+func TestReinstallOverAnEntryWithoutATreeHash(t *testing.T) {
+	t.Run("SKILL.md only", func(t *testing.T) {
+		destDir := t.TempDir()
+		src := writeSourceSkill(t, filepath.Join(t.TempDir(), "pdf"), bundledSkillManifest)
+		if _, err := Install(context.Background(), InstallOptions{Source: src, Dir: destDir}); err != nil {
+			t.Fatalf("first Install: %v", err)
+		}
+		dropTreeHash(t, destDir, "pdf")
+
+		result, err := Install(context.Background(), InstallOptions{Source: src, Dir: destDir})
+		if err != nil {
+			t.Fatalf("second Install: %v", err)
+		}
+		if result.Updated {
+			t.Fatalf("reinstalling an unchanged SKILL.md-only skill over an old entry was reported as an update: %+v", result)
+		}
+		lock, err := ReadLock(destDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lock["pdf"].TreeHash != result.TreeHash {
+			t.Fatalf("lock tree hash = %q after the reinstall, want %q", lock["pdf"].TreeHash, result.TreeHash)
+		}
+	})
+	t.Run("with bundled files", func(t *testing.T) {
+		destDir := t.TempDir()
+		src := writeBundledSourceSkill(t, filepath.Join(t.TempDir(), "pdf"))
+		first, err := Install(context.Background(), InstallOptions{Source: src, Dir: destDir})
+		if err != nil {
+			t.Fatalf("first Install: %v", err)
+		}
+		dropTreeHash(t, destDir, "pdf")
+
+		result, err := Install(context.Background(), InstallOptions{Source: src, Dir: destDir})
+		if err != nil {
+			t.Fatalf("second Install: %v", err)
+		}
+		if !result.Updated || result.Hash != first.Hash || result.PreviousHash != first.Hash || result.PreviousTreeHash != "" {
+			t.Fatalf("result = %+v, want an update with SKILL.md hash %q unchanged and no previous tree hash", result, first.Hash)
+		}
+	})
+}
+
+// dropTreeHash rewrites the lock entry for name the way an install from before
+// tree hashes left it: a source and a SKILL.md hash, nothing for the tree.
+func dropTreeHash(t *testing.T, destDir, name string) {
+	t.Helper()
+	lock, err := ReadLock(destDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := lock[name]
+	entry.TreeHash = ""
+	lock[name] = entry
+	data, err := json.Marshal(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(destDir, LockFileName), data, 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

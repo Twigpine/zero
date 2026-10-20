@@ -68,6 +68,10 @@ type InstallResult struct {
 	// carries the prior recorded hash so a caller can show the change.
 	Updated      bool   `json:"updated"`
 	PreviousHash string `json:"previousHash,omitempty"`
+	// PreviousTreeHash is the tree hash the replaced install recorded. It is
+	// empty when that install predates tree hashes, and so copied SKILL.md
+	// alone.
+	PreviousTreeHash string `json:"previousTreeHash,omitempty"`
 	// SkippedLinks lists symlinks in the source, relative to the skill
 	// directory. Install neither follows nor copies them.
 	SkippedLinks []string `json:"skippedLinks,omitempty"`
@@ -145,7 +149,7 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 	if err := os.MkdirAll(staged, 0o755); err != nil {
 		return InstallResult{}, fmt.Errorf("create staged skill dir: %w", err)
 	}
-	skippedLinks, err := copySkillTree(skillDir, staged)
+	bundled, skippedLinks, err := copySkillTree(skillDir, staged)
 	if err != nil {
 		return InstallResult{}, fmt.Errorf("stage skill directory: %w", err)
 	}
@@ -204,11 +208,18 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 		SkippedLinks: skippedLinks,
 	}
 	if existed {
-		// A changed script with the same SKILL.md is still an update. An entry
-		// from before tree hashes counts as one too: the reinstall is the first
-		// that puts the bundled files in place.
-		result.Updated = previous.Hash != hash || previous.TreeHash != treeHash
 		result.PreviousHash = previous.Hash
+		result.PreviousTreeHash = previous.TreeHash
+		if previous.TreeHash == "" {
+			// An entry from before tree hashes is from an install that copied
+			// SKILL.md alone. Against that, this install is an update when
+			// SKILL.md changed or it now brings bundled files; a skill that is
+			// still only its unchanged SKILL.md is not.
+			result.Updated = previous.Hash != hash || bundled > 0
+		} else {
+			// A changed script with the same SKILL.md is still an update.
+			result.Updated = previous.Hash != hash || previous.TreeHash != treeHash
+		}
 	}
 	return result, nil
 }
