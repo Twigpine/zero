@@ -92,13 +92,20 @@ func runSkillAdd(args []string, dir string, stdout io.Writer, stderr io.Writer) 
 	lines := []string{}
 	if result.Updated {
 		lines = append(lines, fmt.Sprintf("Updated skill %q.", result.Name))
-		lines = append(lines, fmt.Sprintf("  hash: %s -> %s", shortHash(result.PreviousHash), shortHash(result.Hash)))
+		if result.PreviousHash != result.Hash {
+			lines = append(lines, fmt.Sprintf("  hash: %s -> %s", shortHash(result.PreviousHash), shortHash(result.Hash)))
+		} else {
+			lines = append(lines, "  SKILL.md is unchanged; the files bundled with it changed")
+		}
 	} else {
 		lines = append(lines, fmt.Sprintf("Installed skill %q.", result.Name))
 		lines = append(lines, "  hash: "+result.Hash)
 	}
 	lines = append(lines, "  source: "+result.Source)
 	lines = append(lines, "  path: "+result.Path)
+	if len(result.SkippedLinks) > 0 {
+		lines = append(lines, "  not copied (symlinks): "+strings.Join(result.SkippedLinks, ", "))
+	}
 	if _, err := fmt.Fprintln(stdout, redaction.RedactString(strings.Join(lines, "\n"), redaction.Options{})); err != nil {
 		return exitCrash
 	}

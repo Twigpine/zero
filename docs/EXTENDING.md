@@ -110,6 +110,8 @@ Discovery roots (earlier wins on name collisions):
 
 A missing directory is fine — Zero just omits it. Management commands (`zero skill add` / `zero skill remove`) always write to the primary Zero dir only; `list` / `info` search primary + `~/.agents/skills`. `skill info` reports lock source/hash when present and whether the on-disk `SKILL.md` has drifted from the recorded hash.
 
+For a skill installed since Zero started installing bundled files, `skill info` also reports drift in any file installed with it.
+
 ```text
 ~/.local/share/zero/skills/          # primary (install/remove target)
   run-benchmarks/
@@ -139,6 +141,15 @@ description: Run the project's benchmark suite and summarize the deltas.
 Only `name` and `description` are recognized in the frontmatter today. The `name` defaults to the directory name. Within a single skills root, duplicate names are resolved by lexicographic directory order. Across roots, Zero loads the primary directory first, then `~/.agents/skills`, then plugin skill roots; earlier roots win name collisions. Plugin-declared skills (section 6) are merged into the active agent run at plugin activation time, so bundled skills appear in the available skills list and can be loaded with the `skill` tool.
 
 The `skill` tool lets the agent load any discovered skill by name (primary, agents, or plugin).
+
+A skill can ship files beside its `SKILL.md`, in the [agentskills.io](https://agentskills.io/specification) layout: `scripts/`, `references/`, `assets/` or anything else the instructions refer to. `zero skill add` installs the whole skill directory, leaving out hidden entries such as `.git` and not following or copying symlinks (it lists any it skipped). A skill larger than 1,000 files or 32 MiB is refused. When the `skill` tool loads a skill that has such files, its output ends with the skill's directory and a list of the files, so instructions like "run `scripts/fill.py`" can be followed. Running a bundled script goes through the normal tool permissions; installing or loading a skill never runs anything.
+
+```text
+pdf/
+  SKILL.md
+  scripts/fill.py
+  references/form-fields.md
+```
 
 ## 4. Hooks
 

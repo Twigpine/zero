@@ -364,10 +364,11 @@ func TestInstallGitSourceUsesRunnerAndDoesNotExecuteContent(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(cloneRoot, "PWNED")); err == nil {
 		t.Fatalf("install must never execute fetched content")
 	}
-	// The fetched executable must not be copied into the skills dir either (skills
-	// are markdown — only SKILL.md is installed, not arbitrary fetched files).
-	if _, err := os.Stat(filepath.Join(destDir, "remote", "install.sh")); err == nil {
-		t.Fatalf("install must not copy fetched executable into the skills dir")
+	// A script beside SKILL.md is part of the skill (#584), so it is installed,
+	// and still only copied: running it is up to whoever uses the skill later,
+	// through the normal tool permissions.
+	if _, err := os.Stat(filepath.Join(destDir, "remote", "install.sh")); err != nil {
+		t.Fatalf("the skill's bundled script was not installed: %v", err)
 	}
 }
 
@@ -440,10 +441,10 @@ func TestInfoReturnsFrontmatterSourceAndHash(t *testing.T) {
 
 func TestSkillHashDriftUnreadableLockedPath(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing", "SKILL.md")
-	if !skillHashDrift(Skill{Path: missing}, "sha256:deadbeef") {
+	if !skillHashDrift(Skill{Path: missing}, "sha256:deadbeef", "") {
 		t.Fatal("expected drift when locked SKILL.md cannot be read")
 	}
-	if skillHashDrift(Skill{Path: missing}, "") {
+	if skillHashDrift(Skill{Path: missing}, "", "") {
 		t.Fatal("missing lock hash must not count as drift")
 	}
 }

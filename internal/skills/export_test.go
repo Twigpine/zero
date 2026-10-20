@@ -15,9 +15,10 @@ func Info(dir string, name string) (SkillInfo, bool) {
 		if entry, found := lock[skill.Name]; found {
 			info.Source = entry.Source
 			info.Hash = entry.Hash
+			info.TreeHash = entry.TreeHash
 		}
 	}
-	info.HashDrift = skillHashDrift(skill, info.Hash)
+	info.HashDrift = skillHashDrift(skill, info.Hash, info.TreeHash)
 	return info, true
 }
 
