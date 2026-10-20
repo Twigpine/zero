@@ -8,10 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Twigpine/zero/internal/fsutil"
 )
 
 type Event string
@@ -241,7 +244,44 @@ func LoadConfig(options LoadOptions) (LoadResult, error) {
 	}, nil
 }
 
-func WriteConfig(path string, config Config) error {
+// WriteConfig durably publishes config at path. It takes the same
+// <path>.lock used by ConfigStore mutations, so a direct caller cannot
+// interleave with a CLI mutation, and it replaces the file with a synced temp
+// file, an atomic rename, and a parent-directory sync.
+func WriteConfig(path string, config Config) (err error) {
+	resolved, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	return withConfigLock(resolved, func() error {
+		return writeConfigLocked(resolved, config)
+	})
+}
+
+// withConfigLock serializes a path's read-modify-write across goroutines and
+// processes. The in-process mutex is acquired first; the OS lock is held until
+// fn returns. A release failure is joined into the result: reporting success
+// while the lock is still held would let the next mutation fail or block
+// unexpectedly. The kernel releases the lock on process exit, so the lock file
+// is never removed.
+func withConfigLock(path string, fn func() error) (err error) {
+	lock := lockForPath(path)
+	lock.Lock()
+	defer lock.Unlock()
+
+	unlock, err := configLockFileFn(path)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		err = errors.Join(err, unlock())
+	}()
+	return fn()
+}
+
+// writeConfigLocked normalizes and publishes config. The caller must hold the
+// config lock for path.
+func writeConfigLocked(path string, config Config) error {
 	normalized, err := normalizeConfig(map[string]any{
 		"enabled": config.Enabled,
 		"hooks":   definitionsToRaw(config.Hooks),
@@ -249,26 +289,144 @@ func WriteConfig(path string, config Config) error {
 	if err != nil {
 		return err
 	}
-	resolved, err := filepath.Abs(path)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(resolved), 0o700); err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(normalized, "", "  ")
 	if err != nil {
 		return err
 	}
-	tempPath := fmt.Sprintf("%s.tmp-%d-%d", resolved, os.Getpid(), time.Now().UnixNano())
-	if err := os.WriteFile(tempPath, append(data, '\n'), 0o600); err != nil {
+	return writeConfigData(path, append(data, '\n'))
+}
+
+// Seams allow tests to inject lock and persistence failures at each barrier.
+var (
+	configLockFileFn = lockConfigFile
+	syncHooksFileFn  = (*os.File).Sync
+	syncHooksDirFn   = syncHooksDir
+)
+
+// syncHooksDir fsyncs a directory so a rename/create within it is durable
+// across a crash. Windows cannot sync directory handles, so the rename is
+// best-effort durable there. A directory the user can write but not read
+// cannot be opened for syncing either; that is also best effort, because the
+// write it follows already succeeded. Every other failure is reported.
+func syncHooksDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			return nil
+		}
 		return err
 	}
-	if err := os.Rename(tempPath, resolved); err != nil {
-		_ = os.Remove(tempPath)
+	return errors.Join(d.Sync(), d.Close())
+}
+
+// writeConfigData writes a complete temp file, syncs it, atomically replaces
+// path, and syncs the directory. An interrupted in-place write would leave the
+// user's only hooks config truncated or corrupt; the rename makes readers see
+// either the old document or the new one, never a partial file.
+func writeConfigData(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := ensureConfigDir(dir); err != nil {
 		return err
+	}
+	if len(data) == 0 || data[len(data)-1] != '\n' {
+		data = append(data, '\n')
+	}
+	tmp, err := os.CreateTemp(dir, ".hooks-*.tmp")
+	if err != nil {
+		return fmt.Errorf("write hooks config %s: %w", path, err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("secure hooks config permissions %s: %w", path, err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write hooks config %s: %w", path, err)
+	}
+	if err := syncHooksFileFn(tmp); err != nil {
+		return fmt.Errorf("sync hooks config %s: %w", path, errors.Join(err, tmp.Close()))
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("write hooks config %s: %w", path, err)
+	}
+	if err := fsutil.RenameWithRetry(tmpPath, path, nil); err != nil {
+		return fmt.Errorf("replace hooks config %s: %w", path, err)
+	}
+	// The replacement is already visible if this fails; do not roll it back.
+	if err := syncHooksDirFn(dir); err != nil {
+		return fmt.Errorf("sync hooks config directory %s: %w", dir, err)
 	}
 	return nil
+}
+
+// ensureConfigDir creates dir and each missing ancestor 0700, syncing every
+// new entry into its parent so a crash cannot lose the directory (and with it
+// the hooks config) after a successful write. Components that appeared between
+// the lookup and the mkdir belong to another writer and are not rolled back.
+// Only directories created by this call are removed if a barrier fails.
+func ensureConfigDir(dir string) error {
+	if dir == "." || dir == "" {
+		return nil
+	}
+	missing := missingConfigDirs(dir)
+	if len(missing) == 0 {
+		return nil
+	}
+	var created []string
+	for i := len(missing) - 1; i >= 0; i-- {
+		d := missing[i]
+		err := os.Mkdir(d, 0o700)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return errors.Join(fmt.Errorf("create hooks config directory %s: %w", d, err), removeConfigDirs(created))
+		}
+		created = append(created, d)
+	}
+	for _, d := range missing {
+		parent := filepath.Dir(d)
+		if err := syncHooksDirFn(parent); err != nil {
+			return errors.Join(fmt.Errorf("sync hooks config directory %s: %w", parent, err), removeConfigDirs(created))
+		}
+	}
+	return nil
+}
+
+// missingConfigDirs lists dir and each ancestor that does not exist yet,
+// deepest first, so ensureConfigDir can create them shallowest first and sync
+// each new entry into its parent deepest first.
+func missingConfigDirs(dir string) []string {
+	var missing []string
+	for d := dir; ; {
+		if _, err := os.Lstat(d); !errors.Is(err, os.ErrNotExist) {
+			return missing
+		}
+		missing = append(missing, d)
+		parent := filepath.Dir(d)
+		if parent == d {
+			return missing
+		}
+		d = parent
+	}
+}
+
+// removeConfigDirs rolls back directories ensureConfigDir created in this call,
+// deepest first. os.Remove refuses a non-empty directory, so an entry another
+// process already populated survives and its error is reported.
+func removeConfigDirs(created []string) error {
+	var errs []error
+	for i := len(created) - 1; i >= 0; i-- {
+		if err := os.Remove(created[i]); err != nil {
+			errs = append(errs, fmt.Errorf("roll back hooks config directory %s: %w", created[i], err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 type ConfigStore struct {
@@ -296,84 +454,86 @@ func (store *ConfigStore) List() (Config, error) {
 }
 
 func (store *ConfigStore) Upsert(hook Definition) (Definition, error) {
-	lock := lockForPath(store.configPath)
-	lock.Lock()
-	defer lock.Unlock()
-
-	config, err := store.List()
-	if err != nil {
-		return Definition{}, err
-	}
-	raw := definitionToRaw(hook)
-	// Upsert treats the zero-value Enabled field as omitted so new hooks default
-	// to enabled. Disable persisted hooks explicitly with SetEnabled.
-	if !hook.Enabled {
-		delete(raw, "enabled")
-	}
-	normalized, err := normalizeDefinition(raw, "hooks.0")
-	if err != nil {
-		return Definition{}, err
-	}
-	next := make([]Definition, 0, len(config.Hooks)+1)
-	for _, existing := range config.Hooks {
-		if existing.ID != normalized.ID {
-			next = append(next, existing)
+	var saved Definition
+	err := withConfigLock(store.configPath, func() error {
+		config, err := store.List()
+		if err != nil {
+			return err
 		}
-	}
-	next = append(next, normalized)
-	sortDefinitions(next)
-	config.Hooks = next
-	if err := WriteConfig(store.configPath, config); err != nil {
+		raw := definitionToRaw(hook)
+		// Upsert treats the zero-value Enabled field as omitted so new hooks default
+		// to enabled. Disable persisted hooks explicitly with SetEnabled.
+		if !hook.Enabled {
+			delete(raw, "enabled")
+		}
+		normalized, err := normalizeDefinition(raw, "hooks.0")
+		if err != nil {
+			return err
+		}
+		next := make([]Definition, 0, len(config.Hooks)+1)
+		for _, existing := range config.Hooks {
+			if existing.ID != normalized.ID {
+				next = append(next, existing)
+			}
+		}
+		next = append(next, normalized)
+		sortDefinitions(next)
+		config.Hooks = next
+		if err := writeConfigLocked(store.configPath, config); err != nil {
+			return err
+		}
+		saved = normalized
+		return nil
+	})
+	if err != nil {
 		return Definition{}, err
 	}
-	return normalized, nil
+	return saved, nil
 }
 
 func (store *ConfigStore) Remove(hookID string) (bool, error) {
-	lock := lockForPath(store.configPath)
-	lock.Lock()
-	defer lock.Unlock()
-
-	config, err := store.List()
-	if err != nil {
-		return false, err
-	}
-	next := make([]Definition, 0, len(config.Hooks))
 	removed := false
-	for _, hook := range config.Hooks {
-		if hook.ID == hookID {
-			removed = true
-			continue
+	err := withConfigLock(store.configPath, func() error {
+		config, err := store.List()
+		if err != nil {
+			return err
 		}
-		next = append(next, hook)
-	}
-	if !removed {
-		return false, nil
-	}
-	config.Hooks = next
-	return true, WriteConfig(store.configPath, config)
+		next := make([]Definition, 0, len(config.Hooks))
+		for _, hook := range config.Hooks {
+			if hook.ID == hookID {
+				removed = true
+				continue
+			}
+			next = append(next, hook)
+		}
+		if !removed {
+			return nil
+		}
+		config.Hooks = next
+		return writeConfigLocked(store.configPath, config)
+	})
+	return removed, err
 }
 
 func (store *ConfigStore) SetEnabled(hookID string, enabled bool) (bool, error) {
-	lock := lockForPath(store.configPath)
-	lock.Lock()
-	defer lock.Unlock()
-
-	config, err := store.List()
-	if err != nil {
-		return false, err
-	}
 	changed := false
-	for index := range config.Hooks {
-		if config.Hooks[index].ID == hookID {
-			config.Hooks[index].Enabled = enabled
-			changed = true
+	err := withConfigLock(store.configPath, func() error {
+		config, err := store.List()
+		if err != nil {
+			return err
 		}
-	}
-	if !changed {
-		return false, nil
-	}
-	return true, WriteConfig(store.configPath, config)
+		for index := range config.Hooks {
+			if config.Hooks[index].ID == hookID {
+				config.Hooks[index].Enabled = enabled
+				changed = true
+			}
+		}
+		if !changed {
+			return nil
+		}
+		return writeConfigLocked(store.configPath, config)
+	})
+	return changed, err
 }
 
 func Select(config Config, input SelectInput) []Definition {
