@@ -492,6 +492,13 @@ func (store *ConfigStore) Upsert(hook Definition) (Definition, error) {
 }
 
 func (store *ConfigStore) Remove(hookID string) (bool, error) {
+	// A no-op must not create .zero/ or the lock file: removing an unknown hook
+	// from a project with no hooks config should leave the working tree alone.
+	// A concurrent Upsert that creates the file is simply ordered after this
+	// read.
+	if _, err := os.Lstat(store.configPath); errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
 	removed := false
 	err := withConfigLock(store.configPath, func() error {
 		config, err := store.List()
@@ -516,6 +523,10 @@ func (store *ConfigStore) Remove(hookID string) (bool, error) {
 }
 
 func (store *ConfigStore) SetEnabled(hookID string, enabled bool) (bool, error) {
+	// See Remove: changing an unknown hook must not create config state.
+	if _, err := os.Lstat(store.configPath); errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
 	changed := false
 	err := withConfigLock(store.configPath, func() error {
 		config, err := store.List()

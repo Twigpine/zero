@@ -86,6 +86,31 @@ func TestConfigStoreMutationWaitsForSiblingConfigLock(t *testing.T) {
 	}
 }
 
+// TestNoOpMutationsDoNotCreateConfigState pins the working-tree rule for the
+// new lock: removing or disabling a hook that does not exist must not create
+// .zero/ or hooks.json.lock.
+func TestNoOpMutationsDoNotCreateConfigState(t *testing.T) {
+	configDir := filepath.Join(t.TempDir(), ".zero")
+	path := filepath.Join(configDir, "hooks.json")
+	store, err := NewConfigStore(StoreOptions{ConfigPath: path})
+	if err != nil {
+		t.Fatalf("NewConfigStore: %v", err)
+	}
+
+	if removed, err := store.Remove("missing"); err != nil || removed {
+		t.Fatalf("Remove(missing) = %v, %v; want false, nil", removed, err)
+	}
+	if changed, err := store.SetEnabled("missing", false); err != nil || changed {
+		t.Fatalf("SetEnabled(missing) = %v, %v; want false, nil", changed, err)
+	}
+	if _, err := os.Lstat(configDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("no-op mutation created config state %s: %v", configDir, err)
+	}
+	if _, err := os.Lstat(path + ".lock"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("no-op mutation created lock file: %v", err)
+	}
+}
+
 // TestCrossProcessHooksMutationExcludesAndPreserves is the coordinated
 // two-process regression for lost updates. The child announces itself and then
 // mutates; the parent holds the config lock across that window and asserts the
