@@ -603,15 +603,11 @@ func removeWindowsSandboxPrincipalForSetup(config WindowsSandboxCommandConfig, r
 	return errors.Join(secretErr, removeWindowsPrincipalACLLedger(config.SandboxHome, username))
 }
 
-// setupWindowsSandboxRuntimeRoot resolves this workspace's runtime root and
-// makes sure it exists, so the principal ACL plan can name it.
-//
-// It is created here rather than left to the first command because
-// applyWindowsACLPlan skips a target that does not exist: granting write on a
-// directory that setup never made would silently no-op, and the failure would
-// only show up later as a denied cache write. Creating it under the elevated
-// setup process is safe, since it lives under the invoking user's own cache
-// directory and prepareSandboxRuntime would create it on the same path anyway.
+// windowsSandboxRuntimeRootPath resolves this workspace's runtime root
+// candidates and creates nothing, so teardown can name them on its way out.
+// setupWindowsSandboxRuntimeRoot below adds the creation, which setup needs
+// because applyWindowsACLPlan fails the whole run on a target that does not
+// exist.
 //
 // An empty return means there is no runtime root to grant (no workspace root
 // configured), which is not an error: the caller simply grants nothing extra.
