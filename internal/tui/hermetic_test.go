@@ -10,6 +10,22 @@ import (
 	"github.com/Twigpine/zero/internal/testutil"
 )
 
+// isolatedCwd is the working directory for tests that assert on the whole
+// view. With an empty Options.Cwd, newModel uses this package's directory, so
+// the title bar shows the real branch and checkout path, and a check that some
+// text is absent fails wherever either one contains it: a branch named
+// feat/model-picker breaks a "/model" check, a checkout under ~/more breaks a
+// "more" check. The path does not exist, so no branch is read for it.
+var isolatedCwd = filepath.Join(string(filepath.Separator), "workspace", "zero")
+
+// Guards isolatedCwd: the tests that pin it rely on the title bar showing no
+// branch.
+func TestIsolatedCwdHasNoBranch(t *testing.T) {
+	if got := gitBranch(isolatedCwd); got != "" {
+		t.Fatalf("gitBranch(%q) = %q; isolatedCwd must not be inside a git checkout", isolatedCwd, got)
+	}
+}
+
 // Guards TestMain: the per-user directories every newModel reads (and the ones
 // tests could write to) must resolve inside the isolated root on every OS.
 func TestUserDirsAreIsolatedFromTheDeveloperHome(t *testing.T) {

@@ -1586,6 +1586,7 @@ func TestTitleBarHighlightsBranchOverWorkspace(t *testing.T) {
 
 func TestGenericCustomProviderDisplayUsesEndpointName(t *testing.T) {
 	m := newModel(context.Background(), Options{
+		Cwd:          isolatedCwd,
 		ProviderName: "custom-openai-compatible",
 		ModelName:    "MiniMax-M3",
 		ProviderProfile: config.ProviderProfile{
