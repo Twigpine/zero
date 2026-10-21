@@ -862,6 +862,146 @@ func TestRecoveryResolvesEveryInterruptedUpdateStep(t *testing.T) {
 	}
 }
 
+const (
+	bundledScriptV1 = "print('v1')\n"
+	bundledScriptV2 = "print('v2')\n"
+)
+
+func writeBundledScript(t *testing.T, skillDir string, content string) string {
+	t.Helper()
+	path := filepath.Join(skillDir, "scripts", "run.py")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// plantInterruptedBundledUpdate is plantInterruptedAlphaUpdate for a reinstall
+// that changes only a bundled script, killed after the tree swap: alpha's
+// SKILL.md is the same in the live tree and the backup, and only the tree hash
+// in the lockfile tells them apart. published says whether the lockfile was
+// rewritten for the new tree before the kill (S4) or not (S3).
+func plantInterruptedBundledUpdate(t *testing.T, published bool) interruptedUpdate {
+	t.Helper()
+	dir := t.TempDir()
+	source := writeSourceSkill(t, filepath.Join(t.TempDir(), "alpha"), oldAlphaSkill)
+	writeBundledScript(t, source, bundledScriptV1)
+	if _, err := Install(context.Background(), InstallOptions{Source: source, Dir: dir}); err != nil {
+		t.Fatalf("seed alpha: %v", err)
+	}
+	gammaSource := writeSourceSkill(t, filepath.Join(t.TempDir(), "gamma"), gammaSkill)
+	if _, err := Install(context.Background(), InstallOptions{Source: gammaSource, Dir: dir}); err != nil {
+		t.Fatalf("seed gamma: %v", err)
+	}
+
+	staged, _, err := installtxn.StageDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Dir(staged)
+	writeWorkspaceMarker(t, workspace, "alpha")
+	writeSourceSkill(t, staged, oldAlphaSkill)
+	writeBundledScript(t, staged, bundledScriptV2)
+
+	target := filepath.Join(dir, "alpha")
+	if err := os.Rename(target, filepath.Join(workspace, "previous")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(staged, target); err != nil {
+		t.Fatal(err)
+	}
+	if published {
+		treeHash, err := skillTreeHash(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		publishLockEntry(t, dir, "alpha", LockEntry{Source: canonicalSource(source), Hash: hashContent([]byte(oldAlphaSkill)), TreeHash: treeHash})
+	}
+	return interruptedUpdate{dir: dir, workspace: workspace, oldSource: canonicalSource(source), newSource: canonicalSource(source)}
+}
+
+// SKILL.md cannot say which tree of an interrupted bundled-only update the
+// lockfile records, since both carry the same one. The tree hash can: before the
+// publish it still describes the backup, after it the live tree.
+func TestRecoveryTellsABundledOnlyUpdateApartByTreeHash(t *testing.T) {
+	steps := []struct {
+		step      string
+		published bool
+		want      string
+	}{
+		{step: "S3", published: false, want: bundledScriptV1},
+		{step: "S4", published: true, want: bundledScriptV2},
+	}
+	for _, step := range steps {
+		for _, driver := range recoveryDrivers {
+			t.Run(step.step+"/"+driver.name, func(t *testing.T) {
+				update := plantInterruptedBundledUpdate(t, step.published)
+
+				if err := driver.run(t, update.dir); err != nil {
+					t.Fatalf("%s over a recoverable state: %v", driver.name, err)
+				}
+
+				target := filepath.Join(update.dir, "alpha")
+				got, err := os.ReadFile(filepath.Join(target, "scripts", "run.py"))
+				if err != nil || string(got) != step.want {
+					t.Fatalf("recovered script = %q, %v; want %q", got, err, step.want)
+				}
+				lock, err := ReadLock(update.dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				tree, err := skillTreeHash(target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if lock["alpha"].TreeHash != tree {
+					t.Errorf("lock tree hash %q does not describe the recovered tree %q", lock["alpha"].TreeHash, tree)
+				}
+				if _, err := os.Stat(update.workspace); !os.IsNotExist(err) {
+					t.Errorf("a resolved workspace must be cleared, got %v", err)
+				}
+			})
+		}
+	}
+}
+
+// A live tree whose files cannot be read cannot be shown to be the one the
+// lockfile records, or not to be. Recovery reports it, as it does for a SKILL.md
+// it cannot read, and decides nothing until a later pass can read it.
+func TestRecoveryReportsALiveTreeItCannotHash(t *testing.T) {
+	for _, driver := range recoveryDrivers {
+		t.Run(driver.name, func(t *testing.T) {
+			update := plantInterruptedBundledUpdate(t, false)
+			lockBefore := readLockBytes(t, update.dir)
+			dirBefore := treeSnapshot(t, update.dir)
+			release := holdUnreadable(t, filepath.Join(update.dir, "alpha", "scripts", "run.py"))
+
+			err := driver.run(t, update.dir)
+			release()
+			if err == nil || !strings.Contains(err.Error(), "classify interrupted install alpha") {
+				t.Fatalf("%s over a live tree it cannot hash: %v, want the classification error", driver.name, err)
+			}
+			assertSnapshotUnchanged(t, dirBefore, treeSnapshot(t, update.dir))
+			if got := readLockBytes(t, update.dir); got != lockBefore {
+				t.Errorf("the lockfile was rewritten by a caller that must have aborted:\n%s", got)
+			}
+
+			// Once the tree can be read, the next pass resolves it: the lockfile
+			// still describes the backup, so the backup comes back.
+			if err := driver.run(t, update.dir); err != nil {
+				t.Fatalf("%s once the tree is readable: %v", driver.name, err)
+			}
+			got, err := os.ReadFile(filepath.Join(update.dir, "alpha", "scripts", "run.py"))
+			if err != nil || string(got) != bundledScriptV1 {
+				t.Fatalf("recovered script = %q, %v; want %q", got, err, bundledScriptV1)
+			}
+		})
+	}
+}
+
 // A recovery that could not be made is not the same as nothing to recover.
 // Installing over or reporting the removal of a tree that is still owed a
 // restore destroys the only copy of it, so the caller has to stop before it

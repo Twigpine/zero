@@ -1,9 +1,9 @@
 package skills
 
 // Distribution: install a skill from a git URL or a local path into the skills
-// directory, with a content hash recorded in a lockfile (skills.lock) so every
-// install/update is verifiable. Skills are markdown, so install NEVER executes
-// fetched content — it copies and validates the SKILL.md and nothing else.
+// directory, with content hashes recorded in a lockfile (skills.lock) so every
+// install/update is verifiable. Install copies the skill's directory, its
+// SKILL.md and the files beside it, and NEVER executes fetched content.
 
 import (
 	"context"
@@ -227,8 +227,8 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 // lockReconciler answers, for one interrupted workspace, which of the two trees
 // beside each other the lockfile records. A kill between the tree swap and the
 // lockfile publish leaves exactly what a kill after both leaves, so filesystem
-// shape cannot tell them apart and only the recorded hash can: the tree it
-// describes is the one the user was told they had.
+// shape cannot tell them apart and only the recorded hashes can: the tree they
+// describe is the one the user was told they had.
 func lockReconciler(dir string) installtxn.Reconciler {
 	return func(name string, target string, backup string) (installtxn.Phase, error) {
 		lock, err := ReadLock(dir)
@@ -249,22 +249,43 @@ func lockReconciler(dir string) installtxn.Reconciler {
 			// recorded one and recovery must not pick between them.
 			return installtxn.PhaseUnknown, nil
 		}
-		targetHash, err := manifestHash(target)
+		committed, err := treeMatchesEntry(target, entry)
 		if err != nil {
 			return installtxn.PhaseUnknown, err
 		}
-		if targetHash == entry.Hash {
+		if committed {
 			return installtxn.PhaseCommitted, nil
 		}
-		backupHash, err := manifestHash(backup)
+		prePublish, err := treeMatchesEntry(backup, entry)
 		if err != nil {
 			return installtxn.PhaseUnknown, err
 		}
-		if backupHash == entry.Hash {
+		if prePublish {
 			return installtxn.PhasePrePublish, nil
 		}
 		return installtxn.PhaseUnknown, nil
 	}
+}
+
+// treeMatchesEntry reports whether the skill tree at path is the one entry
+// records. A reinstall that changes only a bundled file leaves SKILL.md the same
+// in both trees of an interrupted workspace, so an entry with a tree hash has to
+// match on that as well. An entry from before tree hashes records SKILL.md
+// alone, and that is all it can be matched on. As in manifestHash, a tree with
+// no SKILL.md is a non-match and any other read error is returned.
+func treeMatchesEntry(path string, entry LockEntry) (bool, error) {
+	sum, err := manifestHash(path)
+	if err != nil || sum != entry.Hash {
+		return false, err
+	}
+	if entry.TreeHash == "" {
+		return true, nil
+	}
+	tree, err := skillTreeHash(path)
+	if err != nil {
+		return false, err
+	}
+	return tree == entry.TreeHash, nil
 }
 
 // manifestHash hashes the SKILL.md under path the same way an install records
