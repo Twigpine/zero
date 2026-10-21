@@ -23,7 +23,7 @@ func testAskUserRequest() agent.AskUserRequest {
 
 func newAskUserModel(t *testing.T, request agent.AskUserRequest, answers *[][]string) model {
 	t.Helper()
-	m := newModel(context.Background(), Options{Cwd: isolatedCwd})
+	m := newModel(context.Background(), Options{Cwd: isolatedCwd(t)})
 	m.pending = true
 	m.activeRunID = 7
 	m.width = 96

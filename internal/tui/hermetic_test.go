@@ -15,14 +15,34 @@ import (
 // the title bar shows the real branch and checkout path, and a check that some
 // text is absent fails wherever either one contains it: a branch named
 // feat/model-picker breaks a "/model" check, a checkout under ~/more breaks a
-// "more" check. The path does not exist, so no branch is read for it.
-var isolatedCwd = filepath.Join(string(filepath.Separator), "workspace", "zero")
+// "more" check.
+//
+// It is a child of the home TestMain isolates that nothing creates: fully
+// qualified on every platform, outside any checkout, and holding nothing
+// newModel could read. The title bar shows it as ~/not-a-checkout on every
+// machine. A t.TempDir path would carry the user name and the test name into
+// the view instead, which is the same problem in a new place.
+func isolatedCwd(t *testing.T) string {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(home, "not-a-checkout")
+}
 
-// Guards isolatedCwd: the tests that pin it rely on the title bar showing no
-// branch.
-func TestIsolatedCwdHasNoBranch(t *testing.T) {
-	if got := gitBranch(isolatedCwd); got != "" {
-		t.Fatalf("gitBranch(%q) = %q; isolatedCwd must not be inside a git checkout", isolatedCwd, got)
+// Guards isolatedCwd: the tests that pin it rely on a fully qualified path that
+// does not exist and that no git checkout contains.
+func TestIsolatedCwdIsAbsentAndOutsideACheckout(t *testing.T) {
+	cwd := isolatedCwd(t)
+	if !filepath.IsAbs(cwd) {
+		t.Fatalf("isolatedCwd = %q, want a fully qualified path", cwd)
+	}
+	if _, err := os.Lstat(cwd); !os.IsNotExist(err) {
+		t.Fatalf("isolatedCwd %q must not exist, got %v", cwd, err)
+	}
+	if got := gitBranch(cwd); got != "" {
+		t.Fatalf("gitBranch(%q) = %q; isolatedCwd must not be inside a git checkout", cwd, got)
 	}
 }
 

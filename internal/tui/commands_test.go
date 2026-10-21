@@ -263,7 +263,7 @@ func TestMCPManagerNavigationOpensAddWizard(t *testing.T) {
 }
 
 func TestMCPManagerSearchFiltersMarketplace(t *testing.T) {
-	m := newModel(context.Background(), Options{Cwd: isolatedCwd})
+	m := newModel(context.Background(), Options{Cwd: isolatedCwd(t)})
 	m.width = 120
 	m.height = 36
 	m.input.SetValue("/mcp")
