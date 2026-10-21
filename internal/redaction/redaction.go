@@ -112,6 +112,42 @@ var textSecretPrefixes = [][]string{
 	{"eyJ"},
 }
 
+type secretTrigger struct {
+	literal string
+	// shape indexes the anchoredSecretPatterns entry the trigger belongs to,
+	// so a cut can chain the bytes after it against the shape the trigger
+	// actually starts.
+	shape int
+}
+
+// secretTriggers flattens textSecretPrefixes into one sorted list for the
+// swallowed-trigger search below. Sorted so cuts are discovered earliest-first
+// regardless of which pattern list they came from.
+var secretTriggers = func() []secretTrigger {
+	pairs := []secretTrigger{}
+	for shape, prefixes := range textSecretPrefixes {
+		for _, prefix := range prefixes {
+			pairs = append(pairs, secretTrigger{literal: prefix, shape: shape})
+		}
+	}
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].literal < pairs[j].literal })
+	return pairs
+}()
+
+// longestTrigger bounds how far past a swallowed-scored span the trigger
+// inspection may need to look: an occurrence whose last bytes run past the
+// span end (a greedy body stops at a byte outside its class, and several
+// triggers end in one).
+var longestTrigger = func() int {
+	longest := 0
+	for _, trigger := range secretTriggers {
+		if len(trigger.literal) > longest {
+			longest = len(trigger.literal)
+		}
+	}
+	return longest
+}()
+
 // anchoredSecretPatterns mirrors textSecretPatterns with the leading \b
 // replaced by \A, so each shape can be tested at an exact byte offset. A
 // credential that starts exactly where a redacted span ends (two AWS keys
@@ -129,50 +165,224 @@ var anchoredSecretPatterns = func() []*regexp.Regexp {
 	return out
 }()
 
-// redactAdjacent redacts every match of pattern, plus any match of anchored
-// that begins exactly where a redacted span ends. This catches credentials
-// glued end to end (AKIA...AKIA...) without weakening the leading-boundary
-// rule elsewhere: a mid-word occurrence that does not abut a redacted span
-// still does not match. Chained runs (three or more glued credentials) are
-// followed to the end.
+// A credential's body can run into the trigger prefix of the NEXT one when
+// both are glued end to end. For fixed-length bodies this cannot happen — the
+// `{16}` stops the body exactly where the next AKIA...AKIA... key begins,
+// which is the case the anchored end-chaining always covered. An unbounded
+// body ({36,} on a github key, {20,} on an API key) swallows whichever trigger
+// bytes sit inside its class — "ghp" after a github key is all lowercase
+// letters — so the first match ends PAST the next credential's trigger, and a
+// scan that re-anchors at the span end finds nothing: the second credential
+// is never redacted.
+//
+// redactedSpan is one region of a redaction: the slice s[start:end] and the
+// bytes to write in its place. Chained runs can link shapes together, so a
+// span says which shape produced it rather than assuming the caller's pattern
+// covered it.
+type redactedSpan struct {
+	start int
+	end   int
+	// text replaces s[start:end]. Every entry in textSecretPatterns captures
+	// nothing, so this is the replacement itself unless a custom replacement
+	// template references a group; anchoring the expansion to the shape that
+	// matched keeps that working for cross-shape chains.
+	text string
+}
+
+// redactAdjacent redacts every match of pattern, plus every credential glued
+// into the runs those matches start. Runs follow three loss-of-boundary
+// mechanisms: end-chaining (a credential glued exactly at the previous span's
+// end, the AKIA...AKIA... case), all-shape chaining (a glued credential of a
+// different shape), and the swallowed-trigger cut (one credential's greedy
+// body runs into the next one's trigger prefix, hiding it from any scan that
+// re-anchors at a span end). A run ends at the first byte boundary where no
+// shape matches; a mid-word lookalike never matches and never starts one.
 func redactAdjacent(s string, pattern, anchored *regexp.Regexp, replacement string) string {
-	spans := pattern.FindAllStringIndex(s, -1)
-	// Bound the outer loop to the original match count. The inner loop
-	// appends chained spans to the same slice; re-reading len(spans) would
-	// re-chain every appended span, growing the span count (and the
-	// FindStringIndex calls) exponentially on long glued runs.
-	n := len(spans)
-	for i := 0; i < n; i++ {
-		end := spans[i][1]
-		for end < len(s) {
-			loc := anchored.FindStringIndex(s[end:])
-			if loc == nil || loc[0] != 0 || loc[1] <= 0 {
-				break
-			}
-			newEnd := end + loc[1]
-			spans = append(spans, []int{end, newEnd})
-			end = newEnd
-		}
+	plain := pattern.FindAllStringIndex(s, -1)
+	if len(plain) == 0 {
+		return s
 	}
+	// Bound the outer loop to the original match count. Every span collects
+	// its own run; re-reading len(plain) after appends would re-run every
+	// appended credential and grow the span count (with the anchored scans
+	// each drags) exponentially on long glued runs.
+	n := len(plain)
+	spans := make([]redactedSpan, 0, n+4)
+	for i := 0; i < n; i++ {
+		spans = appendCredentialRun(s, plain[i][0], plain[i][1], replacement, spans)
+	}
+	return writeRedactedSpans(s, spans)
+}
+
+func writeRedactedSpans(s string, spans []redactedSpan) string {
 	if len(spans) == 0 {
 		return s
 	}
-	sort.Slice(spans, func(i, j int) bool { return spans[i][0] < spans[j][0] })
+	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
 	var out strings.Builder
 	pos := 0
 	for _, sp := range spans {
-		if sp[0] < pos {
+		if sp.start < pos {
 			continue // overlapping span, already covered
 		}
-		out.WriteString(s[pos:sp[0]])
-		// s[sp[0]:sp[1]] is a match (anchored spans match at \b when taken
-		// alone), so ReplaceAllString expands $ references exactly as the
-		// plain loop below would.
-		out.WriteString(pattern.ReplaceAllString(s[sp[0]:sp[1]], replacement))
-		pos = sp[1]
+		out.WriteString(s[pos:sp.start])
+		out.WriteString(sp.text)
+		pos = sp.end
 	}
 	out.WriteString(s[pos:])
 	return out.String()
+}
+
+// appendCredentialRun follows the path that begins exactly at start, whose
+// first plain match ended at end. Every step finds the shape that matches at
+// the current boundary, tries to re-bind that match at a swallowed trigger,
+// and otherwise consumes the whole match; the run ends where no shape does.
+func appendCredentialRun(s string, start, end int, replacement string, spans []redactedSpan) []redactedSpan {
+	cur := start
+	for cur < len(s) {
+		shape, matchEnd := firstShapeAt(s, cur)
+		if shape < 0 || matchEnd == cur {
+			break
+		}
+		if cutStart, cut := earliestSwallowedCut(s, cur, matchEnd, shape); cut {
+			// The bytes before the trigger are the credential that matched;
+			// from the trigger on the run continues under the next shape.
+			spans = append(spans, redactedSpan{start: cur, end: cutStart, text: shapeReplacement(shape, s[cur:cutStart], replacement)})
+			cur = cutStart
+			continue
+		}
+		spans = append(spans, redactedSpan{start: cur, end: matchEnd, text: shapeReplacement(shape, s[cur:matchEnd], replacement)})
+		cur = matchEnd
+	}
+	return spans
+}
+
+func shapeReplacement(shape int, slice, replacement string) string {
+	return anchoredSecretPatterns[shape].ReplaceAllString(slice, replacement)
+}
+
+// firstShapeAt returns the first anchored shape that matches exactly at off,
+// with the end of its match. Shapes are tried in declaration order, so the
+// strict JWT form wins over the loose one; both redact the same bytes, so the
+// tie-break only decides which regex expanded the replacement.
+func firstShapeAt(s string, off int) (shape int, end int) {
+	for shape, anchored := range anchoredSecretPatterns {
+		loc := anchored.FindStringIndex(s[off:])
+		if loc != nil && loc[0] == 0 && loc[1] > 0 {
+			return shape, off + loc[1]
+		}
+	}
+	return -1, off
+}
+
+// earliestSwallowedCut searches the matched span [start, end) of shape for a
+// trigger literal that begins a valid credential right there: the head (the
+// bytes before it) still matches the shape as a whole, and the run chained
+// from the trigger reaches past the span. The earliest such trigger is the
+// cut a boundary at that byte would have produced.
+//
+// The head requirement and the past-the-end requirement keep the cut honest:
+// a trigger spelled mid-body that does not begin a credential leaves the span
+// alone, and a cut that stayed inside the original span recovers no bytes —
+// it would only split one redaction in two.
+//
+// The candidate set is the trigger occurrences inside the span, bounded by
+// the span plus one trigger length; every occurrence of every trigger in that
+// window is a candidate, earliest-first.
+func earliestSwallowedCut(s string, start, end, shape int) (int, bool) {
+	if end-start <= 1 {
+		return 0, false
+	}
+	lookahead := end + longestTrigger
+	if lookahead > len(s) {
+		lookahead = len(s)
+	}
+	window := s[start+1 : lookahead]
+
+	// A trigger occurrence whose bytes begin inside the span may extend past
+	// its end: the greedy body stops at one byte outside its class, and
+	// several triggers end in exactly such a byte ("ghp_"'s underscore,
+	// "sk-ant-" plus a hyphen).
+	anchored := anchoredSecretPatterns[shape]
+	examined := 0
+	for _, q := range triggerOccurrences(window, start+1, end) {
+		if examined >= maxTriggerOccurrences {
+			// Occurrences are earliest-first, so the ones past the cap are the
+			// farthest into the span; a cut among them is missed and the
+			// greedy span stands, as it did before the cut existed.
+			break
+		}
+		examined++
+		// The bytes before the trigger must still be a complete match of this
+		// shape: a trigger spelling inside a body whose head does not
+		// validate is prose-shaped, not a swallowed credential.
+		loc := anchored.FindStringIndex(s[start:q])
+		if loc == nil || loc[0] != 0 || loc[1] != q-start {
+			continue
+		}
+		if runReach(s, q) > end {
+			return q, true
+		}
+	}
+	return 0, false
+}
+
+// maxTriggerOccurrences bounds how many trigger occurrences one span is
+// examined for, after sorting. Real glued credentials announce their trigger
+// within reach of the span's own start, so a distant lookalike run does not
+// get walked to its end; the split path makes the same trade ("at most two
+// passes and no more"). A cut found past the cap is missed and the greedy
+// span stands, as it did before the cut existed.
+const maxTriggerOccurrences = 64
+
+// triggerOccurrences returns every occurrence of every trigger literal that
+// begins inside [windowStart, windowEnd), where window is the slice rooted at
+// windowStart that the caller bounded so occurrences could reach one trigger
+// length past its end. Earliest first, duplicates collapsed.
+func triggerOccurrences(window string, windowStart, windowEnd int) []int {
+	occurrences := make([]int, 0, 4)
+	for _, trigger := range secretTriggers {
+		at := 0
+		for {
+			found := strings.Index(window[at:], trigger.literal)
+			if found < 0 {
+				break
+			}
+			q := windowStart + at + found
+			if q >= windowEnd {
+				break // later occurrences for this trigger start even later
+			}
+			occurrences = append(occurrences, q)
+			at += found + 1
+		}
+	}
+	sort.Ints(occurrences)
+	// In-place deduplicate: duplicates come only from triggers shared between
+	// shapes ("eyJ"), and zero is never an occurrence — the scan starts past it.
+	unique := occurrences[:0]
+	for i, q := range occurrences {
+		if i > 0 && q == occurrences[i-1] {
+			continue
+		}
+		unique = append(unique, q)
+	}
+	return unique
+}
+
+// runReach reports how far the credential run beginning exactly at off
+// extends: each boundary picks the first shape that matches there, until one
+// does not. The run is followed, not redacted; this is the shared-size check
+// that keeps a cut honest.
+func runReach(s string, off int) int {
+	cur := off
+	for cur < len(s) {
+		_, matchEnd := firstShapeAt(s, cur)
+		if matchEnd == cur {
+			break
+		}
+		cur = matchEnd
+	}
+	return cur
 }
 
 var (
