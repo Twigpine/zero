@@ -32,6 +32,11 @@ type RegisterOptions struct {
 	ConnectTimeout time.Duration
 	Execution      *execution.Runner
 	WorkspaceRoot  string
+	// SecretValues reports the credential material that exists right now, and is
+	// sampled BEFORE the connect phase so every skipped entry can record the
+	// context that made its error safe to display. See SkippedServer.Credentials.
+	// Optional: nil records no context and claims nothing.
+	SecretValues func() []string
 }
 
 // SkippedServer records an MCP server that was not registered because it could
@@ -45,6 +50,23 @@ type SkippedServer struct {
 	// server is an out-of-the-box default the user never configured, so a
 	// caller can skip warning loudly about it.
 	UnconfiguredDefault bool
+	// Credentials fingerprints the credential material that existed when Err was
+	// produced.
+	//
+	// THE CONTEXT THAT MAKES AN ERROR SAFE HAS TO BE RECORDED WHERE THE ERROR IS.
+	// Err is the RAW failure and is redacted at display time against whatever the
+	// token store holds then, so a consumer needs to know whether that set is
+	// still the one that was hiding the credential. Sampling it at the consumer
+	// instead is too late: startup registers here and the interactive surface is
+	// built seconds later, after plugin activation and the rest of startup, and a
+	// refresh, a logout, or another process can rotate the store in between. The
+	// consumer would then compare the current set against itself, find no change,
+	// and print an error containing a bearer that no longer exists anywhere in the
+	// candidate set.
+	//
+	// Empty means no context was recorded, which is a claim of nothing rather than
+	// a claim that nothing changed.
+	Credentials string
 }
 
 type Runtime struct {
@@ -111,6 +133,17 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 		cancel context.CancelFunc
 		err    error
 	}
+	// Sampled BEFORE connecting, not after. A 401 during connect triggers a
+	// refresh that rotates the stored bearer, and the error text captured on that
+	// same attempt can contain the OLD one. A sample taken afterwards would record
+	// the new set, match at display time, and let the old bearer through with
+	// nothing left in the candidate set to hide it. Sampling first means such a
+	// rotation reads as a change and the reason is withheld, which is the safe
+	// direction to be wrong in.
+	credentials := ""
+	if options.SecretValues != nil {
+		credentials = CredentialFingerprint(options.SecretValues())
+	}
 	results := make([]connectResult, len(servers))
 	var wg sync.WaitGroup
 	for index := range servers {
@@ -158,7 +191,7 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 	for index, server := range servers {
 		res := results[index]
 		if res.err != nil {
-			runtime.skipped = append(runtime.skipped, SkippedServer{Name: server.Name, Err: res.err, UnconfiguredDefault: server.UnconfiguredDefault})
+			runtime.skipped = append(runtime.skipped, SkippedServer{Name: server.Name, Err: res.err, UnconfiguredDefault: server.UnconfiguredDefault, Credentials: credentials})
 			continue
 		}
 		serverTools, validateErr := buildServerTools(registry, server, res.remote, res.client, options, stagedNames)
@@ -167,7 +200,7 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 				res.cancel()
 			}
 			_ = res.client.Close()
-			runtime.skipped = append(runtime.skipped, SkippedServer{Name: server.Name, Err: validateErr, UnconfiguredDefault: server.UnconfiguredDefault})
+			runtime.skipped = append(runtime.skipped, SkippedServer{Name: server.Name, Err: validateErr, UnconfiguredDefault: server.UnconfiguredDefault, Credentials: credentials})
 			continue
 		}
 		runtime.clients = append(runtime.clients, res.client)

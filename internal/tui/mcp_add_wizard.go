@@ -292,7 +292,7 @@ func (m model) applyMCPAddWizardSaveResult(result MCPCommandResult, disabled boo
 		return m
 	}
 	if len(result.Config.Servers) > 0 || len(m.mcpConfig.Servers) > 0 {
-		m.mcpConfig = result.Config
+		m = m.adoptMCPConfig(result.Config)
 		m.refreshMCPViewState()
 	}
 	server := result.Config.Servers[wizard.serverName]
