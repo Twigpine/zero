@@ -55,6 +55,22 @@ const (
 	// error, so this only affects true same-error loops.
 	toolFailureStopAt = 6
 
+	// toolFailureAnyErrorStopAt halts a tool that keeps failing with DIFFERENT
+	// errors. The streak above cannot see that case by construction: a changed
+	// signature rebuilds the record at 1, so a tool whose error text varies every
+	// call never reaches toolFailureStopAt however long it loops.
+	//
+	// That is not hypothetical. A headless run made 384 denied calls over 26
+	// minutes without tripping a halt set to 6, because each denial named a
+	// different path. Keying denials on their category (see observeToolResult)
+	// fixes that case; this bound covers every error with no category to key on.
+	//
+	// Deliberately well above toolFailureStopAt. A model iterating on a genuinely
+	// tricky edit legitimately fails several times with different errors while it
+	// converges, and this must not cut those runs short — the same reasoning that
+	// moved toolFailureStopAt from 4 to 6. Both counters reset on success.
+	toolFailureAnyErrorStopAt = 12
+
 	// maxContinueNudges bounds how many times the headless completion gate
 	// (Options.RequireCompletionSignal) re-prompts a model that stopped without a
 	// tool call while work clearly remained. Once spent, the run finalizes as
@@ -324,15 +340,89 @@ func acceptanceVerificationNudge(objective string) string {
 const toolFailureHintMarker = "kept failing with the same error"
 
 type toolFailureRecord struct {
-	count     int
-	errSig    string
-	hintShown bool
+	count    int
+	identity failureIdentity
+	// sawExecuted and sawRefused are the AGGREGATE over the whole streak, not
+	// the current identity. The content-blind bound needs them because it fires
+	// exactly when no identity repeated, so the last one is unrepresentative.
+	sawExecuted bool
+	sawRefused  bool
+	hintShown   bool
+	// anyErrorCount counts consecutive failures of this tool REGARDLESS of the
+	// error, and is cleared only by a success. count above restarts whenever the
+	// signature changes, which is exactly what a varying error message defeats;
+	// this one cannot be reset by changing the text.
+	anyErrorCount int
 }
+
+// failureKind separates a failure the TOOL produced from one POLICY produced.
+//
+// The two used to share one string namespace, with provenance recovered
+// afterwards by testing that string for a "denial:" prefix. Trusted provenance
+// and untrusted content in one namespace is a namespace the untrusted side can
+// write into: a command that printed exactly "denial:permission_denied" and
+// exited non-zero acquired the identity of a real permission refusal, merged
+// its streak with one, and had the run report it as refused although it ran
+// every time. The kind is carried as its own field so no output can spell it.
+type failureKind uint8
+
+const (
+	failureKindNone failureKind = iota
+	// failureKindExecuted: the tool ran and returned an error. The key is the
+	// normalized error signature, which is tool-controlled text.
+	failureKindExecuted
+	// failureKindRefused: policy refused the call before the tool ran. The key is
+	// the denial category, a small closed enum the loop sets.
+	failureKindRefused
+)
+
+// failureIdentity is what the same-identity streak counts. Comparing the pair
+// means an executed error can never equal a refusal however it is spelled.
+type failureIdentity struct {
+	kind failureKind
+	key  string
+}
+
+// toolFailureCause is why the guard stopped, decided where the facts are rather
+// than reconstructed by the caller from overlapping booleans.
+type toolFailureCause uint8
+
+const (
+	toolFailureCauseNone toolFailureCause = iota
+	// toolFailureCauseSameError: the same executed error signature, six times.
+	toolFailureCauseSameError
+	// toolFailureCauseSameRefusal: the same denial category, six times. The prose
+	// differs on every call because it names what was refused, so this is NOT the
+	// same-error case.
+	toolFailureCauseSameRefusal
+	// toolFailureCauseVariedExecuted: the content-blind bound, and every failure
+	// was the tool executing and failing.
+	toolFailureCauseVariedExecuted
+	// toolFailureCauseVariedRefused: the content-blind bound, and every failure
+	// was a policy refusal. Alternating two categories reaches twelve without
+	// either reaching six, and the tool never ran once.
+	toolFailureCauseVariedRefused
+	// toolFailureCauseVariedMixed: the content-blind bound over both kinds.
+	// Named deliberately rather than left to whichever field a switch tested
+	// first.
+	toolFailureCauseVariedMixed
+)
 
 type toolFailureOutcome struct {
 	InjectHint bool
 	Stop       bool
 	Count      int
+	// Cause is set only when Stop is. It carries the aggregate fact about the
+	// sequence that tripped a bound, which the last record alone cannot supply:
+	// the content-blind bound is reached precisely when no single identity
+	// repeated enough, so the identity present at the end says nothing about the
+	// eleven before it.
+	Cause toolFailureCause
+}
+
+// Refused reports whether policy, rather than the tool, produced the failures.
+func (cause toolFailureCause) Refused() bool {
+	return cause == toolFailureCauseSameRefusal || cause == toolFailureCauseVariedRefused
 }
 
 // errorSignature normalizes a tool error to a short, comparable signature so
@@ -358,10 +448,37 @@ func toolFailureHint(toolName, schemaJSON, errOutput string) string {
 
 // toolFailureStopAnswer is the final answer when the repeated-failure guard halts
 // a run.
-func toolFailureStopAnswer(toolName string, count int) string {
-	return "Agent stopped: the `" + toolName + "` tool failed " + strconv.Itoa(count) +
-		" times in a row with the same error, so I halted instead of looping further. " +
+func toolFailureStopAnswer(toolName string, count int, cause toolFailureCause) string {
+	// Each branch claims only what its counter established, and the mixed case is
+	// spelled out rather than decided by whichever field a switch happened to
+	// test first. The wording used to overclaim in both directions: the
+	// content-blind bound said every failure differed, which it does not track,
+	// and it described a run of policy refusals as the tool failing, when the
+	// tool had not run at all.
+	verb, tail := " tool failed ", " times in a row with the same error, "
+	switch cause {
+	case toolFailureCauseSameRefusal:
+		verb, tail = " tool was refused ", " times in a row, "
+	case toolFailureCauseVariedExecuted:
+		tail = " times in a row with varying errors, "
+	case toolFailureCauseVariedRefused:
+		verb, tail = " tool was refused ", " times in a row for different reasons, "
+	case toolFailureCauseVariedMixed:
+		verb, tail = " tool failed or was refused ", " times in a row, "
+	}
+	return "Agent stopped: the `" + toolName + "`" + verb + strconv.Itoa(count) +
+		tail + "so I halted instead of looping further. " +
 		"Please check the request or adjust the tool arguments."
+}
+
+// toolFailureIncompleteReason describes a guard halt for the headless
+// completion gate. A guard halt is BY DEFINITION unfinished work: the run
+// stopped because a tool would not stop failing, not because the task was done.
+func toolFailureIncompleteReason(toolName string, cause toolFailureCause) string {
+	if cause.Refused() {
+		return "halted after `" + toolName + "` was refused repeatedly, without completing the task"
+	}
+	return "halted after `" + toolName + "` failed repeatedly, without completing the task"
 }
 
 // The no-output stop answer is assembled from these fixed parts (only the turn
@@ -472,28 +589,68 @@ func newGuardState() *guardState {
 // observeToolResult tracks repeated identical failures of a tool. A successful
 // result clears that tool's failure streak. Returns whether to inject a one-shot
 // corrective hint and/or stop the run.
-func (state *guardState) observeToolResult(name string, failed bool, output string) toolFailureOutcome {
+// hintable is separate from failed on purpose. A categorized denial MUST count
+// toward the streaks — that is the whole point of keying on the category — but a
+// schema hint is the wrong response to a policy refusal: the call shape is fine,
+// the answer was no. Collapsing the two is what made the earlier version of this
+// fix a no-op, since the caller could only pass a flag that excluded denials.
+func (state *guardState) observeToolResult(name string, failed bool, hintable bool, output string, denial DenialCategory) toolFailureOutcome {
 	if state.toolFailures == nil {
 		state.toolFailures = map[string]*toolFailureRecord{}
 	}
 	if !failed {
-		delete(state.toolFailures, name) // success resets the streak
+		delete(state.toolFailures, name) // success resets both counters
 		return toolFailureOutcome{}
 	}
-	sig := errorSignature(output)
+	// A denial keys on its CATEGORY, not its prose. The message embeds the path
+	// or command that was refused, so it differs on every call while describing
+	// the same unchanging refusal — which rebuilt the record at 1 each time and
+	// let a denied tool loop indefinitely under a halt set to 6. The category is
+	// a small closed enum the loop already sets on the result.
+	identity := failureIdentity{kind: failureKindExecuted, key: errorSignature(output)}
+	if denial != DenialNone {
+		identity = failureIdentity{kind: failureKindRefused, key: string(denial)}
+	}
 	record := state.toolFailures[name]
-	if record == nil || record.errSig != sig {
-		record = &toolFailureRecord{count: 1, errSig: sig}
+	if record == nil {
+		record = &toolFailureRecord{identity: identity}
 		state.toolFailures[name] = record
+	}
+	if record.identity != identity {
+		// A different failure restarts the same-identity streak but NOT the
+		// content-blind one: changing how a tool fails is not progress.
+		record.count = 1
+		record.identity = identity
+		record.hintShown = false
 	} else {
 		record.count++
 	}
+	record.anyErrorCount++
+	if identity.kind == failureKindRefused {
+		record.sawRefused = true
+	} else {
+		record.sawExecuted = true
+	}
+
 	outcome := toolFailureOutcome{Count: record.count}
-	if record.count >= toolFailureStopAt {
+	switch {
+	case record.count >= toolFailureStopAt:
 		outcome.Stop = true
+		outcome.Cause = toolFailureCauseSameError
+		if identity.kind == failureKindRefused {
+			outcome.Cause = toolFailureCauseSameRefusal
+		}
+		return outcome
+	case record.anyErrorCount >= toolFailureAnyErrorStopAt:
+		// Report the counter that actually tripped. record.count is the
+		// same-identity streak and is often 1 here, which would describe a tool
+		// that failed a dozen different ways as having failed once.
+		outcome.Stop = true
+		outcome.Count = record.anyErrorCount
+		outcome.Cause = record.variedCause()
 		return outcome
 	}
-	if record.count >= toolFailureHintAt && !record.hintShown {
+	if hintable && record.count >= toolFailureHintAt && !record.hintShown {
 		record.hintShown = true
 		outcome.InjectHint = true
 	}
@@ -602,4 +759,16 @@ func (state *guardState) planReminder(turn int) string {
 	}
 
 	return ""
+}
+
+// variedCause classifies a content-blind stop by what the whole streak held.
+func (record *toolFailureRecord) variedCause() toolFailureCause {
+	switch {
+	case record.sawRefused && record.sawExecuted:
+		return toolFailureCauseVariedMixed
+	case record.sawRefused:
+		return toolFailureCauseVariedRefused
+	default:
+		return toolFailureCauseVariedExecuted
+	}
 }
