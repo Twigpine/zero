@@ -1,6 +1,6 @@
 {
   "name": "@twigpine/zero",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Zero — a fast, multi-provider terminal coding agent.",
   "type": "module",
   "module": "bin/zero.js",
