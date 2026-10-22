@@ -3,7 +3,6 @@
 package sandbox
 
 import (
-	"errors"
 	"os"
 
 	"golang.org/x/sys/windows"
@@ -14,34 +13,19 @@ type runtimeLeaseHandle struct {
 	overlapped windows.Overlapped
 }
 
-func acquireSharedRuntimeLease(path string) (runtimeLeaseHandle, error) {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return runtimeLeaseHandle{}, err
-	}
-	handle := runtimeLeaseHandle{file: file}
-	if err := windows.LockFileEx(windows.Handle(file.Fd()), 0, 0, 1, 0, &handle.overlapped); err != nil {
-		_ = file.Close()
-		return runtimeLeaseHandle{}, err
-	}
-	return handle, nil
-}
-
-func tryAcquireExclusiveRuntimeLease(path string) (runtimeLeaseHandle, bool, error) {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return runtimeLeaseHandle{}, false, err
-	}
-	handle := runtimeLeaseHandle{file: file}
-	flags := uint32(windows.LOCKFILE_EXCLUSIVE_LOCK | windows.LOCKFILE_FAIL_IMMEDIATELY)
-	if err := windows.LockFileEx(windows.Handle(file.Fd()), flags, 0, 1, 0, &handle.overlapped); err != nil {
-		_ = file.Close()
-		if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
-			return runtimeLeaseHandle{}, true, nil
-		}
-		return runtimeLeaseHandle{}, false, err
-	}
-	return handle, false, nil
+// BOTH SIDES HAVE TO MEAN THE SAME OBJECT.
+//
+// This opened the lease by full pathname with os.OpenFile and no no-follow flag,
+// while shared acquisition opened it relative to a retained parent handle. A file
+// symbolic link at <digest>.lease therefore handed the two sides different
+// objects: setup or a running command held a shared lock on the link, cleanup
+// took an exclusive lock on its target, both calls succeeded, and cleanup went on
+// to RemoveAll a root somebody was still using.
+//
+// Mutual exclusion is a property of the OBJECT, so cleanup resolves the name the
+// way acquisition does and refuses the same reparse objects.
+func tryAcquireExclusiveRuntimeLease(root string) (runtimeLeaseHandle, bool, error) {
+	return tryAcquireExclusiveRuntimeLeaseRooted(root)
 }
 
 func (lease runtimeLeaseHandle) release() {

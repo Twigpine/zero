@@ -174,7 +174,7 @@ func runSandboxSetup(args []string, stdout io.Writer, stderr io.Writer, deps app
 	if !setupHelper.Available() {
 		return writeAppError(stderr, "Windows sandbox setup helper is not available", exitProvider)
 	}
-	setupArgs, err := zeroSandbox.BuildWindowsSandboxSetupArgs(zeroSandbox.WindowsSandboxSetupArgsOptions{
+	setupPlan, err := zeroSandbox.BuildWindowsSandboxSetupArgs(zeroSandbox.WindowsSandboxSetupArgsOptions{
 		CommandCWD:        workspaceRoot,
 		WorkspaceRoots:    []string{workspaceRoot},
 		PermissionProfile: profile,
@@ -182,9 +182,18 @@ func runSandboxSetup(args []string, stdout io.Writer, stderr io.Writer, deps app
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
-	setupArgs = append(append([]string{}, setupHelper.ArgsPrefix...), setupArgs...)
+	setupArgs := append(append([]string{}, setupHelper.ArgsPrefix...), setupPlan.Args...)
+	// BUILDING THE ARGS ALREADY WROTE TO DISK. Selecting the runtime root takes a
+	// lease, and taking a lease creates the runtime tree and the lease file when
+	// they are not there. A helper that never publishes a marker leaves that tree
+	// behind, attested by nothing, so the undo belongs on this side of the process
+	// boundary where the record of it lives.
 	if err := deps.runSandboxSetupHelper(setupHelper.Name, setupArgs, stdout, stderr); err != nil {
-		return writeAppError(stderr, "Windows sandbox setup failed: "+err.Error(), exitProvider)
+		message := "Windows sandbox setup failed: " + err.Error()
+		if undo := setupPlan.Rollback(); undo != nil {
+			message += "\nleftover sandbox runtime state could not be removed: " + undo.Error()
+		}
+		return writeAppError(stderr, message, exitProvider)
 	}
 	return writeSandboxSetupResult(stdout, options.json, sandboxSetupResult{
 		Platform: "windows",
