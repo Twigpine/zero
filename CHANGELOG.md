@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once the first release is
 tagged. Until then, source builds report the version `dev`.
 
+## [0.12.0](https://github.com/Twigpine/zero/compare/v0.11.0...v0.12.0) (2026-10-22)
+
+
+### Features
+
+* **sandbox:** support self-exec pattern to eliminate separate helper binary ([#946](https://github.com/Twigpine/zero/issues/946)) ([8c4e759](https://github.com/Twigpine/zero/commit/8c4e7597989ef9b3ca67b7703dfd15d92372aed2))
+
+
+### Bug Fixes
+
+* bump Go to 1.26.10 for GO-2026-6809 ([#1168](https://github.com/Twigpine/zero/issues/1168)) ([6393a90](https://github.com/Twigpine/zero/commit/6393a90ed618a3536e09c02852f4ec829b97545b))
+* **deps:** refresh the lockfile to hono 4.13.13 ([#1171](https://github.com/Twigpine/zero/issues/1171)) ([de1443b](https://github.com/Twigpine/zero/commit/de1443b2edb44fd3747cc77200d54dc8cffcd0a7))
+* **oauth:** reuse the crash-safe secret store and sync encrypted publications ([#1165](https://github.com/Twigpine/zero/issues/1165)) ([84c1b15](https://github.com/Twigpine/zero/commit/84c1b1554076679a342e9cac61f8f8cdbaf3a429))
+* **redaction:** redact credentials whose trigger a greedy span swallowed ([#1158](https://github.com/Twigpine/zero/issues/1158)) ([a97db88](https://github.com/Twigpine/zero/commit/a97db8832fdba077f2d31bdf03ecef8d7c774fe1))
+* **sessions:** preserve image attachment summaries on resume ([#1152](https://github.com/Twigpine/zero/issues/1152)) ([1e84849](https://github.com/Twigpine/zero/commit/1e848492e5c1919d187fb5e1eb5e7ef9bc6140dc)), closes [#1135](https://github.com/Twigpine/zero/issues/1135)
+* **tools:** grep stops where a file's line breaks stop ([#1160](https://github.com/Twigpine/zero/issues/1160)) ([aa9ba84](https://github.com/Twigpine/zero/commit/aa9ba8412eb8917daa2ca5cb3fdbd0a39276fa88))
+* **workspaceindex:** import gitsafe under the Twigpine module path ([#1153](https://github.com/Twigpine/zero/issues/1153)) ([ef4da13](https://github.com/Twigpine/zero/commit/ef4da1323f1097863ae278224b5f304c2fff909a))
+* **workspaceindex:** run Scan's git calls through gitsafe ([#1149](https://github.com/Twigpine/zero/issues/1149)) ([2ffe183](https://github.com/Twigpine/zero/commit/2ffe1831b0950b1463ec46d487d03a5fcb679cc6))
+
 ## [0.11.0](https://github.com/Twigpine/zero/compare/v0.10.0...v0.11.0) (2026-10-15)
 
 
