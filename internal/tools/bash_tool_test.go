@@ -789,6 +789,29 @@ func TestBashToolBlocksInteractiveCommandBeforeExecution(t *testing.T) {
 	}
 }
 
+func TestBashToolBlocksOverDepthShellLauncherBeforeExecution(t *testing.T) {
+	command := "vim main.go"
+	// Six launchers exceed sandbox.maxAnalyzerDepth (4) while leaving the
+	// interactive payload beyond the detector's inspection budget.
+	for range 6 {
+		command = "bash -c '" + strings.ReplaceAll(command, "'", `'"'"'`) + "'"
+	}
+
+	result := NewScopedBashTool(t.TempDir(), nil).Run(context.Background(), map[string]any{
+		"command": command,
+	})
+
+	if result.Status != StatusError || result.Meta["safety_block"] != "interactive_command" {
+		t.Fatalf("over-depth shell launcher result = %#v; want pre-execution safety block", result)
+	}
+	if result.Meta["exit_code"] != "-1" || result.Meta["safety_cmd"] != "nested shell launcher" {
+		t.Fatalf("over-depth shell launcher metadata = %#v; want unresolved launcher blocked before execution", result.Meta)
+	}
+	if !strings.Contains(result.Output, "cannot be proven non-interactive") {
+		t.Fatalf("over-depth shell launcher output = %q; want conservative inspection-limit reason", result.Output)
+	}
+}
+
 func TestBashToolBlocksInteractiveCommandThroughSandbox(t *testing.T) {
 	root := t.TempDir()
 	engine := sandbox.NewEngine(sandbox.EngineOptions{
