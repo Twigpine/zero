@@ -44,7 +44,7 @@ func canonicalPrivateDir(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := ensurePrivateDir(canonical); err != nil {
+	if err := EnsurePrivateDir(canonical); err != nil {
 		return "", err
 	}
 	return canonical, nil

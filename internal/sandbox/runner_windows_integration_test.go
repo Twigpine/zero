@@ -36,10 +36,14 @@ func TestWindowsRestrictedTokenRealSandboxSmoke(t *testing.T) {
 		Network: NetworkPolicy{Mode: NetworkDeny},
 	}
 	config := WindowsSandboxCommandArgsOptions{
-		SandboxHome:       sandboxHome,
-		CommandCWD:        root,
-		WorkspaceRoots:    []string{root},
-		PermissionProfile: profile,
+		SandboxHome:    sandboxHome,
+		CommandCWD:     root,
+		WorkspaceRoots: []string{root},
+		// The setup builder folds the runtime roots into its profile before the
+		// helper sees it; the command builder does not. Passing the bare profile
+		// here made every command disagree with the marker setup wrote, nine
+		// entries against five, before the first write probe ran.
+		PermissionProfile: WindowsSandboxProfileWithRuntimeRoots(profile, []string{root}),
 		SandboxLevel:      WindowsSandboxLevelRestrictedToken,
 	}
 	runWindowsRealSmokeSetup(t, setupExe, WindowsSandboxSetupArgsOptions{
@@ -393,6 +397,15 @@ func realSmokeExecutable(t *testing.T, envKey string, fallbackName string) strin
 
 func runWindowsRealSmokeSetup(t *testing.T, setupExe string, options WindowsSandboxSetupArgsOptions) {
 	t.Helper()
+	// options.PrincipalOptIn is deliberately left nil by both call sites, which
+	// makes BuildWindowsSandboxSetupArgs resolve the opt-in from this process's
+	// environment — the same value the command half resolves, since the smoke
+	// WindowsSandboxCommandArgsOptions carries no explicit entry either. Do not
+	// "fix" this by setting it to false: anyone running this suite with
+	// ZERO_WINDOWS_SANDBOX_IDENTITY=1 (the only way to exercise the principal
+	// backend) would then serialize `--sandbox-principal 0`, disagree with the
+	// command half, and fail every command at marker validation instead of
+	// testing the sandbox.
 	args, err := BuildWindowsSandboxSetupArgs(options)
 	if err != nil {
 		t.Fatalf("BuildWindowsSandboxSetupArgs: %v", err)

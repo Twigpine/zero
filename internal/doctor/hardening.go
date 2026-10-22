@@ -100,10 +100,17 @@ func windowsSandboxSetupCheck(goos string, backend sandbox.Backend, workspaceRoo
 	}
 	profile := sandbox.PermissionProfileFromPolicy(workspaceRoot, doctorSandboxPolicy(sandboxConfig), scope)
 	setupConfig := sandbox.WindowsSandboxSetupConfig{
-		SandboxHome:       sandboxHome,
-		CommandCWD:        workspaceRoot,
-		WorkspaceRoots:    []string{workspaceRoot},
-		PermissionProfile: profile,
+		SandboxHome:    sandboxHome,
+		CommandCWD:     workspaceRoot,
+		WorkspaceRoots: []string{workspaceRoot},
+		// Same augmentation the setup args and the command plan apply, so doctor
+		// fingerprints what a real command fingerprints. Safe here: doctor runs in
+		// the operator's shell, not behind the sandbox's TEMP redirection.
+		PermissionProfile: sandbox.WindowsSandboxProfileWithRuntimeRoots(profile, []string{workspaceRoot}),
+		// Same opt-in a command would resolve, so doctor reports the principal
+		// mismatch as out-of-date setup instead of passing a check the next command
+		// will fail.
+		PrincipalOptIn: sandbox.WindowsSandboxPrincipalOptIn(nil),
 	}
 	if err := sandbox.ValidateWindowsSandboxSetupMarker(setupConfig); err != nil {
 		result := check("sandbox.backend", "Sandbox backend", StatusWarn, fmt.Sprintf("Native sandbox backend %s is installed, but Windows sandbox setup is missing or out of date: %v.", backend.Name, err), map[string]any{
@@ -113,6 +120,53 @@ func windowsSandboxSetupCheck(goos string, backend sandbox.Backend, workspaceRoo
 			"setupStatus":  "missing-or-out-of-date",
 			"remedy":       "run `zero sandbox setup` to prepare the Windows native sandbox",
 		})
+		return &result
+	}
+	// Setup is valid and the opt-in is set, so report which principal a command
+	// will actually run as.
+	//
+	// This used to warn that the principal stood down under the DEFAULT
+	// network-deny policy, which was true while network denial could only be
+	// expressed on the restricted token: a principal token cannot carry the
+	// synthetic offline-marker SID the WFP filters matched. Dual-role provisioning
+	// removed that limit by giving each workspace an offline account whose real
+	// group membership the same filters match, so deny mode now runs on a
+	// principal exactly as allow mode does. Leaving the warning would have doctor
+	// telling operators their reads are unconfined while they are confined.
+	//
+	// Naming the role rather than just saying "active" is the useful part. The two
+	// accounts differ only in that membership, so an operator debugging network
+	// behaviour needs to know which one this workspace picks.
+	if setupConfig.PrincipalOptIn {
+		// Asked of the shared rule rather than re-derived here, so doctor and the
+		// runtime cannot disagree about which account a command runs as. Two
+		// copies drifting is what produced the wrong report this replaces.
+		role := sandbox.WindowsSandboxPrincipalRoleForNetwork(profile.Network.Mode)
+		// SETUP IS CURRENT IS NOT THE SAME AS THE PRINCIPAL IS LIVE, and this used
+		// to claim the second from the first. Marker validation compares serialized
+		// plans and hashes; it names no account. Delete the selected account or its
+		// secret, or drop the offline account out of ZeroSandboxOffline, and the
+		// marker still validates while the runtime either falls back to the weaker
+		// restricted-token path or fails outright. Doctor asserting read
+		// confinement in that state is worse than saying nothing, because it is the
+		// surface an operator checks precisely when they are unsure.
+		//
+		// Verifying liveness needs the account, a usable secret and (for offline)
+		// the group membership, all Windows-only live queries this package cannot
+		// make. So the claim is narrowed to what the marker actually proves, and
+		// the role is still named because that part IS derived rather than assumed
+		// and is what an operator debugging network behaviour needs.
+		result := check("sandbox.principal", "Sandbox principal", StatusPass,
+			fmt.Sprintf("Sandbox principal setup is current; a command in this workspace selects the %s principal. Setup state does not confirm the account is usable.", role), map[string]any{
+				"backend":  string(backend.Name),
+				"platform": goos,
+				"optIn":    true,
+				// Deliberately not "active": nothing here checked the account, the
+				// secret or the group membership.
+				"setupCurrent": true,
+				"role":         role,
+				"networkMode":  string(profile.Network.Mode),
+			})
 		return &result
 	}
 	return nil

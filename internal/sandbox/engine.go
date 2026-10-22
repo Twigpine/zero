@@ -394,6 +394,19 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 			return deny(request, risk, block.Code, block.Path, block.Reason, false)
 		}
 	}
+	// BEFORE THE NETWORK GATE, because this one cannot be approved away.
+	//
+	// `git clone` is both a network command and a repository-creating one. With
+	// the network gate first, a clone in a governed nested workspace under the
+	// default NetworkDeny came back as a network prompt: the operator was asked
+	// to approve network access for a command that approval could never make
+	// runnable, and the reason that actually decides it was never shown. The
+	// refusal below does not depend on policy, permission or mode, so it is the
+	// answer whatever the network gate would have said, and it is the one with a
+	// remedy the operator can act on. Reported by @jatmn.
+	if HasRiskCategory(risk, "nested_git_init") {
+		return deny(request, risk, BlockNestedGitInit, "", ReasonNestedGitInit, false)
+	}
 	netMode := engine.effectiveNetworkMode(policy)
 	if netMode == NetworkDeny && HasRiskCategory(risk, "network") && !engine.toolNetworkExempt(request) {
 		if request.SideEffect == SideEffectShell && request.PermissionMode != PermissionUnsafe {
