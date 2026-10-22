@@ -205,8 +205,8 @@ func TestACPEndToEndPrompt(t *testing.T) {
 	if len(newRes.ConfigOptions) != 2 || newRes.ConfigOptions[0].ID != configIDModel || newRes.ConfigOptions[0].CurrentValue != "fake-model" {
 		t.Fatalf("model config option = %+v, want fake-model fallback", newRes.ConfigOptions)
 	}
-	if newRes.ConfigOptions[1].ID != configIDMode || newRes.ConfigOptions[1].CurrentValue != string(agent.PermissionModeAuto) {
-		t.Fatalf("mode config option = %+v", newRes.ConfigOptions[1])
+	if mode := configOptionByID(t, newRes.ConfigOptions, configIDMode); mode.CurrentValue != string(agent.PermissionModeAuto) {
+		t.Fatalf("mode config option = %+v", mode)
 	}
 
 	// session/prompt
@@ -455,7 +455,7 @@ func TestACPModelConfigOptionsCatalogSelectionAndLoad(t *testing.T) {
 	if len(loaded.ConfigOptions) != 2 || loaded.ConfigOptions[0].CurrentValue != "gpt-5.4-mini" {
 		t.Fatalf("load model option = %+v", loaded.ConfigOptions)
 	}
-	if loaded.ConfigOptions[1].CurrentValue != string(agent.PermissionModeAuto) {
+	if mode := configOptionByID(t, loaded.ConfigOptions, configIDMode); mode.CurrentValue != string(agent.PermissionModeAuto) {
 		t.Fatalf("load mode option = %+v", loaded.ConfigOptions[1])
 	}
 }
@@ -654,12 +654,76 @@ func TestACPSetModeUpdatesSession(t *testing.T) {
 		t.Fatalf("config mode options missing plan: %#v", planConfigured.ConfigOptions[1].Options)
 	}
 	// Unsafe must be rejected over ACP — a client can't self-grant no-prompt host access.
-	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: string(agent.PermissionModeUnsafe)}, &SetSessionModeResult{}); err == nil {
+	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: string(agent.PermissionModeFullAuto)}, &SetSessionModeResult{}); err == nil {
 		t.Fatal("expected Unsafe mode to be rejected over ACP")
 	}
 	// An unknown mode must be rejected.
 	if err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: "bogus"}, &SetSessionModeResult{}); err == nil {
 		t.Fatal("expected error for unknown mode")
+	}
+}
+
+// The legacy "unsafe" spelling has to reach the full-auto arm of both mode
+// doors, not fall through to "unknown mode".
+//
+// It is an accepted alias everywhere else in the tree, so a client that sends it
+// is naming the mode ACP deliberately refuses. Unnormalized, both handlers
+// answered "unknown mode: unsafe" — the mode was still refused, so nothing
+// escalated, but the client was told the wrong thing about why: that the mode
+// does not exist, rather than that this transport will not grant it. That
+// invites retrying under another spelling instead of stopping.
+//
+// Both doors are checked because they are two entry points onto one contract,
+// and the previous round of this bug was exactly one layer normalizing while
+// another did not.
+func TestACPRejectsLegacyUnsafeAliasAsDisallowedNotUnknown(t *testing.T) {
+	h := newHarness(t, testDeps(t))
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var newRes NewSessionResult
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir(), McpServers: []McpServer{}}, &newRes); err != nil {
+		t.Fatalf("session/new: %v", err)
+	}
+
+	assertDisallowed := func(door string, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("%s: legacy unsafe alias was accepted over ACP", door)
+		}
+		if !strings.Contains(err.Error(), "mode not permitted over ACP") {
+			t.Errorf("%s: error = %q, want the disallowed-mode message", door, err)
+		}
+		if strings.Contains(err.Error(), "unknown mode") {
+			t.Errorf("%s: error = %q, want the alias resolved instead of reported as unknown", door, err)
+		}
+	}
+
+	// Spelled literally on purpose: this is the value that travels over the wire,
+	// and the Go alias for it is the canonical string, not the legacy one.
+	const legacyModeID = "unsafe"
+	assertDisallowed("set_mode", h.client.Call(ctx, MethodSessionSetMode,
+		SetSessionModeParams{SessionID: newRes.SessionID, ModeID: legacyModeID}, &SetSessionModeResult{}))
+	assertDisallowed("set_config_option", h.client.Call(ctx, MethodSessionSetConfigOption,
+		SetSessionConfigOptionParams{SessionID: newRes.SessionID, ConfigID: configIDMode, Value: legacyModeID}, &SetSessionConfigOptionResult{}))
+
+	// Refusing must leave the session where it was, not in a half-applied state.
+	var configured SetSessionConfigOptionResult
+	if err := h.client.Call(ctx, MethodSessionSetConfigOption, SetSessionConfigOptionParams{
+		SessionID: newRes.SessionID, ConfigID: configIDMode, Value: string(agent.PermissionModeAsk),
+	}, &configured); err != nil {
+		t.Fatalf("set_config_option ask: %v", err)
+	}
+	if got := configured.ConfigOptions[1].CurrentValue; got != string(agent.PermissionModeAsk) {
+		t.Fatalf("mode after the refusals = %q, want ask", got)
+	}
+
+	// A genuinely unknown mode must still say so, or the assertions above would
+	// hold for a handler that answered "not permitted" to everything.
+	err := h.client.Call(ctx, MethodSessionSetMode, SetSessionModeParams{SessionID: newRes.SessionID, ModeID: "bogus"}, &SetSessionModeResult{})
+	if err == nil || !strings.Contains(err.Error(), "unknown mode") {
+		t.Fatalf("set_mode bogus = %v, want an unknown-mode error", err)
 	}
 }
 
@@ -2544,6 +2608,22 @@ func payloadString(payload any, key string) string {
 	}
 	value, _ := decoded[key].(string)
 	return value
+}
+
+// configOptionByID finds an advertised option by its identity rather than by
+// position. Asserting on ConfigOptions[1] made every one of these tests depend
+// on the ORDER the options are advertised in: reordering them would move the
+// assertion onto a different option, or panic, instead of failing with a
+// message about the option it means.
+func configOptionByID(t *testing.T, options []SessionConfigOption, id string) SessionConfigOption {
+	t.Helper()
+	for _, option := range options {
+		if option.ID == id {
+			return option
+		}
+	}
+	t.Fatalf("no config option %q was advertised; got %+v", id, options)
+	return SessionConfigOption{}
 }
 
 // Load is best effort about a history it cannot read, but a session that zero

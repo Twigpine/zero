@@ -254,8 +254,28 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if options.allowEscalation {
 		registry.Register(tools.NewEscalateModelTool())
 	}
+	// RESOLVED BEFORE THE REGISTRY IS COMPOSED, because registration used to read
+	// the raw CLI fields while execution read the resolved mode, and the two
+	// disagreed. `--permission-mode full-auto` resolves to the same effective
+	// mode as `--auto high` and `--full-auto`, but only the latter two were
+	// visible to the eligibility check, so that spelling silently shipped without
+	// Task and swarm tooling: the explicitly selected full-auto agent could not
+	// delegate, and `--list-tools` showed a different set for the same mode.
+	//
+	// Safe to hoist: resolveExecPermissionMode only parses the options it was
+	// given, so --list-tools stays offline.
+	permissionMode, err := resolveExecPermissionMode(options)
+	if err != nil {
+		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
+	}
+	if options.useSpec {
+		permissionMode = agent.PermissionModeSpecDraft
+	}
+	if options.plan {
+		permissionMode = agent.PermissionModePlan
+	}
 	var specialistRuntime *agentToolRuntime
-	if shouldRegisterExecSpecialistTools(options) {
+	if shouldRegisterExecSpecialistTools(options, permissionMode) {
 		// Specialist tools register before the full config resolve below (so
 		// --list-tools stays offline). swarm.maxTeamSize is not affected by
 		// overrides, so an empty-overrides resolve yields the same value; a resolve
@@ -270,16 +290,6 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			return writeExecProviderError(stdout, stderr, options.outputFormat, "specialist_error", err.Error())
 		}
 		defer closeSpecialistRuntime(stderr, specialistRuntime)
-	}
-	permissionMode, err := resolveExecPermissionMode(options)
-	if err != nil {
-		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
-	}
-	if options.useSpec {
-		permissionMode = agent.PermissionModeSpecDraft
-	}
-	if options.plan {
-		permissionMode = agent.PermissionModePlan
 	}
 	var mcpRuntime mcpToolRuntime
 	var mcpSkip trustSkip
@@ -594,20 +604,21 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	if writer.err != nil {
 		return exitCrash
 	}
-	// Surface the unsafe-permissions warning whenever the run resolves to unsafe
-	// mode, covering BOTH --skip-permissions-unsafe and --auto high (which also
-	// resolves to PermissionModeUnsafe). Previously only the explicit flag path
-	// warned, so --auto high silently ran without notice.
-	if permissionMode == agent.PermissionModeUnsafe {
-		reason := "--auto high"
-		switch {
-		case options.skipPermissionsUnsafe:
-			reason = "--skip-permissions-unsafe"
-		case strings.EqualFold(strings.TrimSpace(options.permissionMode), "unsafe"),
-			strings.EqualFold(strings.TrimSpace(options.permissionMode), "high"):
-			reason = "--permission-mode unsafe"
-		}
-		writer.warning(fmt.Sprintf("Unsafe permissions are active for this run because %s was passed.", reason))
+	// Surface the warning whenever the run resolves to full-auto, covering BOTH
+	// the explicit flag and --auto high (which also resolves to
+	// PermissionModeFullAuto). Previously only the explicit flag path warned, so
+	// --auto high silently ran without notice.
+	//
+	// The wording names permission prompts specifically. Full-auto skips
+	// approvals; it does not remove the OS sandbox, and a warning that implied
+	// otherwise would misdescribe what is actually happening.
+	if permissionMode == agent.PermissionModeFullAuto {
+		// One bool backs both spellings, so which one was typed is not recoverable
+		// here. Naming both is the only accurate option: reporting "--full-auto"
+		// to someone who passed --skip-permissions-unsafe sends them looking for a
+		// flag they did not use, and a warning is the wrong place to be wrong
+		// about what the user did.
+		writer.warning(fmt.Sprintf("Full-auto is active for this run because %s was passed: prompt-gated tools run without approval.", fullAutoWarningSource(options)))
 		if writer.err != nil {
 			return exitCrash
 		}
@@ -1503,4 +1514,30 @@ func writeTraceSnapshot(snapshot *trace.TurnTrace, dest string, stderr io.Writer
 	}
 	defer file.Close()
 	return trace.WriteNDJSON(file, snapshot)
+}
+
+// fullAutoWarningSource names the flag that put this run into full-auto, for the
+// warning that explains why prompt-gated tools will run without approval.
+//
+// ECHOED, NOT MATCHED. This used to test the typed --permission-mode value
+// against a list of three spellings while resolveExecPermissionMode accepted
+// four, so `--permission-mode full_auto` fell through and the run was told
+// full-auto was active because `--auto high` was passed, which it was not.
+// Keeping alias acceptance and user-facing attribution in two separate tables
+// guarantees they drift again, and a warning explaining why approvals are being
+// skipped is the worst place to be wrong about what the user did.
+//
+// The order matches resolveExecPermissionMode, which consults --permission-mode
+// before --auto and the boolean flags.
+func fullAutoWarningSource(options execOptions) string {
+	if mode := strings.TrimSpace(options.permissionMode); mode != "" {
+		return "--permission-mode " + mode
+	}
+	if options.skipPermissionsUnsafe {
+		// One bool backs both spellings, so naming both is the only accurate
+		// option: pointing someone at a flag they did not type sends them looking
+		// for it.
+		return "--full-auto (or --skip-permissions-unsafe)"
+	}
+	return "--auto high"
 }

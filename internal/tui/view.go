@@ -196,6 +196,56 @@ func (m model) composerDividerLine(width int) string {
 // chip (permission mode + effort/fast tier) on the left, a flexible gap, then the
 // context-fill gauge and token/cost usage on the right. The provider lives in the
 // title bar and is NOT duplicated here. Groups drop with the width tier.
+// offerOwnsStatusChip reports whether a live full-auto offer holds the left
+// chip. The offer is a question the user must be able to READ before ctrl+g
+// accepts it, so it outranks the statuses that merely REPORT what is happening
+// - a recording mic, a model download - while the two confirmations that ask
+// their own question still win, because those are what the user just pressed a
+// key for. Reported by @jatmn.
+//
+// offerConfirmable is the same rule taking the armed flag as an argument,
+// because the key handler captures and clears m.unsafeArmed before its switch
+// runs. Sharing one expression is the point: the renderer and the confirm key
+// must never disagree about whether an offer is live, or ctrl+g accepts an
+// offer the footer did not show.
+func (m model) offerOwnsStatusChip() bool {
+	return m.offerConfirmable(m.unsafeArmed)
+}
+
+func (m model) offerConfirmable(armed bool) bool {
+	return armed && !m.exitConfirmActive && !m.cancelConfirmActive && m.offerKeyVisible()
+}
+
+// unsafeOfferLabel is the offer as the footer words it. One string, because the
+// fit decision below renders exactly what the footer renders.
+const unsafeOfferLabel = "full-auto? ctrl+g to confirm"
+
+// offerChip is the left chip the footer draws for a live offer.
+func (m model) offerChip() string {
+	btwChip := ""
+	if m.btw.active {
+		btwChip = zeroTheme.amber.Render("BTW") + zeroTheme.muted.Render(" · ")
+	}
+	return "  " + btwChip + zeroTheme.accent.Render("●") + " " + zeroTheme.modeUnsafe.Render(unsafeOfferLabel)
+}
+
+// offerKeyVisible reports whether the footer, at the width it actually has
+// after the pet reservation, shows the offer far enough for its confirmation
+// key to be read. The armed flag says an offer exists; it does not say the
+// layout put it in front of the user. With a docked pet at 24 or 30 columns the
+// chip came out as `  ● full-aut…` and `  ● full-auto? ctr…`, no key in either,
+// while ctrl+g still confirmed. The decision is made on the same truncation the
+// footer applies, so the two cannot disagree. Before the first WindowSizeMsg
+// there is no layout to judge and the offer is taken at its word.
+// Reported by @jatmn.
+func (m model) offerKeyVisible() bool {
+	if m.width <= 0 {
+		return true
+	}
+	available := m.width - m.petComposerReservedColumns(m.width)
+	return strings.Contains(ansi.Strip(fitStyledLine(m.offerChip(), available)), "ctrl+g")
+}
+
 func (m model) statusLine(width int) string {
 	tier := widthTier(width)
 	separator := zeroTheme.line.Render(" │ ")
@@ -218,6 +268,15 @@ func (m model) statusLine(width int) string {
 		if m.cancelConfirmActive {
 			return fitStyledLine(prefix+btwChip+zeroTheme.amber.Render("●")+" "+zeroTheme.amber.Render(escCancelConfirmText), width)
 		}
+		// A LIVE OFFER OUTRANKS A STATUS THAT MERELY REPORTS.
+		//
+		// left already carries the offer, because modeLabel renders it, and the
+		// takeover below discards left entirely. Arming while the mic was live
+		// therefore showed REC while ctrl+g would still confirm, so the user was
+		// asked to confirm something the footer never put in front of them.
+		if m.offerOwnsStatusChip() {
+			return fitStyledLine(left, width)
+		}
 		if dictation := m.dictationStatusChip(); dictation != "" {
 			return fitStyledLine(prefix+btwChip+dictation, width)
 		}
@@ -238,10 +297,10 @@ func (m model) statusLine(width int) string {
 		left = prefix + btwChip + zeroTheme.amber.Render("●") + " " + zeroTheme.amber.Render(ctrlCExitConfirmText)
 	} else if m.cancelConfirmActive {
 		left = prefix + btwChip + zeroTheme.amber.Render("●") + " " + zeroTheme.amber.Render(escCancelConfirmText)
-	} else if m.dictation.downloading && m.dictation.downloadStatus != "" {
+	} else if !m.offerOwnsStatusChip() && m.dictation.downloading && m.dictation.downloadStatus != "" {
 		// A model download in progress takes over the left chip with a live percentage.
 		left = prefix + btwChip + zeroTheme.accent.Render("⬇ ") + zeroTheme.muted.Render(m.dictation.downloadStatus)
-	} else if dictation := m.dictationStatusChip(); dictation != "" && m.dictation.active() {
+	} else if dictation := m.dictationStatusChip(); !m.offerOwnsStatusChip() && dictation != "" && m.dictation.active() {
 		// An active recording/transcription takes over the left chip — it is the
 		// most time-sensitive thing on screen (the mic is live).
 		left = prefix + btwChip + dictation
@@ -316,39 +375,79 @@ func providerDisplayNameIsGenericCustom(name string) bool {
 	}
 }
 
-// nextPermissionMode toggles between the two prompt-respecting modes:
-// Auto ⇄ Ask. Unsafe (which disables permission prompts entirely) is
-// deliberately NOT reachable by a casual keypress — a single shift+tab landing
-// on it would let prompt-required tools run with no decision. Unsafe stays an
-// explicit opt-in (the launch/--skip-permissions-unsafe path), not a UI toggle.
-// Unsafe is folded back to Ask so the toggle always lands somewhere safe.
-// Plan is left untouched: folding it to Ask would be a LESS strict landing
-// (Ask allows write/shell tools with a prompt; Plan hides them entirely), so
-// the read-only guarantee must only be given up through the explicit /plan
-// off exit, never a stray shift+tab.
-func nextPermissionMode(mode agent.PermissionMode) agent.PermissionMode {
+// advancePermissionMode is one shift+tab press. It returns the mode to land on
+// and whether unsafe is being OFFERED after this press.
+//
+// shift+tab always advances the cycle and never commits unsafe. That is the
+// property worth protecting: unsafe turns permission prompts off entirely, so
+// no repeat of a navigation key may land on it. Committing takes a separate,
+// deliberate key (see confirmUnsafePermissionMode).
+//
+// The cycle stays complete. From Ask the first press OFFERS unsafe while
+// staying on Ask, and a second press declines the offer and continues to Auto,
+// so every mode is still reachable with shift+tab alone. An earlier draft of
+// this made the second press commit unsafe, which silently removed Ask -> Auto
+// from the cycle entirely.
+//
+// Leaving unsafe is one press and never gated. Getting stricter should never
+// need confirming.
+//
+// Plan is outside the cycle in both directions: it is stricter than Ask, so
+// shift+tab neither leaves it nor offers unsafe from it. Only /plan off exits.
+func advancePermissionMode(mode agent.PermissionMode, offered bool) (agent.PermissionMode, bool) {
 	switch mode {
 	case agent.PermissionModeAuto:
-		return agent.PermissionModeAsk
+		return agent.PermissionModeAsk, false
 	case agent.PermissionModeAsk:
-		return agent.PermissionModeAuto
+		if offered {
+			return agent.PermissionModeAuto, false
+		}
+		return agent.PermissionModeAsk, true
+	case agent.PermissionModeFullAuto:
+		return agent.PermissionModeAuto, false
 	case agent.PermissionModePlan:
-		return agent.PermissionModePlan
+		// Plan stays put, and never carries an offer.
+		//
+		// Folding it to Ask would be a LESS strict landing: Ask allows write and
+		// shell tools behind a prompt, Plan hides them entirely. The read-only
+		// guarantee is given up only through the explicit /plan off exit, never a
+		// stray shift+tab, and certainly not by offering unsafe from it.
+		return agent.PermissionModePlan, false
 	default:
-		// Anything else (incl. an externally-set Unsafe) folds to Ask — the stricter
-		// landing, so toggling never makes an Unsafe session less strict.
-		return agent.PermissionModeAsk
+		// Anything else folds to Ask, the stricter landing, so an unrecognized
+		// mode can never resolve into a less strict one.
+		return agent.PermissionModeAsk, false
 	}
 }
 
+// confirmUnsafePermissionMode commits unsafe, but only from a live offer.
+//
+// The offer is cleared by every keypress that is not this one, so confirming
+// has to immediately follow the shift+tab that raised it. Without a live offer
+// this does nothing at all, which is what stops the confirm key from being a
+// standalone shortcut into unsafe.
+func confirmUnsafePermissionMode(mode agent.PermissionMode, offered bool) (agent.PermissionMode, bool) {
+	if !offered {
+		return mode, false
+	}
+	return agent.PermissionModeFullAuto, true
+}
+
 func (m model) modeLabel() (string, lipgloss.Style) {
+	// The offer renders in the unsafe style rather than the current mode's, so
+	// it is unmistakable before it is accepted, and it names the exact key. It
+	// reads as a question because nothing has changed yet: the session is still
+	// in whatever mode it was, and any other key declines.
+	if m.unsafeArmed {
+		return unsafeOfferLabel, zeroTheme.modeUnsafe
+	}
 	switch m.permissionMode {
 	case agent.PermissionModeAuto:
 		return "auto-approve", zeroTheme.modeAuto
 	case agent.PermissionModeAsk:
 		return "ask", zeroTheme.modeAsk
-	case agent.PermissionModeUnsafe:
-		return "unsafe", zeroTheme.modeUnsafe
+	case agent.PermissionModeFullAuto:
+		return "full-auto", zeroTheme.modeUnsafe
 	case agent.PermissionModePlan:
 		return "plan", zeroTheme.modePlan
 	default:
