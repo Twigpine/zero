@@ -218,8 +218,14 @@ func (server toolServer) callTool(ctx context.Context, rawParams json.RawMessage
 	result := server.registry.RunWithOptions(ctx, params.Name, params.Arguments, tools.RunOptions{
 		PermissionGranted: server.options.PermissionGranted,
 	})
+	// ModelOutput, not the raw field. This is a model-facing protocol boundary,
+	// and Result.Output now holds the UNDECORATED base text: the enforcement
+	// disclosure lives in typed state and the accessor is what composes the two.
+	// Serializing Output directly hands an MCP client a Windows command's ordinary
+	// output with no statement that its DenyRead token shape left writes
+	// unconfined, which is the one thing the disclosure exists to say.
 	return CallToolResult{
-		Content: []Content{{Type: "text", Text: result.Output}},
+		Content: []Content{{Type: "text", Text: result.ModelOutput()}},
 		IsError: result.Status != tools.StatusOK,
 	}, nil
 }

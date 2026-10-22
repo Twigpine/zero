@@ -50,6 +50,16 @@ type transcriptRow struct {
 	changedFiles    []string
 	changeSummaries []execution.Change
 
+	// enforcementNotices are the least-privilege disclosures that were true of
+	// this result (from tools.Result.EnforcementNotices; restored from the
+	// session payload on resume).
+	//
+	// Held as its own field rather than folded into detail. detail is parsed as a
+	// diff by the files panel and the file view, so prefixing it with prose would
+	// corrupt both. It is not folded into text either: text carries the notice
+	// today and the card never renders it, which is the whole defect.
+	enforcementNotices []string
+
 	// specialistInfo holds the specialist card data for rowSpecialist rows.
 	// Nil for all other row kinds.
 	specialistInfo *specialistInfo

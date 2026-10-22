@@ -6002,16 +6002,17 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				}
 			}
 			row := transcriptRow{
-				kind:            rowToolResult,
-				id:              effectiveToolRowID(result.ToolCallID, callSeq[result.ToolCallID]),
-				text:            toolResultRowText(result),
-				tool:            result.Name,
-				status:          result.Status,
-				detail:          toolResultDetail(result),
-				meta:            result.Meta,
-				runID:           runID,
-				changedFiles:    result.ChangedFiles,
-				changeSummaries: result.ChangeSummaries,
+				kind:               rowToolResult,
+				id:                 effectiveToolRowID(result.ToolCallID, callSeq[result.ToolCallID]),
+				text:               toolResultRowText(result),
+				tool:               result.Name,
+				status:             result.Status,
+				detail:             toolResultDetail(result),
+				meta:               result.Meta,
+				runID:              runID,
+				changedFiles:       result.ChangedFiles,
+				changeSummaries:    result.ChangeSummaries,
+				enforcementNotices: result.EnforcementNotices,
 			}
 			// A successful Task/TaskOutput result is represented by a specialist card.
 			// update_plan stays in the transcript as a rendered checklist; failures
@@ -6253,45 +6254,19 @@ func (m model) sendAgentUsage(runID int, modelID string, event zeroruntime.Usage
 	m.runtimeMessageSink(agentUsageMsg{runID: runID, modelID: modelID, usage: event})
 }
 
-// toolResultDetail is the card body source: the rich card-only Display.Preview
-// (a code/diff preview) when present on a successful result, else the Output that
-// the model also saw. Error results keep their Output so the failure shows.
+// toolResultDetail is the card body source. The rule lives on the result itself
+// (agent.ToolResult.CardBody) because the session payload is built from it too,
+// and that payload now has a writer outside this package.
 func toolResultDetail(result agent.ToolResult) string {
-	display := result.HumanDisplay()
-	if strings.TrimSpace(display.Preview) != "" && (result.Status != tools.StatusError || result.Outcome.Finalized()) {
-		return display.Preview
-	}
-	return result.ModelOutput()
+	return result.CardBody()
 }
 
 // toolResultSessionPayload preserves both views of a tool result: output remains
 // the provider-facing text used for session context, while displayPreview keeps
-// the richer card body that was visible during the live run. The preview is only
-// stored when it differs, so ordinary tool results retain their compact event.
+// the richer card body that was visible during the live run. The contract and
+// its presence rules are documented on agent.ToolResultSessionPayload.
 func toolResultSessionPayload(result agent.ToolResult) map[string]any {
-	output := result.ModelOutput()
-	payload := map[string]any{
-		"toolCallId": result.ToolCallID,
-		"name":       result.Name,
-		"status":     string(result.Status),
-		"output":     output,
-	}
-	if preview := toolResultDetail(result); strings.TrimSpace(preview) != "" && preview != output {
-		payload["displayPreview"] = preview
-	}
-	if result.Redacted {
-		payload["redacted"] = true
-	}
-	if len(result.Meta) > 0 {
-		payload["meta"] = result.Meta
-	}
-	if len(result.ChangedFiles) > 0 {
-		payload["changedFiles"] = result.ChangedFiles
-	}
-	if len(result.ChangeSummaries) > 0 {
-		payload["changeSummaries"] = result.ChangeSummaries
-	}
-	return payload
+	return agent.ToolResultSessionPayload(result)
 }
 
 func toolResultRowText(result agent.ToolResult) string {

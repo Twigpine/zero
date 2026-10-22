@@ -118,6 +118,19 @@ type AuditResult struct {
 	ExitCode int    `json:"exitCode"`
 	Stdout   string `json:"stdout,omitempty"`
 	Stderr   string `json:"stderr,omitempty"`
+	// EnforcementNotices are the least-privilege disclosures that were true of
+	// this hook's execution.
+	//
+	// A DURABLE READER CANNOT RECOVER A FACT THAT WAS DROPPED IN CONVERSION. The
+	// notice is deliberately not written into stdout or stderr, so recording only
+	// those three fields meant that once the transient dispatch result was gone,
+	// nothing could tell an audit or recovery reader that a successful, failing or
+	// vetoing hook had run under the weakened DenyRead token.
+	//
+	// Typed rather than a rendered line, and omitempty, so historical records that
+	// predate the field read back unchanged and an ordinary hook writes exactly
+	// what it wrote before.
+	EnforcementNotices []string `json:"enforcementNotices,omitempty"`
 }
 
 type AuditEvent struct {

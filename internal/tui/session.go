@@ -671,20 +671,26 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 				status = tools.StatusOK
 			}
 			output := payloadString(payload, "output")
-			detail := payloadString(payload, "displayPreview")
-			if detail == "" {
-				detail = output
+			// PRESENCE, not emptiness. displayPreview is the undecorated card
+			// body; output carries the enforcement notice composed in. An empty
+			// stored body is a real answer (a command that printed nothing under
+			// an enforced profile), and treating it as absent would restore the
+			// decorated output and render the disclosure twice.
+			detail := output
+			if raw, ok := payload["displayPreview"]; ok {
+				detail, _ = raw.(string)
 			}
 			rows = append(rows, transcriptRow{
-				kind:            rowToolResult,
-				id:              effectiveToolRowID(id, callSeq[id]),
-				text:            fmt.Sprintf("tool result: %s %s %s", name, status, truncateTUIOutput(output, tuiToolOutputLimit)),
-				tool:            name,
-				status:          status,
-				detail:          detail,
-				meta:            payloadStringMap(payload, "meta"),
-				changedFiles:    payloadStringSlice(payload, "changedFiles"),
-				changeSummaries: payloadExecutionChanges(payload, "changeSummaries"),
+				kind:               rowToolResult,
+				id:                 effectiveToolRowID(id, callSeq[id]),
+				text:               fmt.Sprintf("tool result: %s %s %s", name, status, truncateTUIOutput(output, tuiToolOutputLimit)),
+				tool:               name,
+				status:             status,
+				detail:             detail,
+				meta:               payloadStringMap(payload, "meta"),
+				changedFiles:       payloadStringSlice(payload, "changedFiles"),
+				enforcementNotices: payloadStringSlice(payload, "enforcementNotices"),
+				changeSummaries:    payloadExecutionChanges(payload, "changeSummaries"),
 			})
 		case sessions.EventError:
 			if message := payloadString(payload, "message"); message != "" {
