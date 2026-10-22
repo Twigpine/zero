@@ -83,9 +83,18 @@ func TestViewTestModelKeepsAnEnclosingCheckoutsBranchOutOfTheView(t *testing.T) 
 		t.Fatalf("the enclosing checkout's branch reached the view:\n%s", plain)
 	}
 	// The path is the other half: the title bar shows the isolated cwd, not the
-	// checkout the tests happen to run from.
+	// checkout the tests happen to run from or the one enclosing the home.
 	if !strings.Contains(plain, "not-a-checkout") {
 		t.Fatalf("the title bar does not show the isolated cwd:\n%s", plain)
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{checkout, wd} {
+		if strings.Contains(plain, path) {
+			t.Fatalf("the view shows the checkout path %s:\n%s", path, plain)
+		}
 	}
 }
 
