@@ -29,6 +29,7 @@ jobs:
           - macos-latest       # macos-arm64 (Apple Silicon)
           - macos-15-intel     # macos-x64 (Intel)
           - windows-latest     # windows-x64
+          - windows-11-arm     # windows-arm64
 
     steps:
       - name: Checkout
@@ -49,6 +50,19 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Resolve platform arch name and version
+        shell: bash
+        run: |
+          echo "VERSION=$(jq -r .version package.json)" >> "$GITHUB_ENV"
+          case "${{ runner.os }}-${{ runner.arch }}" in
+            Linux-X64)      echo "ARCH=x64"   >> "$GITHUB_ENV" ;;
+            Linux-ARM64)    echo "ARCH=arm64" >> "$GITHUB_ENV" ;;
+            macOS-X64)      echo "ARCH=x64"   >> "$GITHUB_ENV" ;;
+            macOS-ARM64)    echo "ARCH=arm64" >> "$GITHUB_ENV" ;;
+            Windows-X64)    echo "ARCH=x64"   >> "$GITHUB_ENV" ;;
+            Windows-ARM64)  echo "ARCH=arm64" >> "$GITHUB_ENV" ;;
+          esac
 
       - name: Test
         run: go test ./...
@@ -75,6 +89,68 @@ jobs:
 
       - name: Verify release checksums
         run: go run ./cmd/zero-release verify
+
+      # Windows installer
+      - name: Install NSIS (portable)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $url = "https://sourceforge.net/projects/nsis/files/NSIS%203/3.10/nsis-3.10.zip/download"
+          $zip = "$env:RUNNER_TEMP\nsis.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP\nsis"
+          echo "NSIS_DIR=$env:RUNNER_TEMP\nsis\NSIS" >> $env:GITHUB_ENV
+
+      - name: Build Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & scripts/build-windows-installer.ps1 `
+            -NsisDir "$env:NSIS_DIR" `
+            -StagingDir "dist/package/zero-v$env:VERSION-windows-$env:ARCH" `
+            -OutputDir "dist/release" `
+            -Version $env:VERSION `
+            -Arch $env:ARCH
+
+      # Linux AppImage + system installer
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq imagemagick
+          wget -q "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-$(uname -m).AppImage" -O /tmp/appimagetool
+          chmod +x /tmp/appimagetool
+          cd /tmp && ./appimagetool --appimage-extract >/dev/null 2>&1
+          sudo cp squashfs-root/AppRun /usr/local/bin/appimagetool
+          rm -rf /tmp/appimagetool /tmp/squashfs-root
+
+      - name: Build AppImage
+        if: runner.os == 'Linux'
+        run: |
+          bash scripts/build-linux-appimage.sh \
+            --staging-dir "dist/package/zero-v${VERSION}-linux-${ARCH}" \
+            --output-dir "dist/release" \
+            --version "${VERSION}" \
+            --arch "${ARCH}"
+
+      - name: Build Linux system installer
+        if: runner.os == 'Linux'
+        run: |
+          bash scripts/build-linux-install.sh \
+            --staging-dir "dist/package/zero-v${VERSION}-linux-${ARCH}" \
+            --output-dir "dist/release" \
+            --version "${VERSION}" \
+            --arch "${ARCH}"
+
+      # macOS .app
+      - name: Build .app bundle
+        if: runner.os == 'macOS'
+        run: |
+          bash scripts/build-macos-app.sh \
+            --staging-dir "dist/package/zero-v${VERSION}-macos-${ARCH}" \
+            --output-dir "dist/release" \
+            --version "${VERSION}" \
+            --arch "${ARCH}"
 
       - name: Upload package
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -183,7 +259,15 @@ jobs:
             "zero-v${version}-linux-arm64.tar.gz" \
             "zero-v${version}-macos-x64.tar.gz" \
             "zero-v${version}-macos-arm64.tar.gz" \
-            "zero-v${version}-windows-x64.zip"; do
+            "zero-v${version}-windows-x64.zip" \
+            "zero-v${version}-windows-x64-installer.exe" \
+            "zero-v${version}-linux-x86_64.AppImage" \
+            "zero-v${version}-linux-x86_64-install.run" \
+            "zero-v${version}-macos-x64.zip" \
+            "zero-v${version}-windows-arm64-installer.exe" \
+            "zero-v${version}-linux-aarch64.AppImage" \
+            "zero-v${version}-linux-aarch64-install.run" \
+            "zero-v${version}-macos-arm64.zip"; do
             for url in "${base}/${asset}" "${base}/${asset}.sha256"; do
               if ! curl -fsSLI -o /dev/null "$url"; then
                 echo "::error::${url} is not publicly downloadable — the wrapper's fallback downloader and install.sh would fail. Is the repo public and are all assets uploaded?" >&2
