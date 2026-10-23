@@ -142,12 +142,22 @@ func trimTrailingSeparators(path string) string {
 var randomBytes = rand.Read
 
 // CreateTemp makes an O_EXCL temp file named prefix.<random>suffix inside dir,
-// relative to handle, and returns it with its relative path.
+// relative to handle, and returns it with its relative path. The file is
+// created 0o600 so bytes staged in it are not readable before publication.
 //
 // O_EXCL rather than a fixed name: a link planted at a predictable temp path
 // between the check and the create is the same race this package exists to
 // close, and O_EXCL makes the kernel refuse it rather than us.
 func CreateTemp(handle *os.Root, dir, prefix, suffix string) (*os.File, string, error) {
+	return CreateTempMode(handle, dir, prefix, suffix, 0o600)
+}
+
+// CreateTempMode is CreateTemp with an explicit create mode. The mode is
+// passed to the kernel's exclusive create, so the process umask still applies;
+// callers that must publish the permissions a normal create would have been
+// granted should read the returned file's mode rather than assigning perm
+// later, because Chmod does not consult the umask.
+func CreateTempMode(handle *os.Root, dir, prefix, suffix string, perm os.FileMode) (*os.File, string, error) {
 	// prefix and suffix are NAME fragments, not path fragments. A separator or a
 	// "."/".." in either would relocate the file out of dir — a prefix of
 	// "../escaped", or a suffix of ".tmp/../evil" that also erases the random
@@ -164,7 +174,7 @@ func CreateTemp(handle *os.Root, dir, prefix, suffix string) (*os.File, string, 
 			return nil, "", fmt.Errorf("generate a temporary name: %w", err)
 		}
 		relative := filepath.Join(dir, prefix+"."+hex.EncodeToString(noise)+suffix)
-		file, err := handle.OpenFile(relative, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+		file, err := handle.OpenFile(relative, os.O_RDWR|os.O_CREATE|os.O_EXCL, perm)
 		if err == nil {
 			return file, relative, nil
 		}
