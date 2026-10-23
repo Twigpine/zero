@@ -28,6 +28,7 @@ import (
 	"github.com/Twigpine/zero/internal/modelregistry"
 	"github.com/Twigpine/zero/internal/notify"
 	"github.com/Twigpine/zero/internal/peermsg"
+	"github.com/Twigpine/zero/internal/planmode"
 	"github.com/Twigpine/zero/internal/providerhealth"
 	"github.com/Twigpine/zero/internal/providermodeldiscovery"
 	"github.com/Twigpine/zero/internal/providers"
@@ -681,6 +682,7 @@ type agentUsageMsg struct {
 }
 
 type agentResponseMsg struct {
+	planUpdate  *planUpdateMsg // fallback when no live runtime message sink is configured
 	runID       int
 	rows        []transcriptRow
 	usageEvents []zeroruntime.Usage
@@ -743,8 +745,9 @@ type agentRowMsg struct {
 // and captures model by value, so it cannot mutate m.plan directly — it sends
 // this message through the runtimeMessageSink instead.
 type planUpdateMsg struct {
-	runID int
-	items []tools.PlanItem
+	runID    int
+	items    []tools.PlanItem
+	syncTool bool
 }
 
 // planStepExplanationMsg carries the model's fresh, plain-English write-up of a
@@ -1542,6 +1545,72 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case transientNoticeExpiredMsg:
 		if msg.seq == m.transientNoticeSeq {
 			m.transientNotice = transientNotice{}
+		}
+		return m, nil
+	case planEditorFinishedMsg:
+		if msg.err != nil {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "plan editor error: " + msg.err.Error()})
+			return m, nil
+		}
+		if msg.outcome != nil && !msg.outcome.Reload {
+			return m, nil
+		}
+		// Capture what the editor started from, before reloadPlanFromFile
+		// replaces it, so an editor session that changed nothing (open, read,
+		// quit) can be told apart from a real edit below.
+		var beforeEdit []tools.PlanItem
+		if tool, found := m.registry.Get("update_plan"); found {
+			if reader, isReader := tool.(currentPlanReader); isReader {
+				beforeEdit = reader.CurrentPlan()
+			}
+		}
+		// The user may have edited the plan file in $EDITOR; sync it back into
+		// the in-memory update_plan so the edited plan drives execution, and
+		// refresh the sticky plan panel to match.
+		items, ok, reloadErr := m.reloadPlanFromFile()
+		if reloadErr != nil {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "plan reload error: " + reloadErr.Error()})
+			return m, nil
+		}
+		if !ok {
+			return m, nil
+		}
+		// Quitting the editor without touching anything must not claim an edit
+		// happened. The session event below is written as the user's own words,
+		// so recording it unchanged would put a false statement into the next
+		// turn's context, and repeated opens would each restate the whole plan.
+		if msg.outcome == nil && planItemsEqual(beforeEdit, items) {
+			return m, nil
+		}
+		m.plan.updateFromItems(items, m.now())
+		if msg.outcome != nil && !msg.outcome.Edited {
+			return m, nil
+		}
+		// The sticky-panel refresh above is the only visible sign the edit was
+		// taken up; a /plan open with no other output would otherwise look like
+		// nothing happened. Confirm the reload (or a clear) in the transcript.
+		reloadNote := "Reloaded the edited plan."
+		if len(items) == 0 {
+			reloadNote = "Cleared the plan (the edited plan file is empty)."
+		}
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: reloadNote})
+		// SetPlan (inside reloadPlanFromFile) only changes the update_plan
+		// tool's in-memory state; the model has no way to observe that on its
+		// own. Record it as a session event too, so a user-authored edit
+		// actually reaches the next turn's context — whether that turn is
+		// more planning or, after /plan off, the implementation run the
+		// feature is supposed to drive.
+		content := "I edited the plan file directly and cleared the plan."
+		if plan := formatPlanItems(items); plan != "" {
+			content = "I edited the plan file directly. Updated plan:\n\n" + plan
+		}
+		var err error
+		m, err = m.appendSessionEvent(sessions.EventMessage, map[string]any{
+			"role":    "user",
+			"content": content,
+		})
+		if err != nil {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "session record error: " + err.Error()})
 		}
 		return m, nil
 	case exitConfirmExpiredMsg:
@@ -2695,6 +2764,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if msg.planUpdate != nil {
+			m.applyPlanUpdate(*msg.planUpdate)
+		}
 		m.clearStreamingToolCall() // active run finished — drop any lingering "writing" block
 		if msg.err != nil {
 			m.petOutcome = terminalpet.Failed
@@ -2737,7 +2809,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// BEFORE the reset below clears them, and skip spec-draft reviews — those
 		// are legitimate mid-plan err==nil yields where the plan is NOT done.
 		if msg.err == nil && msg.specReview == nil &&
-			m.pendingAskUser == nil && m.pendingPermission == nil {
+			m.pendingAskUser == nil && m.pendingPermission == nil &&
+			m.permissionMode != agent.PermissionModePlan {
 			m.plan.completeRemaining(m.now())
 		}
 		m.pendingPermission = nil
@@ -2904,7 +2977,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.runID != m.activeRunID {
 			return m, nil
 		}
-		m.plan.updateFromItems(msg.items, m.now())
+		m.applyPlanUpdate(msg)
 		return m, nil
 	case planStepExplanationMsg:
 		// Drop a result from a previous run: beginRun bumps planDetailGen and clears
@@ -4926,10 +4999,7 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.debugText()})
 		return m, nil
 	case commandPlan:
-		text := ""
-		m, text = m.handlePlanCommand(command.text)
-		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
-		return m, nil
+		return m.handlePlanCommand(command.text)
 	case commandDoctor:
 		return m.startDoctorCommand(command.text)
 	case commandSearch:
@@ -5410,7 +5480,7 @@ func (m *model) ensureSpinnerTick() tea.Cmd {
 }
 
 func (m model) launchQueuedMessageIfReady() (model, tea.Cmd) {
-	if !m.hasQueuedMessage() || m.pending || m.exiting || m.pendingPermission != nil || m.pendingAskUser != nil || m.pendingSpecReview != nil {
+	if !m.hasQueuedMessage() || m.pending || m.exiting || m.pendingPermission != nil || m.pendingAskUser != nil || m.pendingSpecReview != nil || m.planModeBlocksContinuations() {
 		return m, nil
 	}
 	prompt := m.queuedMessage
@@ -5578,7 +5648,19 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 	}
 	catalog := m.modelCatalog
 
-	return func() tea.Msg {
+	var publication *planPublication
+	if tool, ok := m.registry.Get("update_plan"); ok {
+		if reader, ok := tool.(currentPlanReader); ok {
+			publication = newPlanPublication(m.cwd, m.activeSession.SessionID, reader.CurrentPlan())
+		}
+	}
+	return func() (message tea.Msg) {
+		defer func() {
+			if response, ok := message.(agentResponseMsg); ok && m.runtimeMessageSink == nil {
+				response.planUpdate = publication.update(runID)
+				message = response
+			}
+		}()
 		started := m.now()
 		if m.turnTimer != nil {
 			m.turnTimer.start(started)
@@ -5622,6 +5704,9 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				}
 			}
 		}
+		if _, ok := options.Registry.Get("update_plan"); ok && publication != nil {
+			options.Registry.Register(publication)
+		}
 		peerAwareRun := runOptions.transientSystemPrompt != "" || m.sessionContainsPeerMessages()
 		if peerAwareRun && m.peerService != nil {
 			options.Registry.Register(tools.NewPeerReplyTool(m.peerService))
@@ -5630,8 +5715,22 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		if runOptions.permissionMode != "" {
 			options.PermissionMode = runOptions.permissionMode
 		}
-		if runOptions.systemPrompt != "" {
+		switch {
+		case runOptions.systemPrompt != "":
 			options.SystemPrompt = runOptions.systemPrompt
+		case options.PermissionMode == agent.PermissionModePlan:
+			// Plan mode is toggled via /plan on the normal submit path (not a
+			// dedicated run-launch command like /spec), so there is no call site
+			// to pass planmode.DraftSystemPrompt through runOptions: set it here
+			// from the active permission mode instead. Layer it onto (rather
+			// than replace) any configured options.SystemPrompt: an embedder's
+			// system prompt encodes product policy that must still apply while
+			// planning, not just on ordinary turns.
+			if configured := strings.TrimSpace(options.SystemPrompt); configured != "" {
+				options.SystemPrompt = configured + "\n\n" + planmode.DraftSystemPrompt
+			} else {
+				options.SystemPrompt = planmode.DraftSystemPrompt
+			}
 		}
 		if runOptions.transientSystemPrompt != "" {
 			options.TransientSystemPrompt = runOptions.transientSystemPrompt
@@ -6020,14 +6119,12 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				rows = append(rows, row)
 				m.sendAgentRow(runID, row)
 			}
-			// Keep the latest plan state in sync for run details and step drill-in.
-			if result.Name == "update_plan" && m.registry != nil {
-				if planTool, ok := m.registry.Get("update_plan"); ok {
-					if reader, ok := planTool.(interface{ CurrentPlan() []tools.PlanItem }); ok {
-						if m.runtimeMessageSink != nil {
-							m.runtimeMessageSink(planUpdateMsg{runID: runID, items: reader.CurrentPlan()})
-						}
-					}
+			// The run-local tool has already accepted or rejected the durable
+			// write. Publish only its accepted snapshot, including recovery to a
+			// competing writer's value after a conflict.
+			if result.Name == "update_plan" && m.runtimeMessageSink != nil {
+				if update := publication.update(runID); update != nil {
+					m.runtimeMessageSink(*update)
 				}
 			}
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
@@ -6282,8 +6379,11 @@ func toolResultSessionPayload(result agent.ToolResult) map[string]any {
 	if result.Redacted {
 		payload["redacted"] = true
 	}
-	if len(result.Meta) > 0 {
-		payload["meta"] = result.Meta
+	// Strip plan_snapshot from session event meta: WritePlan (or the durable
+	// plan file) is the plan source of truth; embedding the full snapshot
+	// again would store the plan twice on disk.
+	if meta := sessionToolResultMeta(result.Meta); len(meta) > 0 {
+		payload["meta"] = meta
 	}
 	if len(result.ChangedFiles) > 0 {
 		payload["changedFiles"] = result.ChangedFiles

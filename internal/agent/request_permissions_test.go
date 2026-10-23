@@ -120,6 +120,37 @@ func TestRequestPermissionsTurnGrantAllowsLaterToolAndCleansUp(t *testing.T) {
 	}
 }
 
+// TestRequestPermissionsDeniedInPlanModeEvenWithoutRegistryEntry guards the
+// defense-in-depth check in executeRequestPermissions: the registry-based
+// ToolAdvertised gate in executeToolCall only fires when the tool is found in
+// whatever registry the caller passed in, but request_permissions is
+// dispatched by name regardless of registry contents. A registry that omits
+// the tool (e.g. a reduced/specialist registry) must not let a plan-mode turn
+// slip through to a real, outliving sandbox grant.
+func TestRequestPermissionsDeniedInPlanModeEvenWithoutRegistryEntry(t *testing.T) {
+	registry := tools.NewRegistry() // deliberately does not register RequestPermissionsTool
+	promptCalled := false
+	result, err := executeToolCall(context.Background(), registry, ToolCall{
+		ID:        "grant-1",
+		Name:      tools.RequestPermissionsToolName,
+		Arguments: `{"reason":"try to escape plan mode","permissions":{"file_system":{"write":["/tmp"]}}}`,
+	}, PermissionModePlan, Options{
+		OnPermissionRequest: func(_ context.Context, _ PermissionRequest) (PermissionDecision, error) {
+			promptCalled = true
+			return PermissionDecision{Action: PermissionDecisionAllow}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if promptCalled {
+		t.Fatal("request_permissions must not reach the permission prompt in plan mode, registry entry or not")
+	}
+	if result.Status != tools.StatusError || !strings.Contains(result.Output, "not available in plan mode") {
+		t.Fatalf("result = %#v, want a plan-mode denial error", result)
+	}
+}
+
 func tempDirOutsideDefaultTemp(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp(".", ".zero-sandbox-outside-")

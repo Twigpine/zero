@@ -52,6 +52,11 @@ const (
 	SandboxDenialKindMeta    = "sandbox_denial_kind"
 	SandboxDenialReasonMeta  = "sandbox_denial_reason"
 	SandboxDenialKeywordMeta = "sandbox_denial_keyword"
+	// PlanSnapshotMeta carries the JSON-encoded []PlanItem a successful
+	// update_plan call installed, so consumers persist exactly that call's
+	// plan instead of re-reading the shared tool later (by which time a
+	// session switch may have cleared or replaced it).
+	PlanSnapshotMeta = "plan_snapshot"
 )
 
 const (
@@ -135,6 +140,12 @@ type Result struct {
 	// consumers; Output, Display, and spill metadata remain synchronized for
 	// compatibility with direct tool callers and persisted sessions.
 	Outcome ToolOutcome
+	// PlanSnapshot carries the typed, immutable snapshot of the []PlanItem
+	// accepted by a successful update_plan call. This internal control field
+	// is excluded from transcript/session serialization and secret scrubbing,
+	// ensuring durable plan persistence and UI panels retain the exact
+	// canonical plan without risk of redaction mutating secret-shaped step text.
+	PlanSnapshot []PlanItem `json:"-"`
 	// pendingFileObservation is proposed by read_file and committed only after
 	// the final model-visible output boundary confirms the exact content survived.
 	pendingFileObservation *pendingFileObservation

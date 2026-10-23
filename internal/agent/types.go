@@ -108,6 +108,9 @@ type ToolResult struct {
 	// for every normal tool result; the Run loop performs the switch when it is
 	// set and Options.ModelSwitcher is wired.
 	RequestedModel string
+	// PlanSnapshot carries the typed, immutable snapshot of the []PlanItem
+	// accepted by a successful update_plan call, untampered by transcript scrubbing.
+	PlanSnapshot []tools.PlanItem `json:"-"`
 }
 
 // ModelOutput returns the bounded provider-facing result while preserving

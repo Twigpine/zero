@@ -116,9 +116,9 @@ var commandDefinitions = []commandDefinition{
 	},
 	{
 		name:        "/plan",
-		usage:       "/plan [status|on|off]",
+		usage:       "/plan [status|on|open|off]",
 		group:       commandGroupSession,
-		description: "Show plan status, or enter/exit read-only planning mode.",
+		description: "Show plan status, enter plan mode, open the plan file, or exit plan mode.",
 		kind:        commandPlan,
 	},
 	{

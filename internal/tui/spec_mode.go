@@ -35,12 +35,24 @@ func (m model) handleSpecCommand(task string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Match /resume ordering: switch/create the destination session first, then
+	// clear plan state that belonged to the previous session. Clearing before a
+	// failed create would drop plan mode on a session that never left.
 	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendUser, text: "/spec " + task})
 	var err error
 	m, err = m.createSpecDraftSession(task)
 	if err != nil {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "session create error: " + err.Error()})
 		return m, nil
+	}
+	if updated, cleared := m.clearLoopsForSessionSwitch(); cleared > 0 {
+		m = updated
+		m = m.appendSystemNotice(fmt.Sprintf("Stopped %d loop(s) tied to the previous session.", cleared))
+	}
+	wasPlan := m.permissionMode == agent.PermissionModePlan
+	m = m.resetPlanForSessionSwitch().exitPlanMode()
+	if wasPlan {
+		m = m.appendSystemNotice("Plan mode ended for the previous session. The spec draft uses restricted spec-draft permissions until review.")
 	}
 	m, err = m.appendSessionEvent(sessions.EventMessage, map[string]any{
 		"role":    "user",
@@ -201,7 +213,16 @@ func (m model) approveSpecReview() (tea.Model, tea.Cmd) {
 	m.pendingSpecReview = nil
 	m.activeSession = impl
 	m.sessionEvents = append([]sessions.Event{}, events...)
+	if updated, cleared := m.clearLoopsForSessionSwitch(); cleared > 0 {
+		m = updated
+		m = m.appendSystemNotice(fmt.Sprintf("Stopped %d loop(s) tied to the draft session.", cleared))
+	}
 	m = m.syncPeerIdentity()
+	wasPlan := m.permissionMode == agent.PermissionModePlan
+	m = m.resetPlanForSessionSwitch().exitPlanMode()
+	if wasPlan {
+		m = m.appendSystemNotice("Plan mode ended for the draft session. Implementation uses " + string(m.permissionMode) + " permission mode.")
+	}
 	m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "Spec approved. Starting implementation session " + impl.SessionID + "."})
 	runCtx, cancel := context.WithCancel(m.ctx)
 	m = m.beginRun(cancel)
