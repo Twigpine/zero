@@ -1,0 +1,393 @@
+package tools
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+
+	"github.com/Gitlawb/zero/internal/memory"
+)
+
+func memoryTestPaths(t *testing.T) memory.Paths {
+	t.Helper()
+	return memory.DefaultPaths(t.TempDir())
+}
+
+// THE DELETE BLOCKER. An omitted or whitespace-only content used to fall through
+// to Forget, so a call that merely left the field out destroyed the note —
+// behind an approval whose text says only that this tool SAVES. The save tool
+// must now refuse such a call rather than treat it as a deletion.
+func TestMemoryWriteRefusesToDeleteThroughAnEmptyContent(t *testing.T) {
+	paths := memoryTestPaths(t)
+	if _, err := memory.Write(paths, memory.ScopeLocal, "precious", "d", "keep me"); err != nil {
+		t.Fatal(err)
+	}
+	write := NewMemoryWriteTool(paths)
+
+	for _, args := range []map[string]any{
+		{"name": "precious"},                     // content omitted entirely
+		{"name": "precious", "content": ""},      // empty
+		{"name": "precious", "content": " \n\t"}, // whitespace only
+	} {
+		result := write.Run(context.Background(), args)
+		if result.Status != StatusError {
+			t.Errorf("memory_write(%v) succeeded; an empty payload must not be a deletion: %q", args, result.Output)
+		}
+		if strings.Contains(strings.ToLower(result.Output), "forgot") {
+			t.Errorf("memory_write(%v) deleted the note: %q", args, result.Output)
+		}
+	}
+	// And the note is still there.
+	if _, err := memory.Read(paths, memory.ScopeLocal, "precious"); err != nil {
+		t.Fatalf("the note was destroyed by a save-shaped call: %v", err)
+	}
+}
+
+// Deletion lives in its own tool so its approval text can say so. The safety
+// disclosure is the point: a grant on "saves a note" must not authorise removal.
+func TestMemoryForgetIsASeparateToolThatDisclosesDeletion(t *testing.T) {
+	paths := memoryTestPaths(t)
+	if _, err := memory.Write(paths, memory.ScopeLocal, "doomed", "d", "bye"); err != nil {
+		t.Fatal(err)
+	}
+	forget := NewMemoryForgetTool(paths)
+	if forget.Name() == NewMemoryWriteTool(paths).Name() {
+		t.Fatal("forget and write share a name, so they would share one approval")
+	}
+	disclosure := strings.ToLower(forget.Safety().Reason)
+	if !strings.Contains(disclosure, "delet") {
+		t.Errorf("the forget approval does not disclose deletion: %q", forget.Safety().Reason)
+	}
+	if saved := strings.ToLower(NewMemoryWriteTool(paths).Safety().Reason); strings.Contains(saved, "delet") {
+		t.Errorf("the save approval mentions deletion, which it no longer performs: %q", saved)
+	}
+
+	result := forget.Run(context.Background(), map[string]any{"name": "doomed"})
+	if result.Status == StatusError {
+		t.Fatalf("memory_forget failed: %q", result.Output)
+	}
+	if _, err := memory.Read(paths, memory.ScopeLocal, "doomed"); err == nil {
+		t.Error("memory_forget reported success but the note is still readable")
+	}
+}
+
+// An unrecognised scope must be refused, not silently widened to every store.
+func TestMemoryReadRefusesAnUnknownScope(t *testing.T) {
+	paths := memoryTestPaths(t)
+	if _, err := memory.Write(paths, memory.ScopeProject, "shared", "d", "x"); err != nil {
+		t.Fatal(err)
+	}
+	read := NewMemoryTool(paths)
+	result := read.Run(context.Background(), map[string]any{"name": "shared", "scope": "invalid"})
+	if result.Status != StatusError {
+		t.Errorf("an unknown scope was accepted and the search widened: %q", result.Output)
+	}
+}
+
+// A valid scope must actually narrow the listing; it used to be ignored.
+func TestMemoryListHonoursTheRequestedScope(t *testing.T) {
+	paths := memoryTestPaths(t)
+	if _, err := memory.Write(paths, memory.ScopeProject, "shared", "team", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := memory.Write(paths, memory.ScopeLocal, "private", "mine", "y"); err != nil {
+		t.Fatal(err)
+	}
+	result := NewMemoryTool(paths).Run(context.Background(), map[string]any{"scope": "project"})
+	if result.Status == StatusError {
+		t.Fatalf("listing failed: %q", result.Output)
+	}
+	if strings.Contains(result.Output, "private") {
+		t.Errorf("a project-scoped listing included a local note: %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "shared") {
+		t.Errorf("a project-scoped listing dropped the project note: %q", result.Output)
+	}
+}
+
+// A store with directories but no containment Root is UNAVAILABLE, not empty.
+// Every scope refuses with ErrNoStore, which List treats as "not configured", so
+// the listing came back empty and told the user they had no notes when the store
+// was switched off — the same absence-versus-unavailable confusion these tools
+// exist to keep apart.
+func TestMemoryReportsUnavailableWhenTheRootIsMissing(t *testing.T) {
+	base := t.TempDir()
+	paths := memory.Paths{
+		ProjectDir: base + "/.zero/memory",
+		LocalDir:   base + "/.zero/memory/local",
+		// Root deliberately blank.
+	}
+	result := NewMemoryTool(paths).Run(context.Background(), map[string]any{})
+	if result.Status != StatusError {
+		t.Fatalf("a store with no Root reported success: %q", result.Output)
+	}
+	if strings.Contains(strings.ToLower(result.Output), "no saved notes") {
+		t.Errorf("a switched-off store was rendered as an empty one: %q", result.Output)
+	}
+	if !strings.Contains(strings.ToLower(result.Output), "not available") {
+		t.Errorf("the reason was not reported: %q", result.Output)
+	}
+}
+
+// Forgetting a note that was never there must SAY so. memory.Forget is
+// idempotent at the store layer, so the tool used to answer "Forgot" for a name
+// that never existed — and a model that misspelled the name took that as
+// confirmation and stopped looking for the real note.
+func TestMemoryForgetReportsAbsenceRatherThanClaimingSuccess(t *testing.T) {
+	paths := memoryTestPaths(t)
+	if _, err := memory.Write(paths, memory.ScopeLocal, "real-note", "d", "body"); err != nil {
+		t.Fatal(err)
+	}
+	result := NewMemoryForgetTool(paths).Run(context.Background(), map[string]any{"name": "reel-note"})
+	if result.Status == StatusError {
+		t.Fatalf("a missing note should not be an error: %q", result.Output)
+	}
+	if strings.Contains(result.Output, "Forgot") {
+		t.Errorf("memory_forget claimed it deleted a note that never existed: %q", result.Output)
+	}
+	if !strings.Contains(strings.ToLower(result.Output), "nothing to forget") {
+		t.Errorf("absence was not reported distinctly: %q", result.Output)
+	}
+	// The real note is untouched.
+	if _, err := memory.Read(paths, memory.ScopeLocal, "real-note"); err != nil {
+		t.Errorf("the existing note was disturbed: %v", err)
+	}
+}
+
+func TestMemoryForgetPreservesANoteThatCannotBeRead(t *testing.T) {
+	paths := memoryTestPaths(t)
+	if err := os.MkdirAll(paths.LocalDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	notePath := filepath.Join(paths.LocalDir, "unreadable.md")
+	// Oversize input is a deterministic, cross-platform read failure; unlike
+	// permission bits, it behaves the same when tests run with elevated access.
+	if err := os.WriteFile(notePath, []byte(strings.Repeat("x", 70<<10)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := memory.Read(paths, memory.ScopeLocal, "unreadable"); err == nil {
+		t.Fatal("oversized fixture unexpectedly remained readable")
+	}
+
+	result := NewMemoryForgetTool(paths).Run(context.Background(), map[string]any{"name": "unreadable"})
+	if result.Status != StatusError {
+		t.Fatalf("memory_forget deleted an unreadable note: %q", result.Output)
+	}
+	if !strings.Contains(strings.ToLower(result.Output), "cannot read") {
+		t.Fatalf("memory_forget hid the read failure: %q", result.Output)
+	}
+	if _, err := os.Stat(notePath); err != nil {
+		t.Fatalf("memory_forget removed the unreadable note: %v", err)
+	}
+}
+
+// One unreadable note must not empty the listing. memory.List deliberately
+// returns what it could read alongside the failures; the tool returning an error
+// instead threw that away, turning partial success back into total failure one
+// bad directory entry away from an empty memory.
+func TestAnUnreadableNoteDoesNotEmptyTheListing(t *testing.T) {
+	paths := memoryTestPaths(t)
+	if _, err := memory.Write(paths, memory.ScopeProject, "readable", "still here", "body"); err != nil {
+		t.Fatal(err)
+	}
+	// A note too large to read back: the ceiling holds on the way out.
+	oversized := strings.Repeat("x", 70<<10)
+	if err := os.WriteFile(filepath.Join(paths.ProjectDir, "huge.md"), []byte(oversized), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result := NewMemoryTool(paths).Run(context.Background(), map[string]any{})
+	if !strings.Contains(result.Output, "readable") {
+		t.Errorf("the readable note was dropped because another failed: %q", result.Output)
+	}
+	if !strings.Contains(strings.ToLower(result.Output), "could not be read") {
+		t.Errorf("the failure was not reported alongside the notes: %q", result.Output)
+	}
+}
+
+// A failure in the local scope must not hide a readable project note. Unscoped
+// reads resolve local first, then continue to the checked-in project scope when
+// the local entry cannot be read.
+func TestALocalFailureDoesNotHideTheProjectNote(t *testing.T) {
+	paths := memoryTestPaths(t)
+	if _, err := memory.Write(paths, memory.ScopeProject, "findings", "team", "the project body"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(paths.LocalDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// An unreadable local note of the SAME name, searched first.
+	oversized := strings.Repeat("x", 70<<10)
+	if err := os.WriteFile(filepath.Join(paths.LocalDir, "findings.md"), []byte(oversized), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result := NewMemoryTool(paths).Run(context.Background(), map[string]any{"name": "findings"})
+	if result.Status == StatusError {
+		t.Fatalf("a local-scope failure hid the readable project note: %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "the project body") {
+		t.Errorf("the project note was not returned: %q", result.Output)
+	}
+}
+
+// A DELETE MUST REFUSE THE NAME THE OTHER TWO DOORS REFUSE. memory_read and
+// memory_write both decline a note whose stored spelling differs from the one
+// asked for, because on a case-insensitive filesystem they are one file. Forget
+// did not, so the operation with nothing recoverable afterwards was the only one
+// that ignored the guard — and the refusal the other two return used to say
+// "rename or remove it first", which named this tool as the way out.
+func TestMemoryForgetRefusesADifferentlySpelledNote(t *testing.T) {
+	paths := memoryTestPaths(t)
+	if err := os.MkdirAll(paths.ProjectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hand := filepath.Join(paths.ProjectDir, "findings.MD")
+	if err := os.WriteFile(hand, []byte("---\nname: findings\n---\n\nweeks of work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := NewMemoryForgetTool(paths).Run(context.Background(), map[string]any{"name": "findings", "scope": "project"})
+	if result.Status != StatusError {
+		t.Errorf("forget accepted a clashing name and reported %q", result.Output)
+	}
+	if !strings.Contains(result.Output, "findings.MD") {
+		t.Errorf("the refusal did not name the occupant it declined to delete: %q", result.Output)
+	}
+	if strings.Contains(result.Output, MemoryForgetToolName) {
+		t.Errorf("the refusal pointed back at the deleting tool: %q", result.Output)
+	}
+	// AND IT MUST NOT ADVISE REMOVAL. The wording is the other half of this bug:
+	// all three doors used to answer a clash with "rename or remove it first",
+	// and removal is the operation that destroys the occupant being described.
+	// A refusal that routes the reader to the sharpest door is not a refusal.
+	if strings.Contains(strings.ToLower(result.Output), "remove it") {
+		t.Errorf("the refusal advised removing the occupant it just protected: %q", result.Output)
+	}
+	if !strings.Contains(strings.ToLower(result.Output), "rename") {
+		t.Errorf("the refusal named no way forward: %q", result.Output)
+	}
+	body, err := os.ReadFile(hand)
+	if err != nil {
+		t.Fatalf("the hand-authored note was deleted by a refused forget: %v", err)
+	}
+	if !strings.Contains(string(body), "weeks of work") {
+		t.Errorf("the note survived but its contents did not: %q", body)
+	}
+}
+
+// THE LISTING ORDER HAS TO REACH A USER TO BE AN ORDER. memory.List documents a
+// project-first listing and a test asserts it, but the tool resolved scopes
+// first and handed the resolution order (local-first) straight through, so the
+// documented order applied to nothing anybody could see.
+func TestAnUnscopedListingIsProjectFirst(t *testing.T) {
+	paths := memoryTestPaths(t)
+	write := NewMemoryWriteTool(paths)
+	if r := write.Run(context.Background(), map[string]any{"name": "zulu", "scope": "local", "content": "a local note"}); r.Status == StatusError {
+		t.Fatal(r.Output)
+	}
+	if r := write.Run(context.Background(), map[string]any{"name": "alpha", "scope": "project", "content": "a project note"}); r.Status == StatusError {
+		t.Fatal(r.Output)
+	}
+
+	result := NewMemoryTool(paths).Run(context.Background(), map[string]any{})
+	if result.Status == StatusError {
+		t.Fatal(result.Output)
+	}
+	project, local := strings.Index(result.Output, "alpha (project)"), strings.Index(result.Output, "zulu (local)")
+	if project < 0 || local < 0 {
+		t.Fatalf("the unscoped listing lost a scope: %q", result.Output)
+	}
+	if project > local {
+		t.Errorf("the listing put local before project, which is the resolution order, not the listing order:\n%s", result.Output)
+	}
+}
+
+// linkDirForTool mirrors internal/memory's helper: a junction on Windows, where
+// os.Symlink needs a privilege an ordinary session does not hold.
+func linkDirForTool(t *testing.T, target, link string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		if out, err := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
+			t.Skipf("cannot create a junction: %v %s", err, out)
+		}
+		return
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("cannot create a symlink: %v", err)
+	}
+}
+
+// NOTHING READ PLUS A FAILURE MUST NOT RENDER AS AN EMPTY STORE. memory.List
+// returns its error precisely so a caller can tell "there are no notes" from
+// "the notes could not be read" — escape_test.go pins that at the library — and
+// the tool put the confusion back by rendering the empty-store copy first and
+// appending the failure below it. A model reading "No saved notes yet" writes
+// the note again, or proceeds as though nothing was ever recorded.
+//
+// Both ways of reaching zero-notes-plus-error are covered: a redirected .zero
+// (the store is never opened) and every on-disk entry failing to read (the
+// store opens, its contents do not).
+func TestAFailedMemoryListingDoesNotRenderAsAnEmptyStore(t *testing.T) {
+	t.Run("redirected store", func(t *testing.T) {
+		base := t.TempDir()
+		outside := filepath.Join(base, "outside")
+		workspace := filepath.Join(base, "workspace")
+		for _, dir := range []string{outside, workspace, filepath.Join(outside, "memory")} {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		linkDirForTool(t, outside, filepath.Join(workspace, ".zero"))
+		paths := memory.DefaultPaths(workspace)
+		// The library's own answer is the premise of this test.
+		if notes, err := memory.List(paths); err == nil || len(notes) != 0 {
+			t.Fatalf("premise failed: List returned %d notes, err=%v", len(notes), err)
+		}
+
+		result := NewMemoryTool(paths).Run(context.Background(), map[string]any{})
+		if result.Status != StatusError {
+			t.Errorf("an unreadable store reported ok: %q", result.Output)
+		}
+		if strings.Contains(strings.ToLower(result.Output), "no saved notes") {
+			t.Errorf("an unreadable store was rendered as an empty one: %q", result.Output)
+		}
+		if !strings.Contains(strings.ToLower(result.Output), "unknown") {
+			t.Errorf("the output does not say the contents are unknown: %q", result.Output)
+		}
+		// The caveat has to match the failure: nothing was "unread" here, the
+		// store was refused outright, and sending an operator to look for
+		// corrupt note files is the wrong instruction.
+		if strings.Contains(result.Output, "Some notes could not be read") {
+			t.Errorf("a containment refusal was reported as unreadable notes: %q", result.Output)
+		}
+	})
+
+	t.Run("readable store with readable notes still lists", func(t *testing.T) {
+		paths := memoryTestPaths(t)
+		if _, err := memory.Write(paths, memory.ScopeProject, "kept", "d", "body"); err != nil {
+			t.Fatal(err)
+		}
+		result := NewMemoryTool(paths).Run(context.Background(), map[string]any{})
+		if result.Status != StatusOK || !strings.Contains(result.Output, "kept") {
+			t.Fatalf("a healthy listing regressed: status=%s %q", result.Status, result.Output)
+		}
+	})
+
+	// And a genuinely empty, readable store still says so — the fix must not
+	// turn "no notes" into an error.
+	t.Run("empty readable store still reports empty", func(t *testing.T) {
+		paths := memoryTestPaths(t)
+		result := NewMemoryTool(paths).Run(context.Background(), map[string]any{})
+		if result.Status != StatusOK {
+			t.Fatalf("an empty store reported an error: %q", result.Output)
+		}
+		if !strings.Contains(strings.ToLower(result.Output), "no saved notes") {
+			t.Errorf("an empty store lost its empty-store copy: %q", result.Output)
+		}
+	})
+}
