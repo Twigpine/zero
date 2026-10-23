@@ -286,7 +286,7 @@ type readFileStats struct {
 }
 
 func scanReadFileStats(path string) (readFileStats, error) {
-	file, err := os.Open(path)
+	file, err := openReadableRegularFile(path)
 	if err != nil {
 		return readFileStats{}, err
 	}
@@ -321,7 +321,7 @@ func renderReadFileBytes(path, relativePath string, total, requestedStart, limit
 	if requestedStart >= total {
 		return okResult(fmt.Sprintf("File: %s\n(byte_offset %d is past the end of the file, which has %d bytes)", relativePath, requestedStart, total)), 0, 0
 	}
-	file, err := os.Open(path)
+	file, err := openReadableRegularFile(path)
 	if err != nil {
 		return errorResult("Error reading file " + relativePath + ": " + err.Error()), 0, 0
 	}
@@ -359,7 +359,7 @@ func renderReadFileBytes(path, relativePath string, total, requestedStart, limit
 }
 
 func appendReadFileRange(output *outputBudgetBuilder, path string, startLine int, selectedLines int) error {
-	file, err := os.Open(path)
+	file, err := openReadableRegularFile(path)
 	if err != nil {
 		return err
 	}
