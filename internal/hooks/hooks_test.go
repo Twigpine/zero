@@ -180,7 +180,7 @@ func TestLoadConfigPreservesUserDisabledStateWhenProjectOmitsEnabled(t *testing.
 }
 
 func TestLoadConfigRejectsMatchersOnLifecycleHooks(t *testing.T) {
-	for _, event := range []string{"sessionStart", "specialistStart"} {
+	for _, event := range []string{"sessionStart", "sessionEnd"} {
 		t.Run(event, func(t *testing.T) {
 			dir := t.TempDir()
 			projectConfigPath := filepath.Join(dir, "hooks.json")
@@ -205,6 +205,46 @@ func TestLoadConfigRejectsMatchersOnLifecycleHooks(t *testing.T) {
 			}
 			if !hasHookDiagnostic(result.Diagnostics, DiagnosticSchema, "", "hooks.0.matcher") {
 				t.Fatalf("missing matcher diagnostic: %#v", result.Diagnostics)
+			}
+		})
+	}
+}
+
+func TestLoadConfigAcceptsMatchersOnSpecialistHooks(t *testing.T) {
+	for _, tc := range []struct {
+		event Event
+		id    string
+	}{
+		{event: EventSpecialistStart, id: "zero.explorer-start"},
+		{event: EventSpecialistStop, id: "zero.explorer-stop"},
+	} {
+		t.Run(string(tc.event), func(t *testing.T) {
+			dir := t.TempDir()
+			projectConfigPath := filepath.Join(dir, "hooks.json")
+			writeHookJSON(t, projectConfigPath, map[string]any{
+				"hooks": []any{map[string]any{
+					"id":      tc.id,
+					"event":   string(tc.event),
+					"matcher": "explorer",
+					"command": "node",
+				}},
+			})
+
+			result, err := LoadConfig(LoadOptions{
+				UserConfigPath:    filepath.Join(dir, "missing-user-hooks.json"),
+				ProjectConfigPath: projectConfigPath,
+			})
+			if err != nil {
+				t.Fatalf("LoadConfig returned error: %v", err)
+			}
+			if len(result.Config.Hooks) != 1 || result.Config.Hooks[0].Matcher != "explorer" {
+				t.Fatalf("specialist matcher hook = %#v", result.Config.Hooks)
+			}
+			if got := hookIDs(Select(result.Config, SelectInput{Event: tc.event, ToolName: "explorer"})); !reflect.DeepEqual(got, []string{tc.id}) {
+				t.Fatalf("matched selection = %#v", got)
+			}
+			if got := Select(result.Config, SelectInput{Event: tc.event, ToolName: "worker"}); len(got) != 0 {
+				t.Fatalf("unmatched specialist should be empty, got %#v", got)
 			}
 		})
 	}
