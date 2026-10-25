@@ -54,10 +54,10 @@ func TestRunExecImageAttachmentHistory(t *testing.T) {
 		{name: "stream and file images", model: "gpt-4.1", fileImage: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			root := t.TempDir()
-			for _, name := range []string{"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"} {
-				t.Setenv(name, root)
-			}
+			// The shared isolation also turns off the models.dev refresh that
+			// runExec starts in the background. Without it, the refresh downloads
+			// the catalog into this HOME and races the TempDir cleanup.
+			isolateCLIUserState(t)
 			cwd := t.TempDir()
 			png := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52}
 			encoded := base64.StdEncoding.EncodeToString(png)
@@ -148,6 +148,7 @@ func TestRunExecImageAttachmentHistory(t *testing.T) {
 // user turn). Before the fix, stream-json images were parsed and validated but
 // silently dropped — never threaded into the agent run.
 func TestRunExecStreamJSONImageReachesAgent(t *testing.T) {
+	isolateCLIUserState(t)
 	cwd := t.TempDir()
 
 	// A minimal PNG, base64-encoded for the stream-json image payload.
@@ -217,6 +218,7 @@ func TestRunExecStreamJSONImageReachesAgent(t *testing.T) {
 // the fix, ResolvePrompt's "must include at least one prompt or user message
 // event" error was returned before images were considered, rejecting the turn.
 func TestRunExecStreamJSONImageOnlyMessageProceeds(t *testing.T) {
+	isolateCLIUserState(t)
 	cwd := t.TempDir()
 
 	png := []byte{
