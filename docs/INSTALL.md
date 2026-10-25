@@ -190,7 +190,7 @@ Every release so far declares the module path `github.com/Gitlawb/zero`, so
 fails with "module declares its path as" until a release is tagged with the new
 module path.
 
-This builds from source, so it needs Go 1.26.9+ and it does not go through the
+This builds from source, so it needs Go 1.26.10+ and it does not go through the
 release archives. Two consequences worth knowing before you pick it:
 
 - On Linux, Bubblewrap is still required for native sandboxing. Zero resolves
@@ -218,7 +218,7 @@ Build a local binary:
 go build -o zero ./cmd/zero
 ```
 
-Source builds require Go 1.26.9+.
+Source builds require Go 1.26.10+.
 
 ### Sandbox Helpers For Source Builds
 

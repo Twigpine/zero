@@ -149,6 +149,7 @@ func TestRefreshModelsDevCacheRejectsBadBodyWithoutClobbering(t *testing.T) {
 	}
 	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
 	t.Setenv("ZERO_MODELS_URL", server.URL)
+	t.Setenv("ZERO_DISABLE_MODELS_FETCH", "")
 
 	if err := RefreshModelsDevCache(t.Context()); err == nil {
 		t.Fatal("bad body must return an error")
@@ -211,6 +212,9 @@ func TestCachedModelsDevProvidersIgnoresStaleCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
+	// The variable turns the overlay off too, which would pass this test
+	// without the staleness check ever running.
+	t.Setenv("ZERO_DISABLE_MODELS_FETCH", "")
 	resetModelsDevCacheForTest()
 	t.Cleanup(resetModelsDevCacheForTest)
 	EnableModelsDevOverlay()
@@ -226,6 +230,9 @@ func TestCachedModelsDevProvidersRequiresOptIn(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
+	// As above: with the variable set, a nil result says nothing about the
+	// opt-in.
+	t.Setenv("ZERO_DISABLE_MODELS_FETCH", "")
 	resetModelsDevCacheForTest()
 	t.Cleanup(resetModelsDevCacheForTest)
 
@@ -242,6 +249,7 @@ func TestDefaultModelEntriesAppliesFreshCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
+	t.Setenv("ZERO_DISABLE_MODELS_FETCH", "")
 	resetModelsDevCacheForTest()
 	t.Cleanup(resetModelsDevCacheForTest)
 	EnableModelsDevOverlay()
