@@ -18,7 +18,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Twigpine/zero/internal/fsutil"
 	"github.com/Twigpine/zero/internal/keyring"
+	"github.com/Twigpine/zero/internal/securefile"
 )
 
 const (
@@ -155,7 +157,7 @@ const (
 // is AES-256-GCM ciphertext at rest.
 type Store struct {
 	blob    blobStore
-	crypter *aesGCMCrypter // nil => plaintext blob
+	crypter *securefile.Crypter // nil => plaintext blob
 	now     func() time.Time
 	mu      sync.Mutex
 }
@@ -244,8 +246,15 @@ func NewStore(options StoreOptions) (*Store, error) {
 			return nil, err
 		}
 		// The file blob holds AES-256-GCM ciphertext; the per-user secret lives in
-		// a sibling ".secret" file (see encrypt.go).
-		return &Store{blob: fileBlob{path: path}, crypter: newAESGCMCrypter(path + ".secret"), now: now}, nil
+		// a sibling ".secret" file. The secret publishes through the sandbox-denied
+		// ".secret.publish" directory so a same-user sandboxed process cannot race
+		// the plaintext key name.
+		secretPath := path + ".secret"
+		return &Store{
+			blob:    fileBlob{path: path},
+			crypter: securefile.NewCrypterWithPublicationDir(secretPath, PublicationDir(secretPath)),
+			now:     now,
+		}, nil
 	case "keyring":
 		kr := options.Keyring
 		if kr == nil {
@@ -405,7 +414,7 @@ func (s *Store) readState() (storeFile, error) {
 	}
 	if s.crypter != nil {
 		// Encrypted backend: the blob is AES-256-GCM ciphertext, not JSON.
-		data, err = s.crypter.open(data)
+		data, err = s.crypter.Open(data)
 		if err != nil {
 			return storeFile{}, fmt.Errorf("oauth: decrypt token store at %s: %w", s.blob.location(), err)
 		}
@@ -437,9 +446,9 @@ func (s *Store) writeState(state storeFile) error {
 	// writes opaque ciphertext instead.
 	payload := append(data, '\n')
 	if s.crypter != nil {
-		payload, err = s.crypter.seal(data)
+		payload, err = s.crypter.Seal(data)
 		if err != nil {
-			return err
+			return fmt.Errorf("oauth: encrypt token store: %w", err)
 		}
 	}
 	return s.blob.write(payload)
@@ -511,6 +520,31 @@ func (b fileBlob) read() ([]byte, bool, error) {
 	return data, true, nil
 }
 
+// Sync seams allow tests to inject persistence failures at each barrier.
+var (
+	syncOAuthFileFn = (*os.File).Sync
+	syncOAuthDirFn  = syncOAuthDir
+)
+
+// syncOAuthDir fsyncs the directory that now holds the published token store.
+// Windows cannot sync directory handles, so the rename is best-effort durable
+// there. A directory the user can write but not read cannot be opened for
+// syncing either; that is also best effort, because the write it follows
+// already succeeded. Every other failure is reported.
+func syncOAuthDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			return nil
+		}
+		return err
+	}
+	return errors.Join(d.Sync(), d.Close())
+}
+
 func (b fileBlob) write(data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(b.path), 0o700); err != nil {
 		return err
@@ -524,10 +558,20 @@ func (b fileBlob) write(data []byte) error {
 		_ = temp.Close()
 		return err
 	}
-	if err := temp.Close(); err != nil {
-		return err
+	if err := syncOAuthFileFn(temp); err != nil {
+		_ = temp.Close()
+		return fmt.Errorf("oauth: sync token store: %w", err)
 	}
-	return os.Rename(tempPath, b.path)
+	if err := temp.Close(); err != nil {
+		return fmt.Errorf("oauth: write token store: %w", err)
+	}
+	if err := fsutil.RenameWithRetry(tempPath, b.path, nil); err != nil {
+		return fmt.Errorf("oauth: publish token store: %w", err)
+	}
+	if err := syncOAuthDirFn(filepath.Dir(b.path)); err != nil {
+		return fmt.Errorf("oauth: sync token store directory: %w", err)
+	}
+	return nil
 }
 
 // PublicationDirSuffix names the per-store directory a token store publishes new
