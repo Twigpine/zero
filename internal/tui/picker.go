@@ -488,7 +488,7 @@ func (m model) modelListDiscoveryCmd() tea.Cmd {
 	}
 }
 
-func (m model) modelPickerDiscoveryNotices() []string {
+func (m model) modelPickerDiscoveryNotices(refreshAction string) []string {
 	var notices []string
 	if status := strings.TrimSpace(m.modelPickerLoadError); status != "" {
 		notices = append(notices, status)
@@ -509,9 +509,9 @@ func (m model) modelPickerDiscoveryNotices() []string {
 			if len(m.modelPickerLiveByProvider[key]) > 0 || len(m.modelPickerLiveByProvider[descriptor.ID]) > 0 {
 				source = "previously discovered models"
 			}
-			notices = append(notices, fmt.Sprintf("%s: %s; refresh failed: %s. Ctrl+R to retry.", label, source, failure))
+			notices = append(notices, fmt.Sprintf("%s: %s; refresh failed: %s. %s to retry.", label, source, failure, refreshAction))
 		} else if descriptor.ID == "chatgpt" && len(m.modelPickerLiveByProvider[key]) == 0 && len(m.modelPickerLiveByProvider[descriptor.ID]) == 0 {
-			notices = append(notices, label+": fallback suggestions (unverified). Ctrl+R to refresh.")
+			notices = append(notices, label+": fallback suggestions (unverified). "+refreshAction+" to refresh.")
 		}
 	}
 	return notices
