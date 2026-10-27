@@ -2,10 +2,11 @@ package providermodeldiscovery
 
 import (
 	"context"
-	"github.com/Twigpine/zero/internal/config"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/Twigpine/zero/internal/config"
 )
 
 func TestChatGPTDiscoveryUsesCurrentCompatibilityVersion(t *testing.T) {
@@ -20,7 +21,11 @@ func TestChatGPTDiscoveryUsesCurrentCompatibilityVersion(t *testing.T) {
 		CatalogID: "chatgpt", ProviderKind: config.ProviderKindOpenAICompatible,
 		BaseURL: server.URL + "/backend-api/codex", APIKey: "test-bearer",
 	}
-	if _, err := Discover(context.Background(), profile, Options{HTTPClient: server.Client()}); err != nil {
+	models, err := Discover(context.Background(), profile, Options{HTTPClient: server.Client()})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if len(models) != 1 || models[0].ID != "gpt-future-coder" {
+		t.Fatalf("models = %#v, want only gpt-future-coder", models)
 	}
 }
