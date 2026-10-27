@@ -936,8 +936,15 @@ func TestExecCommandInteractiveBlockSuggestsTTY(t *testing.T) {
 }
 
 func TestExecCommandTTYSkipsInteractiveBlock(t *testing.T) {
-	tool := NewScopedExecCommandTool(t.TempDir(), nil, newExecSessionManager())
-	// ssh to a bogus host fails fast on its own; the point is that the
+	// The ssh can still be resolving the bogus host when the 250ms yield
+	// returns, which leaves its session running in the test root. Stop it
+	// before the root goes, and use execTestRoot for the moment Windows still
+	// holds the directory after the stop.
+	root := execTestRoot(t)
+	manager := newExecSessionManager()
+	t.Cleanup(func() { manager.StopAll() })
+	tool := NewScopedExecCommandTool(root, nil, manager)
+	// ssh to a bogus host fails on its own; the point is that the
 	// interactive guard must not fire ahead of the tty path.
 	result := tool.Run(context.Background(), map[string]any{
 		"cmd": "ssh host.example.com", "tty": true, "yield_time_ms": 250,
