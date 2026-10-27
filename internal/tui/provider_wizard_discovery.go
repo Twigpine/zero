@@ -235,8 +235,11 @@ func (m model) providerModelDiscoveryCmd() tea.Cmd {
 	needOAuthToken := strings.TrimSpace(pastedKey) == "" && provider.OAuth && !provider.OAuthMintsKey
 	discover := m.discoverProviderModels
 	if discover == nil {
+		// Resolve ownership before materializing an OAuth bearer as APIKey for
+		// the request: a materialized bearer otherwise looks like explicit key auth.
+		discoveryOptions := m.modelPickerDiscoveryOptions(providerWizardDiscoveryProfile(provider, pastedKey, wizard.baseURL))
 		discover = func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
-			return providermodeldiscovery.DiscoverCatalog(ctx, provider, profile, providermodeldiscovery.Options{})
+			return providermodeldiscovery.DiscoverCatalog(ctx, provider, profile, discoveryOptions)
 		}
 	}
 

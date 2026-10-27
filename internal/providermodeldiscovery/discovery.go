@@ -10,6 +10,9 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Twigpine/zero/internal/config"
 	"github.com/Twigpine/zero/internal/providercatalog"
@@ -54,6 +57,24 @@ type Options struct {
 }
 
 func DiscoverCatalog(ctx context.Context, provider providercatalog.Descriptor, profile config.ProviderProfile, options Options) ([]Model, error) {
+	if providercatalog.NormalizeID(provider.ID) == "chatgpt" {
+		// Public OpenAI metadata cannot establish subscription entitlements. Probe
+		// the account first and surface failures instead of calling metadata live.
+		liveModels, err := Discover(ctx, profile, options)
+		if err != nil {
+			return nil, err
+		}
+		// Enrichment is optional and must not consume the caller's entire discovery
+		// budget, leaving a working subscription looking unavailable.
+		metadataCtx, cancel := context.WithTimeout(ctx, time.Second)
+		defer cancel()
+		catalogModels, _ := fetchCatalogModels(metadataCtx, provider, options)
+		models := mergeLiveModels(provider, liveModels, catalogModels)
+		if len(models) == 0 {
+			return nil, fmt.Errorf("ChatGPT models endpoint returned no visible coding models")
+		}
+		return models, nil
+	}
 	catalogModels, catalogErr := fetchCatalogModels(ctx, provider, options)
 	// OpenRouter and OpenGateway publish public live model lists. Probe them even
 	// without credentials so the picker stays current before a key is entered.
@@ -268,29 +289,43 @@ func fetchProviderModels(ctx context.Context, endpoint string, profile config.Pr
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
-	response, err := providerio.SendWithAuthRetry(ctx, client, http.MethodGet, endpoint, nil, auth, options.OAuthResolver, func(request *http.Request) {
+	resolver := options.OAuthResolver
+	var resolvedSecrets []string
+	if resolver != nil {
+		resolver = func(ctx context.Context, force bool) (string, string, bool, error) {
+			header, value, ok, err := options.OAuthResolver(ctx, force)
+			if ok {
+				// Include both attempts: an upstream may echo either the rejected
+				// bearer or its replacement in a failure response.
+				resolvedSecrets = append(resolvedSecrets, value, strings.TrimSpace(strings.TrimPrefix(value, "Bearer ")))
+			}
+			return header, value, ok, err
+		}
+	}
+	redact := func(err error) error { return redactDiscoveryError(err, profile, resolvedSecrets...) }
+	response, err := providerio.SendWithAuthRetry(ctx, client, http.MethodGet, endpoint, nil, auth, resolver, func(request *http.Request) {
 		request.Header.Set("Accept", "application/json")
 		if configure != nil {
 			configure(request)
 		}
 	}, 1)
 	if err != nil {
-		return nil, redactDiscoveryError(err, profile)
+		return nil, redact(err)
 	}
 	defer response.Body.Close()
 
 	// OpenRouter's full catalog is ~0.5MB today; keep headroom for growth.
 	body, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
 	if err != nil {
-		return nil, redactDiscoveryError(err, profile)
+		return nil, redact(err)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, redactDiscoveryError(fmt.Errorf("models endpoint returned %s: %s", response.Status, strings.TrimSpace(string(body))), profile)
+		return nil, redact(fmt.Errorf("models endpoint returned %s: %s", response.Status, strings.TrimSpace(string(body))))
 	}
 
 	models, err := parseModelsResponse(body)
 	if err != nil {
-		return nil, redactDiscoveryError(err, profile)
+		return nil, redact(err)
 	}
 	return models, nil
 }
@@ -707,14 +742,20 @@ func firstDiscoverySource(values ...string) string {
 	return ""
 }
 
-func redactDiscoveryError(err error, profile config.ProviderProfile) error {
+func redactDiscoveryError(err error, profile config.ProviderProfile, secrets ...string) error {
 	if err == nil {
 		return nil
 	}
-	return fmt.Errorf("%s", redaction.RedactString(err.Error(), redaction.Options{ExtraSecretValues: []string{
-		profile.APIKey,
-		profile.AuthHeaderValue,
-	}}))
+	// Normalize before matching so terminal rendering cannot reassemble a
+	// credential split by an escape sequence or an invisible control byte.
+	message := strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' || !unicode.IsControl(r) {
+			return r
+		}
+		return -1
+	}, ansi.Strip(err.Error()))
+	secrets = append(secrets, profile.APIKey, profile.AuthHeaderValue)
+	return fmt.Errorf("%s", redaction.RedactString(message, redaction.Options{ExtraSecretValues: secrets}))
 }
 
 func displayProviderName(profile config.ProviderProfile) string {

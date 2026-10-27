@@ -574,6 +574,10 @@ type model struct {
 	// catalog descriptor ID), so /model shows each provider's real current models —
 	// the same list the provider-setup wizard discovers — not the static catalog.
 	modelPickerLiveByProvider map[string][]providermodeldiscovery.Model
+	// Discovery errors and generations belong to the provider lookup, not the
+	// active model, so concurrent results cannot clear another account's status.
+	modelPickerErrorsByProvider    map[string]string
+	modelPickerDiscoveryGeneration int
 	// ollamaContextWindowByModel holds context-window sizes fetched from a local
 	// Ollama daemon's native /api/show endpoint (keyed by model name), for
 	// custom/local models that have no curated-catalog entry and whose
@@ -2060,6 +2064,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.noBlockingModal() {
 				return m, readClipboardImageCmd()
 			}
+		case keyCtrl(msg, 'r'):
+			if m.picker != nil && m.picker.kind == pickerModel {
+				m.modelPickerDiscoveryGeneration++
+				return m, m.modelPickerDiscoveryCmds()
+			}
 		case keyCtrl(msg, 'f'):
 			if m.picker != nil && m.picker.kind == pickerModel {
 				if m.modelPickerIsLoading() {
@@ -3090,7 +3099,14 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case setupOAuthDeviceMsg:
 		return m.applySetupOAuthDeviceCode(msg)
 	case modelPickerModelsDiscoveredMsg:
-		return m.applyModelPickerModelsDiscovered(msg), nil
+		if msg.generation != 0 && msg.generation != m.modelPickerDiscoveryGeneration {
+			return m, nil
+		}
+		m = m.applyModelPickerModelsDiscovered(msg)
+		if msg.showList {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.modelListText()})
+		}
+		return m, nil
 	case petCatalogLoadedMsg:
 		return m.applyPetCatalog(msg)
 	case petPreviewDebounceMsg:
@@ -4880,6 +4896,12 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.providerText()})
 		return m, nil
 	case commandModel:
+		if arg := strings.ToLower(strings.TrimSpace(command.text)); arg == "list" || arg == "ls" {
+			m.modelPickerDiscoveryGeneration++
+			if cmd := m.modelListDiscoveryCmd(); cmd != nil {
+				return m, cmd
+			}
+		}
 		if strings.TrimSpace(command.text) == "" {
 			if m.pending {
 				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: pickerBusyText(command.name)})

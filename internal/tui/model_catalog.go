@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Twigpine/zero/internal/config"
 	"github.com/Twigpine/zero/internal/modelregistry"
 	"github.com/Twigpine/zero/internal/providermodeldiscovery"
 )
@@ -24,12 +25,26 @@ func (m model) modelListText() string {
 		return models[i].Provider < models[j].Provider
 	})
 	modelLines := []string{}
-	for _, model := range models {
-		marker := " "
-		if activeID != "" && model.ID == activeID {
-			marker = "*"
+	source := "global model registry"
+	if config.HasProviderProfile(m.providerProfile) {
+		source = "fallback suggestions (unverified)"
+		if _, ok := m.discoveredModelsForActiveRoute(); ok {
+			source = "live provider discovery"
 		}
-		modelLines = append(modelLines, fmt.Sprintf("%s %s (%s) - %s", marker, model.ID, model.Provider, model.DisplayName))
+		// Keep the configured model visible even if it is no longer advertised;
+		// an explicit saved selection is never migrated by catalog refresh.
+		modelLines = append(modelLines, fmt.Sprintf("* %s (%s) - current selection", m.modelName, m.providerName))
+		for _, item := range m.savedProviderModelPickerItems(m.providerProfile, m.providerName, m.modelName) {
+			modelLines = append(modelLines, fmt.Sprintf("  %s (%s) - %s", item.Value, m.providerName, item.Label))
+		}
+	} else {
+		for _, model := range models {
+			marker := " "
+			if activeID != "" && model.ID == activeID {
+				marker = "*"
+			}
+			modelLines = append(modelLines, fmt.Sprintf("%s %s (%s) - %s", marker, model.ID, model.Provider, model.DisplayName))
+		}
 	}
 	return renderCommandOutput(commandOutput{
 		Title:  "Models",
@@ -41,6 +56,7 @@ func (m model) modelListText() string {
 					"Active model: " + displayValue(m.modelName, "none"),
 					"provider: " + displayValue(m.providerName, "none"),
 					"effort: " + m.effortDisplay(),
+					"model source: " + source,
 				},
 			},
 			{
@@ -48,7 +64,7 @@ func (m model) modelListText() string {
 				Lines: modelLines,
 			},
 		},
-		Hints: []string{"use /model <id> to switch this TUI session"},
+		Hints: append(m.modelPickerDiscoveryNotices(), "use /model <id> to switch this TUI session; /model list refreshes availability"),
 	})
 }
 
