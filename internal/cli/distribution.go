@@ -92,13 +92,25 @@ func runSkillAdd(args []string, dir string, stdout io.Writer, stderr io.Writer) 
 	lines := []string{}
 	if result.Updated {
 		lines = append(lines, fmt.Sprintf("Updated skill %q.", result.Name))
-		lines = append(lines, fmt.Sprintf("  hash: %s -> %s", shortHash(result.PreviousHash), shortHash(result.Hash)))
+		switch {
+		case result.PreviousHash != result.Hash:
+			lines = append(lines, fmt.Sprintf("  hash: %s -> %s", shortHash(result.PreviousHash), shortHash(result.Hash)))
+		case result.PreviousTreeHash == "":
+			// The install this replaced predates tree hashes and copied SKILL.md
+			// alone, so the bundled files are new rather than changed.
+			lines = append(lines, "  SKILL.md is unchanged; the files bundled with it are now installed too")
+		default:
+			lines = append(lines, "  SKILL.md is unchanged; the files bundled with it changed")
+		}
 	} else {
 		lines = append(lines, fmt.Sprintf("Installed skill %q.", result.Name))
 		lines = append(lines, "  hash: "+result.Hash)
 	}
 	lines = append(lines, "  source: "+result.Source)
 	lines = append(lines, "  path: "+result.Path)
+	if len(result.SkippedLinks) > 0 {
+		lines = append(lines, "  not copied (symlinks): "+strings.Join(result.SkippedLinks, ", "))
+	}
 	if _, err := fmt.Fprintln(stdout, redaction.RedactString(strings.Join(lines, "\n"), redaction.Options{})); err != nil {
 		return exitCrash
 	}

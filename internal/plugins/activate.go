@@ -374,7 +374,7 @@ func (tool skillTool) Run(_ context.Context, args map[string]any) tools.Result {
 	available := make([]string, 0, len(merged))
 	for _, skill := range merged {
 		if skill.Name == name {
-			return tools.Result{Status: tools.StatusOK, Output: skill.Content}
+			return tools.Result{Status: tools.StatusOK, Output: skills.ToolOutput(skill)}
 		}
 		available = append(available, skill.Name)
 	}

@@ -15,6 +15,7 @@
   <img alt="Go 1.26.10+" src="https://img.shields.io/badge/Go-1.26.10+-00ADD8?logo=go&logoColor=white">
   <img alt="25+ providers" src="https://img.shields.io/badge/providers-25+-34E2EA">
   <a href="https://discord.gg/CaQDS6wdFn"><img alt="Discord" src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white"></a>
+  <a href="https://vercel.com/open-source-program"><img alt="Vercel OSS Program" src="https://vercel.com/oss/program-badge-2026.svg"></a>
   <br>
   <strong>English</strong> | <a href="README_ZH.md">中文</a>
 </p>
@@ -87,9 +88,18 @@ zero exec --output-format stream-json < turns.jsonl
         </picture>
       </a>
     </td>
+    <td align="center" width="150" height="80">
+      <a href="https://vercel.com/">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/assets/vercel-logo-dark.svg">
+          <img src="docs/assets/vercel-logo.svg" alt="Vercel logo" width="120">
+        </picture>
+      </a>
+    </td>
   </tr>
   <tr>
     <td align="center"><a href="https://www.gmicloud.ai/"><strong>GMI Cloud</strong></a></td>
+    <td align="center"><a href="https://vercel.com/"><strong>Vercel</strong></a></td>
   </tr>
 </table>
 
