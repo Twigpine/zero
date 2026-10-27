@@ -93,6 +93,29 @@ func TestSubscriptionFallbackSuggestionsAreUnverified(t *testing.T) {
 	}
 }
 
+func TestSubscriptionDiscoveryHintsMatchTheirEntryPoint(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failed-%v", failed), func(t *testing.T) {
+			m := subscriptionTestModel(t)
+			action := "refresh"
+			if failed {
+				action = "retry"
+				m = m.applyModelPickerModelsDiscovered(modelPickerModelsDiscoveredMsg{
+					providerID: "chatgpt", endpointKey: "subscription", err: errors.New("expired login"),
+				})
+			}
+			text := m.modelListText()
+			if strings.Contains(text, "Ctrl+R") || !strings.Contains(text, "Run /model list to "+action) {
+				t.Fatalf("transcript must offer a usable %s command instead of the picker shortcut:\n%s", action, text)
+			}
+			m.picker = m.newModelPicker()
+			if text := m.modelPickerOverlay(100); !strings.Contains(text, "Ctrl+R") || strings.Contains(text, "Run /model list") {
+				t.Fatalf("picker must retain its keyboard shortcut:\n%s", text)
+			}
+		})
+	}
+}
+
 func TestSubscriptionModelListRefreshesWithoutOpeningPicker(t *testing.T) {
 	m := subscriptionTestModel(t)
 	m.discoverProviderModels = func(_ context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
