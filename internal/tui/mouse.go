@@ -479,11 +479,8 @@ func (m *model) selectModelPickerAtMouse(msg tea.MouseMsg) (mouseSelectionTarget
 	if !ok {
 		return mouseSelectionTarget{}, false
 	}
-	line := 3
-	if strings.TrimSpace(m.modelPickerLoadError) != "" {
-		line++
-	}
 	innerWidth := maxInt(1, modelPickerOverlayWidth(width, m.picker)-4)
+	line := 3 + len(m.modelPickerDiscoveryNoticeLines(innerWidth))
 	lastGroup := ""
 	for index := start; index < start+count; index++ {
 		item := m.picker.items[index]
