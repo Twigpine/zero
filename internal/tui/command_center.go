@@ -781,8 +781,9 @@ func (m model) resolveModelSwitchTarget(registry modelregistry.Registry, args st
 		}, true
 	}
 	if provider, ok := m.activeProviderDescriptor(); ok {
+		discovered, _ := m.discoveredModelsForActiveRoute()
 		for _, candidate := range providerModelSwitchCandidates(provider.ID, args) {
-			for _, model := range m.modelPickerLiveByProvider[provider.ID] {
+			for _, model := range discovered {
 				if strings.EqualFold(model.ID, candidate) {
 					return modelSwitchTarget{modelID: model.ID}, true
 				}

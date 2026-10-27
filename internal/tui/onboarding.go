@@ -943,8 +943,9 @@ func (m model) setupModelDiscoveryCmd(gen uint64) tea.Cmd {
 	baseSecrets := []string{m.setup.apiKey.Value()}
 	discover := m.discoverProviderModels
 	if discover == nil {
+		discoveryOptions := m.modelPickerDiscoveryOptions(providerWizardDiscoveryProfile(provider, pastedKey, m.setupBaseURL(option)))
 		discover = func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
-			return providermodeldiscovery.DiscoverCatalog(ctx, provider, profile, providermodeldiscovery.Options{})
+			return providermodeldiscovery.DiscoverCatalog(ctx, provider, profile, discoveryOptions)
 		}
 	}
 	providerID := provider.ID
