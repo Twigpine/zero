@@ -64,7 +64,7 @@ func (m model) modelListText() string {
 				Lines: modelLines,
 			},
 		},
-		Hints: append(m.modelPickerDiscoveryNotices(), "use /model <id> to switch this TUI session; /model list refreshes availability"),
+		Hints: append(m.modelPickerDiscoveryNotices("Run /model list"), "use /model <id> to switch this TUI session; /model list refreshes availability"),
 	})
 }
 

@@ -1071,7 +1071,7 @@ func (m model) renderModelPickerOverlay(width, start, count int) string {
 	searchInset := lipgloss.Width("❯ ")
 	searchPrefix := transparentSurface(zeroTheme.ink).Render(strings.Repeat(" ", searchInset))
 	lines = append(lines, fillPaletteLine(searchPrefix+renderModelPickerSearchLine(m.picker.query, maxInt(1, innerWidth-searchInset)), innerWidth, transparentSurface))
-	for _, status := range m.modelPickerDiscoveryNotices() {
+	for _, status := range m.modelPickerDiscoveryNotices("Ctrl+R") {
 		for _, line := range strings.Split(ansi.Wrap(status, maxInt(1, innerWidth-searchInset), ""), "\n") {
 			lines = append(lines, fillPaletteLine(searchPrefix+zeroTheme.faint.Render(line), innerWidth, transparentSurface))
 		}
