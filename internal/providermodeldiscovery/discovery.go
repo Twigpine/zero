@@ -20,8 +20,9 @@ import (
 )
 
 const (
-	anthropicVersion             = "2023-06-01"
-	chatGPTModelsProtocolVersion = "0.146.0"
+	anthropicVersion = "2023-06-01"
+	// GPT-6.1 Terra's documented Codex client floor: https://learn.chatgpt.com/docs/models.
+	chatGPTModelsProtocolVersion = "0.159.0"
 )
 
 type Model struct {
