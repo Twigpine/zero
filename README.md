@@ -88,9 +88,18 @@ zero exec --output-format stream-json < turns.jsonl
         </picture>
       </a>
     </td>
+    <td align="center" width="150" height="80">
+      <a href="https://vercel.com/">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/assets/vercel-logo-dark.svg">
+          <img src="docs/assets/vercel-logo.svg" alt="Vercel logo" width="120">
+        </picture>
+      </a>
+    </td>
   </tr>
   <tr>
     <td align="center"><a href="https://www.gmicloud.ai/"><strong>GMI Cloud</strong></a></td>
+    <td align="center"><a href="https://vercel.com/"><strong>Vercel</strong></a></td>
   </tr>
 </table>
 
