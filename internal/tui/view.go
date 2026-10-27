@@ -1071,10 +1071,8 @@ func (m model) renderModelPickerOverlay(width, start, count int) string {
 	searchInset := lipgloss.Width("❯ ")
 	searchPrefix := transparentSurface(zeroTheme.ink).Render(strings.Repeat(" ", searchInset))
 	lines = append(lines, fillPaletteLine(searchPrefix+renderModelPickerSearchLine(m.picker.query, maxInt(1, innerWidth-searchInset)), innerWidth, transparentSurface))
-	for _, status := range m.modelPickerDiscoveryNotices("Ctrl+R") {
-		for _, line := range strings.Split(ansi.Wrap(status, maxInt(1, innerWidth-searchInset), ""), "\n") {
-			lines = append(lines, fillPaletteLine(searchPrefix+zeroTheme.faint.Render(line), innerWidth, transparentSurface))
-		}
+	for _, line := range m.modelPickerDiscoveryNoticeLines(innerWidth) {
+		lines = append(lines, fillPaletteLine(searchPrefix+zeroTheme.faint.Render(line), innerWidth, transparentSurface))
 	}
 	lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
 	lastGroup := ""
@@ -1110,6 +1108,16 @@ func (m model) renderModelPickerOverlay(width, start, count int) string {
 		title = "Choose a model"
 	}
 	return centerRenderedBlock(styledBlockFillTitle(overlayWidth, title, lines, zeroTheme.lineStrong, lipgloss.NewStyle()), width)
+}
+
+// Share wrapped notice rows with mouse hit testing so both agree where models start.
+func (m model) modelPickerDiscoveryNoticeLines(innerWidth int) []string {
+	var lines []string
+	width := maxInt(1, innerWidth-lipgloss.Width("❯ "))
+	for _, status := range m.modelPickerDiscoveryNotices(m.modelPickerProviders(), "Ctrl+R") {
+		lines = append(lines, strings.Split(ansi.Wrap(status, width, ""), "\n")...)
+	}
+	return lines
 }
 
 func (m model) modelPickerLoadingOverlay(width int) string {

@@ -1035,6 +1035,36 @@ func TestModelPickerMouseUsesRenderedRowBoundaries(t *testing.T) {
 	}
 }
 
+func TestModelPickerMouseAccountsForWrappedDiscoveryNotices(t *testing.T) {
+	for _, label := range []string{"target-row", "refresh failed"} {
+		t.Run(label, func(t *testing.T) {
+			m := subscriptionTestModel(t)
+			m.width, m.height = 80, 40
+			m.modelPickerErrorsByProvider = map[string]string{"subscription": "login expired; authenticate again before refreshing account models"}
+			m.picker = &commandPicker{kind: pickerModel, items: []pickerItem{
+				{Group: "Models", Label: "first-row", Value: "first"},
+				{Group: "Models", Label: "target-row", Value: "target"},
+			}}
+			overlay := m.modelPickerOverlay(80)
+			rect := m.overlayMouseRect(len(viewLines(overlay)), 80)
+			for row, text := range strings.Split(plainRender(t, overlay), "\n") {
+				if !strings.Contains(text, label) {
+					continue
+				}
+				target, ok := m.selectModelPickerAtMouse(testMouseClick(tea.MouseLeft, 40, rect.y+row))
+				if label == "target-row" && (!ok || target.Value != "target") {
+					t.Fatalf("click on rendered model selected %#v, ok=%v; want target", target, ok)
+				}
+				if label == "refresh failed" && ok {
+					t.Fatalf("click on discovery notice selected %#v", target)
+				}
+				return
+			}
+			t.Fatalf("rendered picker lacks %q", label)
+		})
+	}
+}
+
 func TestModelPickerFitsMultilineRowsToViewport(t *testing.T) {
 	for _, selected := range []int{0, 5, 9} {
 		m := mouseTestModel()

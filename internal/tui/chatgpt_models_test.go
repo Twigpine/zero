@@ -48,7 +48,7 @@ func subscriptionTestModel(t *testing.T) model {
 func TestSubscriptionModelListIncludesDiscoveredModels(t *testing.T) {
 	m := subscriptionTestModel(t)
 	m = m.applyModelPickerModelsDiscovered(modelPickerModelsDiscoveredMsg{
-		providerID: "chatgpt", models: []providermodeldiscovery.Model{{ID: "gpt-future-coder", Description: "Future coder"}},
+		providerID: "chatgpt", endpointKey: "subscription", models: []providermodeldiscovery.Model{{ID: "gpt-future-coder", Description: "Future coder"}},
 	})
 	text := m.modelListText()
 	for _, want := range []string{"gpt-future-coder", "subscription", "live"} {
@@ -69,7 +69,7 @@ func TestSubscriptionPickerReportsDiscoveryFailureAndRecovery(t *testing.T) {
 	m := subscriptionTestModel(t)
 	m.picker = m.newModelPicker()
 	m = m.applyModelPickerModelsDiscovered(modelPickerModelsDiscoveredMsg{
-		providerID: "chatgpt", err: errors.New("expired login"),
+		providerID: "chatgpt", endpointKey: "subscription", err: errors.New("expired login"),
 	})
 	text := m.modelPickerOverlay(100)
 	for _, want := range []string{"expired login", "fallback", "Ctrl+R"} {
@@ -78,7 +78,7 @@ func TestSubscriptionPickerReportsDiscoveryFailureAndRecovery(t *testing.T) {
 		}
 	}
 	m = m.applyModelPickerModelsDiscovered(modelPickerModelsDiscoveredMsg{
-		providerID: "chatgpt", models: []providermodeldiscovery.Model{{ID: "gpt-future-coder"}},
+		providerID: "chatgpt", endpointKey: "subscription", models: []providermodeldiscovery.Model{{ID: "gpt-future-coder"}},
 	})
 	if text := m.modelPickerOverlay(100); strings.Contains(text, "expired login") || strings.Contains(text, "unverified") {
 		t.Fatalf("successful refresh kept fallback warning:\n%s", text)
@@ -111,6 +111,65 @@ func TestSubscriptionDiscoveryHintsMatchTheirEntryPoint(t *testing.T) {
 			m.picker = m.newModelPicker()
 			if text := m.modelPickerOverlay(100); !strings.Contains(text, "Ctrl+R") || strings.Contains(text, "Run /model list") {
 				t.Fatalf("picker must retain its keyboard shortcut:\n%s", text)
+			}
+		})
+	}
+}
+
+func TestSubscriptionModelListNoticesOnlyDescribeRefreshedProfile(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("inactive-failed-%v", failed), func(t *testing.T) {
+			m := subscriptionTestModel(t)
+			inactive := m.providerProfile
+			inactive.Name = "chatgpt"
+			m.savedProviders = []config.ProviderProfile{m.providerProfile, inactive}
+			if failed {
+				m = m.applyModelPickerModelsDiscovered(modelPickerModelsDiscoveredMsg{
+					providerID: "chatgpt", endpointKey: "chatgpt", err: errors.New("inactive login expired"),
+				})
+			}
+			var refreshed []string
+			m.discoverProviderModels = func(_ context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+				refreshed = append(refreshed, profile.Name)
+				return []providermodeldiscovery.Model{{ID: "gpt-active-account"}}, nil
+			}
+			m.input.SetValue("/model list")
+			updated, cmd := m.Update(testKey(tea.KeyEnter))
+			if cmd == nil {
+				t.Fatal("missing active-profile refresh")
+			}
+			updated, _ = updated.(model).Update(cmd())
+			next := updated.(model)
+			if len(refreshed) != 1 || refreshed[0] != "subscription" {
+				t.Fatalf("/model list refreshed %#v, want only the active profile", refreshed)
+			}
+			if text := next.modelListText(); strings.Contains(text, "unverified") || strings.Contains(text, "inactive login expired") {
+				t.Fatalf("active-profile transcript advertised an inactive profile's refresh:\n%s", text)
+			}
+			next.picker = next.newModelPicker()
+			if text := next.modelPickerOverlay(110); !strings.Contains(text, "unverified") || !strings.Contains(text, "Ctrl+R") || (failed && !strings.Contains(text, "inactive login expired")) {
+				t.Fatalf("picker must keep inactive-profile notices with its all-profile refresh:\n%s", text)
+			}
+		})
+	}
+}
+
+func TestSubscriptionCanonicalProfileDoesNotSupplyAnotherAccount(t *testing.T) {
+	for _, layer := range []string{"active route", "picker rows"} {
+		t.Run(layer, func(t *testing.T) {
+			m := subscriptionTestModel(t)
+			m = m.applyModelPickerModelsDiscovered(modelPickerModelsDiscoveredMsg{
+				providerID: "chatgpt", endpointKey: "chatgpt", models: []providermodeldiscovery.Model{{ID: "gpt-inactive-account"}},
+			})
+			if layer == "active route" {
+				if models, ok := m.discoveredModelsForActiveRoute(); ok {
+					t.Fatalf("active profile borrowed the canonical profile's models: %#v", models)
+				}
+			} else {
+				items := m.savedProviderModelPickerItems(m.providerProfile, m.providerName, m.modelName)
+				if contains(pickerValues(items), "gpt-inactive-account") {
+					t.Fatal("active picker rows borrowed the canonical profile's models")
+				}
 			}
 		})
 	}
@@ -215,7 +274,7 @@ func TestSubscriptionPickerRedactsDiscoveryErrors(t *testing.T) {
 			m := subscriptionTestModel(t)
 			m.picker = m.newModelPicker()
 			m = m.applyModelPickerModelsDiscovered(modelPickerModelsDiscoveredMsg{
-				providerID: "chatgpt", err: errors.New("request failed with opaque-" + split + "subscription-bearer"), secrets: []string{secret},
+				providerID: "chatgpt", endpointKey: "subscription", err: errors.New("request failed with opaque-" + split + "subscription-bearer"), secrets: []string{secret},
 			})
 			if text := m.modelPickerOverlay(100); strings.Contains(text, "subscription-bearer") || !strings.Contains(text, "request failed") {
 				t.Fatalf("discovery error was not safely rendered: %s", text)
