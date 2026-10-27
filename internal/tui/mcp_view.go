@@ -6,6 +6,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/Twigpine/zero/internal/mcp"
 )
 
 type MCPViewState struct {
@@ -459,17 +461,50 @@ func mcpServerActionLine(server MCPServerView) string {
 	if name == "" {
 		return ""
 	}
-	actions := []string{"zero mcp check " + name}
-	if strings.EqualFold(strings.TrimSpace(server.State), "disabled") {
-		actions = append(actions, "zero mcp enable "+name)
-	} else {
-		actions = append(actions, "zero mcp disable "+name)
+	// check, enable, disable and remove look the server up by its exact config
+	// key, the same identity the manager overlay dispatches with. oauth login
+	// matches the trimmed name instead, so it keeps the canonical spelling.
+	var actions []string
+	if key, ok := mcpActionKeyArg(server); ok {
+		actions = append(actions, "zero mcp check "+key)
+		if strings.EqualFold(strings.TrimSpace(server.State), "disabled") {
+			actions = append(actions, "zero mcp enable "+key)
+		} else {
+			actions = append(actions, "zero mcp disable "+key)
+		}
+		actions = append(actions, "zero mcp remove "+key)
 	}
-	actions = append(actions, "zero mcp remove "+name)
 	if strings.EqualFold(strings.TrimSpace(server.Auth), "oauth") {
 		actions = append(actions, "zero mcp oauth login "+name)
 	}
+	if len(actions) == 0 {
+		return ""
+	}
 	return "    actions: " + strings.Join(actions, " | ")
+}
+
+// mcpActionKeyArg spells a row's config key as one argument that still reaches
+// that exact key when pasted into a shell or into /mcp.
+//
+// A valid key is a server name with optional padding, so plain spaces are the
+// only thing that needs quoting. Double quotes keep them in POSIX shells,
+// PowerShell, cmd and /mcp alike, since nothing else in a valid name is special
+// inside them. Any other padding (a tab, a newline, a Unicode space) cannot be
+// shown as something a reader can type back, so the row gets no key-addressed
+// hint rather than one that runs against a different entry.
+func mcpActionKeyArg(server MCPServerView) (string, bool) {
+	key := server.ConfigKey
+	if key == "" {
+		key = strings.TrimSpace(server.Name)
+	}
+	core := strings.Trim(key, " ")
+	if core == "" || core != strings.TrimSpace(core) || mcp.ValidateServerName(core) != nil {
+		return "", false
+	}
+	if core != key {
+		return `"` + key + `"`, true
+	}
+	return key, true
 }
 
 func mcpOAuthActionLine(server MCPOAuthServerView) string {
