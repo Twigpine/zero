@@ -306,7 +306,8 @@ func (m model) savedProviderModelPickerItems(profile config.ProviderProfile, act
 	if endpointKey != "" {
 		discovered = m.modelPickerLiveByProvider[endpointKey]
 	}
-	if len(discovered) == 0 && hasDescriptor && !genericProviderCatalogID(descriptor.ID) {
+	if len(discovered) == 0 && hasDescriptor && !genericProviderCatalogID(descriptor.ID) &&
+		(descriptor.ID != "chatgpt" || strings.TrimSpace(profile.Name) == "") {
 		discovered = m.modelPickerLiveByProvider[descriptor.ID]
 	}
 
@@ -488,29 +489,35 @@ func (m model) modelListDiscoveryCmd() tea.Cmd {
 	}
 }
 
-func (m model) modelPickerDiscoveryNotices(refreshAction string) []string {
+// The caller supplies only profiles that its refresh action can refresh.
+func (m model) modelPickerDiscoveryNotices(profiles []config.ProviderProfile, refreshAction string) []string {
 	var notices []string
 	if status := strings.TrimSpace(m.modelPickerLoadError); status != "" {
 		notices = append(notices, status)
 	}
-	for _, profile := range m.modelPickerProviders() {
+	for _, profile := range profiles {
 		descriptor, ok := m.descriptorForProfile(profile)
 		if !ok {
 			continue
 		}
 		key := providerEndpointKey(profile, descriptor)
 		failure := m.modelPickerErrorsByProvider[key]
-		if failure == "" {
+		catalogFallback := descriptor.ID != "chatgpt" || strings.TrimSpace(profile.Name) == ""
+		if failure == "" && catalogFallback {
 			failure = m.modelPickerErrorsByProvider[descriptor.ID]
+		}
+		discovered := m.modelPickerLiveByProvider[key]
+		if len(discovered) == 0 && catalogFallback {
+			discovered = m.modelPickerLiveByProvider[descriptor.ID]
 		}
 		label := firstProviderDisplayValue(profile.Name, descriptor.Name)
 		if failure != "" {
 			source := "fallback suggestions (unverified)"
-			if len(m.modelPickerLiveByProvider[key]) > 0 || len(m.modelPickerLiveByProvider[descriptor.ID]) > 0 {
+			if len(discovered) > 0 {
 				source = "previously discovered models"
 			}
 			notices = append(notices, fmt.Sprintf("%s: %s; refresh failed: %s. %s to retry.", label, source, failure, refreshAction))
-		} else if descriptor.ID == "chatgpt" && len(m.modelPickerLiveByProvider[key]) == 0 && len(m.modelPickerLiveByProvider[descriptor.ID]) == 0 {
+		} else if descriptor.ID == "chatgpt" && len(discovered) == 0 {
 			notices = append(notices, label+": fallback suggestions (unverified). "+refreshAction+" to refresh.")
 		}
 	}
@@ -954,6 +961,11 @@ func (m model) activeDiscoveryKeys() []string {
 	descriptor, hasDescriptor := m.activeProviderDescriptor()
 	if key := providerEndpointKey(m.providerProfile, descriptor); key != "" {
 		add(key)
+	}
+	if hasDescriptor && descriptor.ID == "chatgpt" && strings.TrimSpace(m.providerProfile.Name) != "" {
+		// The canonical profile may itself be named "chatgpt". Its cache key
+		// must not become a catalog-wide fallback for a different account.
+		return keys
 	}
 	if m.providerProfile.Name != "" {
 		add(m.providerProfile.Name)
