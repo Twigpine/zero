@@ -85,10 +85,14 @@ func resolveExecPermissionMode(options execOptions) (agent.PermissionMode, error
 			return agent.PermissionModeMemberAuto, nil
 		case "ask":
 			return agent.PermissionModeAsk, nil
-		case "unsafe", "high":
-			return agent.PermissionModeUnsafe, nil
+		// full-auto is the canonical spelling this PR establishes; unsafe stays as
+		// the deprecated alias so existing invocations keep working. Without the
+		// canonical value here, `--permission-mode full-auto` failed usage
+		// validation before NormalizePermissionMode was ever reached.
+		case "full-auto", "full_auto", "unsafe", "high":
+			return agent.PermissionModeFullAuto, nil
 		default:
-			return "", execUsageError{fmt.Sprintf("Invalid permission mode %q. Expected plan, spec-draft, auto, member, ask, or unsafe.", options.permissionMode)}
+			return "", execUsageError{fmt.Sprintf("Invalid permission mode %q. Expected plan, spec-draft, auto, member, ask, or full-auto.", options.permissionMode)}
 		}
 	}
 	// Validate --auto first, regardless of --skip-permissions-unsafe, so an
@@ -105,12 +109,12 @@ func resolveExecPermissionMode(options execOptions) (agent.PermissionMode, error
 		// swarm launcher sets this; it is not part of the public low|medium|high set.
 		mode = agent.PermissionModeMemberAuto
 	case "high":
-		mode = agent.PermissionModeUnsafe
+		mode = agent.PermissionModeFullAuto
 	default:
 		return "", execUsageError{fmt.Sprintf("Invalid autonomy level %q. Expected low, medium, or high.", options.autonomy)}
 	}
 	if options.skipPermissionsUnsafe {
-		return agent.PermissionModeUnsafe, nil
+		return agent.PermissionModeFullAuto, nil
 	}
 	return mode, nil
 }

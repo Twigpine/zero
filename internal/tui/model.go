@@ -151,9 +151,19 @@ type model struct {
 	// entered PermissionModePlan, so /plan off can restore it exactly (mirrors
 	// the execProfile displaced/applied pattern below).
 	permissionModeBeforePlan agent.PermissionMode
-	selfCorrectTests         bool
-	reasoningEffort          modelregistry.ReasoningEffort
-	serviceTier              string
+	// unsafeArmed means the last keypress was a shift+tab that offered unsafe
+	// mode, and the next one commits it. Unsafe turns permission prompts off
+	// entirely, so it is the one mode that must not be reachable by a single
+	// keypress landing on it.
+	//
+	// Cleared unconditionally at the top of the key handler and re-armed only by
+	// the shift+tab branch, so forgetting a path clears it rather than leaving it
+	// set. A stale flag would turn a later innocent shift+tab into a silent drop
+	// into unsafe, which is exactly the accident the arming exists to prevent.
+	unsafeArmed      bool
+	selfCorrectTests bool
+	reasoningEffort  modelregistry.ReasoningEffort
+	serviceTier      string
 	// Active execution profile (set by /profile; applies to the NEXT run).
 	// The displaced/applied pairs let a switch or /profile balanced restore
 	// exactly what the profile replaced while leaving later manual overrides
@@ -733,6 +743,24 @@ type peerReceiptErrorMsg struct{ err error }
 
 type peerApprovalExpiredMsg struct{ messageID string }
 
+// isPeerDelivery reports whether msg is cross-session peer traffic: every
+// peer*Msg type declared above, and nothing else.
+//
+// The list is closed on purpose and a test reads this file to keep it honest. A
+// new peer message type that is not added here fails
+// TestEveryPeerMessageTypeEndsTheFullAutoOffer by name, because the thing this
+// decides (see updateModel) is a permission boundary, and a type that was merely
+// forgotten would keep a full-auto offer alive across traffic the user was
+// looking at.
+func isPeerDelivery(msg tea.Msg) bool {
+	switch msg.(type) {
+	case peerMessageMsg, peerStatusMsg, peerHeldReleasedMsg, peerDecisionMsg,
+		peerRuntimeErrorMsg, peerReceiptErrorMsg, peerApprovalExpiredMsg:
+		return true
+	}
+	return false
+}
+
 type agentRowMsg struct {
 	runID int
 	row   transcriptRow
@@ -987,6 +1015,14 @@ func newModel(ctx context.Context, options Options) model {
 	if permissionMode == "" {
 		permissionMode = agent.PermissionModeAuto
 	}
+	// Normalized HERE, not only inside agent.Run. The TUI makes its own
+	// mode-specific decisions before the run starts, and it tests for the
+	// canonical PermissionModeFullAuto. An entry point handed the accepted legacy
+	// "unsafe" spelling therefore rejected ! shell escapes, published a prompting
+	// peer identity and chose low self-correction, while agent.Run normalized the
+	// very same run to full-auto. One value, two behaviours, decided by which
+	// layer looked at it.
+	permissionMode = agent.NormalizePermissionMode(permissionMode)
 
 	input := textinput.New()
 	input.Prompt = "❯ "
@@ -1446,6 +1482,25 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if next, cmd, routed := m.routeBTWParentMessage(msg); routed {
 		return next, cmd
 	}
+	// CROSS-SESSION TRAFFIC ENDS A FULL-AUTO OFFER, every kind of it.
+	//
+	// The offer is valid only until the next user-visible input transition,
+	// whatever delivers it (see sttPartialMsg below). Paste, blur, mouse, the
+	// clipboard and dictation all honoured that; peer delivery did not. A peer
+	// message raises an approval prompt or lands in the inbox, a held message is
+	// released after a mode sync, a status line or a peer error is appended to the
+	// transcript, an approval expires and its prompt goes away. Each of those
+	// changes what the user is looking at, so shift+tab, then peer traffic, then
+	// ctrl+g entered full-auto with the confirmation several events behind them.
+	//
+	// Cleared HERE, for the whole family at the dispatch boundary, rather than in
+	// the three handlers the report named. Those were the ones that reproduced;
+	// the decision, expiry and error deliveries are the same kind of transition
+	// and were armed the same way, and a rule written per handler is a rule the
+	// next handler forgets. Reported by @jatmn.
+	if isPeerDelivery(msg) {
+		m.unsafeArmed = false
+	}
 	switch msg := msg.(type) {
 	case uv.CellSizeEvent:
 		if msg.Width > 0 && msg.Height > 0 {
@@ -1512,6 +1567,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.MouseMsg:
+		// Any mouse event is input the user meant, so it answers a pending
+		// full-auto offer with "not now" before anything else looks at it.
+		m = m.cancelUnsafeOfferOnMouse(msg)
 		// Attached to a live terminal: the overlay owns the viewport, so mouse
 		// events go nowhere rather than hitting transcript selection below.
 		if m.terminalAttach != nil {
@@ -1578,6 +1636,19 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case providerManagerCleanupMsg:
 		return m.applyProviderManagerCleanup(msg)
 	case clipboardReadMsg:
+		// DEFERRED INPUT IS STILL INPUT, and it cancels the offer exactly as a
+		// synchronous paste does. tea.PasteMsg below clears the arm for this
+		// reason, but a right-click paste does not arrive that way: it starts
+		// pasteFromClipboardCmd, the OS clipboard read takes time, and Shift+Tab
+		// can reach the full-auto offer while it is in flight. The result then
+		// lands here, inserts text through routePaste, and left the arm alive, so
+		// an ordinary ctrl+g afterwards silently entered full-auto with the user
+		// several actions past the confirmation they were offered.
+		//
+		// Cleared before the branches rather than inside them, because a failed
+		// read and an empty-clipboard image probe are both still the completion
+		// of an input action the user started.
+		m.unsafeArmed = false
 		// Result of a right-click paste. Insert on success; surface a brief
 		// status if the clipboard couldn't be read (e.g. no clipboard utility on
 		// a remote session). An empty clipboard is a silent no-op.
@@ -1595,6 +1666,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.routePaste(msg.content)
 	case clipboardImageMsg:
+		// Same rule as clipboardReadMsg: this is the tail of a paste the user
+		// started, arriving late. Attaching an image is input.
+		m.unsafeArmed = false
 		if msg.err != nil {
 			return m.appendImageNotice("Clipboard image read failed: " + msg.err.Error()), nil
 		}
@@ -1603,6 +1677,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.attachClipboardImage(msg.data, msg.mediaType), nil
 	case tea.PasteMsg:
+		// A paste is input the user meant, so it answers the pending full-auto
+		// offer with "not now" exactly as any other key does. Without this the
+		// offer stays live across the paste and an unrelated ctrl+g afterwards
+		// silently enters full-auto.
+		m.unsafeArmed = false
 		// While attached to a live terminal, a paste forwards verbatim to the
 		// PTY stdin — never into the composer or transcript.
 		if m.terminalAttach != nil {
@@ -1618,8 +1697,26 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case dictationStartedMsg:
 		return m.handleDictationStarted(msg)
 	case dictationTranscribedMsg:
+		// Transcribed speech is committed into the composer, so it is deferred
+		// input on the same rule as the clipboard deliveries above. Starting
+		// dictation is a keypress and already clears the arm; this covers the
+		// delivery that lands afterwards.
+		m.unsafeArmed = false
 		return m.handleDictationTranscribed(msg)
 	case sttPartialMsg:
+		// A STREAMING PARTIAL IS AN INPUT TRANSITION TOO, and the note above about
+		// starting dictation being a keypress does not cover it. The offer can be
+		// armed AFTER dictation is already running: shift+tab offers full-auto,
+		// the next partial rewrites the composer, and active dictation is not a
+		// blocking modal, so an ordinary ctrl+g still confirmed. The user is
+		// several actions past the confirmation by then.
+		//
+		// Cleared at the dispatch boundary rather than inside
+		// handleDictationPartial, so a future partial-delivery path inherits the
+		// rule instead of having to remember it. The rule is not "these particular
+		// message types": an offer is valid only until the next user-visible input
+		// transition, whatever delivers it.
+		m.unsafeArmed = false
 		return m.handleDictationPartial(msg), nil
 	case sttDownloadProgressMsg:
 		return m.handleDictationDownloadProgress(msg), nil
@@ -1680,6 +1777,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !keyIs(msg, tea.KeyEnter) {
 			m.lastCharTime = now
 		}
+		// Disarm unsafe mode for EVERY keypress, before any branch can return,
+		// and let only the shift+tab branch below re-arm from this local. The
+		// inversion is deliberate: clearing in each of the many paths that should
+		// cancel would mean a missed one leaves the flag set, and a stale flag
+		// turns a later innocent shift+tab into a silent drop into unsafe. This
+		// way a path nobody thought about cancels the arm, which is the harmless
+		// direction to be wrong in.
+		unsafeWasArmed := m.unsafeArmed
+		m.unsafeArmed = false
 		// Enter the solid-while-typing state right away: only composerBlinkMsg
 		// evaluates the typing threshold, so if the blink phase had just hidden
 		// the caret, the typed character would render caret-less for up to a
@@ -2008,13 +2114,35 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.pendingAskUser != nil {
 				return m.moveAskUserTab(-1), nil
 			}
-			// shift+tab toggles the permission mode between Auto and Ask (Unsafe
-			// is intentionally not reachable by a casual keypress — see
-			// nextPermissionMode), but only when nothing modal is up: a permission
-			// prompt, ask_user questionnaire, or open picker all take precedence
-			// and let the key fall through to their own handlers below.
+			// shift+tab cycles the permission mode, but only when nothing modal is
+			// up: a permission prompt, ask_user questionnaire, or open picker all
+			// take precedence and let the key fall through to their own handlers.
+			//
+			// Unsafe is in the cycle but takes two presses to reach, because it
+			// turns permission prompts off entirely. See advancePermissionMode.
 			if m.noBlockingModal() {
-				m.permissionMode = nextPermissionMode(m.permissionMode)
+				m.permissionMode, m.unsafeArmed = advancePermissionMode(m.permissionMode, unsafeWasArmed)
+				// An offer the footer cannot show is not an offer. Raising it
+				// anyway would leave a truncated chip on screen and a live
+				// confirmation nobody was asked for; the next press re-offers, so
+				// full-auto stays two visible presses away, never a hidden one.
+				if m.unsafeArmed && !m.offerKeyVisible() {
+					m.unsafeArmed = false
+				}
+				// The peer record carries the permission class, so it has to be
+				// resynced wherever the mode changes. This branch and the ctrl+g
+				// confirm below are now two such places, not one.
+				m = m.syncPeerIdentity()
+				return m, nil
+			}
+		case keyCtrl(msg, 'g') && m.offerConfirmable(unsafeWasArmed):
+			// Confirms an unsafe offer raised by the shift+tab immediately before
+			// this. Guarded on unsafeWasArmed in the case itself rather than inside
+			// the body, so without a live offer this key is not consumed at all and
+			// falls through to whatever would normally handle it. That is what
+			// keeps ctrl+g from being a standalone shortcut into unsafe mode.
+			if m.noBlockingModal() {
+				m.permissionMode, _ = confirmUnsafePermissionMode(m.permissionMode, unsafeWasArmed)
 				m = m.syncPeerIdentity()
 				return m, nil
 			}
@@ -2345,6 +2473,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.BlurMsg:
+		// A focus loss ends the offer, for the same reason a paste or a click does:
+		// the offer is only valid for the keypress immediately after it, and leaving
+		// the terminal is a context switch, not that keypress. Without this, the
+		// sequence shift+tab, away, back, ctrl+g enters full-auto with no live
+		// offer in front of it and silently turns permission prompts off.
+		//
+		// Cleared here because a BlurMsg never reaches the tea.KeyPressMsg
+		// handler, so the keypress-wide reset that cancels the offer for every
+		// other key never runs for it.
+		m.unsafeArmed = false
 		var petMouseCmd tea.Cmd
 		if m.petDragActive {
 			pixelDrag := m.petPixelDrag
@@ -2535,6 +2673,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeFreePetPosition(m.width, m.height, msg.Width, msg.Height)
 		m.width = msg.Width
 		m.height = msg.Height
+		// A live offer whose key the new width can no longer show is withdrawn
+		// rather than left confirmable behind a truncated chip.
+		if m.unsafeArmed && !m.offerKeyVisible() {
+			m.unsafeArmed = false
+		}
 		if msg.Width < runDetailsMinWidth {
 			m.runDetailsOpen = false
 		}
@@ -5123,10 +5266,10 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		// the explicit unsafe permission mode. In auto/ask mode it is not executed;
 		// the user is told how to enable it. This keeps a sandbox-bypassing exec
 		// from running without a deliberate safety posture.
-		if m.permissionMode != agent.PermissionModeUnsafe {
+		if m.permissionMode != agent.PermissionModeFullAuto {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{
 				kind: actionAppendSystem,
-				text: "Shell escape (!) is disabled in " + string(m.permissionMode) + " mode — it bypasses the sandbox. Relaunch with --skip-permissions-unsafe to run shell commands directly.",
+				text: "Shell escape (!) is disabled in " + string(m.permissionMode) + " mode — it bypasses the sandbox. Press shift+tab to full-auto (then ctrl+g to confirm), or relaunch with --full-auto.",
 			})
 			return m, nil
 		}
@@ -5555,7 +5698,7 @@ func (m model) runAgent(runID int, runCtx context.Context, prompt string, images
 // while restrictive modes only surface the failure. Mirrors exec's --auto levels.
 func selfCorrectAutonomyForMode(mode agent.PermissionMode) string {
 	switch mode {
-	case agent.PermissionModeUnsafe:
+	case agent.PermissionModeFullAuto:
 		return "high"
 	case agent.PermissionModeAuto:
 		return "medium"
@@ -6300,4 +6443,24 @@ func toolResultRowText(result agent.ToolResult) string {
 		status = tools.StatusOK
 	}
 	return fmt.Sprintf("tool result: %s %s %s", result.Name, status, truncateTUIOutput(result.ModelOutput(), tuiToolOutputLimit))
+}
+
+// cancelUnsafeOfferOnMouse withdraws a pending full-auto offer when the user
+// acts with the mouse.
+//
+// Deliberate actions only. Passive motion is excluded because terminals report
+// it continuously once motion tracking is on (see the AllMotion/CellMotion
+// fallback in syncMouseCapture): treating a twitch as an answer would retract
+// the offer before anyone could accept it, and a gate that cannot be used gets
+// worked around rather than respected.
+//
+// A click, a release or a wheel turn is a real decision to do something else,
+// and the offer must not survive it. Otherwise a ctrl+g pressed later, for its
+// ordinary meaning, commits full-auto with nobody having agreed to it.
+func (m model) cancelUnsafeOfferOnMouse(msg tea.MouseMsg) model {
+	if _, motion := msg.(tea.MouseMotionMsg); motion {
+		return m
+	}
+	m.unsafeArmed = false
+	return m
 }

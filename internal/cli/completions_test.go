@@ -153,8 +153,11 @@ func TestCompletionTreeCoversAliasesNestingAndCommonFlags(t *testing.T) {
 		byPath[context.path] = context.candidates
 	}
 
-	assertCandidates(t, byPath[""], "sessions", "session", "plugins", "plugin", "worktrees", "worktree", "--add-dir", "--theme", "-p", "--prompt")
-	assertCandidates(t, byPath["exec"], "--model", "--cwd", "--worktree", "--output-format", "--resume", "--skip-permissions-unsafe")
+	// --full-auto is the canonical spelling and --skip-permissions-unsafe its
+	// compatibility alias. BOTH are asserted: testing only the surviving alias is
+	// what lets a later cleanup quietly stop suggesting the documented flag.
+	assertCandidates(t, byPath[""], "sessions", "session", "plugins", "plugin", "worktrees", "worktree", "--add-dir", "--theme", "-p", "--prompt", "--full-auto", "--skip-permissions-unsafe")
+	assertCandidates(t, byPath["exec"], "--model", "--cwd", "--worktree", "--output-format", "--resume", "--full-auto", "--skip-permissions-unsafe")
 	assertCandidates(t, byPath["worktrees"], "prepare", "release")
 	assertCandidates(t, byPath["worktree"], "prepare", "release")
 	assertCandidates(t, byPath["daemon"], "start", "stop", "status", "run", "attach")

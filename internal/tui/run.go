@@ -6,13 +6,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/term"
 
-	"github.com/Twigpine/zero/internal/peermsg"
 	"github.com/Twigpine/zero/internal/terminalpet"
 )
 
@@ -81,33 +79,19 @@ func Run(ctx context.Context, options Options) int {
 	}
 	program = tea.NewProgram(initialModel, programOpts...)
 	peerStarted := false
+	var peerDeliver *peerForwarder
 	if options.PeerService != nil {
-		options.PeerService.SetStatusHandler(func(event peermsg.StatusEvent) {
-			forward(peerStatusMsg{event: event})
-		})
-		options.PeerService.SetHeldEvictionHandler(func(messageID string) {
-			forward(peerApprovalExpiredMsg{messageID: messageID})
-		})
-		options.PeerService.SetHeldReleaseHandler(func(message peermsg.InboundMessage) {
-			forward(peerHeldReleasedMsg{message: message})
-		})
-		if err := options.PeerService.Start(func(message peermsg.InboundMessage) bool {
-			admit := make(chan bool, 1)
-			forward(peerMessageMsg{message: message, admit: admit})
-			select {
-			case accepted := <-admit:
-				return accepted
-			case <-time.After(4 * time.Second):
-				return false
-			}
-		}); err != nil {
-			forward(peerRuntimeErrorMsg{err: err})
-		} else {
-			peerStarted = true
-		}
+		// Through the forwarder, never program.Send directly: a held-release
+		// callback can fire on the event loop's own goroutine, from inside
+		// Update. See peerForwarder.
+		peerDeliver = newPeerForwarder(forward)
+		peerStarted = wirePeerService(options.PeerService, peerDeliver.send)
 	}
 
 	_, runErr := program.Run()
+	if peerDeliver != nil {
+		peerDeliver.stop()
+	}
 	clearErr := petOutput.clearImage()
 	var closeErr error
 	if peerStarted {

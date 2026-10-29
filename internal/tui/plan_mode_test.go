@@ -119,13 +119,27 @@ func TestPlanCommandOnTwiceDoesNotClobberSavedMode(t *testing.T) {
 	}
 }
 
-// TestNextPermissionModeLeavesPlanUntouched confirms the shift+tab Auto<->Ask
-// toggle cannot silently exit plan mode: folding Plan to Ask would be a LESS
-// strict landing (Ask still permits write/shell tools with a prompt), so the
-// read-only guarantee must only be given up via the explicit /plan off exit.
+// TestNextPermissionModeLeavesPlanUntouched confirms the shift+tab cycle cannot
+// silently exit plan mode: folding Plan to Ask would be a LESS strict landing
+// (Ask still permits write/shell tools with a prompt), so the read-only
+// guarantee must only be given up via the explicit /plan off exit.
+//
+// The second return value matters as much as the first. Plan must never carry a
+// full-auto OFFER either, or two presses from Plan would reach the one mode that
+// turns permission prompts off entirely, starting from the one mode that
+// promises no mutation at all.
 func TestNextPermissionModeLeavesPlanUntouched(t *testing.T) {
-	if got := nextPermissionMode(agent.PermissionModePlan); got != agent.PermissionModePlan {
-		t.Fatalf("nextPermissionMode(Plan) = %s, want Plan unchanged", got)
+	got, offered := advancePermissionMode(agent.PermissionModePlan, false)
+	if got != agent.PermissionModePlan {
+		t.Fatalf("advancePermissionMode(Plan) = %s, want Plan unchanged", got)
+	}
+	if offered {
+		t.Fatal("shift+tab from Plan offered full-auto, so a second press would leave read-only mode for the least strict one")
+	}
+	// And from a live offer, which is the state a stray earlier press can leave
+	// behind: still Plan, still no offer.
+	if got, offered = advancePermissionMode(agent.PermissionModePlan, true); got != agent.PermissionModePlan || offered {
+		t.Fatalf("advancePermissionMode(Plan, offered) = %s/%v, want Plan/false", got, offered)
 	}
 }
 

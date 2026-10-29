@@ -1908,7 +1908,7 @@ func TestPermissionRowRendersSandboxBlocks(t *testing.T) {
 		ToolName:       "write_file",
 		Action:         agent.PermissionActionDeny,
 		Permission:     "prompt",
-		PermissionMode: agent.PermissionModeUnsafe,
+		PermissionMode: agent.PermissionModeFullAuto,
 		Autonomy:       "high",
 		SideEffect:     "write",
 		Reason:         "workspace boundary enforced",
@@ -2088,11 +2088,18 @@ func TestShiftTabCyclesPermissionMode(t *testing.T) {
 	m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeAuto})
 	m.width = 96
 
-	// shift+tab toggles Auto<->Ask only; Unsafe is intentionally NOT reachable by
-	// a casual keypress (it disables permission prompts).
+	// The cycle has three positions now: Auto, Ask, and an unsafe OFFER that
+	// sits on Ask until it is either confirmed with the dedicated key or
+	// declined by pressing on. So returning to Auto costs two presses, which is
+	// simply what a third position means.
+	//
+	// shift+tab itself must still never land on Unsafe, however many times it is
+	// pressed; that is asserted inside the loop and again in
+	// TestHoldingShiftTabNeverCommitsUnsafe.
 	for _, want := range []agent.PermissionMode{
-		agent.PermissionModeAsk,
-		agent.PermissionModeAuto,
+		agent.PermissionModeAsk,  // Auto -> Ask
+		agent.PermissionModeAsk,  // offers unsafe, stays on Ask
+		agent.PermissionModeAuto, // declines the offer, completes the cycle
 	} {
 		updated, cmd := m.Update(testKeyShift(tea.KeyTab))
 		m = updated.(model)
@@ -2102,7 +2109,7 @@ func TestShiftTabCyclesPermissionMode(t *testing.T) {
 		if m.permissionMode != want {
 			t.Fatalf("expected permission mode %q after shift+tab, got %q", want, m.permissionMode)
 		}
-		if m.permissionMode == agent.PermissionModeUnsafe {
+		if m.permissionMode == agent.PermissionModeFullAuto {
 			t.Fatalf("shift+tab must never land on Unsafe")
 		}
 	}
@@ -2893,17 +2900,112 @@ func testSessionStore(t *testing.T) *sessions.Store {
 	})
 }
 
-func TestNextPermissionModeFoldsUnsafeToAsk(t *testing.T) {
-	if got := nextPermissionMode(agent.PermissionModeAuto); got != agent.PermissionModeAsk {
-		t.Fatalf("Auto -> %s, want Ask", got)
+// shift+tab alone must never reach unsafe, however many times it is pressed,
+// and the cycle must stay complete. An earlier draft made the second press
+// commit unsafe, which silently removed Ask -> Auto from the cycle: this walks
+// the whole loop so that cannot come back unnoticed.
+func TestPermissionModeCycleNeverReachesUnsafeOnItsOwn(t *testing.T) {
+	mode := agent.PermissionModeAuto
+	offered := false
+	seen := map[agent.PermissionMode]bool{mode: true}
+
+	for press := 0; press < 8; press++ {
+		mode, offered = advancePermissionMode(mode, offered)
+		if mode == agent.PermissionModeFullAuto {
+			t.Fatalf("press %d landed on Unsafe with shift+tab alone", press+1)
+		}
+		seen[mode] = true
 	}
-	if got := nextPermissionMode(agent.PermissionModeAsk); got != agent.PermissionModeAuto {
-		t.Fatalf("Ask -> %s, want Auto", got)
+	for _, want := range []agent.PermissionMode{agent.PermissionModeAuto, agent.PermissionModeAsk} {
+		if !seen[want] {
+			t.Errorf("%s is unreachable by cycling, so the toggle lost a mode", want)
+		}
 	}
-	// Unsafe must fold to the STRICTER Ask, never Auto (toggling an Unsafe session
-	// must not make it less strict).
-	if got := nextPermissionMode(agent.PermissionModeUnsafe); got != agent.PermissionModeAsk {
-		t.Fatalf("Unsafe -> %s, want Ask", got)
+}
+
+// Declining is what keeps the cycle whole: the press after an offer continues
+// to Auto rather than committing.
+func TestDecliningTheUnsafeOfferContinuesTheCycle(t *testing.T) {
+	mode, offered := advancePermissionMode(agent.PermissionModeAsk, false)
+	if mode != agent.PermissionModeAsk || !offered {
+		t.Fatalf("first press from Ask = (%s, offered=%v), want (Ask, true)", mode, offered)
+	}
+	mode, offered = advancePermissionMode(mode, offered)
+	if mode != agent.PermissionModeAuto || offered {
+		t.Fatalf("second press = (%s, offered=%v), want (Auto, false)", mode, offered)
+	}
+}
+
+// The confirm key is inert without a live offer. This is the property that
+// stops ctrl+g being a one-key shortcut into unsafe.
+func TestConfirmDoesNothingWithoutALiveOffer(t *testing.T) {
+	for _, mode := range []agent.PermissionMode{agent.PermissionModeAuto, agent.PermissionModeAsk} {
+		got, confirmed := confirmUnsafePermissionMode(mode, false)
+		if got != mode || confirmed {
+			t.Errorf("confirm with no offer from %s = (%s, %v), want unchanged", mode, got, confirmed)
+		}
+	}
+	got, confirmed := confirmUnsafePermissionMode(agent.PermissionModeAsk, true)
+	if got != agent.PermissionModeFullAuto || !confirmed {
+		t.Errorf("confirm with a live offer = (%s, %v), want (Unsafe, true)", got, confirmed)
+	}
+}
+
+// The legacy "unsafe" spelling never arrives as the Go constant. It comes off a
+// saved config, a launch script or a wrapper, and newModel is where the TUI
+// commits to a mode, so the alias has to be canonical HERE — one layer down,
+// agent.Run normalizes the same run to full-auto, and the two layers disagreeing
+// about one value is the whole bug. Both consequences are asserted because they
+// fail in opposite directions: the escape gate refuses a mode the user asked
+// for, and the footer names a mode the run is not in.
+func TestLegacyUnsafeAliasIsCanonicalAtTheTUIBoundary(t *testing.T) {
+	m := newModel(context.Background(), Options{PermissionMode: agent.PermissionMode("unsafe")})
+	// Reported rather than fatal, so the two consequences below are still
+	// exercised and named when the normalization goes missing.
+	if m.permissionMode != agent.PermissionModeFullAuto {
+		t.Errorf("newModel kept the legacy spelling: permissionMode = %q, want %q", m.permissionMode, agent.PermissionModeFullAuto)
+	}
+
+	// "!" shell escapes are gated on the canonical mode, so an unnormalized
+	// session refused the escapes its own mode is supposed to allow.
+	m.input.SetValue("!echo hi")
+	updated, cmd := m.handleSubmit()
+	if cmd == nil {
+		lastSystem := ""
+		rows := updated.(model).transcript
+		for i := len(rows) - 1; i >= 0; i-- {
+			if rows[i].kind == rowSystem {
+				lastSystem = rows[i].text
+				break
+			}
+		}
+		t.Errorf("legacy unsafe alias gated its own ! escape, got nil cmd and system text %q", lastSystem)
+	}
+
+	// modeLabel has a default arm that echoes whatever string it was given, so
+	// an unnormalized session rendered "unsafe" in the footer — the exact name
+	// this branch renamed away from.
+	label, _ := m.modeLabel()
+	if label != "full-auto" {
+		t.Fatalf("modeLabel = %q, want %q", label, "full-auto")
+	}
+}
+
+// Leaving unsafe must be one press and must never need confirming: getting
+// stricter is always allowed to be easy.
+func TestLeavingUnsafeIsOnePress(t *testing.T) {
+	mode, offered := advancePermissionMode(agent.PermissionModeFullAuto, false)
+	if mode != agent.PermissionModeAuto || offered {
+		t.Fatalf("Unsafe -> (%s, offered=%v), want (Auto, false)", mode, offered)
+	}
+}
+
+// An unrecognized mode folds to the stricter of the two prompt-respecting
+// modes, so a bad value can never resolve into something looser.
+func TestUnknownPermissionModeFoldsToAsk(t *testing.T) {
+	mode, offered := advancePermissionMode(agent.PermissionMode("nonsense"), false)
+	if mode != agent.PermissionModeAsk || offered {
+		t.Fatalf("unknown -> (%s, offered=%v), want (Ask, false)", mode, offered)
 	}
 }
 
@@ -3198,6 +3300,19 @@ func TestScrimViewportLine(t *testing.T) {
 	}
 	if !strings.Contains(scrimmed, "\x1b[2m") {
 		t.Fatalf("scrim must apply faint styling around semantic colors, got %q", scrimmed)
+	}
+	// SGR 22 clears faint just as 0 does, so the scrim has to be reapplied after
+	// it too. The fixture has to carry a non-markdown sequence as well: a line
+	// whose only sequences are bold and its 22 terminator is not "externally
+	// styled", so it takes the whole-line render path and never reaches
+	// sgrClearsFaint at all.
+	boldSpan := "\x1b[38;2;235;80;110mremoved\x1b[0m \x1b[1mbold\x1b[22m tail"
+	reapplied := scrimViewportLine(boldSpan, 40)
+	if ansi.Strip(reapplied) != "removed bold tail" {
+		t.Fatalf("scrim must preserve text around SGR 22, got %q", ansi.Strip(reapplied))
+	}
+	if !strings.Contains(reapplied, "\x1b[22m\x1b[2m") {
+		t.Fatalf("scrim must reapply faint after SGR 22, got %q", reapplied)
 	}
 }
 

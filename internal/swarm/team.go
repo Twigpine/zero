@@ -402,7 +402,13 @@ const (
 	permissionModeAsk       = "ask"        // prompts for every tool (most restrictive)
 	permissionModeSpecDraft = "spec-draft" // spec-drafting only
 	permissionModeAuto      = "auto"       // auto-approve low-risk
-	permissionModeUnsafe    = "unsafe"     // approve everything (most permissive)
+	permissionModeFullAuto  = "full-auto"  // approve everything (most permissive)
+	// permissionModeUnsafe is what full-auto used to be called. Still ranked
+	// because these are raw strings crossing a package boundary, so the Go alias
+	// in the agent package does not reach them: a caller still passing the old
+	// spelling would otherwise rank as unknown and clamp its members to the
+	// strictest tier.
+	permissionModeUnsafe = "unsafe"
 )
 
 // permissionRank orders permission modes from least to most permissive so the
@@ -419,7 +425,7 @@ func permissionRank(mode string) int {
 		return 2
 	case permissionModeAuto:
 		return 3
-	case permissionModeUnsafe:
+	case permissionModeFullAuto, permissionModeUnsafe:
 		return 4
 	default:
 		return 0
