@@ -189,7 +189,18 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 	}
 	var runtimeCleanup func()
 	if preference != SandboxPreferenceForbid && policy.Mode != ModeDisabled {
-		runtimeState, cleanup, runtimeErr := prepareSandboxRuntime(workspaceRoot)
+		// The home THIS command asked for. Windows planning resolves
+		// ZERO_WINDOWS_SANDBOX_HOME out of spec.Env and hands it to the runner for
+		// marker validation, so selection has to read the same environment or the
+		// two disagree about which marker describes the tree. See
+		// pinnedSandboxRuntimeRoot.
+		commandSandboxHome := ""
+		if spec.Env != nil {
+			if resolved, err := ResolveWindowsSandboxHome(envListToMap(spec.Env)); err == nil {
+				commandSandboxHome = resolved
+			}
+		}
+		runtimeState, cleanup, runtimeErr := prepareSandboxRuntime(workspaceRoot, commandSandboxHome)
 		if runtimeErr != nil {
 			return CommandPlan{}, runtimeErr
 		}
