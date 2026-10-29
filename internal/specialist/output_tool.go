@@ -21,9 +21,12 @@ const (
 )
 
 type OutputTool struct {
-	manager        *background.Manager
-	managerFunc    BackgroundManagerFunc
-	SessionStore   *sessions.Store
+	manager      *background.Manager
+	managerFunc  BackgroundManagerFunc
+	SessionStore *sessions.Store
+	// LifecycleHooks must be the same bridge as Task so onExit and TaskOutput
+	// poll share stop-hook dedup. nil is safe (accounting still runs).
+	LifecycleHooks *LifecycleHooks
 	PollInterval   time.Duration
 	DefaultTimeout time.Duration
 	MaxTimeout     time.Duration
@@ -35,8 +38,8 @@ type outputParameters struct {
 	TimeoutMS int
 }
 
-func newOutputToolWithManagerFunc(managerFunc BackgroundManagerFunc, sessionStore *sessions.Store) *OutputTool {
-	return &OutputTool{managerFunc: managerFunc, SessionStore: sessionStore}
+func newOutputToolWithManagerFunc(managerFunc BackgroundManagerFunc, sessionStore *sessions.Store, lifecycleHooks *LifecycleHooks) *OutputTool {
+	return &OutputTool{managerFunc: managerFunc, SessionStore: sessionStore, LifecycleHooks: lifecycleHooks}
 }
 
 func (tool *OutputTool) Name() string {
@@ -143,7 +146,10 @@ func (tool *OutputTool) readOutput(task background.Task) tools.Result {
 	dataString := string(data)
 	summary, rawLines := summarizeTaskData(dataString, task.ExitCode)
 	if task.Status != background.StatusRunning {
-		Executor{SessionStore: tool.SessionStore}.recordBackgroundTaskAccounting(task, summary)
+		Executor{
+			SessionStore:   tool.SessionStore,
+			LifecycleHooks: tool.LifecycleHooks,
+		}.recordBackgroundTaskAccounting(task, summary)
 	}
 	return tools.Result{
 		Status: tools.StatusOK,
