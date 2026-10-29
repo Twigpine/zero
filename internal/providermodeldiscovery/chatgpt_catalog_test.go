@@ -96,7 +96,7 @@ func TestChatGPTCatalogBoundsOptionalMetadata(t *testing.T) {
 
 func TestChatGPTDiscoveryRedactsRefreshedOAuthBearer(t *testing.T) {
 	const oldToken, newToken = "opaque-old-subscription", "opaque-new-subscription"
-	for _, split := range []string{"", "\x00", "\x1b", "\u0085", "\x1b[31m"} {
+	for _, split := range []string{"", "\x00", "\x1b", "\u0085", "\x1b[31m", "\u200b", "\u2060", "\ufeff", "\u202e", "\u00ad"} {
 		t.Run(fmt.Sprintf("split-%x", split), func(t *testing.T) {
 			var requests int
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -123,7 +123,7 @@ func TestChatGPTDiscoveryRedactsRefreshedOAuthBearer(t *testing.T) {
 			if err == nil || requests != 2 {
 				t.Fatalf("expected failed refresh retry: requests=%d err=%v", requests, err)
 			}
-			if strings.Contains(err.Error(), oldToken) || strings.Contains(err.Error(), "new-subscription") {
+			if !strings.Contains(err.Error(), "expired [REDACTED] and [REDACTED]") || strings.Contains(err.Error(), oldToken) || strings.Contains(err.Error(), "new-subscription") {
 				t.Fatalf("discovery error exposed OAuth bearer: %v", err)
 			}
 		})

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Twigpine/zero/internal/config"
 	"github.com/Twigpine/zero/internal/modelregistry"
@@ -18,7 +17,6 @@ import (
 	"github.com/Twigpine/zero/internal/providermodelcatalog"
 	"github.com/Twigpine/zero/internal/providermodeldiscovery"
 	"github.com/Twigpine/zero/internal/providers"
-	"github.com/Twigpine/zero/internal/redaction"
 )
 
 // pickerKind identifies which command a picker selection feeds back into.
@@ -1103,10 +1101,8 @@ func (m model) applyModelPickerModelsDiscovered(msg modelPickerModelsDiscoveredM
 	}
 	delete(errorsByProvider, key)
 	if msg.err != nil {
-		// Normalize terminal controls before matching: removing a control after
-		// redaction could reassemble a split credential in the rendered message.
-		message := sanitizeCardField(ansi.Strip(msg.err.Error()))
-		errorsByProvider[key] = truncateTUIOutput(redaction.RedactString(message, redaction.Options{ExtraSecretValues: msg.secrets}), 240)
+		message := providermodeldiscovery.RedactError(msg.err, msg.secrets...).Error()
+		errorsByProvider[key] = truncateTUIOutput(sanitizeCardField(message), 240)
 	} else if len(msg.models) == 0 {
 		errorsByProvider[key] = "models endpoint returned no visible coding models"
 	}
