@@ -685,11 +685,23 @@ func TestIsRetriableToolError(t *testing.T) {
 		{"success", ToolResult{Status: tools.StatusOK}, false},
 		{"bad arguments", ToolResult{Status: tools.StatusError, Output: "Error: Failed to parse arguments for x: bad json"}, true},
 		{"execution failure", ToolResult{Status: tools.StatusError, Output: "Error: read foo.txt: no such file"}, true},
-		{"disabled tool", ToolResult{Status: tools.StatusError, Output: `Error: Tool "x" is not enabled for this run.`}, false},
+		// Each refusal carries the provenance its production path attaches: the
+		// disabled-tool path sets a denial category, the registry gates set the
+		// pre-execution marker. Text is never what decides.
+		{"disabled tool", ToolResult{Status: tools.StatusError, Output: `Error: Tool "x" is not enabled for this run.`, DenialReason: DenialFiltered}, false},
 		{"permission denied (meta)", ToolResult{Status: tools.StatusError, Output: "Error: Permission denied for x: needs approval", Meta: map[string]string{"permission_action": "deny"}}, false},
-		{"permission required", ToolResult{Status: tools.StatusError, Output: "Error: Permission required for x: approve first"}, false},
-		{"sandbox block", ToolResult{Status: tools.StatusError, Output: "Error: Sandbox block: outside_workspace"}, false},
-		{"sandbox approval", ToolResult{Status: tools.StatusError, Output: "Error: Sandbox approval required for x: network"}, false},
+		{"permission required", ToolResult{Status: tools.StatusError, Output: "Error: Permission required for x: approve first", Meta: map[string]string{tools.PolicyRefusalMeta: tools.PolicyRefusalPermissionRequired}}, false},
+		{"sandbox block", ToolResult{Status: tools.StatusError, Output: "Error: Sandbox block: outside_workspace", Meta: map[string]string{tools.PolicyRefusalMeta: tools.PolicyRefusalSandboxDenied}}, false},
+		{"sandbox approval", ToolResult{Status: tools.StatusError, Output: "Error: Sandbox approval required for x: network", Meta: map[string]string{tools.PolicyRefusalMeta: tools.PolicyRefusalSandboxApproval}}, false},
+		// THE INVERSE, which is the failure this classifier had. An allowed tool
+		// that RAN, failed, and happened to print one of those phrases must stay
+		// retriable: `bash` preserves arbitrary stdout and stderr on any nonzero
+		// exit, and read_file returns whatever the file says.
+		{"executed failure printing the sandbox phrase", ToolResult{Status: tools.StatusError, Output: "Sandbox block\n"}, true},
+		{"executed failure printing a permission denial", ToolResult{Status: tools.StatusError, Output: "cp: Permission denied for /etc/hosts"}, true},
+		{"executed failure printing a permission requirement", ToolResult{Status: tools.StatusError, Output: "Permission required for sudo"}, true},
+		{"executed failure printing the approval phrase", ToolResult{Status: tools.StatusError, Output: "Sandbox approval required for curl"}, true},
+		{"executed failure quoting the disabled-tool phrase", ToolResult{Status: tools.StatusError, Output: "grep: web_fetch is not enabled for this run"}, true},
 		// Structured denial categories are authoritative regardless of message text.
 		{"denial: filtered", ToolResult{Status: tools.StatusError, Output: "anything", DenialReason: DenialFiltered}, false},
 		{"denial: permission", ToolResult{Status: tools.StatusError, Output: "anything", DenialReason: DenialPermissionDenied}, false},

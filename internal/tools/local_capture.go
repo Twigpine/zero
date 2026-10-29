@@ -76,11 +76,23 @@ func (tool captureArtifactTool) RejectBeforePermission(args map[string]any) (Res
 	if err != nil {
 		return errorResult("Error: Invalid arguments for capture_artifact: " + err.Error()), true
 	}
+	// CONFIGURATION, NOT ARGUMENTS, so these carry provenance. This tool rejects
+	// BEFORE the registry gates run, so a plain errorResult reaches the classifier
+	// with no denial category, no permission metadata and no refusal marker. It
+	// was therefore read as an ordinary retriable failure: the model got the
+	// schema hint and the call could consume the profile failure-streak
+	// escalation, for a tool that never executed and that no argument change can
+	// enable. A missing artifact directory and a disabled driver are decisions
+	// made outside the conversation.
+	//
+	// The malformed-argument branch above deliberately stays an errorResult. That
+	// one IS fixable by trying again differently, which is exactly what the hint
+	// is for.
 	if strings.TrimSpace(tool.artifactsDir) == "" {
-		return errorResult("Error: capture_artifact is disabled because no artifact directory is configured."), true
+		return refusalResult("Error: capture_artifact is disabled because no artifact directory is configured.", PolicyRefusalToolNotEnabled), true
 	}
 	if !tool.actionEnabled(request.action) {
-		return errorResult("Error: Local control driver for " + request.action + " is disabled."), true
+		return refusalResult("Error: Local control driver for "+request.action+" is disabled.", PolicyRefusalToolNotEnabled), true
 	}
 	return Result{}, false
 }
