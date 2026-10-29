@@ -1467,10 +1467,31 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	}
 
 	// beforeTool hooks may veto the call before it runs (a non-zero exit blocks).
+	//
+	// A SUCCESSFUL beforeTool HOOK STILL HAS SOMETHING TO SAY, BUT ONLY ITS NOTICE.
+	//
+	// Reading the outcome only when Blocked left the enforcement disclosure in the
+	// audit record and nowhere the model or the operator could see it: a hook could
+	// run under the weakened DenyRead token and say so to nobody.
+	//
+	// Notices, NOT Messages. Messages is presentation text that hookMessage builds
+	// by folding the notice together with the hook's ordinary stdout, so delivering
+	// it would put every successful hook's routine logging, large diagnostics, and
+	// whatever text a hook happened to process into the next model request. That is
+	// a behaviour change nobody asked for and a standing input channel. main is
+	// silent for successful hooks and stays silent here for everything except the
+	// disclosure. Carried to the tool result below, the same surface afterTool
+	// feedback already uses.
+	var beforeToolNotices []string
+	// Filled after the tool runs, and merged with beforeTool's at the one
+	// finalization below so both phases land on the same contract.
+	var afterToolNotices []string
 	if toolFound {
-		if outcome, blocked := dispatchBeforeTool(ctx, options, call, args); blocked {
+		outcome, blocked := dispatchBeforeTool(ctx, options, call, args)
+		if blocked {
 			return blockedByHookResult(call, outcome), nil
 		}
+		beforeToolNotices = outcome.Notices
 	}
 	args = shellExecutionArgsForApproval(call.Name, args, decisionAction, options)
 
@@ -1516,7 +1537,10 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	})
 	if retryResult, directResult, retried, action, reason, prefix, abortErr := maybeRetryUnsandboxedAfterSandboxRestriction(ctx, registry, call, tool, args, result, permissionMode, options, progressCallback); retried || directResult != nil || abortErr != nil {
 		if directResult != nil {
-			return *directResult, abortErr
+			// A denied, cancelled, or ungrantable retry still returns a result for a
+			// call whose beforeTool hook already ran. Without this the disclosure is
+			// produced and then dropped on the floor.
+			return withAppliedHookNotices(*directResult, beforeToolNotices, nil), abortErr
 		}
 		result = retryResult
 		permissionGranted = true
@@ -1542,7 +1566,15 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	// afterTool hooks run once the tool has executed; their output (e.g. a
 	// formatter or vet result) is surfaced back to the model on the result.
 	if toolFound {
-		if feedback := dispatchAfterTool(ctx, options, call, args, result); feedback != "" {
+		// NEITHER PHASE'S NOTICES ARE FOLDED IN HERE. They are typed enforcement
+		// data on both sides now, and appending them as hook prose was what kept
+		// beforeTool's out of every surface that renders the typed slice, and what
+		// made afterTool's arrive twice once that slice was composed. Only the
+		// hook's own output, which is what an afterTool validator asked to say,
+		// still travels this way.
+		feedback, notices := dispatchAfterTool(ctx, options, call, args, result)
+		afterToolNotices = notices
+		if strings.TrimSpace(feedback) != "" {
 			var didRedact bool
 			result.Output, didRedact = appendHookFeedback(result.Output, feedback)
 			if didRedact {
@@ -1569,28 +1601,32 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	// Secret scrubbing happens at the registry boundary (the single point both
 	// the agent loop and the MCP server pass through), so result.Output is
 	// already redacted here and result.Redacted reflects whether it changed.
-	return ToolResult{
-		Risk:            executedRisk,
-		ToolCallID:      call.ID,
-		Name:            call.Name,
-		Status:          result.Status,
-		Output:          result.ModelOutput(),
-		Truncated:       result.Truncated,
-		Meta:            result.Meta,
-		Images:          result.Images,
-		Redacted:        result.Redacted,
-		ChangedFiles:    result.ChangedFiles,
-		FileDiffs:       result.FileDiffs,
-		ChangeSummaries: result.ChangeSummaries,
-		Display:         result.HumanDisplay(),
-		Outcome:         result.Outcome,
-		LoadedTools:     loadedToolsFromResult(result.Meta),
+	//
+	// Wrapped in the same finalization every other return from a hooked call
+	// uses, so the normal path cannot drift away from the veto and retry paths.
+	return withAppliedHookNotices(ToolResult{
+		Risk:               executedRisk,
+		ToolCallID:         call.ID,
+		Name:               call.Name,
+		Status:             result.Status,
+		Output:             result.BaseModelOutput(),
+		Truncated:          result.Truncated,
+		Meta:               result.Meta,
+		EnforcementNotices: append([]string(nil), result.EnforcementNotices...),
+		Images:             result.Images,
+		Redacted:           result.Redacted,
+		ChangedFiles:       result.ChangedFiles,
+		FileDiffs:          result.FileDiffs,
+		ChangeSummaries:    result.ChangeSummaries,
+		Display:            result.BaseDisplay(),
+		Outcome:            result.Outcome,
+		LoadedTools:        loadedToolsFromResult(result.Meta),
 		// A tool may signal a mid-run model escalation by carrying the target id
 		// in Meta["escalate_to_model"]. Lift it into the typed loop-level field;
 		// the Run turn loop performs the actual provider switch. Empty for every
 		// ordinary tool result.
 		RequestedModel: result.Meta["escalate_to_model"],
-	}, nil
+	}, beforeToolNotices, afterToolNotices), nil
 }
 
 const sandboxNamespaceLimitedReason = "sandbox output is limited to the sandbox PID namespace; host/global state requires approval"
@@ -1974,9 +2010,9 @@ func dispatchBeforeTool(ctx context.Context, options Options, call ToolCall, arg
 // dispatchAfterTool runs configured afterTool hooks once a tool has executed and
 // returns any advisory output (e.g. a formatter or vet result) to surface back
 // to the model. afterTool hooks never block. A nil dispatcher is a no-op.
-func dispatchAfterTool(ctx context.Context, options Options, call ToolCall, args map[string]any, result tools.Result) string {
+func dispatchAfterTool(ctx context.Context, options Options, call ToolCall, args map[string]any, result tools.Result) (string, []string) {
 	if options.Hooks == nil || hooksSuppressed(options) {
-		return ""
+		return "", nil
 	}
 	outcome := options.Hooks.Dispatch(ctx, hooks.DispatchInput{
 		Event:      hooks.EventAfterTool,
@@ -1992,7 +2028,13 @@ func dispatchAfterTool(ctx context.Context, options Options, call ToolCall, args
 			"changedFiles": result.ChangedFiles,
 		},
 	})
-	return strings.TrimSpace(strings.Join(outcome.Messages, "\n"))
+	// Both halves, because they have different destinations. The hook's own output
+	// is prose that belongs in the result body where an afterTool validator's
+	// findings have always gone; its enforcement notices are typed data that the
+	// caller merges into the result the same way beforeTool's are. Returning only
+	// the joined messages was what left afterTool on the old channel while
+	// beforeTool moved, and a notice reported by both then appeared twice.
+	return strings.TrimSpace(strings.Join(outcome.Messages, "\n")), outcome.Notices
 }
 
 // dispatchSessionStart runs configured sessionStart hooks once before the first
@@ -2056,7 +2098,7 @@ func blockedByHookResult(call ToolCall, outcome hooks.DispatchOutcome) ToolResul
 		reason = "blocked by a beforeTool hook"
 	}
 	message := fmt.Sprintf("Error: %q was blocked by hook %q: %s", call.Name, outcome.BlockedBy, reason)
-	return ToolResult{
+	result := ToolResult{
 		ToolCallID:   call.ID,
 		Name:         call.Name,
 		Status:       tools.StatusError,
@@ -2064,12 +2106,124 @@ func blockedByHookResult(call ToolCall, outcome hooks.DispatchOutcome) ToolResul
 		Redacted:     redacted,
 		DenialReason: DenialHookBlocked,
 	}
+	// Dispatch runs hooks in order and stops at the first veto, so an earlier hook
+	// may already have run under a weakened token before this one said no. Its
+	// notice describes something that happened and has to survive the veto, and so
+	// does the blocking hook's own.
+	//
+	// ALL OF THEM, FROM THE TYPED SLICE. Reason carries the hook's words only, so
+	// nothing here is said twice and nothing has to be filtered out. The filter
+	// this replaced matched notices against the reason text, and dropped an
+	// earlier hook's disclosure whenever the blocking hook's output quoted it.
+	return withAppliedHookNotices(result, outcome.Notices, nil)
+}
+
+// withAppliedHookNotices is the single place a hook enforcement notice
+// reaches a tool result on a path that does NOT run afterTool.
+//
+// The normal tail joins the notices with the afterTool feedback and delivers
+// both at once. Two other exits return a result for a call whose hook already
+// ran: a later hook's veto, and a denied, cancelled, or ungrantable unsandboxed
+// retry. Routing all three through one function is what keeps "the hook ran
+// under this token" from depending on which exit the call happened to take.
+//
+// NO REBUDGET HERE, AND THAT IS LOAD-BEARING ON WHAT MAY PASS THROUGH. The
+// normal tail appends and then calls Registry.RebudgetAfterHook, because what it
+// appends is afterTool feedback: hook stdout, which a hook can make arbitrarily
+// large. These notices cannot be: they are CommandPlan.Notes, which only this
+// package's own fixed sentences may fill (none does today; #1006 refuses the
+// denyRead trade the last one described), and nothing hook-authored reaches
+// this slice: DispatchOutcome.Messages is where
+// hook output lives, and the capture site deliberately does not read it.
+//
+// So if anything ever widens what is delivered here to include text a hook or a
+// tool can size, this needs the rebudget step as well, which means converting
+// through tools.Result the way the tail does rather than editing Output in
+// place. Do not widen it without that.
+// withAppliedHookNotices carries a hook's disclosures onto the result as TYPED
+// enforcement notices, and is the single finalization point every return path
+// from a hooked call goes through.
+//
+// BOTH PHASES, because half a symmetry is its own defect. beforeTool was moved
+// onto the typed slice while afterTool was left folding its notices into the
+// prose feedback, and since the two carry the identical fixed string, a
+// disclosure reported by both then reached the model twice: once from the typed
+// prepend every surface composes, once inside the hook feedback in the body. A
+// bash or exec card showed it in the furniture and again in the body.
+//
+// It used to fold them into result.Output as prose. That reached the provider,
+// which reads the output, and reached nothing else. Every interactive surface
+// builds its enforcement furniture from the typed slice, and for an edit or a
+// write the card shows Display.Preview instead of Output, so the disclosure was
+// absent from the live card in both its collapsed and expanded states and from
+// the session payload that restores them. A notice about a weakened token was
+// therefore shown to the model and hidden from the operator, on exactly the
+// results where something was written.
+//
+// Typed here, the canonical accessors compose it per surface, the same way a
+// tool's own notices already work. Nothing is written into Output as well:
+// decoration has one owner per surface or the disclosure appears twice.
+// Hook notices lead, in run order, with the tool's own after them: dedupe makes
+// the ordering moot for the duplicate case that motivated this, and for distinct
+// disclosures it keeps the shape the tool-owned notices already had.
+func withAppliedHookNotices(result ToolResult, before []string, after []string) ToolResult {
+	hookNotices := before
+	if len(after) > 0 {
+		hookNotices = append(append([]string(nil), before...), after...)
+	}
+	merged, didRedact := mergeEnforcementNotices(hookNotices, result.EnforcementNotices)
+	result.EnforcementNotices = merged
+	if didRedact {
+		result.Redacted = true
+	}
+	return result
+}
+
+// mergeEnforcementNotices puts the hook disclosures ahead of the
+// tool's own and drops exact repeats, so a surface rendering the slice shows
+// each disclosure exactly once.
+//
+// Hook notices are third-party text arriving on an intercepted path that bypasses
+// the registry's redaction boundary, so they are scrubbed here the way
+// appendHookFeedback scrubbed them while they travelled as prose. The bool
+// reports whether scrubbing changed anything, so Redacted keeps matching the
+// registry's contract.
+func mergeEnforcementNotices(before []string, own []string) ([]string, bool) {
+	if len(before) == 0 && len(own) == 0 {
+		return nil, false
+	}
+	merged := make([]string, 0, len(before)+len(own))
+	seen := make(map[string]struct{}, len(before)+len(own))
+	redacted := false
+	for index, notice := range append(append([]string(nil), before...), own...) {
+		if index < len(before) {
+			scrubbed := redaction.RedactString(notice, redaction.Options{})
+			redacted = redacted || scrubbed != notice
+			notice = scrubbed
+		}
+		if strings.TrimSpace(notice) == "" {
+			continue
+		}
+		if _, already := seen[notice]; already {
+			continue
+		}
+		seen[notice] = struct{}{}
+		merged = append(merged, notice)
+	}
+	if len(merged) == 0 {
+		return nil, redacted
+	}
+	return merged, redacted
 }
 
 // appendHookFeedback appends afterTool hook output to a tool result's output,
 // scrubbed for secrets like every other string crossing the tool boundary. The
 // returned bool reports whether scrubbing changed the feedback, so the caller can
 // set ToolResult.Redacted to match the registry's redaction contract.
+// The joiner that folded beforeTool notices in with the afterTool feedback is
+// gone. Sending a typed enforcement notice out as hook prose was the defect, not
+// the delivery: see withAppliedHookNotices. afterTool feedback still arrives here
+// on its own, which is all this path was ever meant to carry.
 func appendHookFeedback(output string, feedback string) (string, bool) {
 	scrubbed := redaction.RedactString(feedback, redaction.Options{})
 	redacted := scrubbed != feedback
@@ -2204,18 +2358,19 @@ func askUserFallbackResult(ctx context.Context, registry *tools.Registry, call T
 			Cwd:               options.Cwd,
 		})
 		return ToolResult{
-			ToolCallID:      call.ID,
-			Name:            call.Name,
-			Status:          result.Status,
-			Output:          result.ModelOutput(),
-			Truncated:       result.Truncated,
-			Meta:            result.Meta,
-			Redacted:        result.Redacted,
-			ChangedFiles:    result.ChangedFiles,
-			FileDiffs:       result.FileDiffs,
-			ChangeSummaries: result.ChangeSummaries,
-			Display:         result.HumanDisplay(),
-			Outcome:         result.Outcome,
+			ToolCallID:         call.ID,
+			Name:               call.Name,
+			Status:             result.Status,
+			Output:             result.BaseModelOutput(),
+			Truncated:          result.Truncated,
+			Meta:               result.Meta,
+			EnforcementNotices: append([]string(nil), result.EnforcementNotices...),
+			Redacted:           result.Redacted,
+			ChangedFiles:       result.ChangedFiles,
+			FileDiffs:          result.FileDiffs,
+			ChangeSummaries:    result.ChangeSummaries,
+			Display:            result.BaseDisplay(),
+			Outcome:            result.Outcome,
 		}
 	}
 	return ToolResult{

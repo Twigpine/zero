@@ -70,6 +70,20 @@ type CommandPlan struct {
 	// workspace. It carries structured policy facts; command output is never
 	// parsed as the control protocol.
 	executionReportPath string
+	// childLaunchReported marks a plan whose helper publishes the authoritative
+	// child-launch fact through executionReportPath. Set ONLY by adapters that
+	// actually write it: Wrapped alone is not enough, since a bwrap plan is also
+	// wrapped and reports only denials, and treating its silence as "no child"
+	// would deny every successful Linux sandbox run its disclosure.
+	childLaunchReported bool
+}
+
+// ChildLaunchOwnedByAdapter reports whether this plan starts a WRAPPER whose
+// helper creates the requested process itself, so the requested child launched
+// only if the adapter says so. False for a direct command, where the process the
+// caller starts IS the requested one.
+func (plan CommandPlan) ChildLaunchOwnedByAdapter() bool {
+	return plan.childLaunchReported
 }
 
 // Cleanup releases any resources the plan holds. It is safe to call on a zero
@@ -131,15 +145,12 @@ func (engine *Engine) PrepareExecution(ctx context.Context, request execution.Re
 		return execution.PreparedCommand{}, err
 	}
 	return execution.PreparedCommand{
-		Command: command,
-		Enforcement: execution.Enforcement{
-			Backend:         string(plan.TargetBackend),
-			Level:           string(plan.EnforcementLevel),
-			Degraded:        plan.EnforcementLevel == EnforcementDegraded,
-			DowngradeReason: plan.DowngradeReason,
-		},
-		Report:  plan.ExecutionReport,
-		Cleanup: plan.Cleanup,
+		Command:     command,
+		Enforcement: EnforcementFor(plan),
+		Report:      plan.ExecutionReport,
+		Cleanup:     plan.Cleanup,
+		// Only for adapters that publish the fact; see CommandPlan.childLaunchReported.
+		ChildLaunchOwnedByAdapter: plan.childLaunchReported,
 	}, nil
 }
 
@@ -1195,4 +1206,27 @@ func isDynamicSensitiveEnvKey(key string) bool {
 	return strings.HasPrefix(key, prefix) &&
 		strings.HasSuffix(key, suffix) &&
 		len(key) > len(prefix)+len(suffix)
+}
+
+// EnforcementFor projects a CommandPlan onto the platform-neutral enforcement
+// contract.
+//
+// ONE PROJECTION, because there were two and they drifted. PrepareExecution
+// built execution.Enforcement by hand for the generic adapter that hooks,
+// plugins and MCP processes go through, and exec_command built the same struct
+// by hand for the tool path. When Notices was added it reached only the tool
+// path, so the contract was true for one wrapper and false for the wrapper other
+// execution consumers depend on. A hand-maintained projection duplicated across
+// two adapters cannot be kept honest by review; a shared one cannot be missed.
+//
+// The notice slice is copied rather than aliased so a consumer cannot mutate the
+// plan through it.
+func EnforcementFor(plan CommandPlan) execution.Enforcement {
+	return execution.Enforcement{
+		Backend:         string(plan.TargetBackend),
+		Level:           string(plan.EnforcementLevel),
+		Degraded:        plan.EnforcementLevel == EnforcementDegraded,
+		DowngradeReason: plan.DowngradeReason,
+		Notices:         append([]string(nil), plan.Notes...),
+	}
 }

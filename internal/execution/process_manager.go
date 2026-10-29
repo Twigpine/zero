@@ -79,8 +79,12 @@ type ProcessResult struct {
 	Enforcement     Enforcement
 	Report          AdapterReport
 	ReportErr       error
-	Changes         []Change
-	Metadata        map[string]string
+	// ChildLaunchOwnedByAdapter carries the prepared plan's ownership of the
+	// requested-child launch fact through to the caller, which for a retained
+	// session no longer has the plan.
+	ChildLaunchOwnedByAdapter bool
+	Changes                   []Change
+	Metadata                  map[string]string
 }
 
 type ProcessSnapshot struct {
@@ -162,6 +166,7 @@ func (manager *ProcessManager) Start(ctx context.Context, input ProcessStart, wa
 		command:     command,
 		request:     request,
 		enforcement: input.Prepared.Enforcement,
+		ownedLaunch: input.Prepared.ChildLaunchOwnedByAdapter,
 		report:      input.Prepared.Report,
 		cleanup:     input.Prepared.Cleanup,
 		stdin:       stdin,
@@ -423,31 +428,46 @@ func (manager *ProcessManager) removeCompletedLater(process *managedProcess) {
 }
 
 type managedProcess struct {
-	id           int
-	commandText  string
-	cwd          string
-	relativeCwd  string
-	startedAt    time.Time
-	lastUsedAt   time.Time
-	tty          bool
-	command      *exec.Cmd
-	request      Request
-	enforcement  Enforcement
-	report       func() (AdapterReport, error)
-	cleanup      func()
-	stdin        io.WriteCloser
-	output       *processOutputBuffer
-	reaped       chan struct{}
-	doneOnce     sync.Once
-	done         chan struct{}
-	kill         func(int) error
-	mu           sync.Mutex
-	exitCode     *int
-	waitErr      error
-	resultReport AdapterReport
-	reportErr    error
-	changes      []Change
-	metadata     map[string]string
+	id          int
+	commandText string
+	cwd         string
+	relativeCwd string
+	startedAt   time.Time
+	lastUsedAt  time.Time
+	tty         bool
+	command     *exec.Cmd
+	request     Request
+	enforcement Enforcement
+	ownedLaunch bool
+	// launchObserved latches the adapter's launch transition the first time it is
+	// seen, so a live result can report it. Guarded by mu.
+	launchObserved bool
+	report         func() (AdapterReport, error)
+	cleanup        func()
+	stdin          io.WriteCloser
+	output         *processOutputBuffer
+	reaped         chan struct{}
+	doneOnce       sync.Once
+	done           chan struct{}
+	kill           func(int) error
+	mu             sync.Mutex
+	exitCode       *int
+	waitErr        error
+	resultReport   AdapterReport
+	reportErr      error
+	changes        []Change
+	metadata       map[string]string
+}
+
+// launchedReportLocked returns the report to hand out, with a latched live
+// launch folded in. Caller holds mu.
+func (process *managedProcess) launchedReportLocked() AdapterReport {
+	report := process.resultReport
+	if report.ChildLaunched == nil && process.launchObserved {
+		launched := true
+		report.ChildLaunched = &launched
+	}
+	return report
 }
 
 func (process *managedProcess) markDone(err error, exitCode int, report AdapterReport, reportErr error, changes []Change) {
@@ -455,14 +475,76 @@ func (process *managedProcess) markDone(err error, exitCode int, report AdapterR
 	process.waitErr = err
 	process.exitCode = &exitCode
 	process.resultReport = report
+	// The plan's cleanup has already removed the report file by the time this
+	// runs on some orderings, so a terminal read can answer "nothing recorded"
+	// about a child that demonstrably started. A launch we already saw is not
+	// un-seen by that.
+	if report.ChildLaunched == nil && process.launchObserved {
+		launched := true
+		process.resultReport.ChildLaunched = &launched
+	}
 	process.reportErr = reportErr
 	process.changes = append([]Change(nil), changes...)
 	process.mu.Unlock()
 	process.doneOnce.Do(func() { close(process.done) })
 }
 
+// observeLaunch reads the adapter's launch report while the process is still
+// running, and latches a confirmed launch.
+//
+// THE LAUNCH FACT IS A LIFECYCLE TRANSITION, NOT TERMINAL DATA. The Windows
+// helper publishes childLaunched immediately after CreateProcessAsUser creates
+// the restricted child, and then waits for it. The manager used to read the
+// report only in the post-Wait goroutine, so for the entire live lifetime of a
+// retained session the report was the zero value: the first exec_command reply
+// and every write_stdin poll resolved Launched=false and disclosed nothing,
+// even though the fact was sitting readable on disk. A watcher or an abandoned
+// retained session could therefore never be told the write jail had been traded
+// away. The MCP launcher already reads the report while its server is live;
+// this is the same read, in the launcher that was left behind.
+//
+// SILENCE IS NOT A NEGATIVE, BUT AN EXPLICIT NEGATIVE IS. An absent, partial or
+// undecodable report, and a helper that failed before it ever created the child,
+// must all leave the live result exactly as it was: not confirmed, nothing
+// disclosed. Reading absence as false, or surfacing a read error or a denial
+// from here, would let a mid-flight poll rewrite a running command into a setup
+// failure, and absence is the normal state once the plan's cleanup has removed
+// the file.
+//
+// A report that SAYS false is different, and it revokes. The Windows helper
+// publishes the launch before it resumes the suspended child, so there is a
+// window where the fact is readable and the child has still executed nothing; if
+// the resume then fails, the helper retracts the record with an explicit false.
+// Without this, a poll that landed inside that window would hold a launch that
+// never happened, and hold it through completion, since the final read finds the
+// file cleaned away and restores what was latched.
+//
+// Which is why the observation is repeated while the command runs rather than
+// latched once. It costs one small read per poll on a wrapped plan, and every
+// unwrapped plan still does no extra work at all; a fact that can be withdrawn
+// is not one to cache.
+func (process *managedProcess) observeLaunch() {
+	if process.report == nil {
+		return
+	}
+	process.mu.Lock()
+	skip := !process.ownedLaunch
+	process.mu.Unlock()
+	if skip || process.doneClosed() {
+		return
+	}
+	report, err := process.report()
+	if err != nil || report.ChildLaunched == nil {
+		return
+	}
+	process.mu.Lock()
+	process.launchObserved = *report.ChildLaunched
+	process.mu.Unlock()
+}
+
 func (process *managedProcess) collectResult(ctx context.Context, wait time.Duration, interrupted bool) ProcessResult {
 	output, truncated := process.collect(ctx, wait)
+	process.observeLaunch()
 	process.mu.Lock()
 	exitCode := 0
 	exited := process.exitCode != nil
@@ -473,8 +555,9 @@ func (process *managedProcess) collectResult(ctx context.Context, wait time.Dura
 		ProcessID: process.id, CommandText: process.commandText, RelativeCwd: process.relativeCwd,
 		TTY: process.tty, Output: output, OutputTruncated: truncated, Exited: exited,
 		ExitCode: exitCode, Interrupted: interrupted, Request: process.request,
-		Enforcement: process.enforcement, Report: process.resultReport, ReportErr: process.reportErr,
-		Changes: append([]Change(nil), process.changes...), Metadata: cloneStringMap(process.metadata),
+		Enforcement: process.enforcement, Report: process.launchedReportLocked(), ReportErr: process.reportErr,
+		ChildLaunchOwnedByAdapter: process.ownedLaunch,
+		Changes:                   append([]Change(nil), process.changes...), Metadata: cloneStringMap(process.metadata),
 	}
 	process.mu.Unlock()
 	return result
