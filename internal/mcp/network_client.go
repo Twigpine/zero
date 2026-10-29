@@ -606,13 +606,65 @@ func (client *remoteSSEClient) failPending(err error) {
 	}
 }
 
+// maxHTTPErrorDetail bounds how much of a failing response body is kept.
+const maxHTTPErrorDetail = 1024
+
+// statusError is an HTTP failure whose detail may have been cut at
+// maxHTTPErrorDetail.
+//
+// THE CUT IS REPORTED, NOT JUST MADE. A consumer that redacts by exact value
+// cannot match a credential this reader sliced in half, and it cannot tell that
+// anything was sliced: the /mcp failure view only repaired the tail of text IT
+// had truncated, and this error arrives well under its bound. A body that spends
+// the budget on bytes which later vanish (terminal control sequences) puts the
+// start of an echoed credential right at the cut, and the surviving prefix was
+// displayed and persisted. Reported by @jatmn.
+type statusError struct {
+	message   string
+	truncated bool
+}
+
+func (e *statusError) Error() string { return e.message }
+
+// DetailTruncated reports whether the detail was cut at the producer's limit
+// or ended early by a read that failed.
+func (e *statusError) DetailTruncated() bool { return e.truncated }
+
+// ErrorDetailTruncated reports whether any error in err's chain says its text
+// was cut short by the code that produced it, at a byte limit or by a failed
+// read. A caller that matches whole values treats the tail of such an error as
+// possibly partial.
+func ErrorDetailTruncated(err error) bool {
+	var marked interface{ DetailTruncated() bool }
+	return errors.As(err, &marked) && marked.DetailTruncated()
+}
+
 func httpStatusError(server Server, response *http.Response) error {
-	body, _ := io.ReadAll(io.LimitReader(response.Body, 1024))
+	// One byte past the limit is what distinguishes "exactly this long" from
+	// "there was more", and it is never kept.
+	//
+	// A FAILED READ IS A CUT TOO. A server that promises 2048 bytes and closes
+	// after 24 ends the body just as early as the limit does, and the retained
+	// tail can be the start of a credential. Dropping the read error left that
+	// detail unmarked, so nothing downstream repaired it. Slicing still follows
+	// the length actually read, so a short failed read is never sliced past its
+	// end. Reported by @jatmn.
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, maxHTTPErrorDetail+1))
+	truncated := readErr != nil || len(body) > maxHTTPErrorDetail
+	if len(body) > maxHTTPErrorDetail {
+		body = body[:maxHTTPErrorDetail]
+	}
 	detail := strings.TrimSpace(string(body))
 	if detail == "" {
-		return fmt.Errorf("MCP %s server %s returned HTTP %d", server.Type, server.Name, response.StatusCode)
+		return &statusError{
+			message:   fmt.Sprintf("MCP %s server %s returned HTTP %d", server.Type, server.Name, response.StatusCode),
+			truncated: truncated,
+		}
 	}
-	return fmt.Errorf("MCP %s server %s returned HTTP %d: %s", server.Type, server.Name, response.StatusCode, detail)
+	return &statusError{
+		message:   fmt.Sprintf("MCP %s server %s returned HTTP %d: %s", server.Type, server.Name, response.StatusCode, detail),
+		truncated: truncated,
+	}
 }
 
 func decodeSSERPCMessage(reader io.Reader) (rpcMessage, error) {

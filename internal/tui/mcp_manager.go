@@ -30,8 +30,13 @@ const (
 )
 
 type mcpManagerItem struct {
-	Kind           mcpManagerItemKind
-	Name           string
+	Kind mcpManagerItemKind
+	// Name is the display label. It is NOT an identity: two config entries whose
+	// keys differ only by padding render under the same name.
+	Name string
+	// ConfigKey addresses the configuration map. Every action and every lookup
+	// uses it, because Name cannot distinguish the rows.
+	ConfigKey      string
 	Label          string
 	Meta           string
 	Detail         string
@@ -137,19 +142,19 @@ func (m model) handleMCPManagerKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			return m.runMCPManagerCommand([]string{"list"})
 		case "c":
 			if item, ok := m.currentMCPManagerItem(); ok && item.Kind == mcpManagerItemServer {
-				return m.runMCPManagerCommand([]string{"check", item.Name})
+				return m.runMCPManagerCommand([]string{"check", item.ConfigKey})
 			}
 		case "d":
 			if item, ok := m.currentMCPManagerItem(); ok && item.Kind == mcpManagerItemServer {
-				return m.runMCPManagerCommand([]string{"disable", item.Name})
+				return m.runMCPManagerCommand([]string{"disable", item.ConfigKey})
 			}
 		case "e":
 			if item, ok := m.currentMCPManagerItem(); ok && item.Kind == mcpManagerItemServer {
-				return m.runMCPManagerCommand([]string{"enable", item.Name})
+				return m.runMCPManagerCommand([]string{"enable", item.ConfigKey})
 			}
 		case "r":
 			if item, ok := m.currentMCPManagerItem(); ok && item.Kind == mcpManagerItemServer {
-				return m.runMCPManagerCommand([]string{"remove", item.Name})
+				return m.runMCPManagerCommand([]string{"remove", item.ConfigKey})
 			}
 		}
 	}
@@ -197,7 +202,7 @@ func (m model) chooseMCPManagerItem() (model, tea.Cmd) {
 	}
 	switch item.Kind {
 	case mcpManagerItemServer:
-		return m.runMCPManagerCommand([]string{"check", item.Name})
+		return m.runMCPManagerCommand([]string{"check", item.ConfigKey})
 	case mcpManagerItemMarketplace:
 		return m.prefillMCPManagerCommand(item.InstallCommand), nil
 	case mcpManagerItemAddRemote:
@@ -253,11 +258,12 @@ func (m model) mcpManagerItems() []mcpManagerItem {
 		name := displayValue(strings.TrimSpace(server.Name), "unnamed")
 		installed[strings.ToLower(name)] = true
 		item := mcpManagerItem{
-			Kind:   mcpManagerItemServer,
-			Name:   name,
-			Label:  name,
-			Meta:   mcpManagerServerMeta(server),
-			Detail: strings.Join([]string{name, server.Transport, server.State, server.Auth, server.Target}, " "),
+			Kind:      mcpManagerItemServer,
+			Name:      name,
+			ConfigKey: server.ConfigKey,
+			Label:     name,
+			Meta:      mcpManagerServerMeta(server),
+			Detail:    strings.Join([]string{name, server.Transport, server.State, server.Auth, server.Target}, " "),
 		}
 		if mcpManagerItemMatches(item, query) {
 			items = append(items, item)
@@ -426,12 +432,24 @@ func (m model) mcpManagerSelectionDetail(width int) []string {
 	}
 	switch item.Kind {
 	case mcpManagerItemServer:
-		server, ok := m.mcpManagerServer(item.Name)
+		server, ok := m.mcpManagerServer(item.ConfigKey)
 		if !ok {
 			return nil
 		}
 		lines := []string{
 			fillPaletteLine(zeroTheme.ink.Bold(true).Render(server.Name)+" "+zeroTheme.faint.Render(server.Transport+" · "+server.State), width, transparentSurface),
+		}
+		// Directly under the header, above the target, and through the same
+		// sanitizer mcpManagerServerLines uses.
+		//
+		// This overlay is what a bare /mcp opens, so it is the first place a user
+		// goes after a startup warning has scrolled away. It reported the state
+		// and stopped: "failed" on its own sends the reader to check their config
+		// when the answer is usually in the error, which is the whole point of
+		// recording it. The transcript path showed the reason and this one did
+		// not, so the fix only reached the surface people were not looking at.
+		if reason := sanitizeTerminalReason(server.Error); reason != "" {
+			lines = append(lines, fitStyledLine(zeroTheme.faint.Render(reason), width))
 		}
 		if target := strings.TrimSpace(server.Target); target != "" {
 			lines = append(lines, fitStyledLine(zeroTheme.faint.Render(target), width))
@@ -473,9 +491,15 @@ func firstMCPMarketplaceDetailLine(item mcpManagerItem) string {
 	return detail
 }
 
-func (m model) mcpManagerServer(name string) (MCPServerView, bool) {
+// mcpManagerServer selects a row by its CONFIG KEY, not its display name.
+//
+// Two entries whose keys differ only by padding render under one canonical name,
+// and ValidateUniqueNames deliberately accepts that when one of them is
+// disabled. Matching on the name returned whichever came first, so a detail
+// pane or an action chosen on the disabled row could land on the enabled one.
+func (m model) mcpManagerServer(configKey string) (MCPServerView, bool) {
 	for _, server := range m.mcpViewState().Servers {
-		if server.Name == name {
+		if server.ConfigKey == configKey {
 			return server, true
 		}
 	}

@@ -101,14 +101,30 @@ type model struct {
 	// other language servers) stay warm — a fresh manager per run would cold-start
 	// the server on the first edit of every turn. Nil when cwd is unknown; runs then
 	// fall back to a per-run manager. Torn down in quit().
-	lspManager           *lsp.Manager
-	sessionStore         *sessions.Store
-	peerService          *peermsg.Service
-	peerInbox            []peermsg.InboundMessage
-	peerApprovalQueue    []peermsg.InboundMessage
-	peerPendingApproval  *peermsg.InboundMessage
-	sandboxStore         *sandbox.GrantStore
-	mcpConfig            config.MCPConfig
+	lspManager          *lsp.Manager
+	sessionStore        *sessions.Store
+	peerService         *peermsg.Service
+	peerInbox           []peermsg.InboundMessage
+	peerApprovalQueue   []peermsg.InboundMessage
+	peerPendingApproval *peermsg.InboundMessage
+	sandboxStore        *sandbox.GrantStore
+	mcpConfig           config.MCPConfig
+	mcpSkipped          []internalmcp.SkippedServer
+	// mcpSkippedCredentials fingerprints the credential material that existed
+	// when mcpSkipped was captured, so a later render cannot re-derive a weaker
+	// redaction for the same retained error. See staleMCPObservation.
+	mcpSkippedCredentials string
+	// mcpLateSkipped pulls failures that were recorded after this model was
+	// built, and mcpStartupConfig is the configuration they were observed
+	// against, so the same invalidation the startup snapshot gets can be applied
+	// to them. mcpLateSkippedCount is what the cached view state was built from,
+	// so a new arrival invalidates the cache without a config change.
+	mcpLateSkipped func() []internalmcp.SkippedServer
+	// mcpStartupCompleted closes when the background registration finishes, so an
+	// already-open manager can be told to rebuild rather than waiting for input.
+	mcpStartupCompleted  <-chan struct{}
+	mcpStartupConfig     config.MCPConfig
+	mcpLateSkippedCount  int
 	mcpPermissionStore   *internalmcp.PermissionStore
 	mcpTokenStore        *internalmcp.TokenStore
 	mcpCommand           func(context.Context, []string) MCPCommandResult
@@ -1055,6 +1071,11 @@ func newModel(ctx context.Context, options Options) model {
 		peerService:                 options.PeerService,
 		sandboxStore:                sandboxStore,
 		mcpConfig:                   options.MCPConfig,
+		mcpSkipped:                  options.MCPSkipped,
+		mcpLateSkipped:              options.MCPLateSkipped,
+		mcpStartupCompleted:         options.MCPStartupCompleted,
+		mcpStartupConfig:            options.MCPConfig,
+		mcpSkippedCredentials:       mcpCredentialFingerprint(options.MCPTokenStore.CredentialMaterial()),
 		mcpPermissionStore:          options.MCPPermissionStore,
 		mcpTokenStore:               options.MCPTokenStore,
 		mcpCommand:                  options.MCPCommand,
@@ -1229,6 +1250,9 @@ func (m model) armComposerBlink() (model, tea.Cmd) {
 
 func (m model) Init() tea.Cmd {
 	cmds := []tea.Cmd{textinput.Blink, composerBlinkCmd(m.composerBlinkSeq)}
+	if m.mcpStartupCompleted != nil {
+		cmds = append(cmds, waitForMCPStartupCompletion(m.mcpStartupCompleted))
+	}
 	if m.petAnimation != nil && !m.reducedMotion {
 		cmds = append(cmds, petTickCmd(m.petTickSeq, m.petFrameDelay()))
 	}
@@ -1567,6 +1591,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, dragEdgeScrollTickCmd(m.edgeScrollSeq)
 	case providerWizardOAuthMsg:
 		return m.applyProviderWizardOAuth(msg)
+	case mcpStartupCompletedMsg:
+		// The background registration is done, so the observations it produced are
+		// available now. Rebuilding HERE is what makes an already-open manager show
+		// them: nothing else schedules a render once Bubble Tea is idle, so a getter
+		// that reports late failures is not on its own enough.
+		m.refreshMCPViewState()
+		return m, nil
 	case aimlapiOnboardMsg:
 		return m.applyAimlapiOnboard(msg)
 	case aimlapiExistingBalanceMsg:

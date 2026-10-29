@@ -97,7 +97,7 @@ func TestMCPManagerTargetsRedactSecretsFromURLsAndArgs(t *testing.T) {
 			},
 		}},
 	})
-	got := plainRender(t, renderMCPView(state, 260))
+	got := plainRender(t, renderMCPView(state, 320))
 
 	for _, leaked := range []string{
 		"arg-secret",

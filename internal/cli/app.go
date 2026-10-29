@@ -846,6 +846,15 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		mcpTokenStore = nil
 		err = nil
 	}
+	// Checked on the WHOLE configuration, before the split. The two halves
+	// normalize separately, so a collision that straddles them is invisible to
+	// either call: a user-configured "  exa" is critical while the built-in
+	// default "exa" is optional, and they are one runtime server. Ambiguous
+	// identity is worth refusing to start over, because every downstream join is
+	// keyed on that name and one of the two entries is unreachable regardless.
+	if err := mcp.ValidateUniqueNames(mcpConfig); err != nil {
+		return writeAppError(stderr, err.Error(), 1)
+	}
 	criticalMCPConfig, optionalMCPConfig := splitMCPStartupConfig(mcpConfig)
 	mcpRuntime := mcpToolRuntime(noopMCPRuntime{})
 	if len(criticalMCPConfig.Servers) > 0 {
@@ -854,6 +863,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			Autonomy:        mcp.AutonomyLow,
 			Execution:       executionRunner,
 			WorkspaceRoot:   workspaceRoot,
+			SecretValues:    mcpTokenStore.CredentialMaterial,
 		})
 		if registerErr != nil {
 			closeMCPRuntime(stderr, runtime)
@@ -936,6 +946,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 				Autonomy:        mcp.AutonomyLow,
 				Execution:       executionRunner,
 				WorkspaceRoot:   workspaceRoot,
+				SecretValues:    mcpTokenStore.CredentialMaterial,
 			},
 			deps.registerMCPTools,
 			func() {
@@ -1012,8 +1023,22 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		PeerService:        peerService,
 		SandboxStore:       sandboxStore,
 		MCPConfig:          mcpConfig,
-		MCPPermissionStore: mcpPermissionStore,
-		MCPTokenStore:      mcpTokenStore,
+		// The panel needs the failures too. A startup warning on stderr scrolls
+		// away behind the first screen of output, so /mcp is where a user goes
+		// to ask what is actually running — it should not answer from config
+		// alone and report a server that never connected as enabled.
+		MCPSkipped: mcpRuntime.Skipped(),
+		// Optional servers register on a background goroutine, so their failures
+		// are not known yet and a snapshot cannot carry them. Pulled instead, or
+		// they stay rendered from configuration alone: enabled, with no
+		// explanation, for a server that never connected.
+		MCPLateSkipped: optionalMCPRuntime.Skipped,
+		// And a signal to rebuild when it finishes. Pulling alone leaves an
+		// already-open manager showing the configuration-derived state, because a
+		// background completion schedules no render of its own.
+		MCPStartupCompleted: optionalMCPRuntime.completed(),
+		MCPPermissionStore:  mcpPermissionStore,
+		MCPTokenStore:       mcpTokenStore,
 		MCPCommand: func(ctx context.Context, args []string) tui.MCPCommandResult {
 			if ctx == nil {
 				ctx = context.Background()
