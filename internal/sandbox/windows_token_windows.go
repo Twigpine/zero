@@ -48,6 +48,54 @@ func (sid windowsLocalSID) close() {
 	}
 }
 
+// restrictWindowsTokenForCapabilitySIDs applies the same write jail to an
+// arbitrary base token that createWindowsRestrictedTokenForCapabilitySIDs
+// applies to the calling process's own.
+//
+// The sandbox principal path needs this. A LogonUser token is a full token for
+// that account: the ACL plan can deny it at named paths, but it cannot revoke
+// what the account's ambient memberships already grant, so an opted-in command
+// could still write any path whose DACL admits BUILTIN\Users, Authenticated
+// Users, or NT AUTHORITY\BATCH - C:\Users\Public\Documents being the obvious
+// one - regardless of the profile's write roots.
+//
+// The caller must include the principal's OWN SID among the capability SIDs.
+// The plan grants the workspace to that SID rather than to a capability SID, so
+// without it the restricted-SID check has nothing to match and the principal
+// loses its own workspace: a jail that locks out the inmate and no one else.
+func restrictWindowsTokenForCapabilitySIDs(base windows.Token, capabilitySIDStrings []string, writeRestricted bool) (windows.Token, error) {
+	capabilitySIDs, err := parseWindowsCapabilitySIDs(capabilitySIDStrings)
+	if err != nil {
+		return 0, err
+	}
+	defer func() {
+		for _, sid := range capabilitySIDs {
+			sid.close()
+		}
+	}()
+	return createWindowsRestrictedTokenFromBase(base, capabilitySIDs, writeRestricted)
+}
+
+// parseWindowsCapabilitySIDs converts SID strings, closing what it already
+// allocated if one fails to parse.
+func parseWindowsCapabilitySIDs(values []string) ([]windowsLocalSID, error) {
+	if len(values) == 0 {
+		return nil, errors.New("windows restricted token requires at least one capability SID")
+	}
+	parsed := make([]windowsLocalSID, 0, len(values))
+	for _, value := range values {
+		sid, err := newWindowsLocalSID(value)
+		if err != nil {
+			for _, existing := range parsed {
+				existing.close()
+			}
+			return nil, fmt.Errorf("parse windows capability SID %q: %w", value, err)
+		}
+		parsed = append(parsed, sid)
+	}
+	return parsed, nil
+}
+
 func createWindowsRestrictedTokenForCapabilitySIDs(capabilitySIDStrings []string, writeRestricted bool) (windows.Token, error) {
 	if len(capabilitySIDStrings) == 0 {
 		return 0, errors.New("windows restricted token requires at least one capability SID")
