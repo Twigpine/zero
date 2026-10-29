@@ -350,3 +350,68 @@ func TestWriteFileRefusesSameNameSubstitutionWithIdenticalBytes(t *testing.T) {
 		t.Fatalf("substituted object = %q, err=%v; the write must not land in an object the preimage did not observe", got, err)
 	}
 }
+
+// AN OVERWRITTEN PATH'S NEIGHBOURS THROUGH ANOTHER NAME KEEP THEIR CONTENT.
+//
+// The replace-overwrite truncates and rewrites the observed file in place, and
+// truncation follows the inode: a sibling reached through a hard link loses
+// its content when this path's content is replaced, because both names were
+// pointing at the same bytes. Publishing through a rename detaches this name
+// from the shared inode instead, so the link sibling keeps what it shares.
+func TestOverwriteDoesNotTruncateAHardlinkSibling(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target.txt")
+	sibling := filepath.Join(root, "sibling.txt")
+	if err := os.WriteFile(target, []byte("shared\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(target, sibling); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+
+	result := NewScopedWriteFileTool(root, nil).Run(context.Background(), map[string]any{
+		"path": "target.txt", "content": "replaced\n", "overwrite": true,
+	})
+	if result.Status != StatusOK {
+		t.Fatalf("overwrite status = %s: %s", result.Status, result.Output)
+	}
+	shared, err := os.ReadFile(sibling)
+	if err != nil || string(shared) != "shared\n" {
+		t.Fatalf("hard-link sibling = %q, err=%v; replacing this name must not rewrite the bytes the sibling shares", shared, err)
+	}
+}
+
+// THE PUBLISHED FILE LOOKS LIKE THE FILE IT REPLACED. The permission bits are
+// carried over from the file that was observed, not from the side file the
+// bytes were staged in.
+func TestOverwriteKeepsTheObservedPermissionBits(t *testing.T) {
+	// 0o640 differs from the 0o600 the side file is staged with, so a publish
+	// that forgot to carry the observed bits cannot pass by coincidence.
+	want := os.FileMode(0o640)
+	if runtime.GOOS == "windows" {
+		// A Windows file carries only the read-only bit, so a 0o640 file is
+		// reported as 0o666; the write bit, not the exact value, is the fact
+		// being pinned.
+		want = os.FileMode(0o666)
+	}
+
+	root := t.TempDir()
+	target := filepath.Join(root, "existing.txt")
+	if err := os.WriteFile(target, []byte("observed\n"), want); err != nil {
+		t.Fatal(err)
+	}
+
+	result := NewScopedWriteFileTool(root, nil).Run(context.Background(), map[string]any{
+		"path": "existing.txt", "content": "zero\n", "overwrite": true,
+	})
+	if result.Status != StatusOK {
+		t.Fatalf("overwrite status = %s: %s", result.Status, result.Output)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Fatalf("published permission bits = %o, want %o", got, want)
+	}
+}

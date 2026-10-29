@@ -1,6 +1,6 @@
 //go:build windows
 
-package observability
+package pathjail
 
 import (
 	"errors"
