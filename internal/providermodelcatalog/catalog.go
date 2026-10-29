@@ -116,7 +116,7 @@ var curatedModels = map[string][]Model{
 		// Suggestions only: availability comes from the authenticated Codex catalog.
 		// https://learn.chatgpt.com/docs/models
 		{ID: "gpt-6.1-sol", Description: "balanced Codex model"},
-		{ID: "gpt-6.1-terra", Description: "fast visual and coding model"},
+		{ID: "gpt-6.1-terra", Description: "fast model for writing, visual understanding, and computer use"},
 		{ID: "gpt-6-astra", Description: "advanced reasoning model"},
 		{ID: "gpt-6-luna", Description: "efficient coding model"},
 	},
