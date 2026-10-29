@@ -301,10 +301,12 @@ Install and manage:
 zero plugins add ./github-pr-review      # copy into ~/.config/zero/plugins/ or ./.zero/plugins/
 zero plugins list
 zero plugins info github-pr-review       # show manifest path, enabled state, lock metadata
+zero plugins disable github-pr-review   # sets "enabled": false in plugin.json
+zero plugins enable github-pr-review    # sets "enabled": true in plugin.json
 zero plugins remove github-pr-review    # alias: rm
 ```
 
-A plugin is enabled by being present in the plugins directory and disabled by removing it (or by the user setting `"enabled": false` in its `plugin.json`). Plugins are not enabled or disabled by a CLI subcommand today.
+A plugin is active when it is present under a plugins directory and its `plugin.json` has `"enabled": true` (the default when the field is omitted). Use `zero plugins disable <id>` / `zero plugins enable <id>` to toggle that field without removing the plugin. Pass `--user` to target only user plugins and ignore `./.zero/plugins`; without it, a project plugin with the same id takes precedence. The toggle edits the `enabled` value in place — the rest of the manifest keeps its formatting, field order, and numeric literals — and serializes with `plugins add` / `plugins remove` on the same plugins root.
 
 Plugin commands run with the plugin directory as their working directory. Use relative paths; the loader resolves them at activation time.
 
