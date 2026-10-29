@@ -19,7 +19,8 @@ import (
 // confirms m.permissionMode actually flips to PermissionModePlan and back —
 // the entry/exit path the previous /plan (display-only) command was missing.
 func TestPlanCommandEntersAndExitsPlanMode(t *testing.T) {
-	m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeAuto})
+	isolatePlanConfig(t)
+	m := newModel(context.Background(), Options{SessionStore: testSessionStore(t), Cwd: t.TempDir(), PermissionMode: agent.PermissionModeAuto})
 
 	updated, cmd := m.dispatchCommand(parseCommand("/plan on"))
 	next := updated.(model)
@@ -31,6 +32,9 @@ func TestPlanCommandEntersAndExitsPlanMode(t *testing.T) {
 	}
 	if !transcriptContains(next.transcript, "read-only planning") {
 		t.Fatalf("expected activation notice in transcript, got %#v", next.transcript)
+	}
+	if !transcriptContains(next.transcript, "Starting or switching sessions exits Plan mode") {
+		t.Fatal("activation notice must explain session-scoped Plan mode")
 	}
 
 	updated, cmd = next.dispatchCommand(parseCommand("/plan off"))
@@ -49,7 +53,8 @@ func TestPlanCommandEntersAndExitsPlanMode(t *testing.T) {
 // TestPlanCommandRestoresPriorModeOnExit confirms /plan off restores whatever
 // mode was active before /plan on, not a hardcoded default.
 func TestPlanCommandRestoresPriorModeOnExit(t *testing.T) {
-	m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeAsk})
+	isolatePlanConfig(t)
+	m := newModel(context.Background(), Options{SessionStore: testSessionStore(t), Cwd: t.TempDir(), PermissionMode: agent.PermissionModeAsk})
 
 	updated, _ := m.dispatchCommand(parseCommand("/plan on"))
 	next := updated.(model)
@@ -68,7 +73,8 @@ func TestPlanCommandRestoresPriorModeOnExit(t *testing.T) {
 // pre-existing display-only behavior: bare /plan and /plan status must keep
 // reporting the plan without touching the active permission mode.
 func TestPlanCommandStatusDoesNotChangeMode(t *testing.T) {
-	m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeAuto, Registry: tools.NewRegistry()})
+	isolatePlanConfig(t)
+	m := newModel(context.Background(), Options{SessionStore: testSessionStore(t), Cwd: t.TempDir(), PermissionMode: agent.PermissionModeAuto, Registry: tools.NewRegistry()})
 
 	updated, _ := m.dispatchCommand(parseCommand("/plan"))
 	next := updated.(model)
@@ -86,7 +92,8 @@ func TestPlanCommandStatusDoesNotChangeMode(t *testing.T) {
 // TestPlanCommandOffWithoutActivePlanIsNoop confirms /plan off is a harmless
 // no-op (not an error, not a mode change) when plan mode was never entered.
 func TestPlanCommandOffWithoutActivePlanIsNoop(t *testing.T) {
-	m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeAuto})
+	isolatePlanConfig(t)
+	m := newModel(context.Background(), Options{SessionStore: testSessionStore(t), Cwd: t.TempDir(), PermissionMode: agent.PermissionModeAuto})
 
 	updated, _ := m.dispatchCommand(parseCommand("/plan off"))
 	next := updated.(model)
@@ -102,7 +109,8 @@ func TestPlanCommandOffWithoutActivePlanIsNoop(t *testing.T) {
 // doesn't overwrite the saved prior mode with Plan itself, which would strand
 // /plan off unable to restore the real original mode.
 func TestPlanCommandOnTwiceDoesNotClobberSavedMode(t *testing.T) {
-	m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeAsk})
+	isolatePlanConfig(t)
+	m := newModel(context.Background(), Options{SessionStore: testSessionStore(t), Cwd: t.TempDir(), PermissionMode: agent.PermissionModeAsk})
 
 	updated, _ := m.dispatchCommand(parseCommand("/plan on"))
 	next := updated.(model)

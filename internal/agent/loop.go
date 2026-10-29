@@ -1590,6 +1590,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		// the Run turn loop performs the actual provider switch. Empty for every
 		// ordinary tool result.
 		RequestedModel: result.Meta["escalate_to_model"],
+		PlanSnapshot:   result.PlanSnapshot,
 	}, nil
 }
 
@@ -1926,15 +1927,15 @@ func toolResultFromPrePermissionReject(call ToolCall, result tools.Result) ToolR
 	}
 }
 
-// hooksSuppressed reports whether advisory (non-veto) hooks must not run for
-// this run's permission mode. Plan mode promises a read-only turn, but
-// sessionStart/sessionEnd/afterTool hooks execute configured host commands
-// outside the advertised-tool and sandbox gates, so dispatching them would let
-// merely starting a plan session or finishing a read mutate the workspace.
+// hooksSuppressed reports whether lifecycle and afterTool hooks must not run
+// for this run's permission mode. Plan mode promises a read-only turn, but
+// sessionStart, sessionEnd, and afterTool hooks execute configured host
+// commands outside the advertised-tool and sandbox gates, so dispatching them
+// would let merely starting or finishing a plan session mutate the workspace
+// or spawn processes.
 //
-// beforeTool is intentionally NOT suppressed: a non-zero exit is a deny gate,
-// and skipping it fails open (operators who block secret-file reads via
-// beforeTool would lose that protection under /plan on). See dispatchBeforeTool.
+// beforeTool is intentionally not gated here: fail-closed policy vetoes must
+// still apply to read-only plan-mode calls (see dispatchBeforeTool).
 //
 // Spec-draft keeps the existing trust-gated hook model: project hooks still
 // fire when the workspace (or its worktree trust root) is trusted. That is

@@ -14,6 +14,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/planmode"
 	"github.com/Twigpine/zero/internal/sandbox"
 	"github.com/Twigpine/zero/internal/sessions"
 	"github.com/Twigpine/zero/internal/tools"
@@ -834,6 +835,265 @@ func TestResumeCommandIsBlockedWhileRunPending(t *testing.T) {
 	}
 	if !transcriptContains(next.transcript, "Cannot resume sessions while a run is active") {
 		t.Fatalf("expected pending resume error, got %#v", next.transcript)
+	}
+}
+
+// Regression: plan mode (and the permission mode /plan off would restore)
+// used to live only on the TUI model, so /new left it attached across the
+// session switch — silently making the fresh session read-only, and letting
+// its eventual /plan off restore the OLD session's permission mode into it.
+func TestNewSessionExitsPlanMode(t *testing.T) {
+	isolatePlanConfig(t)
+	store := testSessionStore(t)
+	m := newModel(context.Background(), Options{SessionStore: store})
+	m.permissionMode = agent.PermissionModePlan
+	m.permissionModeBeforePlan = agent.PermissionModeAsk
+
+	m = m.startNewSession()
+
+	if m.permissionMode != agent.PermissionModeAsk {
+		t.Fatalf("expected /new to exit plan mode and restore Ask, got %s", m.permissionMode)
+	}
+	if !transcriptContains(m.transcript, "Plan mode ended for the previous session. Permission mode restored to ask.") {
+		t.Fatal("missing Plan mode exit notice after /new")
+	}
+	if m.permissionModeBeforePlan != "" {
+		t.Fatalf("expected permissionModeBeforePlan to be cleared, got %q", m.permissionModeBeforePlan)
+	}
+}
+
+// Regression: exitPlanMode only restored the permission mode, not the plan
+// itself. A session switch left the previous session's plan in the shared
+// update_plan tool state and sticky panel, leaking it into a session that
+// never drafted it.
+func TestNewSessionClearsPreviousPlan(t *testing.T) {
+	isolatePlanConfig(t)
+	store := testSessionStore(t)
+	planTool := tools.NewUpdatePlanTool()
+	planTool.SetPlan([]tools.PlanItem{{Content: "leftover step", Status: "pending"}})
+	registry := tools.NewRegistry()
+	registry.Register(planTool)
+	m := newModel(context.Background(), Options{SessionStore: store, Registry: registry})
+	m.permissionMode = agent.PermissionModePlan
+	m.plan.updateFromItems(planTool.CurrentPlan(), m.now())
+
+	m = m.startNewSession()
+
+	if len(planTool.CurrentPlan()) != 0 {
+		t.Fatalf("expected /new to clear the shared update_plan state, got %+v", planTool.CurrentPlan())
+	}
+	if !m.plan.isEmpty() {
+		t.Fatalf("expected /new to clear the sticky plan panel, got %+v", m.plan)
+	}
+}
+
+func TestResumeDifferentSessionExitsPlanMode(t *testing.T) {
+	isolatePlanConfig(t)
+	store := testSessionStore(t)
+	active, err := store.Create(sessions.CreateInput{Title: "Active"})
+	if err != nil {
+		t.Fatalf("Create active: %v", err)
+	}
+	other, err := store.Create(sessions.CreateInput{Title: "Other"})
+	if err != nil {
+		t.Fatalf("Create other: %v", err)
+	}
+	m := newModel(context.Background(), Options{SessionStore: store})
+	m.activeSession = active
+	m.permissionMode = agent.PermissionModePlan
+	m.permissionModeBeforePlan = agent.PermissionModeAsk
+
+	m, _ = m.handleResumeCommand(other.SessionID)
+
+	if m.activeSession.SessionID != other.SessionID {
+		t.Fatalf("expected to resume the other session, got %#v", m.activeSession)
+	}
+	if m.permissionMode != agent.PermissionModeAsk {
+		t.Fatalf("expected /resume to a different session to exit plan mode and restore Ask, got %s", m.permissionMode)
+	}
+	if !transcriptContains(m.transcript, "Plan mode ended for the previous session. Permission mode restored to ask.") {
+		t.Fatal("missing Plan mode exit notice after /resume")
+	}
+	if m.permissionModeBeforePlan != "" {
+		t.Fatalf("expected permissionModeBeforePlan to be cleared, got %q", m.permissionModeBeforePlan)
+	}
+}
+
+// Regression: /resume must surface a durable plan reload failure for the
+// destination session instead of leaving sticky/shared plan state silently empty.
+func TestResumeDifferentSessionReportsPlanReloadError(t *testing.T) {
+	isolatePlanConfig(t)
+	store := testSessionStore(t)
+	active, err := store.Create(sessions.CreateInput{Title: "Active"})
+	if err != nil {
+		t.Fatalf("Create active: %v", err)
+	}
+	other, err := store.Create(sessions.CreateInput{Title: "Other"})
+	if err != nil {
+		t.Fatalf("Create other: %v", err)
+	}
+
+	cwd := t.TempDir()
+	// Plant an unreadable plan path for the destination session: a directory
+	// where the plan file should be so ReadPlan returns a real I/O error.
+	path, err := planmode.PlanFilePath(cwd, other.SessionID)
+	if err != nil {
+		t.Fatalf("PlanFilePath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("MkdirAll plan dir: %v", err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatalf("Mkdir over plan path: %v", err)
+	}
+
+	planTool := tools.NewUpdatePlanTool()
+	planTool.SetPlan([]tools.PlanItem{{Content: "stale step", Status: "pending"}})
+	registry := tools.NewRegistry()
+	registry.Register(planTool)
+
+	m := newModel(context.Background(), Options{SessionStore: store, Cwd: cwd, Registry: registry})
+	m.activeSession = active
+	m.permissionMode = agent.PermissionModePlan
+	m.permissionModeBeforePlan = agent.PermissionModeAsk
+	m.plan.updateFromItems(planTool.CurrentPlan(), m.now())
+
+	m, _ = m.handleResumeCommand(other.SessionID)
+
+	if m.activeSession.SessionID != other.SessionID {
+		t.Fatalf("expected to resume the other session, got %#v", m.activeSession)
+	}
+	if !transcriptContains(m.transcript, "plan reload error:") {
+		t.Fatalf("resume did not surface plan reload failure: %#v", m.transcript)
+	}
+	// Destination plan state stays empty after the switch + failed reload
+	// (shared tool cleared by resetPlanForSessionSwitch, panel not rehydrated).
+	if len(planTool.CurrentPlan()) != 0 {
+		t.Fatalf("expected shared update_plan cleared after failed resume reload, got %+v", planTool.CurrentPlan())
+	}
+	if !m.plan.isEmpty() {
+		t.Fatalf("expected sticky plan panel empty after failed resume reload, got %+v", m.plan)
+	}
+}
+
+// Regression: /resume into a session that has a durable plan must restore
+// the sticky panel and shared update_plan (including Status and Notes).
+func TestResumeDifferentSessionReloadsDestinationPlan(t *testing.T) {
+	isolatePlanConfig(t)
+	store := testSessionStore(t)
+	active, err := store.Create(sessions.CreateInput{Title: "Active"})
+	if err != nil {
+		t.Fatalf("Create active: %v", err)
+	}
+	other, err := store.Create(sessions.CreateInput{Title: "Other"})
+	if err != nil {
+		t.Fatalf("Create other: %v", err)
+	}
+
+	cwd := t.TempDir()
+	destItems := []tools.PlanItem{
+		{Content: "wire catalog", Status: "completed", Notes: "done in review"},
+		{Content: "ship it", Status: "pending", Notes: "wait for CI"},
+	}
+	if _, err := planmode.WritePlan(cwd, other.SessionID, formatPlanItems(destItems)); err != nil {
+		t.Fatalf("WritePlan destination: %v", err)
+	}
+
+	planTool := tools.NewUpdatePlanTool()
+	planTool.SetPlan([]tools.PlanItem{{Content: "stale step", Status: "pending"}})
+	registry := tools.NewRegistry()
+	registry.Register(planTool)
+
+	m := newModel(context.Background(), Options{SessionStore: store, Cwd: cwd, Registry: registry})
+	m.activeSession = active
+	m.permissionMode = agent.PermissionModePlan
+	m.permissionModeBeforePlan = agent.PermissionModeAsk
+	m.plan.updateFromItems(planTool.CurrentPlan(), m.now())
+
+	m, _ = m.handleResumeCommand(other.SessionID)
+
+	if m.activeSession.SessionID != other.SessionID {
+		t.Fatalf("expected to resume the other session, got %#v", m.activeSession)
+	}
+	got := planTool.CurrentPlan()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 restored update_plan items, got %+v", got)
+	}
+	if got[0].Content != "wire catalog" || got[0].Status != "completed" || got[0].Notes != "done in review" {
+		t.Fatalf("first restored item mismatch: %+v", got[0])
+	}
+	if got[1].Content != "ship it" || got[1].Status != "pending" || got[1].Notes != "wait for CI" {
+		t.Fatalf("second restored item mismatch: %+v", got[1])
+	}
+	if m.plan.isEmpty() {
+		t.Fatal("expected sticky plan panel restored after destination reload")
+	}
+	if len(m.plan.steps) != 2 || m.plan.steps[0].content != "wire catalog" || m.plan.steps[0].status != "completed" || m.plan.steps[0].notes != "done in review" {
+		t.Fatalf("sticky panel mismatch: %+v", m.plan.steps)
+	}
+}
+
+// A session that never entered plan mode has an explicit, non-Plan
+// permissionMode with no permissionModeBeforePlan to restore. /new and
+// /resume must not reset that choice to Auto just because they
+// unconditionally call exitPlanMode on every session switch.
+func TestNewSessionPreservesNonPlanPermissionMode(t *testing.T) {
+	isolatePlanConfig(t)
+	store := testSessionStore(t)
+	m := newModel(context.Background(), Options{SessionStore: store})
+	m.permissionMode = agent.PermissionModeUnsafe
+
+	m = m.startNewSession()
+
+	if m.permissionMode != agent.PermissionModeUnsafe {
+		t.Fatalf("expected /new to preserve explicit Unsafe permission mode, got %s", m.permissionMode)
+	}
+}
+
+func TestResumeDifferentSessionPreservesNonPlanPermissionMode(t *testing.T) {
+	isolatePlanConfig(t)
+	store := testSessionStore(t)
+	active, err := store.Create(sessions.CreateInput{Title: "Active"})
+	if err != nil {
+		t.Fatalf("Create active: %v", err)
+	}
+	other, err := store.Create(sessions.CreateInput{Title: "Other"})
+	if err != nil {
+		t.Fatalf("Create other: %v", err)
+	}
+	m := newModel(context.Background(), Options{SessionStore: store})
+	m.activeSession = active
+	m.permissionMode = agent.PermissionModeUnsafe
+
+	m, _ = m.handleResumeCommand(other.SessionID)
+
+	if m.permissionMode != agent.PermissionModeUnsafe {
+		t.Fatalf("expected /resume to a different session to preserve explicit Unsafe permission mode, got %s", m.permissionMode)
+	}
+}
+
+// Resuming the session that is already active (e.g. `/resume latest` or
+// `/resume <currentID>`) is not a switch, so it must leave plan mode alone —
+// matching the existing loopsCleared guard just below.
+func TestResumeSameSessionKeepsPlanMode(t *testing.T) {
+	isolatePlanConfig(t)
+	store := testSessionStore(t)
+	active, err := store.Create(sessions.CreateInput{Title: "Active"})
+	if err != nil {
+		t.Fatalf("Create active: %v", err)
+	}
+	m := newModel(context.Background(), Options{SessionStore: store})
+	m.activeSession = active
+	m.permissionMode = agent.PermissionModePlan
+	m.permissionModeBeforePlan = agent.PermissionModeAsk
+
+	m, _ = m.handleResumeCommand(active.SessionID)
+
+	if m.permissionMode != agent.PermissionModePlan {
+		t.Fatalf("expected resuming the same session to leave plan mode active, got %s", m.permissionMode)
+	}
+	if m.permissionModeBeforePlan != agent.PermissionModeAsk {
+		t.Fatalf("expected the saved restore mode preserved on a same-session resume, got %q", m.permissionModeBeforePlan)
 	}
 }
 

@@ -1,0 +1,649 @@
+package planmode
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/lockutil"
+	"github.com/Twigpine/zero/internal/sandbox"
+)
+
+// PlanDirName is the config-relative directory (under UserConfigDir) where
+// durable /plan files live. Plans are kept outside the workspace so the
+// auto-allowed, read-only update_plan tool can persist without a write grant
+// and without mutating the workspace.
+const PlanDirName = "zero/plans"
+
+// DraftSystemPrompt is the system prompt the TUI runs while /plan mode is active
+// on the current session. It is read-only: the agent inspects the workspace and
+// shapes the plan, but must not mutate anything until plan mode is exited.
+const DraftSystemPrompt = `Plan mode is active on this session.
+
+You are planning an implementation, not changing files.
+
+Use read-only tools to inspect the workspace. You may use ask_user only when a
+decision is genuinely blocking and cannot be resolved from the workspace or a
+reasonable safe assumption.
+
+Do not write files, edit files, apply patches, run shell commands, spawn
+specialists, or implement the requested change while in plan mode.
+
+Capture the plan with update_plan as you work. When the user is ready to
+implement, they exit plan mode and you continue normally.
+
+The plan should converge on one concrete approach. Do not leave unresolved
+choices such as "Option A" and "Option B". If something remains uncertain, make
+the safest reasonable assumption and state it clearly.`
+
+// PlanFilePath returns the deterministic, absolute plan file path for a
+// session under the per-user config plans directory, scoped by workspace so
+// two workspaces never share a plan file. It performs no filesystem access;
+// ReadPlan and WritePlan are the safe way to actually read or write plan
+// content.
+//
+// Directory and file names are collision-resistant: slugify alone would map
+// distinct IDs such as "plan_a" and "plan-a" (or workspaces "foo_bar" and
+// "foo-bar") onto the same path, so a durable plan for one session/workspace
+// could be read or overwritten by another. pathKey appends a content hash of
+// the exact original string so the mapping is injective.
+func PlanFilePath(workspaceRoot, sessionID string) (string, error) {
+	base, absWorkspace, err := planStorageBase(workspaceRoot)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, pathKey(absWorkspace), pathKey(sessionID)+".md"), nil
+}
+
+// ReadPlan reads the plan file for a session. The bool reports whether a plan
+// file exists; a missing file is not an error.
+//
+// Containment is bound at open time via a rooted, handle-relative open under
+// the plan storage base (see readPlanFile). Pre-open path checks alone are a
+// check-to-use race: an intermediate directory can be replaced with a symlink
+// or reparse point between resolve and open.
+func ReadPlan(workspaceRoot, sessionID string) (string, bool, error) {
+	path, err := PlanFilePath(workspaceRoot, sessionID)
+	if err != nil {
+		return "", false, err
+	}
+	if err := ensurePlanPathContained(workspaceRoot, path); err != nil {
+		return "", false, err
+	}
+	base, _, err := planStorageBase(workspaceRoot)
+	if err != nil {
+		return "", false, err
+	}
+	data, err := readPlanFile(base, path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		// Symlink refusals from the reader are already fully formed.
+		if errors.Is(err, errPlanSymlinkRefusal) {
+			return "", false, err
+		}
+		return "", false, fmt.Errorf("read plan file: %w", err)
+	}
+	return string(data), true, nil
+}
+
+func lockPlan(ctx context.Context, base, path string) (*lockutil.FileLock, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		return nil, err
+	}
+	if info, err := os.Lstat(base); err != nil {
+		return nil, err
+	} else if info.Mode()&os.ModeSymlink != 0 || pathIsReparsePoint(base) {
+		return nil, errPlanBaseSymlink(base)
+	}
+	// Keep the lock inode stable and include the protected base in the no-follow walk.
+	lockPath := filepath.Join(base, filepath.Base(filepath.Dir(path))+"-"+filepath.Base(path)+".lock")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		lock, err := lockutil.TryAcquireFileLockAt(filepath.Dir(base), lockPath)
+		if !errors.Is(err, lockutil.ErrLockHeld) || time.Now().After(deadline) {
+			return lock, err
+		}
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// WritePlan writes (creating the directory as needed) the plan file for a
+// session and returns its path. The file is stored under the user config
+// directory, never inside the workspace, so an auto-allowed read-only tool
+// can persist without a workspace write grant.
+//
+// Containment is bound at create/rename time via a rooted, handle-relative
+// no-follow walk under the plan storage base (see writePlanFile). Pre-open
+// path checks alone are a check-to-use race: an intermediate directory can
+// be replaced with a symlink between resolve and create, and pathname
+// MkdirAll/OpenFile/Rename would then land outside the storage tree.
+func WritePlan(workspaceRoot, sessionID, content string) (string, error) {
+	return writePlan(context.Background(), workspaceRoot, sessionID, content, nil)
+}
+
+// WritePlanIfUnchanged rejects publication based on an obsolete durable snapshot.
+func WritePlanIfUnchanged(ctx context.Context, workspaceRoot, sessionID, content, baseline string) (string, error) {
+	return writePlan(ctx, workspaceRoot, sessionID, content, &baseline)
+}
+
+func writePlan(ctx context.Context, workspaceRoot, sessionID, content string, baseline *string) (_ string, resultErr error) {
+	path, err := PlanFilePath(workspaceRoot, sessionID)
+	if err != nil {
+		return "", err
+	}
+	if err := ensurePlanPathContained(workspaceRoot, path); err != nil {
+		return "", err
+	}
+	base, _, err := planStorageBase(workspaceRoot)
+	if err != nil {
+		return "", err
+	}
+	lock, err := lockPlan(ctx, base, path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { resultErr = errors.Join(resultErr, lock.Release()) }()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if baseline != nil {
+		durable, _, err := ReadPlan(workspaceRoot, sessionID)
+		if err != nil {
+			return "", err
+		}
+		if planContentHash(durable) != planContentHash(*baseline) {
+			return "", fmt.Errorf("plan changed since this run's last accepted update")
+		}
+	}
+	body := strings.TrimRight(content, "\n") + "\n"
+	if err := writePlanFile(base, path, body); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// StageForEditor copies a session's current plan content (read safely via
+// ReadPlan) into a fresh file outside the workspace, for handing to an
+// external $EDITOR process launched by /plan open.
+//
+// Handing $EDITOR a path at the durable plan location would leave a
+// symlink-swap race between our protected write and the editor's open. The
+// OS temp directory does not avoid this either: the sandbox's default write
+// scope explicitly includes it (see defaultTempWriteRootCandidates in
+// internal/sandbox), so a sandboxed process could plant the same symlink
+// there. config.UserConfigDir() is usually outside that default scope, but
+// it honors XDG_CONFIG_HOME (on macOS explicitly here, on Linux via
+// os.UserConfigDir itself), so a misconfigured or sandboxed-process
+// environment pointing that at the workspace or the OS temp dir would put
+// the staging directory right back in a default-writable root.
+// editorStagingDirIsPrivate rejects that case instead of silently staging
+// somewhere unsafe.
+//
+// Inside the private directory, the staged file is created relative to the
+// opened directory handle with exclusive, no-follow semantics
+// (O_CREAT|O_EXCL|O_NOFOLLOW on Unix, createFileNoFollow on Windows), so a
+// pre-planted entry or symlink at a guessed name is refused, not followed.
+// The pid+nanosecond suffix only avoids collisions between Zero instances
+// editing the same resumed session; it is not a secrecy control.
+func StageForEditor(workspaceRoot, sessionID string) (string, func(), error) {
+	path, finish, err := StageEditor(workspaceRoot, sessionID)
+	if err != nil {
+		return "", nil, err
+	}
+	return path, func() { finish(false) }, nil
+}
+
+// StageEditor stages an edit; finish releases its lock and optionally preserves the file.
+func StageEditor(workspaceRoot, sessionID string) (stagedPath string, finish func(bool), err error) {
+	content, _, err := ReadPlan(workspaceRoot, sessionID)
+	if err != nil {
+		return "", nil, err
+	}
+	dir, err := editorStagingDir()
+	if err != nil {
+		return "", nil, err
+	}
+	// Create the directory before judging it, then judge (and use) its
+	// PHYSICAL path: a lexical check would pass an XDG_CONFIG_HOME that is
+	// itself a symlink into the workspace or the OS temp directory, while
+	// MkdirAll/CreateTemp followed the link and staged the file somewhere a
+	// sandboxed process can write. Resolving after MkdirAll also covers a
+	// pre-existing staging directory that was replaced with a symlink, and
+	// anchoring the staging on the resolved path means the file is created
+	// where it was checked, not wherever the link points next.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", nil, fmt.Errorf("create plan editor staging directory: %w", err)
+	}
+	resolvedDir, err := resolvePhysical(dir)
+	if err != nil {
+		return "", nil, fmt.Errorf("resolve plan editor staging directory: %w", err)
+	}
+	// Use effectiveTempDir (not os.TempDir) so SetTempDirForTest can redirect
+	// the privacy check the same way ensurePlanPathContained does.
+	for _, tempRoot := range append(effectiveTempDirs(), "") {
+		if !editorStagingDirIsPrivate(resolvedDir, workspaceRoot, tempRoot) {
+			return "", nil, fmt.Errorf("plan editor staging directory %s resolves into a default sandbox-writable root (the workspace or the OS temp directory); check XDG_CONFIG_HOME", dir)
+		}
+	}
+	// MkdirAll's mode only applies at creation: tighten an existing directory
+	// only after validating its resolved target is safe to use.
+	if err := os.Chmod(resolvedDir, 0o700); err != nil {
+		return "", nil, fmt.Errorf("restrict plan editor staging directory permissions: %w", err)
+	}
+	// Verify the resolved directory after chmod: refuse anything that is not
+	// a plain directory or that is still group/world-writable. A pre-existing
+	// sticky or ACL-permissive directory that chmod could not fully lock down
+	// must not host a closed staged file the unsandboxed editor will reopen.
+	if err := verifyPrivateDirectory(resolvedDir); err != nil {
+		return "", nil, fmt.Errorf("plan editor staging directory: %w", err)
+	}
+	// tea.ExecProcess's cleanup closure only runs if the caller's Bubble Tea
+	// program lives long enough to invoke it: a shutdown that drops the
+	// pending command (e.g. the terminal or parent process dying while the
+	// editor is open) skips the callback, and the staged file it would have
+	// removed leaks. Sweep those abandoned files on the next stage instead of
+	// relying on every shutdown path to run cleanup.
+	sweepStaleStagedFiles(resolvedDir)
+	return stageContentUnderBase(resolvedDir, sessionID, content, writeEditorBaseline)
+}
+
+// StagedPlanFilePrefix is the dedicated prefix used for all temporary
+// staged plan files created for external $EDITOR inspection or edits.
+const StagedPlanFilePrefix = "zero-stage-"
+
+// staleStagedEditThreshold bounds how long an abandoned staged plan file can
+// linger before sweepStaleStagedFiles reclaims it. The window must comfortably
+// outlast any real interactive edit so a slow user never loses the file out
+// from under their open editor.
+const staleStagedEditThreshold = 6 * time.Hour
+
+// sweepStaleStagedFiles removes staged plan files in dir whose mtime is older
+// than staleStagedEditThreshold and whose lock is proven to be abandoned.
+// Best-effort: errors are ignored, since a failed sweep must not block staging
+// a new file. Unrelated files (not matching the plan format) are never touched.
+func sweepStaleStagedFiles(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-staleStagedEditThreshold)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, StagedPlanFilePrefix) || !strings.HasSuffix(name, ".md") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		tryReclaimStaleStagedFile(dir, name)
+	}
+}
+
+// stageContentForEditor creates a fresh, uniquely-named file under dir
+// holding content, for StageForEditor to hand to $EDITOR. It binds creation to
+// the opened directory handle rather than repeating pathname traversals.
+func stageContentForEditor(dir, sessionID, content string) (stagedPath string, cleanup func(), err error) {
+	path, finish, err := stageContentUnderBase(dir, sessionID, content, writeEditorBaseline)
+	if err != nil {
+		return "", nil, err
+	}
+	return path, func() { finish(false) }, nil
+}
+
+// editorStagingDirIsPrivate reports whether dir avoids the sandbox's default
+// writable roots (tempDir, normally os.TempDir(), and the workspace itself),
+// which are writable from inside the sandbox by default regardless of any
+// extra grant. All three paths are compared in physical form: dir or either
+// root may be reached through symlinks (an XDG_CONFIG_HOME symlinked into
+// the workspace, macOS's /var -> /private/var), and a lexical comparison of
+// unlike spellings would wave a staging directory through a boundary it
+// actually sits inside. tempDir is a parameter so tests can exercise the
+// symlink cases without needing to plant links outside the real temp dir.
+func editorStagingDirIsPrivate(dir, workspaceRoot, tempDir string) bool {
+	dir = physicalPath(dir)
+	if tempDir != "" && isUnderOrEqual(dir, physicalPath(tempDir)) {
+		return false
+	}
+	// Fail closed if the workspace root cannot be resolved (e.g. deleted
+	// CWD makes filepath.Abs fail): do not treat an unresolvable workspace
+	// as "private" and skip the containment check.
+	absRoot, err := filepath.Abs(workspaceRoot)
+	if err != nil {
+		return false
+	}
+	if isUnderOrEqual(dir, physicalPath(absRoot)) {
+		return false
+	}
+	return true
+}
+
+// verifyPrivateDirectory reports an error when path is not a plain directory
+// or is still group/world-writable after the caller tightened it. Symlinks
+// are rejected via Lstat so a TOCTOU swap of the directory for a link cannot
+// host a staged file that $EDITOR will follow. Windows junctions are rejected
+// separately: os.Lstat maps one to os.ModeIrregular, not os.ModeSymlink, so
+// the check above cannot see it. The permission-bit check is skipped on
+// Windows: NTFS reports a directory's POSIX mode via ACLs rather than the bits
+// os.Chmod sets, so it does not reflect what os.Chmod(0o700) actually
+// restricted (see the same rationale on the file-mode check in
+// TestWritePlanUsesRestrictivePermissions) — containment there rests on
+// editorStagingDirIsPrivate and on the reparse-point rejection here.
+func verifyPrivateDirectory(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is a symlink; refusing to stage through it", path)
+	}
+	if pathIsReparsePoint(path) {
+		return fmt.Errorf("%s is a reparse point; refusing to stage through it", path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", path)
+	}
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	if perm := info.Mode().Perm(); perm&0o022 != 0 {
+		return fmt.Errorf("%s is group/world-writable (mode %o) after restriction", path, perm)
+	}
+	return nil
+}
+
+// physicalPath resolves symlinks best-effort. A path that does not exist yet
+// is resolved through its deepest existing ancestor with the remainder
+// rejoined, so a not-yet-created staging directory still compares in the
+// same physical spelling as the (existing, resolved) roots: without this,
+// macOS's /var vs /private/var and Windows's 8.3 short names (RUNNER~1)
+// would make the containment comparison silently miss.
+//
+// Resolution goes through resolvePhysical rather than filepath.EvalSymlinks
+// directly because EvalSymlinks does not traverse a Windows junction, and a
+// junction is the one reparse point an unprivileged process can plant. See
+// resolvePhysical in physical_windows.go.
+func physicalPath(path string) string {
+	if resolved, err := resolvePhysical(path); err == nil {
+		return resolved
+	}
+	cleaned := filepath.Clean(path)
+	parent := filepath.Dir(cleaned)
+	if parent == cleaned {
+		// Reached a filesystem root that itself cannot be resolved.
+		return cleaned
+	}
+	return filepath.Join(physicalPath(parent), filepath.Base(cleaned))
+}
+
+// isUnderOrEqual reports whether path is root itself or a descendant of it.
+func isUnderOrEqual(path, root string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+// CommitStagedEdit reads a file staged by StageForEditor (now edited by the
+// user's $EDITOR) and writes its content back into the durable plan store
+// via WritePlan. stagedPath must be a path produced by StageForEditor.
+// It verifies against the baseline content hash recorded at staging time:
+// no-op edits (content identical to baseline) do not rewrite durable storage,
+// and concurrent modifications to the durable plan are rejected as conflicts.
+func CommitStagedEdit(workspaceRoot, sessionID, stagedPath string) error {
+	_, err := CommitStagedEditResult(workspaceRoot, sessionID, stagedPath)
+	return err
+}
+
+// EditResult distinguishes user edits from unchanged files and external updates.
+type EditResult struct {
+	Edited bool
+	Reload bool
+}
+
+// CommitStagedEditResult accepts an editor snapshot against its required baseline.
+func CommitStagedEditResult(workspaceRoot, sessionID, stagedPath string) (result EditResult, resultErr error) {
+	path, err := PlanFilePath(workspaceRoot, sessionID)
+	if err != nil {
+		return result, err
+	}
+	if err := ensurePlanPathContained(workspaceRoot, path); err != nil {
+		return result, err
+	}
+	base, _, err := planStorageBase(workspaceRoot)
+	if err != nil {
+		return result, err
+	}
+	data, err := os.ReadFile(stagedPath)
+	if err != nil {
+		return result, fmt.Errorf("read staged plan file: %w", err)
+	}
+	baseline, err := os.ReadFile(stagedPath + ".basehash")
+	if err != nil {
+		return result, fmt.Errorf("read editor baseline: %w", err)
+	}
+	baseHash := strings.TrimSpace(string(baseline))
+	decoded, err := hex.DecodeString(baseHash)
+	if err != nil || len(decoded) != sha256.Size {
+		return result, fmt.Errorf("invalid editor baseline")
+	}
+	lock, err := lockPlan(context.Background(), base, path)
+	if err != nil {
+		return result, err
+	}
+	defer func() { resultErr = errors.Join(resultErr, lock.Release()) }()
+	durable, _, err := ReadPlan(workspaceRoot, sessionID)
+	if err != nil {
+		return result, fmt.Errorf("verify durable plan baseline: %w", err)
+	}
+	if planContentHash(string(data)) == baseHash {
+		return EditResult{Reload: planContentHash(durable) != baseHash}, nil
+	}
+	if planContentHash(durable) != baseHash {
+		return result, fmt.Errorf("plan file was modified concurrently while editing")
+	}
+	body := strings.TrimRight(string(data), "\n") + "\n"
+	if err := writePlanFile(base, path, body); err != nil {
+		return result, err
+	}
+	return EditResult{Edited: true, Reload: true}, nil
+}
+
+func planContentHash(content string) string {
+	body := strings.TrimRight(content, "\n") + "\n"
+	sum := sha256.Sum256([]byte(body))
+	return hex.EncodeToString(sum[:])
+}
+
+// PreserveStagedEdit moves rejected user work outside the abandoned-stage sweep.
+func PreserveStagedEdit(stagedPath string) (string, error) {
+	name := filepath.Base(stagedPath)
+	if !strings.HasPrefix(name, StagedPlanFilePrefix) {
+		return "", fmt.Errorf("invalid staged plan name")
+	}
+	recovery := filepath.Join(filepath.Dir(stagedPath), "zero-recovered-"+strings.TrimPrefix(name, StagedPlanFilePrefix))
+	reserved, err := os.OpenFile(recovery, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", err
+	}
+	if err := reserved.Close(); err != nil {
+		_ = os.Remove(recovery)
+		return "", err
+	}
+	if err := os.Rename(stagedPath, recovery); err != nil {
+		_ = os.Remove(recovery)
+		return "", err
+	}
+	return recovery, nil
+}
+
+// editorStagingDir is where plan files are staged for external $EDITOR
+// access. See StageForEditor for why this location, not the OS temp
+// directory, is what actually closes the containment race.
+func editorStagingDir() (string, error) {
+	dir, err := config.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve editor staging directory: %w", err)
+	}
+	return filepath.Join(dir, "zero", "plan-edit"), nil
+}
+
+// planStorageBase returns the absolute user-config plans root and the
+// absolute workspace path used to scope per-workspace plan files.
+func planStorageBase(workspaceRoot string) (base string, absWorkspace string, err error) {
+	if strings.TrimSpace(workspaceRoot) == "" {
+		return "", "", fmt.Errorf("workspace root is required")
+	}
+	absWorkspace, err = filepath.Abs(workspaceRoot)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve workspace root: %w", err)
+	}
+	cfg, err := config.UserConfigDir()
+	if err != nil {
+		return "", "", fmt.Errorf("resolve plan storage directory: %w", err)
+	}
+	return filepath.Join(cfg, filepath.FromSlash(PlanDirName)), absWorkspace, nil
+}
+
+var (
+	tempDirMu sync.RWMutex
+	tempDirFn = sandbox.DefaultTempWriteRoots
+)
+
+func effectiveTempDirs() []string {
+	tempDirMu.RLock()
+	defer tempDirMu.RUnlock()
+	return tempDirFn()
+}
+
+// SetEffectiveTempDirForTest overrides the temp dir func during tests, returning
+// a restore function to reset it.
+func SetEffectiveTempDirForTest(tempDir string) func() {
+	tempDirMu.Lock()
+	old := tempDirFn
+	tempDirFn = func() []string { return []string{tempDir} }
+	tempDirMu.Unlock()
+	return func() {
+		tempDirMu.Lock()
+		tempDirFn = old
+		tempDirMu.Unlock()
+	}
+}
+
+// ensurePlanPathContained verifies that path stays under the config plans
+// root and does not resolve into the workspace or OS temp directory. A mis-set XDG_CONFIG_HOME
+// pointing at the workspace or temp tree would otherwise turn every update_plan
+// persistence into a silent workspace or sandbox-writable write.
+func ensurePlanPathContained(workspaceRoot, path string) error {
+	base, absWorkspace, err := planStorageBase(workspaceRoot)
+	if err != nil {
+		return err
+	}
+	physPath := physicalPath(path)
+	physBase := physicalPath(base)
+	if !isUnderOrEqual(physPath, physBase) {
+		return fmt.Errorf("plan path %s escapes plan storage root %s", path, base)
+	}
+	if isUnderOrEqual(physPath, physicalPath(absWorkspace)) {
+		return fmt.Errorf("plan storage %s resolves into the workspace; check XDG_CONFIG_HOME", path)
+	}
+	for _, tempRoot := range effectiveTempDirs() {
+		if physTemp := physicalPath(tempRoot); physTemp != "" && isUnderOrEqual(physPath, physTemp) {
+			return fmt.Errorf("plan storage %s resolves into temp directory %s; check XDG_CONFIG_HOME", path, physTemp)
+		}
+	}
+	return nil
+}
+
+// maxPathKeySlug is the max length of the human-readable slug prefix in a
+// pathKey component. The SHA-256 suffix (32 hex chars) plus separator keep the
+// full component well under NAME_MAX (255) even for very deep workspace paths.
+const maxPathKeySlug = 64
+
+// pathKey builds a filesystem-safe, collision-resistant directory or file
+// stem from an arbitrary workspace path or session ID. The human-readable
+// slug prefix is for operator convenience only; the SHA-256 suffix makes the
+// key injective so distinct inputs never share a plan path.
+func pathKey(id string) string {
+	rawID := id
+	if strings.TrimSpace(rawID) == "" {
+		// A stable fallback, not a per-call timestamp: PlanFilePath is called
+		// independently from several sites (planEnterText, planText,
+		// openPlanInEditor) before a session ID may exist, and they must all
+		// resolve to the same file rather than a fresh one each time. The
+		// sentinel is namespaced so it cannot collide with a session whose
+		// ID is literally "plan" (which would break injectivity of the map).
+		rawID = "\x00no-session"
+	}
+	sum := sha256.Sum256([]byte(rawID))
+	// Truncate the slug so a deep workspace path cannot produce a single
+	// directory component over NAME_MAX. The hash keeps the key injective.
+	slug := slugify(id)
+	if len(slug) > maxPathKeySlug {
+		slug = strings.Trim(slug[:maxPathKeySlug], "-")
+		if slug == "" {
+			slug = "plan"
+		}
+	}
+	return slug + "-" + hex.EncodeToString(sum[:16])
+}
+
+// slugify turns an arbitrary session identifier into a filesystem-safe slug.
+// It is lossy (see pathKey): do not use it alone as a durable storage key.
+func slugify(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		id = "plan"
+	}
+	var b strings.Builder
+	prevDash := false
+	for _, r := range strings.ToLower(id) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			prevDash = false
+		case r == '-' || r == '_' || r == '/':
+			if !prevDash && b.Len() > 0 {
+				b.WriteRune('-')
+				prevDash = true
+			}
+		default:
+			if !prevDash && b.Len() > 0 {
+				b.WriteRune('-')
+				prevDash = true
+			}
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		out = "plan"
+	}
+	return out
+}

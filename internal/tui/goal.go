@@ -258,11 +258,15 @@ func (m model) goalSystemPrompt(base string) string {
 	return base + "\n\n" + instruction
 }
 
+func (m model) hasArmedGoalContinuation() bool {
+	return m.activeSession.Goal != nil && m.activeSession.Goal.Status == sessions.GoalStatusActive
+}
+
 func (m model) launchGoalContinuationIfReady() (model, tea.Cmd) {
 	goal := m.activeSession.Goal
 	if goal == nil || goal.Status != sessions.GoalStatusActive || m.pending ||
 		m.compactInFlight || m.exiting || m.provider == nil ||
-		m.goalContinuationsSuspended {
+		m.goalContinuationsSuspended || m.planModeBlocksContinuations() {
 		return m, nil
 	}
 	updated, event, reserved, err := m.sessionStore.ReserveGoalContinuation(m.activeSession.SessionID)

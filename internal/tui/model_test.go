@@ -494,6 +494,10 @@ func TestPermissionsCommandListsPersistentSandboxGrants(t *testing.T) {
 }
 
 func TestPlanCommandShowsCurrentPlan(t *testing.T) {
+	// Main's TestMain isolates user dirs under the OS temp dir, which the
+	// plan store's containment check refuses; isolate like the other plan
+	// tests so the config root sits outside the effective temp root.
+	isolatePlanConfig(t)
 	registry := tools.NewRegistry()
 	planTool := tools.NewUpdatePlanTool()
 	result := planTool.Run(context.Background(), map[string]any{
@@ -2904,6 +2908,11 @@ func TestNextPermissionModeFoldsUnsafeToAsk(t *testing.T) {
 	// must not make it less strict).
 	if got := nextPermissionMode(agent.PermissionModeUnsafe); got != agent.PermissionModeAsk {
 		t.Fatalf("Unsafe -> %s, want Ask", got)
+	}
+	// Plan mode is a deliberate read-only gate entered via /plan; a casual
+	// shift+tab toggle must be a no-op, not silently drop back to Ask.
+	if got := nextPermissionMode(agent.PermissionModePlan); got != agent.PermissionModePlan {
+		t.Fatalf("Plan -> %s, want Plan (no-op)", got)
 	}
 }
 
