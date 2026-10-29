@@ -3100,6 +3100,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.applySetupOAuthDeviceCode(msg)
 	case modelPickerModelsDiscoveredMsg:
 		if msg.generation != 0 && msg.generation != m.modelPickerDiscoveryGeneration {
+			// Honor an explicit list request using current state without letting
+			// an older response overwrite the newer discovery or its loading flag.
+			if msg.showList {
+				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.modelListText()})
+			}
 			return m, nil
 		}
 		m = m.applyModelPickerModelsDiscovered(msg)

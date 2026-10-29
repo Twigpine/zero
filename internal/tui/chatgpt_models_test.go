@@ -269,14 +269,20 @@ func TestSubscriptionPickerRetriesFromKeyboard(t *testing.T) {
 
 func TestSubscriptionPickerRedactsDiscoveryErrors(t *testing.T) {
 	const secret = "opaque-subscription-bearer"
-	for _, split := range []string{"", "\x00", "\x1b", "\u0085", "\x1b[31m"} {
+	for _, split := range []string{"", "\x00", "\x1b", "\u0085", "\x1b[31m", "\u200b", "\u2060", "\ufeff", "\u202e", "\u00ad"} {
 		t.Run(fmt.Sprintf("split-%x", split), func(t *testing.T) {
 			m := subscriptionTestModel(t)
 			m.picker = m.newModelPicker()
 			m = m.applyModelPickerModelsDiscovered(modelPickerModelsDiscoveredMsg{
 				providerID: "chatgpt", endpointKey: "subscription", err: errors.New("request failed with opaque-" + split + "subscription-bearer"), secrets: []string{secret},
 			})
-			if text := m.modelPickerOverlay(100); strings.Contains(text, "subscription-bearer") || !strings.Contains(text, "request failed") {
+			if got := m.modelPickerErrorsByProvider["subscription"]; got != "request failed with [REDACTED]" {
+				t.Fatalf("stored error = %q", got)
+			}
+			if text := m.modelListText(); !strings.Contains(text, "request failed with [REDACTED]") {
+				t.Fatalf("transcript error was not redacted: %s", text)
+			}
+			if text := m.modelPickerOverlay(100); strings.Contains(text, "subscription-bearer") || !strings.Contains(text, "[REDACTED]") {
 				t.Fatalf("discovery error was not safely rendered: %s", text)
 			}
 		})
@@ -361,5 +367,23 @@ func TestSubscriptionSetupDiscoveryUsesOAuthAccount(t *testing.T) {
 				t.Fatalf("live discovery requests = %d, want 1", liveRequests)
 			}
 		})
+	}
+}
+
+func TestSubscriptionSupersededModelListStillPrints(t *testing.T) {
+	m := subscriptionTestModel(t)
+	m.modelPickerDiscoveryGeneration = 2
+	m.modelPickerLoading = true
+	m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{"subscription": {{ID: "gpt-current-result"}}}
+	updated, _ := m.Update(modelPickerModelsDiscoveredMsg{
+		providerID: "chatgpt", endpointKey: "subscription", generation: 1, showList: true,
+		models: []providermodeldiscovery.Model{{ID: "gpt-stale-result"}},
+	})
+	next := updated.(model)
+	if !transcriptContains(next.transcript, "gpt-current-result") {
+		t.Fatal("superseded model list never printed current models")
+	}
+	if transcriptContains(next.transcript, "gpt-stale-result") || !next.modelPickerLoading {
+		t.Fatal("superseded list altered current discovery")
 	}
 }

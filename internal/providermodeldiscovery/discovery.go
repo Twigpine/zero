@@ -10,16 +10,12 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode"
-
-	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Twigpine/zero/internal/config"
 	"github.com/Twigpine/zero/internal/providercatalog"
 	"github.com/Twigpine/zero/internal/providermodelcatalog"
 	"github.com/Twigpine/zero/internal/providers/openai"
 	"github.com/Twigpine/zero/internal/providers/providerio"
-	"github.com/Twigpine/zero/internal/redaction"
 )
 
 const (
@@ -746,16 +742,8 @@ func redactDiscoveryError(err error, profile config.ProviderProfile, secrets ...
 	if err == nil {
 		return nil
 	}
-	// Normalize before matching so terminal rendering cannot reassemble a
-	// credential split by an escape sequence or an invisible control byte.
-	message := strings.Map(func(r rune) rune {
-		if r == '\n' || r == '\r' || r == '\t' || !unicode.IsControl(r) {
-			return r
-		}
-		return -1
-	}, ansi.Strip(err.Error()))
 	secrets = append(secrets, profile.APIKey, profile.AuthHeaderValue)
-	return fmt.Errorf("%s", redaction.RedactString(message, redaction.Options{ExtraSecretValues: secrets}))
+	return RedactError(err, secrets...)
 }
 
 func displayProviderName(profile config.ProviderProfile) string {
