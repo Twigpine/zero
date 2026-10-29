@@ -27,6 +27,15 @@ import (
 
 const mcpEchoHelperEnv = "ZERO_TUI_MCP_ECHO"
 
+// The child INHERITS these rather than being configured with them, the way a
+// secret manager hands a server the variable it reads on its own. One is named
+// as a credential, the other is ordinary.
+const (
+	mcpEchoInheritedTokenEnv  = "ZERO_TUI_MCP_ECHO_COMPANY_TOKEN"
+	mcpEchoInheritedPlainEnv  = "ZERO_TUI_MCP_ECHO_REGION"
+	mcpEchoInheritedSwitchEnv = "ZERO_TUI_MCP_ECHO_AUTH_SWITCH"
+)
+
 // TestMCPEchoHelperProcess is not a test. It is the stdio child the tests below
 // start: it reports something about the endpoint it was handed and exits before
 // the handshake, which is an initialization failure with stderr attached.
@@ -68,6 +77,12 @@ func TestMCPEchoHelperProcess(t *testing.T) {
 		fmt.Fprintf(os.Stderr, "bridge: upstream refused %s\n", username)
 	case "fdec":
 		fmt.Fprintf(os.Stderr, "bridge: upstream refused %s\n", unescape(fragmentValue))
+	case "envt":
+		fmt.Fprintf(os.Stderr, "bridge: upstream refused %s\n", os.Getenv(mcpEchoInheritedTokenEnv))
+	case "envp":
+		fmt.Fprintf(os.Stderr, "bridge: upstream refused %s\n", os.Getenv(mcpEchoInheritedPlainEnv))
+	case "envs":
+		fmt.Fprintf(os.Stderr, "bridge: upstream refused %s\n", os.Getenv(mcpEchoInheritedSwitchEnv))
 	}
 	os.Exit(1)
 }
@@ -184,6 +199,106 @@ func TestCredentialPrefixCutByTheHTTPReaderIsNotDisplayed(t *testing.T) {
 					if !strings.Contains(text, present) {
 						t.Errorf("%s lost %q:\n%s", surface, present, text)
 					}
+				}
+			}
+		})
+	}
+}
+
+// AN INTERRUPTED BODY IS CUT JUST THE SAME.
+//
+// The reader's limit is not the only way a failing body ends early. A server
+// that promises more than it sends and then closes leaves a short detail the
+// HTTP client used to hand on unmarked, so the first 24 bytes of a 32-byte
+// credential reached both views as ordinary text. Reported by @jatmn.
+func TestCredentialPrefixCutByAnInterruptedBodyIsNotDisplayed(t *testing.T) {
+	const credential = "Qw7ZmPr4aBcD9eFgH2jKlM6nOpR8sTuV"
+	const survivingPrefix = "Qw7ZmPr4aBcD9eFgH2jKlM6n"
+
+	for _, transport := range []string{"http", "sse"} {
+		for _, tc := range []struct {
+			name    string
+			body    string
+			absent  []string
+			present []string
+		}{
+			{
+				name:    "credential cut by the dropped connection",
+				body:    survivingPrefix,
+				absent:  []string{survivingPrefix, survivingPrefix[:8]},
+				present: []string{"returned HTTP 500"},
+			},
+			{
+				name:    "control: an interrupted body that is not a credential keeps its tail",
+				body:    "upstream gateway timed out",
+				present: []string{"returned HTTP 500", "upstream gateway timed out"},
+			},
+		} {
+			t.Run(transport+"/"+tc.name, func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					hijacker, ok := w.(http.Hijacker)
+					if !ok {
+						t.Error("response writer cannot be hijacked")
+						return
+					}
+					conn, buffered, err := hijacker.Hijack()
+					if err != nil {
+						t.Errorf("Hijack() error = %v", err)
+						return
+					}
+					defer conn.Close()
+					_, _ = fmt.Fprintf(buffered, "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: 2048\r\n\r\n%s", tc.body)
+					_ = buffered.Flush()
+				}))
+				defer server.Close()
+				cfg := config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+					"docs": {Type: transport, URL: server.URL + "/mcp", Headers: map[string]string{"X-Api-Key": credential}},
+				}}
+				skipped := registerAndCollectSkipped(t, cfg, tc.body)
+				panel, detail := failedServerSurfaces(t, cfg, "docs", skipped)
+				for surface, text := range map[string]string{"panel": panel, "manager detail": detail} {
+					for _, absent := range tc.absent {
+						if strings.Contains(text, absent) {
+							t.Errorf("%s shows %q of the credential:\n%s", surface, absent, text)
+						}
+					}
+					for _, present := range tc.present {
+						if !strings.Contains(text, present) {
+							t.Errorf("%s lost %q:\n%s", surface, present, text)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+// THE QUERY RULE HOLDS THROUGH A REAL REGISTRATION.
+//
+// The server answers with the configured query value on its own, which is what
+// leaves exact-value redaction as the only defence. Checked on the Error row,
+// because the Target row masks the query by its own rules.
+func TestQueryCredentialEchoedByAServerIsRedactedInBothViews(t *testing.T) {
+	for _, tc := range []struct{ name, query, echo string }{
+		{"escaped short value under an escaped sensitive key", "api%5Fkey=%73crt", "%73crt"},
+		{"decoded value beside a pair with a semicolon", "workspace=opaque%2Dworkspace%2D9f3c2b7&filter=a;b", "opaque-workspace-9f3c2b7"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/plain")
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte("rejected credential " + tc.echo))
+			}))
+			defer server.Close()
+			cfg := config.MCPConfig{Servers: map[string]config.MCPServerConfig{
+				"docs": {Type: "http", URL: server.URL + "/mcp?" + tc.query},
+			}}
+			skipped := registerAndCollectSkipped(t, cfg, tc.echo)
+			panel, detail := failedServerSurfaces(t, cfg, "docs", skipped)
+			for surface, text := range map[string]string{"panel": panel, "manager detail": detail} {
+				row := surfaceRow(t, surface, text, "rejected credential")
+				if strings.Contains(row, tc.echo) {
+					t.Errorf("%s error row shows %q:\n%s", surface, tc.echo, row)
 				}
 			}
 		})

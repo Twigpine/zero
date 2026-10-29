@@ -863,7 +863,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			Autonomy:        mcp.AutonomyLow,
 			Execution:       executionRunner,
 			WorkspaceRoot:   workspaceRoot,
-			SecretValues:    mcpTokenStore.SecretValues,
+			SecretValues:    mcpTokenStore.CredentialMaterial,
 		})
 		if registerErr != nil {
 			closeMCPRuntime(stderr, runtime)
@@ -946,7 +946,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 				Autonomy:        mcp.AutonomyLow,
 				Execution:       executionRunner,
 				WorkspaceRoot:   workspaceRoot,
-				SecretValues:    mcpTokenStore.SecretValues,
+				SecretValues:    mcpTokenStore.CredentialMaterial,
 			},
 			deps.registerMCPTools,
 			func() {

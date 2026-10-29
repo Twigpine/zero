@@ -131,6 +131,49 @@ func TestSecretValuesSwallowsAnUnreadableStore(t *testing.T) {
 	}
 }
 
+// LOGIN STORES MORE THAN THE BEARER.
+//
+// A dynamically registered client secret and a discovered token endpoint are
+// stored so that Refresh works without an OAuth block in config, and Refresh
+// sends both. The secret is opaque material like the tokens. The endpoint is a
+// URL and comes back separately, so a caller can take it apart instead of
+// hiding the whole thing; the public client id is neither. Reported by @jatmn.
+func TestSecretMaterialIncludesTheStoredClientSecretAndEndpoint(t *testing.T) {
+	const endpoint = "https://auth.invalid/token?workspace=opaque-workspace-9f3c2b7"
+	store := newSecretValuesTestStore(t)
+	if err := store.Save("docs", StoredToken{
+		AccessToken:   "access-material",
+		ClientID:      "public-client-id",
+		ClientSecret:  "cs9f3c",
+		TokenEndpoint: endpoint,
+	}); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	values, endpoints := store.SecretMaterial()
+	if !containsValue(values, "cs9f3c") {
+		t.Errorf("SecretMaterial() values = %q, missing the stored client secret", values)
+	}
+	if containsValue(values, "public-client-id") {
+		t.Errorf("the public client id was returned as a secret: %q", values)
+	}
+	if containsValue(values, endpoint) {
+		t.Errorf("the endpoint is in the opaque values, so it would be hidden whole: %q", values)
+	}
+	if len(endpoints) != 1 || endpoints[0] != endpoint {
+		t.Errorf("SecretMaterial() endpoints = %q, want the stored token endpoint", endpoints)
+	}
+	if !containsValue(store.SecretValues(), "cs9f3c") {
+		t.Errorf("SecretValues() = %q, missing the stored client secret", store.SecretValues())
+	}
+	material := store.CredentialMaterial()
+	for _, want := range []string{"access-material", "cs9f3c", endpoint} {
+		if !containsValue(material, want) {
+			t.Errorf("CredentialMaterial() = %q, missing %q", material, want)
+		}
+	}
+}
+
 func containsValue(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

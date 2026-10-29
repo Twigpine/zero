@@ -275,24 +275,54 @@ func (store *TokenStore) DeleteForServerName(serverName string) (bool, error) {
 // Errors are swallowed by design: an unreadable store must degrade to redacting
 // less, never to failing the render. It therefore returns nothing in that case,
 // so a caller cannot read a non-empty result as proof the store was legible.
+//
+// The client secret is in it too. Login stores a dynamically registered one so
+// that Refresh works for an `auth: oauth` server whose config names none, and
+// Refresh posts it, so a token endpoint that echoes its error_description can
+// return it in the same failure. Reported by @jatmn.
 func (store *TokenStore) SecretValues() []string {
+	values, _ := store.SecretMaterial()
+	return values
+}
+
+// SecretMaterial returns SecretValues together with the token endpoint stored
+// with each login, from ONE read of the store.
+//
+// The endpoint is kept apart because it is a URL rather than an opaque value:
+// Login records a discovered one for Refresh to post to, and its query or
+// userinfo can carry a credential a failed refresh echoes back. Matching the
+// whole URL would hide the host along with it, so a caller takes it apart by
+// its URL rules instead. Read-only and error-swallowing, like SecretValues.
+func (store *TokenStore) SecretMaterial() (values []string, endpoints []string) {
 	if store == nil {
-		return nil
+		return nil, nil
 	}
 	statuses, err := store.store.Status(oauth.KeyPrefixMCP)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
-	values := make([]string, 0, len(statuses)*2)
+	values = make([]string, 0, len(statuses)*3)
 	for _, status := range statuses {
 		token, ok, err := store.store.Load(status.Key)
 		if err != nil || !ok {
 			continue
 		}
 		stored := tokenToStored(token)
-		values = append(values, stored.AccessToken, stored.RefreshToken)
+		values = append(values, stored.AccessToken, stored.RefreshToken, stored.ClientSecret)
+		if endpoint := strings.TrimSpace(stored.TokenEndpoint); endpoint != "" {
+			endpoints = append(endpoints, endpoint)
+		}
 	}
-	return values
+	return values, endpoints
+}
+
+// CredentialMaterial is everything SecretMaterial returns, as one list. It is
+// what the registration boundary and the display both fingerprint, so a
+// rotated client secret or a changed token endpoint reads as a change on both
+// sides rather than on one.
+func (store *TokenStore) CredentialMaterial() []string {
+	values, endpoints := store.SecretMaterial()
+	return append(values, endpoints...)
 }
 
 // Status returns a redaction-safe summary of every stored MCP token, sorted by

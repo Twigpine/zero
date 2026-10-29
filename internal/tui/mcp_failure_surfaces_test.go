@@ -20,7 +20,14 @@ import (
 // through the redaction helper the rows happen to share today.
 func failedServerSurfaces(t *testing.T, cfg config.MCPConfig, key string, skipped []mcp.SkippedServer) (panel string, detail string) {
 	t.Helper()
-	m := newModel(context.Background(), Options{MCPConfig: cfg, MCPSkipped: skipped})
+	return failedServerSurfacesWithStore(t, cfg, key, skipped, nil)
+}
+
+// failedServerSurfacesWithStore is failedServerSurfaces for a session that has
+// an OAuth token store, whose material the views redact as well.
+func failedServerSurfacesWithStore(t *testing.T, cfg config.MCPConfig, key string, skipped []mcp.SkippedServer, store *mcp.TokenStore) (panel string, detail string) {
+	t.Helper()
+	m := newModel(context.Background(), Options{MCPConfig: cfg, MCPSkipped: skipped, MCPTokenStore: store})
 	panel = plainRender(t, m.mcpText())
 	if !strings.Contains(panel, "failed") {
 		t.Fatalf("the panel does not report a failed server, so nothing below is exercised:\n%s", panel)

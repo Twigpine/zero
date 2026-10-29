@@ -99,3 +99,83 @@ func TestPercentEncodedEndpointCredentialsAreRedacted(t *testing.T) {
 		})
 	}
 }
+
+// A QUERY VALUE KEEPS ITS PROVENANCE IN BOTH SPELLINGS.
+//
+// The raw and decoded spellings came apart two ways. The raw pass judged the
+// undecoded key, so "api%5Fkey" never read as api_key, and the escaped spelling
+// of a six-byte credential fell to the readability floor. The decoded pass ran
+// url.ParseQuery over the whole query, which rejects everything at the first
+// pair it cannot parse, so a semicolon or a bad escape in another parameter
+// dropped the decoded spelling of a credential that decodes cleanly. Every URL
+// source goes through the same collector, so each one is driven here. Reported
+// by @jatmn.
+func TestQueryCredentialsKeepTheirProvenanceInBothSpellings(t *testing.T) {
+	const workspace = "opaque-workspace-9f3c2b7"
+	encodedWorkspace := strings.ReplaceAll(workspace, "-", "%2D")
+
+	sources := []struct {
+		name string
+		raw  func(endpoint string) config.MCPServerConfig
+	}{
+		{"server URL", func(endpoint string) config.MCPServerConfig {
+			return config.MCPServerConfig{Type: "http", URL: endpoint}
+		}},
+		{"positional stdio argument", func(endpoint string) config.MCPServerConfig {
+			return config.MCPServerConfig{Type: "stdio", Command: "mcp-remote", Args: []string{endpoint}}
+		}},
+		{"separate stdio argument", func(endpoint string) config.MCPServerConfig {
+			return config.MCPServerConfig{Type: "stdio", Command: "mcp-remote", Args: []string{"--url", endpoint}}
+		}},
+		{"packed stdio argument", func(endpoint string) config.MCPServerConfig {
+			return config.MCPServerConfig{Type: "stdio", Command: "mcp-remote", Args: []string{"--url=" + endpoint}}
+		}},
+		{"OAuth token endpoint", func(endpoint string) config.MCPServerConfig {
+			return config.MCPServerConfig{Type: "http", URL: "https://host.invalid/mcp", Auth: "oauth", OAuth: &config.MCPOAuthConfig{TokenEndpoint: endpoint}}
+		}},
+		{"OAuth authorization endpoint", func(endpoint string) config.MCPServerConfig {
+			return config.MCPServerConfig{Type: "http", URL: "https://host.invalid/mcp", Auth: "oauth", OAuth: &config.MCPOAuthConfig{AuthorizationEndpoint: endpoint}}
+		}},
+		{"OAuth registration endpoint", func(endpoint string) config.MCPServerConfig {
+			return config.MCPServerConfig{Type: "http", URL: "https://host.invalid/mcp", Auth: "oauth", OAuth: &config.MCPOAuthConfig{RegistrationEndpoint: endpoint}}
+		}},
+		{"OAuth issuer", func(endpoint string) config.MCPServerConfig {
+			return config.MCPServerConfig{Type: "http", URL: "https://host.invalid/mcp", Auth: "oauth", OAuth: &config.MCPOAuthConfig{IssuerURL: endpoint}}
+		}},
+	}
+	for _, combo := range []struct {
+		name    string
+		query   string
+		echo    string
+		absent  []string
+		present []string
+	}{
+		{name: "escaped sensitive key, escaped short value echoed alone", query: "api%5Fkey=%73crt", echo: "%73crt", absent: []string{"%73crt"}},
+		{name: "escaped sensitive key, decoded short value echoed alone", query: "api%5Fkey=%73crt", echo: "scrt", absent: []string{"scrt"}},
+		{name: "decoded value beside a pair with a semicolon", query: "workspace=" + encodedWorkspace + "&filter=a;b", echo: workspace, absent: []string{workspace}},
+		{name: "decoded value beside a pair with a bad escape", query: "workspace=" + encodedWorkspace + "&bad=%zz", echo: workspace, absent: []string{workspace}},
+		{name: "escaped value beside a pair with a semicolon", query: "workspace=" + encodedWorkspace + "&filter=a;b", echo: encodedWorkspace, absent: []string{encodedWorkspace}},
+		{name: "control: ordinary short metadata stays readable", query: "v=1&mode=sse&filter=a;b", echo: "mode sse is not served for v 1", present: []string{"mode sse is not served for v 1"}},
+		{name: "control: an escaped ordinary key keeps the floor", query: "mo%64e=sse", echo: "mode sse is not served", present: []string{"mode sse is not served"}},
+	} {
+		for _, source := range sources {
+			t.Run(combo.name+"/"+source.name, func(t *testing.T) {
+				endpoint := "https://host.invalid/mcp?" + combo.query
+				got := redactMCPFailureReason(errors.New("request rejected: "+combo.echo), source.raw(endpoint), nil)
+				if !strings.Contains(got, "request rejected") {
+					t.Fatalf("the reason lost its own text, so the check below proves nothing:\n%s", got)
+				}
+				for _, absent := range combo.absent {
+					if strings.Contains(got, absent) {
+						t.Errorf("%q survived the redaction:\n%s", absent, got)
+					}
+				}
+				for _, present := range combo.present {
+					if !strings.Contains(got, present) {
+						t.Errorf("ordinary text %q was redacted:\n%s", present, got)
+					}
+				}
+			})
+		}
+	}
+}

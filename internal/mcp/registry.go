@@ -32,9 +32,10 @@ type RegisterOptions struct {
 	ConnectTimeout time.Duration
 	Execution      *execution.Runner
 	WorkspaceRoot  string
-	// SecretValues reports the credential material that exists right now, and is
-	// sampled BEFORE the connect phase so every skipped entry can record the
-	// context that made its error safe to display. See SkippedServer.Credentials.
+	// SecretValues reports the credential material that exists right now, which
+	// is the token store's CredentialMaterial, and is sampled BEFORE the connect
+	// phase so every skipped entry can record the context that made its error
+	// safe to display. See SkippedServer.Credentials.
 	// Optional: nil records no context and claims nothing.
 	SecretValues func() []string
 }

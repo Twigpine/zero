@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,17 +23,27 @@ func TestHTTPStatusErrorReportsWhenItCutTheBody(t *testing.T) {
 		name          string
 		serverType    ServerType
 		body          string
+		interrupted   bool
 		wantTruncated bool
 		wantTail      string
 	}{
-		{"http, one byte over the limit", ServerTypeHTTP, strings.Repeat("a", maxHTTPErrorDetail-4) + "tail" + "X", true, "tail"},
-		{"http, exactly the limit", ServerTypeHTTP, strings.Repeat("a", maxHTTPErrorDetail-4) + "tail", false, "tail"},
-		{"http, short body", ServerTypeHTTP, "workspace is not provisioned", false, "provisioned"},
-		{"http, empty body", ServerTypeHTTP, "", false, "HTTP 500"},
-		{"sse, one byte over the limit", ServerTypeSSE, strings.Repeat("a", maxHTTPErrorDetail-4) + "tail" + "X", true, "tail"},
+		{"http, one byte over the limit", ServerTypeHTTP, strings.Repeat("a", maxHTTPErrorDetail-4) + "tail" + "X", false, true, "tail"},
+		{"http, exactly the limit", ServerTypeHTTP, strings.Repeat("a", maxHTTPErrorDetail-4) + "tail", false, false, "tail"},
+		{"http, short body", ServerTypeHTTP, "workspace is not provisioned", false, false, "provisioned"},
+		{"http, empty body", ServerTypeHTTP, "", false, false, "HTTP 500"},
+		{"sse, one byte over the limit", ServerTypeSSE, strings.Repeat("a", maxHTTPErrorDetail-4) + "tail" + "X", false, true, "tail"},
+		// The connection closes long before the promised length, so the short
+		// body that did arrive is partial even though it is under the limit.
+		{"http, body interrupted under the limit", ServerTypeHTTP, "Qw7ZmPr4aBcD9eFgH2jKlM6n", true, true, "Qw7ZmPr4aBcD9eFgH2jKlM6n"},
+		{"sse, body interrupted under the limit", ServerTypeSSE, "Qw7ZmPr4aBcD9eFgH2jKlM6n", true, true, "Qw7ZmPr4aBcD9eFgH2jKlM6n"},
+		{"http, interrupted before any body", ServerTypeHTTP, "", true, true, "HTTP 500"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tc.interrupted {
+					writeInterruptedStatus(t, w, http.StatusInternalServerError, tc.body)
+					return
+				}
 				w.Header().Set("Content-Type", "text/plain")
 				w.WriteHeader(http.StatusInternalServerError)
 				_, _ = w.Write([]byte(tc.body))
@@ -54,6 +65,26 @@ func TestHTTPStatusErrorReportsWhenItCutTheBody(t *testing.T) {
 			}
 		})
 	}
+}
+
+// writeInterruptedStatus answers with a status that promises a longer body than
+// it sends, then drops the connection, so the client's read fails part way.
+func writeInterruptedStatus(t *testing.T, w http.ResponseWriter, status int, body string) {
+	t.Helper()
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		t.Error("response writer cannot be hijacked")
+		return
+	}
+	conn, buffered, err := hijacker.Hijack()
+	if err != nil {
+		t.Errorf("Hijack() error = %v", err)
+		return
+	}
+	defer conn.Close()
+	_, _ = fmt.Fprintf(buffered, "HTTP/1.1 %d %s\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s",
+		status, http.StatusText(status), len(body)+2048, body)
+	_ = buffered.Flush()
 }
 
 func TestErrorDetailTruncatedIsFalseForOtherErrors(t *testing.T) {

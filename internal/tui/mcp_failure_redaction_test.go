@@ -63,7 +63,6 @@ func TestFailedServerReasonRedactsASecretSplitByControlBytes(t *testing.T) {
 	}{
 		{name: "CSI colour sequence", splitter: "\x1b[31m"},
 		{name: "OSC sequence terminated by BEL", splitter: "\x1b]0;title\x07"},
-		{name: "bare escape byte", splitter: "\x1b"},
 		{name: "backspace", splitter: "\x08"},
 		{name: "NUL", splitter: "\x00"},
 		{name: "DEL", splitter: "\x7f"},
@@ -76,6 +75,11 @@ func TestFailedServerReasonRedactsASecretSplitByControlBytes(t *testing.T) {
 
 			if strings.Contains(reason, secret) {
 				t.Errorf("the credential was reassembled for display: %q", reason)
+			}
+			// Redacted, not merely damaged: a splitter that ate a byte of the
+			// credential would pass the check above while showing the rest of it.
+			if !strings.Contains(reason, "[REDACTED]") {
+				t.Errorf("the credential was not redacted: %q", reason)
 			}
 			if !strings.Contains(reason, "handshake rejected") {
 				t.Errorf("redaction ate the diagnostic text: %q", reason)

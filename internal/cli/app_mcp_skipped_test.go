@@ -36,6 +36,19 @@ func TestRunPassesSkippedMCPServersToTheTUI(t *testing.T) {
 	if err := os.WriteFile(projectConfigPath, []byte("{}"), 0o600); err != nil {
 		t.Fatalf("write project config: %v", err)
 	}
+	// THE TOKEN STORE IS A USER STORE TOO. Startup builds one, and the
+	// production constructor resolves the user's OAuth paths, migrates a legacy
+	// token file into the unified store and follows an inherited backend, none of
+	// which setCLIUserConfigRoot redirects. These stand in for the user's files,
+	// so the run below can prove it leaves them alone. Reported by @jatmn.
+	userLegacyTokens := filepath.Join(t.TempDir(), "mcp-oauth-tokens.json")
+	userUnifiedTokens := filepath.Join(t.TempDir(), "oauth-tokens.json")
+	seededTokens := []byte(`{"schemaVersion":1,"tokens":{"docs":{"access_token":"seeded-user-token"}}}`)
+	if err := os.WriteFile(userLegacyTokens, seededTokens, 0o600); err != nil {
+		t.Fatalf("seed user token file: %v", err)
+	}
+	t.Setenv("ZERO_MCP_OAUTH_TOKENS_PATH", userLegacyTokens)
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", userUnifiedTokens)
 	var launchedOptions tui.Options
 
 	exitCode := runWithDeps([]string{}, &stdout, &stderr, appDeps{
@@ -55,6 +68,15 @@ func TestRunPassesSkippedMCPServersToTheTUI(t *testing.T) {
 		},
 		userConfigPath: func() (string, error) {
 			return filepath.Join(t.TempDir(), "zero", "config.json"), nil
+		},
+		// An explicit file path skips the legacy migration, and an empty
+		// environment keeps the backend choice and every path out of the caller's
+		// shell.
+		newMCPTokenStore: func() (*mcp.TokenStore, error) {
+			return mcp.NewTokenStore(mcp.TokenStoreOptions{
+				FilePath: filepath.Join(t.TempDir(), "mcp-oauth.json"),
+				Env:      map[string]string{},
+			})
 		},
 		registerMCPTools: func(context.Context, *tools.Registry, config.MCPConfig, mcp.RegisterOptions) (mcpToolRuntime, error) {
 			return skippingMCPRuntime{skipped: []mcp.SkippedServer{
@@ -78,5 +100,11 @@ func TestRunPassesSkippedMCPServersToTheTUI(t *testing.T) {
 	// panel is an addition to it, not a replacement.
 	if !strings.Contains(stderr.String(), "docs") {
 		t.Errorf("startup no longer warns about the skipped server: %q", stderr.String())
+	}
+	if data, err := os.ReadFile(userLegacyTokens); err != nil || !bytes.Equal(data, seededTokens) {
+		t.Errorf("the run migrated or changed the user's legacy token file (err %v)", err)
+	}
+	if _, err := os.Stat(userUnifiedTokens); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the run created the user's unified token store (stat err %v)", err)
 	}
 }

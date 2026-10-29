@@ -626,12 +626,14 @@ type statusError struct {
 
 func (e *statusError) Error() string { return e.message }
 
-// DetailTruncated reports whether the detail was cut at the producer's limit.
+// DetailTruncated reports whether the detail was cut at the producer's limit
+// or ended early by a read that failed.
 func (e *statusError) DetailTruncated() bool { return e.truncated }
 
 // ErrorDetailTruncated reports whether any error in err's chain says its text
-// was cut at a byte limit by the code that produced it. A caller that matches
-// whole values treats the tail of such an error as possibly partial.
+// was cut short by the code that produced it, at a byte limit or by a failed
+// read. A caller that matches whole values treats the tail of such an error as
+// possibly partial.
 func ErrorDetailTruncated(err error) bool {
 	var marked interface{ DetailTruncated() bool }
 	return errors.As(err, &marked) && marked.DetailTruncated()
@@ -640,9 +642,16 @@ func ErrorDetailTruncated(err error) bool {
 func httpStatusError(server Server, response *http.Response) error {
 	// One byte past the limit is what distinguishes "exactly this long" from
 	// "there was more", and it is never kept.
-	body, _ := io.ReadAll(io.LimitReader(response.Body, maxHTTPErrorDetail+1))
-	truncated := len(body) > maxHTTPErrorDetail
-	if truncated {
+	//
+	// A FAILED READ IS A CUT TOO. A server that promises 2048 bytes and closes
+	// after 24 ends the body just as early as the limit does, and the retained
+	// tail can be the start of a credential. Dropping the read error left that
+	// detail unmarked, so nothing downstream repaired it. Slicing still follows
+	// the length actually read, so a short failed read is never sliced past its
+	// end. Reported by @jatmn.
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, maxHTTPErrorDetail+1))
+	truncated := readErr != nil || len(body) > maxHTTPErrorDetail
+	if len(body) > maxHTTPErrorDetail {
 		body = body[:maxHTTPErrorDetail]
 	}
 	detail := strings.TrimSpace(string(body))

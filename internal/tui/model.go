@@ -1075,7 +1075,7 @@ func newModel(ctx context.Context, options Options) model {
 		mcpLateSkipped:              options.MCPLateSkipped,
 		mcpStartupCompleted:         options.MCPStartupCompleted,
 		mcpStartupConfig:            options.MCPConfig,
-		mcpSkippedCredentials:       mcpCredentialFingerprint(options.MCPTokenStore.SecretValues()),
+		mcpSkippedCredentials:       mcpCredentialFingerprint(options.MCPTokenStore.CredentialMaterial()),
 		mcpPermissionStore:          options.MCPPermissionStore,
 		mcpTokenStore:               options.MCPTokenStore,
 		mcpCommand:                  options.MCPCommand,

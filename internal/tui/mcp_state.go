@@ -3,6 +3,7 @@ package tui
 import (
 	"errors"
 	"net/url"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -76,8 +77,20 @@ func buildMCPServerViews(cfg config.MCPConfig, toolCounts map[string]int, skippe
 	// Read the stored bearers ONCE. Every load re-reads and re-parses the whole
 	// store file, and the material is the same for every row anyway. nil is the
 	// normal case rather than a test-only one: startup soft-fails the token store
-	// to nil with a warning, and SecretValues is nil-safe for exactly that.
-	tokenSecrets := tokenStore.SecretValues()
+	// to nil with a warning, and SecretMaterial is nil-safe for exactly that.
+	tokenSecrets, tokenEndpoints := tokenStore.SecretMaterial()
+	// The staleness check compares against what the registration boundary
+	// fingerprinted, which is the raw material (CredentialMaterial), so it is
+	// built from the same two lists before the endpoints are taken apart below.
+	credentialMaterial := append(append([]string(nil), tokenSecrets...), tokenEndpoints...)
+	// A STORED TOKEN ENDPOINT IS TAKEN APART BY THE URL RULES, the same ones the
+	// configured endpoints go through. Refresh posts to it for an `auth: oauth`
+	// server whose config names no endpoint, so a failed refresh that echoes its
+	// query value reached the panel with nothing configured to match it against.
+	// Reported by @jatmn.
+	for _, endpoint := range tokenEndpoints {
+		tokenSecrets = append(tokenSecrets, mcpURLCandidates(endpoint)...)
+	}
 	names := sortedMCPServerNames(cfg)
 	servers := make([]MCPServerView, 0, len(names))
 	for _, rawName := range names {
@@ -114,7 +127,7 @@ func buildMCPServerViews(cfg config.MCPConfig, toolCounts map[string]int, skippe
 				if captured == "" {
 					captured = capturedCredentials
 				}
-				if staleMCPObservation(captured, tokenSecrets) {
+				if staleMCPObservation(captured, credentialMaterial) {
 					message = mcpStaleObservationReason
 				}
 
@@ -177,7 +190,19 @@ func redactMCPFailureReason(err error, raw config.MCPServerConfig, tokenSecrets 
 	// full server-controlled value going through every redaction pass first, so
 	// the work scaled with the attacker's input instead of with the cap.
 	bounded, truncated := boundMCPFailureError(err)
-	rendered := redaction.RedactString(stripTerminalRejoiners(redaction.ErrorMessage(bounded, options)), options)
+	message := redaction.ErrorMessage(bounded, options)
+	// AN ESCAPE CAN SWALLOW PART OF THE CREDENTIAL ITSELF. stripTerminalRejoiners
+	// removes a sequence whole, including the bytes that end it: the character
+	// after a bare ESC, a CSI's final byte, an OSC payload. A server that puts a
+	// bare ESC in front of one byte of an echoed credential has that byte eaten,
+	// so the reader is shown every other byte of it and equality matches nothing.
+	// The text is read a second way, with those bytes kept, and a candidate that
+	// only appears there means the display holds a damaged copy. That cannot be
+	// repaired by position, so the reason is withheld instead.
+	if escapeSwallowedSecret(message, secrets) {
+		return mcpEscapeSwallowedReason
+	}
+	rendered := redaction.RedactString(stripTerminalRejoiners(message), options)
 	// AND THE CUT ITSELF CAN MANUFACTURE A LEAK. Everything above matches whole
 	// values, so a credential the bound sliced in half matches nothing and its
 	// surviving prefix is ordinary text. The fixed overlap makes that need a
@@ -862,7 +887,7 @@ func mcpServerSecretValues(raw config.MCPServerConfig) []string {
 	// redaction set. That floor is a readability trade-off, and it is only
 	// defensible while the value might not be a credential at all.
 	add := func(value string) {
-		values = append(values, withUnpaddedSpellings(credentialCandidates(value), shortestMCPSecret)...)
+		values = append(values, mcpAmbiguousCandidates(value)...)
 	}
 	// KNOWN values skip the floor. Provenance has already settled that these are
 	// secret: a field named ClientSecret, or the value of a credential-bearing
@@ -882,15 +907,7 @@ func mcpServerSecretValues(raw config.MCPServerConfig) []string {
 	// credential, and taking it apart does not make the credential ambiguous
 	// again: the tail keeps the provenance of the value it came from.
 	addKnown := func(value string) {
-		forms := make([]string, 0, 4)
-		if trimmed := strings.TrimSpace(value); trimmed != "" {
-			forms = append(forms, trimmed)
-		}
-		forms = append(forms, credentialCandidates(value)...)
-		forms = append(forms, knownCredentialTails(value)...)
-		// Every form, not only the whole value: "Bearer <base64>==" is the usual
-		// shape, and its padded TAIL is the credential a server echoes.
-		values = append(values, withUnpaddedSpellings(forms, 1)...)
+		values = append(values, mcpKnownCandidates(value)...)
 	}
 	// addClassified keeps a key/value pair together long enough to decide which
 	// of the two applies. A key the sensitive-name list recognises has already
@@ -939,13 +956,7 @@ func mcpServerSecretValues(raw config.MCPServerConfig) []string {
 	// Target row replaced the value while the failure reason above it did not.
 	// Sharing that predicate is the fix rather than a second policy.
 	for _, candidate := range mcpArgURLCandidates(raw.Args) {
-		candidateKnown, candidateAmbiguous := mcpURLSecretValues(candidate)
-		for _, value := range candidateKnown {
-			addKnown(value)
-		}
-		for _, value := range candidateAmbiguous {
-			add(value)
-		}
+		values = append(values, mcpURLCandidates(candidate)...)
 	}
 	// THE ENDPOINT ITSELF CARRIES CREDENTIALS. HTTP and SSE send the configured
 	// URL verbatim, and it accepts both userinfo and arbitrary query keys, so
@@ -958,13 +969,7 @@ func mcpServerSecretValues(raw config.MCPServerConfig) []string {
 	//
 	// Collected as exact values here rather than by widening the sensitive-key
 	// list, which would still only cover names somebody thought of.
-	urlKnown, urlAmbiguous := mcpURLSecretValues(raw.URL)
-	for _, value := range urlKnown {
-		addKnown(value)
-	}
-	for _, value := range urlAmbiguous {
-		add(value)
-	}
+	values = append(values, mcpURLCandidates(raw.URL)...)
 	// raw.Auth is DELIBERATELY NOT a candidate. It is the public authentication
 	// MODE selector, and normalization accepts only the value "oauth", which the
 	// panel itself displays as ordinary metadata. Feeding it to the exact-value
@@ -994,14 +999,64 @@ func mcpServerSecretValues(raw config.MCPServerConfig) []string {
 			raw.OAuth.RegistrationEndpoint,
 			raw.OAuth.IssuerURL,
 		} {
-			endpointKnown, endpointAmbiguous := mcpURLSecretValues(endpoint)
-			for _, value := range endpointKnown {
-				addKnown(value)
-			}
-			for _, value := range endpointAmbiguous {
+			values = append(values, mcpURLCandidates(endpoint)...)
+		}
+	}
+	// A STDIO CHILD ALSO INHERITS THIS PROCESS'S ENVIRONMENT. mergeProcessEnv
+	// hands it os.Environ() ahead of the configured env, and a secret manager
+	// that injects the variable a server reads on its own is a documented setup
+	// (docs/EXTENDING.md). A child that reports that value while failing put it
+	// in the panel with no configured field to match it against. Read from the
+	// same place the launcher reads, and only credential-named variables: PATH
+	// and the like are not credentials, and redacting them would only eat the
+	// diagnostic. Reported by @jatmn.
+	//
+	// WITH THE FLOOR, unlike configured env. A configured variable was handed to
+	// this server on purpose, so a credential-sounding key settles what its
+	// value is. The inherited environment is everything Zero was started with,
+	// and a name match there is as often a switch as a secret:
+	// ZERO_OAUTH_ALLOW_PRESETS=1 would make every "1" in a stdio reason vanish.
+	if mcpServerTransport(raw) == string(mcp.ServerTypeStdio) {
+		for _, entry := range os.Environ() {
+			if key, value, found := strings.Cut(entry, "="); found && isSensitiveMCPDisplayKey(key) {
 				add(value)
 			}
 		}
+	}
+	return values
+}
+
+// mcpAmbiguousCandidates expands a value that might not be a credential at all,
+// so the shortestMCPSecret readability floor applies. See mcpServerSecretValues.
+func mcpAmbiguousCandidates(value string) []string {
+	return withUnpaddedSpellings(credentialCandidates(value), shortestMCPSecret)
+}
+
+// mcpKnownCandidates expands a value whose provenance already settled that it
+// is a credential, so no floor applies. See mcpServerSecretValues.
+func mcpKnownCandidates(value string) []string {
+	forms := make([]string, 0, 4)
+	if trimmed := strings.TrimSpace(value); trimmed != "" {
+		forms = append(forms, trimmed)
+	}
+	forms = append(forms, credentialCandidates(value)...)
+	forms = append(forms, knownCredentialTails(value)...)
+	// Every form, not only the whole value: "Bearer <base64>==" is the usual
+	// shape, and its padded TAIL is the credential a server echoes.
+	return withUnpaddedSpellings(forms, 1)
+}
+
+// mcpURLCandidates takes an endpoint apart by the URL rules and expands each
+// part by its classification. One implementation for every endpoint source,
+// configured or stored, so none of them can drift onto weaker rules.
+func mcpURLCandidates(rawURL string) []string {
+	known, ambiguous := mcpURLSecretValues(rawURL)
+	values := make([]string, 0, len(known)+len(ambiguous))
+	for _, value := range known {
+		values = append(values, mcpKnownCandidates(value)...)
+	}
+	for _, value := range ambiguous {
+		values = append(values, mcpAmbiguousCandidates(value)...)
 	}
 	return values
 }
@@ -1100,37 +1155,40 @@ func mcpURLSecretValues(rawURL string) (known []string, ambiguous []string) {
 	fragmentKnown, fragmentAmbiguous := mcpURLFragmentSecretValues(trimmed)
 	known = append(known, fragmentKnown...)
 	values = append(values, fragmentAmbiguous...)
-	// Raw query values, taken from RawQuery before any decoding.
+	// QUERY VALUES, ONE PAIR AT A TIME, in both spellings, classified by the
+	// DECODED key.
+	//
+	// The key is what settles the classification, so it is read the way the
+	// server reads it: "api%5Fkey" is api_key. Judging the raw key sent the
+	// escaped spelling of a short credential to the readability floor while
+	// its decoded spelling was kept, and a child that echoed "%73crt" printed
+	// it.
+	//
+	// And each pair is decoded on its own. url.ParseQuery gives up on the whole
+	// query at the first pair it rejects, so a semicolon or a bad escape in an
+	// unrelated parameter threw away the decoded spelling of every other value,
+	// a credential that decodes cleanly included. Reported by @jatmn.
 	for _, pair := range strings.Split(parsed.RawQuery, "&") {
 		if pair == "" {
 			continue
 		}
-		if rawKey, rawValue, found := strings.Cut(pair, "="); found {
-			if isSensitiveMCPDisplayKey(rawKey) {
-				known = append(known, rawValue)
-				if decoded, derr := url.QueryUnescape(rawValue); derr == nil && decoded != rawValue {
-					known = append(known, decoded)
-				}
-				continue
-			}
-			values = append(values, rawValue)
-		}
-	}
-	query, err := url.ParseQuery(parsed.RawQuery)
-	if err != nil {
-		return known, values
-	}
-	names := make([]string, 0, len(query))
-	for name := range query {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		if isSensitiveMCPDisplayKey(name) {
-			known = append(known, query[name]...)
+		rawKey, rawValue, found := strings.Cut(pair, "=")
+		if !found {
 			continue
 		}
-		values = append(values, query[name]...)
+		spellings := []string{rawValue}
+		if decoded, derr := url.QueryUnescape(rawValue); derr == nil && decoded != rawValue {
+			spellings = append(spellings, decoded)
+		}
+		sensitive := isSensitiveMCPDisplayKey(rawKey)
+		if decodedKey, kerr := url.QueryUnescape(rawKey); kerr == nil && isSensitiveMCPDisplayKey(decodedKey) {
+			sensitive = true
+		}
+		if sensitive {
+			known = append(known, spellings...)
+			continue
+		}
+		values = append(values, spellings...)
 	}
 	return known, values
 }
@@ -1515,6 +1573,34 @@ func longestPrefixSuffix(pattern, text string) int {
 // no longer exists. The row still reports that the server failed, which is what
 // the observation actually established; only the reason is withheld.
 const mcpStaleObservationReason = "startup failed; the details were dropped because the stored credentials changed since they were recorded"
+
+// mcpEscapeSwallowedReason replaces a startup failure whose terminal escapes
+// would have eaten part of a credential. See escapeSwallowedSecret.
+const mcpEscapeSwallowedReason = "startup failed; the details were dropped because terminal escapes in them overlapped a credential"
+
+// escapeIntroducers are what an escape sequence adds in front of the bytes it
+// then consumes. Removing only these keeps the consumed bytes as text.
+var escapeIntroducers = strings.NewReplacer("\x1b[", "", "\x1b]", "", "\x1b", "")
+
+// escapeSwallowedSecret reports whether a candidate appears in message once the
+// bytes its escape sequences consume are read as text, but not in the text the
+// reader is shown. Either reading alone can be wrong: "\x1b7" between two
+// halves of a credential is a whole sequence that the display removes, which
+// rejoins them for redaction to find, while a bare ESC eats the credential byte
+// after it. Comparing the two catches the second without disturbing the first.
+func escapeSwallowedSecret(message string, secrets []string) bool {
+	if !strings.ContainsRune(message, 0x1b) {
+		return false
+	}
+	shown := stripTerminalRejoiners(message)
+	kept := stripTerminalRejoiners(escapeIntroducers.Replace(message))
+	for _, secret := range secrets {
+		if secret != "" && strings.Contains(kept, secret) && !strings.Contains(shown, secret) {
+			return true
+		}
+	}
+	return false
+}
 
 // SAFETY MUST BE MONOTONIC OVER AN OBSERVATION.
 //
