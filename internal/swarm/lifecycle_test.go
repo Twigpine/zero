@@ -148,10 +148,13 @@ func TestConcurrencyCapAndQueueDrains(t *testing.T) {
 	}
 	// Release everyone; the queue should drain one-per-slot until all are done.
 	close(gate)
-	testutil.WaitFor(t, "all tasks done", func() bool { return sw.Coordinator().Summarize().Done == 5 })
-	if team.Running() != 0 || team.QueueDepth() != 0 {
-		t.Fatalf("after drain running=%d queue=%d, want 0/0", team.Running(), team.QueueDepth())
-	}
+	// A member's task reads Done before its slot is released: the supervisor
+	// completes the task, then removes the member and only then frees the slot
+	// in afterExit. So the counts are settled once the drain has finished, not
+	// the moment the fifth task reads Done, and the wait covers both.
+	testutil.WaitFor(t, "all tasks done and every slot released", func() bool {
+		return sw.Coordinator().Summarize().Done == 5 && team.Running() == 0 && team.QueueDepth() == 0
+	})
 	if got := len(l.recorded()); got != 5 {
 		t.Fatalf("launched %d members, want 5", got)
 	}
