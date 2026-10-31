@@ -593,7 +593,7 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				// their behavior is unchanged.
 				if options.RequireCompletionSignal {
 					result.Incomplete = true
-					result.IncompleteReason = "stopped after " + strconv.Itoa(result.Turns) + " turns with no output"
+					result.IncompleteReason = "stopped after " + strconv.Itoa(guards.emptyTurns) + " consecutive turns with no output"
 				}
 				result.Messages = copyMessages(messages)
 				return result, nil

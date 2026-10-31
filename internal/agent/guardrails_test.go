@@ -516,6 +516,22 @@ func repeatedFlakyTurns(n int) [][]zeroruntime.StreamEvent {
 	return turns
 }
 
+// alwaysSucceedingTool is the successful counterpart to alwaysFailingTool, used
+// to put a productive tool turn before an empty-turn streak.
+type alwaysSucceedingTool struct{}
+
+func (alwaysSucceedingTool) Name() string        { return "ok" }
+func (alwaysSucceedingTool) Description() string { return "always succeeds for testing" }
+func (alwaysSucceedingTool) Parameters() tools.Schema {
+	return tools.Schema{Type: "object", AdditionalProperties: false}
+}
+func (alwaysSucceedingTool) Safety() tools.Safety {
+	return tools.Safety{SideEffect: tools.SideEffectRead, Permission: tools.PermissionAllow}
+}
+func (alwaysSucceedingTool) Run(context.Context, map[string]any) tools.Result {
+	return tools.Result{Status: tools.StatusOK, Output: "ok"}
+}
+
 func TestRunStopsAfterRepeatedToolFailures(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(alwaysFailingTool{})
@@ -547,12 +563,17 @@ func TestHeadlessGuardStopsAreIncomplete(t *testing.T) {
 		wantTurns  int
 		wantReason string
 	}{
-		{"empty_turns", [][]zeroruntime.StreamEvent{emptyTurn(), emptyTurn(), emptyTurn()}, maxEmptyTurns, "no output"},
+		{"empty_turns", [][]zeroruntime.StreamEvent{emptyTurn(), emptyTurn(), emptyTurn()}, maxEmptyTurns, "3 consecutive turns with no output"},
+		{"empty_turns_after_progress", [][]zeroruntime.StreamEvent{
+			toolTurn("ok-1", "ok", "{}"),
+			emptyTurn(), emptyTurn(), emptyTurn(),
+		}, maxEmptyTurns + 1, "3 consecutive turns with no output"},
 		{"repeated_tool_failures", repeatedFlakyTurns(10), toolFailureStopAt, "flaky"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			registry := tools.NewRegistry()
 			registry.Register(alwaysFailingTool{})
+			registry.Register(alwaysSucceedingTool{})
 			result, err := Run(context.Background(), "go", &mockProvider{turns: tc.turns}, Options{
 				Registry:                registry,
 				MaxTurns:                12,
