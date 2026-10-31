@@ -80,6 +80,9 @@ func TestRunStopsAfterConsecutiveEmptyTurns(t *testing.T) {
 	if result.FinalAnswer == maxTurnsAnswer {
 		t.Fatalf("no-output guard must stop before reaching maxTurns, got max-turns answer")
 	}
+	if result.Incomplete {
+		t.Fatalf("interactive run must not be marked Incomplete; reason=%q", result.IncompleteReason)
+	}
 }
 
 func TestRunResetsEmptyTurnCounterOnVisibleOutput(t *testing.T) {
@@ -528,6 +531,46 @@ func TestRunStopsAfterRepeatedToolFailures(t *testing.T) {
 	// Must halt at the failure cap, NOT loop to maxTurns.
 	if len(provider.requests) != toolFailureStopAt {
 		t.Fatalf("expected stop at %d failures, made %d requests", toolFailureStopAt, len(provider.requests))
+	}
+	if result.Incomplete {
+		t.Fatalf("interactive run must not be marked Incomplete; reason=%q", result.IncompleteReason)
+	}
+}
+
+// Under the headless completion gate both guardrail stops are unfinished runs,
+// so they must set Result.Incomplete and a reason; exec maps that to exit 4.
+// Thresholds and stop answers stay pinned by the two tests above.
+func TestHeadlessGuardStopsAreIncomplete(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		turns      [][]zeroruntime.StreamEvent
+		wantTurns  int
+		wantReason string
+	}{
+		{"empty_turns", [][]zeroruntime.StreamEvent{emptyTurn(), emptyTurn(), emptyTurn()}, maxEmptyTurns, "no output"},
+		{"repeated_tool_failures", repeatedFlakyTurns(10), toolFailureStopAt, "flaky"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := tools.NewRegistry()
+			registry.Register(alwaysFailingTool{})
+			result, err := Run(context.Background(), "go", &mockProvider{turns: tc.turns}, Options{
+				Registry:                registry,
+				MaxTurns:                12,
+				RequireCompletionSignal: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Turns != tc.wantTurns {
+				t.Fatalf("guard did not trigger: turns=%d want=%d", result.Turns, tc.wantTurns)
+			}
+			if !result.Incomplete {
+				t.Fatalf("guardrail stop under the headless gate must be Incomplete; final=%q", result.FinalAnswer)
+			}
+			if !strings.Contains(result.IncompleteReason, tc.wantReason) {
+				t.Fatalf("IncompleteReason = %q, want it to mention %q", result.IncompleteReason, tc.wantReason)
+			}
+		})
 	}
 }
 

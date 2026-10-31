@@ -587,6 +587,14 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			// counted toward the runaway cap so we stop before burning maxTurns.
 			if guards.observeTurn(collected) {
 				result.FinalAnswer = noOutputStopAnswer(result.Turns)
+				// Under the headless completion gate this stop is unfinished work,
+				// not a successful final answer: the guard exists precisely because
+				// the model made no progress. Interactive runs keep the gate off, so
+				// their behavior is unchanged.
+				if options.RequireCompletionSignal {
+					result.Incomplete = true
+					result.IncompleteReason = "stopped after " + strconv.Itoa(result.Turns) + " turns with no output"
+				}
 				result.Messages = copyMessages(messages)
 				return result, nil
 			}
@@ -808,6 +816,13 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
 				messages = append(messages, buildToolImageMessages()...)
 				result.FinalAnswer = toolFailureStopAnswer(call.Name, outcome.Count)
+				// Same headless contract as the empty-turn guard: halting on a
+				// repeated failure is an unfinished run, not success. Gate-off
+				// (interactive / --no-completion-gate) keeps the old behavior.
+				if options.RequireCompletionSignal {
+					result.Incomplete = true
+					result.IncompleteReason = "the " + call.Name + " tool failed " + strconv.Itoa(outcome.Count) + " times in a row with the same error"
+				}
 				result.Messages = copyMessages(messages)
 				return result, nil
 			}
