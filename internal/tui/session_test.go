@@ -492,6 +492,54 @@ func TestPermissionPromptAllowWritesFileAndRecordsDecision(t *testing.T) {
 	}
 }
 
+func TestPermissionPromptFreeformApplyPatchRecordsCheckpoint(t *testing.T) {
+	store := testSessionStore(t)
+	root := t.TempDir()
+	writeTestFile(t, root, "main.txt", "before\n")
+	patch := "*** Begin Patch\n*** Update File: main.txt\n@@\n-before\n+after\n*** End Patch\n"
+	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{
+		freeformApplyPatchToolScript("call_patch", patch),
+		textScript("patched"),
+	}}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewScopedApplyPatchTool(root, nil))
+	runtimeMessageCh := make(chan tea.Msg, 8)
+	m := newPermissionTestModel(root, provider, registry, store, nil, runtimeMessageCh)
+
+	next := submitAndDrivePermissionRun(t, m, "apply the patch", "a", runtimeMessageCh, 4)
+
+	content, err := os.ReadFile(filepath.Join(root, "main.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "after\n" {
+		t.Fatalf("patched content = %q, want after newline", content)
+	}
+	events := readOnlySessionEvents(t, store)
+	if got := eventTypes(events); !equalEventTypes(got, []sessions.EventType{
+		sessions.EventMessage,
+		sessions.EventToolCall,
+		sessions.EventSessionCheckpoint,
+		sessions.EventPermissionRequest,
+		sessions.EventPermissionDecision,
+		sessions.EventToolResult,
+		sessions.EventMessage,
+	}) {
+		t.Fatalf("unexpected event sequence: %#v", got)
+	}
+	checkpoint := nthSessionEvent(t, events, sessions.EventSessionCheckpoint, 1)
+	var payload sessions.CheckpointPayload
+	if err := json.Unmarshal(checkpoint.Payload, &payload); err != nil {
+		t.Fatalf("decode checkpoint payload: %v", err)
+	}
+	if len(payload.Files) != 1 || payload.Files[0].Path != "main.txt" || payload.Files[0].Blob == "" {
+		t.Fatalf("checkpoint files = %#v, want main.txt with a blob", payload.Files)
+	}
+	if !transcriptContains(next.transcript, "permission: apply_patch allow") {
+		t.Fatalf("expected allow decision in transcript, got %#v", next.transcript)
+	}
+}
+
 func TestPermissionPromptAlwaysPersistsGrantAndSkipsLaterPrompt(t *testing.T) {
 	store := testSessionStore(t)
 	root := t.TempDir()
@@ -647,6 +695,17 @@ func writeFileToolScript(callID string, path string, content string) []zerorunti
 	return []zeroruntime.StreamEvent{
 		{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: callID, ToolName: "write_file"},
 		{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: callID, ArgumentsFragment: `{"path":` + jsonString(path) + `,"content":` + jsonString(content) + `,"overwrite":true}`},
+		{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: callID},
+		{Type: zeroruntime.StreamEventDone},
+	}
+}
+
+// freeformApplyPatchToolScript emits a native freeform apply_patch call: the raw
+// patch rides in ArgumentsFragment instead of a JSON object.
+func freeformApplyPatchToolScript(callID string, patch string) []zeroruntime.StreamEvent {
+	return []zeroruntime.StreamEvent{
+		{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: callID, ToolName: "apply_patch", ToolCallFreeform: true},
+		{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: callID, ArgumentsFragment: patch},
 		{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: callID},
 		{Type: zeroruntime.StreamEventDone},
 	}

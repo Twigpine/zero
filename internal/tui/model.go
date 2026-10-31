@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -5965,11 +5964,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			// them is flushed at end-of-run AND on cancel (flushRunIDs), so the blobs
 			// never stay orphaned — see its contract in internal/sessions.
 			if m.sessionStore != nil && m.activeSession.SessionID != "" {
-				var args map[string]any
-				if call.Arguments != "" {
-					_ = json.Unmarshal([]byte(call.Arguments), &args)
-				}
-				if targets := tools.MutationTargets(m.cwd, call.Name, args); len(targets) > 0 {
+				if targets := agent.CheckpointTargets(m.cwd, options.Registry, call); len(targets) > 0 {
 					if payload, ok := m.sessionStore.SnapshotForCheckpoint(m.activeSession.SessionID, m.cwd, call.Name, targets); ok {
 						sessionEvents = append(sessionEvents, pendingSessionEvent{
 							Type:    sessions.EventSessionCheckpoint,
