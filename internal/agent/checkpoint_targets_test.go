@@ -12,6 +12,11 @@ import (
 
 func TestCheckpointTargets(t *testing.T) {
 	root := t.TempDir()
+	// Absolute headers must be compared against the physical root: t.TempDir
+	// differs from it on macOS (/var -> /private/var) and via Windows short names.
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
 	if err := os.WriteFile(filepath.Join(root, "main.txt"), []byte("before\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

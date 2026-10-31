@@ -41,6 +41,11 @@ func TestCaptureCheckpointFreeformApplyPatch(t *testing.T) {
 			t.Setenv("XDG_DATA_HOME", t.TempDir())
 			t.Setenv("ZERO_CHECKPOINTS", "on")
 			root := t.TempDir()
+			// The absolute-header case needs the physical root spelling the tool
+			// resolves (macOS /var vs /private/var, Windows short names).
+			if resolved, err := filepath.EvalSymlinks(root); err == nil {
+				root = resolved
+			}
 			if err := os.WriteFile(filepath.Join(root, "main.txt"), []byte("before\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
