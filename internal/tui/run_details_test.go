@@ -64,3 +64,31 @@ func TestRunDetailsOverlayHidesBehindPicker(t *testing.T) {
 		t.Fatalf("run details must yield to a picker that owns the keyboard, got:\n%s", got)
 	}
 }
+
+func TestRunDetailsHitsAlignWithSidebar(t *testing.T) {
+	m := filesPanelTestModel()
+	inner := 40
+	fileLines, hits := m.sidebarFileLines(inner)
+	if len(hits) == 0 || len(fileLines) == 0 {
+		t.Fatal("sidebar hits")
+	}
+	layout := m.runDetailsLayout(inner)
+	if layout.fileStart < 0 {
+		t.Fatal("run details dropped FILES block identity")
+	}
+	if len(layout.fileHits) != len(hits) && len(fileLines) <= runDetailsMaxItems {
+		t.Fatalf("hit count %d vs sidebar %d", len(layout.fileHits), len(hits))
+	}
+	for _, h := range layout.fileHits {
+		idx := layout.fileStart + h.lineOffset
+		if idx < 0 || idx >= len(layout.lines) {
+			t.Fatalf("hit %q offset %d outside details", h.path, h.lineOffset)
+		}
+		if h.lineOffset < 0 || h.lineOffset >= len(fileLines) {
+			t.Fatalf("hit %q offset %d outside sidebar lines", h.path, h.lineOffset)
+		}
+		if layout.lines[idx] != fileLines[h.lineOffset] {
+			t.Fatalf("hit map != rendered row for %q", h.path)
+		}
+	}
+}
