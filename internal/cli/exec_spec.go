@@ -148,7 +148,7 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 				"name":      call.Name,
 				"arguments": call.Arguments,
 			})
-			if checkpoint, ok := sessionRecorder.captureCheckpoint(run.workspaceRoot, call); ok {
+			if checkpoint, ok := sessionRecorder.captureCheckpoint(run.workspaceRoot, run.registry, call); ok {
 				writer.checkpoint(checkpoint)
 			}
 		},

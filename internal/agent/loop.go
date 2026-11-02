@@ -587,6 +587,14 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			// counted toward the runaway cap so we stop before burning maxTurns.
 			if guards.observeTurn(collected) {
 				result.FinalAnswer = noOutputStopAnswer(result.Turns)
+				// Under the headless completion gate this stop is unfinished work,
+				// not a successful final answer: the guard exists precisely because
+				// the model made no progress. Interactive runs keep the gate off, so
+				// their behavior is unchanged.
+				if options.RequireCompletionSignal {
+					result.Incomplete = true
+					result.IncompleteReason = "stopped after " + strconv.Itoa(guards.emptyTurns) + " consecutive turns with no output"
+				}
 				result.Messages = copyMessages(messages)
 				return result, nil
 			}

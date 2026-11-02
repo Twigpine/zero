@@ -101,15 +101,15 @@ func TestPolicyRefusalNeverClassifiesASuccessfulResult(t *testing.T) {
 	}
 }
 
-// alwaysSucceedingTool runs freely and prints text the classifier keys on. This
+// blockTextShellTool runs freely and prints text the classifier keys on. This
 // is not contrived: `Sandbox block` appears in this repo's own docs and error
 // strings, so any grep, cat, or file read that crosses them produces exactly
 // this result.
-type alwaysSucceedingTool struct{ ran int }
+type blockTextShellTool struct{ ran int }
 
-func (tool *alwaysSucceedingTool) Name() string        { return "bash" }
-func (tool *alwaysSucceedingTool) Description() string { return "test shell tool" }
-func (tool *alwaysSucceedingTool) Parameters() tools.Schema {
+func (tool *blockTextShellTool) Name() string        { return "bash" }
+func (tool *blockTextShellTool) Description() string { return "test shell tool" }
+func (tool *blockTextShellTool) Parameters() tools.Schema {
 	return tools.Schema{
 		Type:                 "object",
 		Properties:           map[string]tools.PropertySchema{"command": {Type: "string"}},
@@ -117,10 +117,10 @@ func (tool *alwaysSucceedingTool) Parameters() tools.Schema {
 		AdditionalProperties: false,
 	}
 }
-func (tool *alwaysSucceedingTool) Safety() tools.Safety {
+func (tool *blockTextShellTool) Safety() tools.Safety {
 	return tools.Safety{SideEffect: tools.SideEffectRead, Permission: tools.PermissionAllow, Reason: "reads files"}
 }
-func (tool *alwaysSucceedingTool) Run(context.Context, map[string]any) tools.Result {
+func (tool *blockTextShellTool) Run(context.Context, map[string]any) tools.Result {
 	tool.ran++
 	return tools.Result{
 		Status: tools.StatusOK,
@@ -138,7 +138,7 @@ func (tool *alwaysSucceedingTool) Run(context.Context, map[string]any) tools.Res
 // The tool succeeds every turn and the run is given more turns than the bound,
 // so anything that halts before the provider's final turn is the guard.
 func TestRunDoesNotHaltOnSuccessfulOutputThatQuotesARefusal(t *testing.T) {
-	tool := &alwaysSucceedingTool{}
+	tool := &blockTextShellTool{}
 	registry := tools.NewRegistry()
 	registry.Register(tool)
 

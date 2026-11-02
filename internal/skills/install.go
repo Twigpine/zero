@@ -1,9 +1,9 @@
 package skills
 
 // Distribution: install a skill from a git URL or a local path into the skills
-// directory, with a content hash recorded in a lockfile (skills.lock) so every
-// install/update is verifiable. Skills are markdown, so install NEVER executes
-// fetched content — it copies and validates the SKILL.md and nothing else.
+// directory, with content hashes recorded in a lockfile (skills.lock) so every
+// install/update is verifiable. Install copies the skill's directory, its
+// SKILL.md and the files beside it, and NEVER executes fetched content.
 
 import (
 	"context"
@@ -61,16 +61,30 @@ type InstallResult struct {
 	Hash string `json:"hash"`
 	// Source echoes the source the skill was installed from.
 	Source string `json:"source"`
+	// TreeHash covers every file the skill ships, SKILL.md included; Hash is
+	// still the SKILL.md hash alone.
+	TreeHash string `json:"treeHash"`
 	// Updated is true when an existing install was replaced; PreviousHash then
 	// carries the prior recorded hash so a caller can show the change.
 	Updated      bool   `json:"updated"`
 	PreviousHash string `json:"previousHash,omitempty"`
+	// PreviousTreeHash is the tree hash the replaced install recorded. It is
+	// empty when that install predates tree hashes, and so copied SKILL.md
+	// alone.
+	PreviousTreeHash string `json:"previousTreeHash,omitempty"`
+	// SkippedLinks lists symlinks in the source, relative to the skill
+	// directory. Install neither follows nor copies them.
+	SkippedLinks []string `json:"skippedLinks,omitempty"`
 }
 
 // LockEntry records the source and content hash for one installed skill.
 type LockEntry struct {
 	Source string `json:"source"`
 	Hash   string `json:"hash"`
+	// TreeHash covers the whole installed skill directory. Entries written
+	// before skills installed their bundled files have none, and are checked on
+	// their SKILL.md alone.
+	TreeHash string `json:"treeHash,omitempty"`
 }
 
 // SkillInfo bundles a discovered skill with its recorded source and hash, for
@@ -79,12 +93,14 @@ type SkillInfo struct {
 	Skill     Skill  `json:"skill"`
 	Source    string `json:"source,omitempty"`
 	Hash      string `json:"hash,omitempty"`
+	TreeHash  string `json:"treeHash,omitempty"`
 	HashDrift bool   `json:"hashDrift"`
 }
 
-// Install fetches the skill at options.Source and copies its SKILL.md into
-// options.Dir/<name>/, validating the frontmatter and recording a content hash
-// in the lockfile. A git URL is fetched via the (injectable) GitRunner into a
+// Install fetches the skill at options.Source and copies its directory into
+// options.Dir/<name>/: SKILL.md and the scripts, references and assets beside
+// it. It validates the frontmatter and records the SKILL.md hash and a hash of
+// the whole tree in the lockfile. A git URL is fetched via the (injectable) GitRunner into a
 // temp dir; a local path is read in place. Fetched content is never executed.
 func Install(ctx context.Context, options InstallOptions) (InstallResult, error) {
 	source := strings.TrimSpace(options.Source)
@@ -133,10 +149,11 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 	if err := os.MkdirAll(staged, 0o755); err != nil {
 		return InstallResult{}, fmt.Errorf("create staged skill dir: %w", err)
 	}
-	stagedManifest := filepath.Join(staged, skillFileName)
-	if err := os.WriteFile(stagedManifest, data, 0o644); err != nil {
-		return InstallResult{}, fmt.Errorf("stage SKILL.md: %w", err)
+	bundled, skippedLinks, err := copySkillTree(skillDir, staged)
+	if err != nil {
+		return InstallResult{}, fmt.Errorf("stage skill directory: %w", err)
 	}
+	stagedManifest := filepath.Join(staged, skillFileName)
 	stagedData, err := os.ReadFile(stagedManifest)
 	if err != nil || hashContent(stagedData) != hash {
 		if err != nil {
@@ -169,8 +186,13 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 		return InstallResult{}, fmt.Errorf("%w: %q is installed from %s (use --force to overwrite)", ErrNameClash, name, previous.Source)
 	}
 
+	treeHash, err := skillTreeHash(staged)
+	if err != nil {
+		return InstallResult{}, fmt.Errorf("hash staged skill directory: %w", err)
+	}
+
 	target := filepath.Join(dir, name)
-	lock[name] = LockEntry{Source: source, Hash: hash}
+	lock[name] = LockEntry{Source: source, Hash: hash, TreeHash: treeHash}
 	if err := installtxn.CommitDir(target, staged, func() error {
 		return writeLock(dir, lock)
 	}); err != nil {
@@ -178,14 +200,26 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 	}
 
 	result := InstallResult{
-		Name:   name,
-		Path:   filepath.Join(target, skillFileName),
-		Hash:   hash,
-		Source: source,
+		Name:         name,
+		Path:         filepath.Join(target, skillFileName),
+		Hash:         hash,
+		TreeHash:     treeHash,
+		Source:       source,
+		SkippedLinks: skippedLinks,
 	}
 	if existed {
-		result.Updated = previous.Hash != hash
 		result.PreviousHash = previous.Hash
+		result.PreviousTreeHash = previous.TreeHash
+		if previous.TreeHash == "" {
+			// An entry from before tree hashes is from an install that copied
+			// SKILL.md alone. Against that, this install is an update when
+			// SKILL.md changed or it now brings bundled files; a skill that is
+			// still only its unchanged SKILL.md is not.
+			result.Updated = previous.Hash != hash || bundled > 0
+		} else {
+			// A changed script with the same SKILL.md is still an update.
+			result.Updated = previous.Hash != hash || previous.TreeHash != treeHash
+		}
 	}
 	return result, nil
 }
@@ -193,8 +227,8 @@ func Install(ctx context.Context, options InstallOptions) (InstallResult, error)
 // lockReconciler answers, for one interrupted workspace, which of the two trees
 // beside each other the lockfile records. A kill between the tree swap and the
 // lockfile publish leaves exactly what a kill after both leaves, so filesystem
-// shape cannot tell them apart and only the recorded hash can: the tree it
-// describes is the one the user was told they had.
+// shape cannot tell them apart and only the recorded hashes can: the tree they
+// describe is the one the user was told they had.
 func lockReconciler(dir string) installtxn.Reconciler {
 	return func(name string, target string, backup string) (installtxn.Phase, error) {
 		lock, err := ReadLock(dir)
@@ -215,22 +249,43 @@ func lockReconciler(dir string) installtxn.Reconciler {
 			// recorded one and recovery must not pick between them.
 			return installtxn.PhaseUnknown, nil
 		}
-		targetHash, err := manifestHash(target)
+		committed, err := treeMatchesEntry(target, entry)
 		if err != nil {
 			return installtxn.PhaseUnknown, err
 		}
-		if targetHash == entry.Hash {
+		if committed {
 			return installtxn.PhaseCommitted, nil
 		}
-		backupHash, err := manifestHash(backup)
+		prePublish, err := treeMatchesEntry(backup, entry)
 		if err != nil {
 			return installtxn.PhaseUnknown, err
 		}
-		if backupHash == entry.Hash {
+		if prePublish {
 			return installtxn.PhasePrePublish, nil
 		}
 		return installtxn.PhaseUnknown, nil
 	}
+}
+
+// treeMatchesEntry reports whether the skill tree at path is the one entry
+// records. A reinstall that changes only a bundled file leaves SKILL.md the same
+// in both trees of an interrupted workspace, so an entry with a tree hash has to
+// match on that as well. An entry from before tree hashes records SKILL.md
+// alone, and that is all it can be matched on. As in manifestHash, a tree with
+// no SKILL.md is a non-match and any other read error is returned.
+func treeMatchesEntry(path string, entry LockEntry) (bool, error) {
+	sum, err := manifestHash(path)
+	if err != nil || sum != entry.Hash {
+		return false, err
+	}
+	if entry.TreeHash == "" {
+		return true, nil
+	}
+	tree, err := skillTreeHash(path)
+	if err != nil {
+		return false, err
+	}
+	return tree == entry.TreeHash, nil
 }
 
 // manifestHash hashes the SKILL.md under path the same way an install records
@@ -346,9 +401,10 @@ func InfoFromRoots(primaryDir string, roots []string, name string) (SkillInfo, b
 		if entry, found := lock[skill.Name]; found {
 			info.Source = entry.Source
 			info.Hash = entry.Hash
+			info.TreeHash = entry.TreeHash
 		}
 	}
-	info.HashDrift = skillHashDrift(skill, info.Hash)
+	info.HashDrift = skillHashDrift(skill, info.Hash, info.TreeHash)
 	return info, true
 }
 
@@ -556,11 +612,12 @@ func hashContent(data []byte) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// skillHashDrift reports whether the on-disk SKILL.md no longer matches the
-// lockfile hash recorded at install time. Missing lock hashes never count as
-// drift (agents-only / unlocked skills). A locked skill whose SKILL.md cannot
-// be read is treated as drifted — not as a clean match.
-func skillHashDrift(skill Skill, lockHash string) bool {
+// skillHashDrift reports whether the installed skill no longer matches the
+// lockfile hashes recorded at install time: the SKILL.md hash, and the tree
+// hash when the entry has one, so an edited script counts as drift too. Missing
+// lock hashes never count as drift (skills Zero did not install). A locked
+// skill that cannot be read is treated as drifted, not as a clean match.
+func skillHashDrift(skill Skill, lockHash string, lockTreeHash string) bool {
 	lockHash = strings.TrimSpace(lockHash)
 	if lockHash == "" {
 		return false
@@ -569,5 +626,13 @@ func skillHashDrift(skill Skill, lockHash string) bool {
 	if err != nil {
 		return true
 	}
-	return hashContent(data) != lockHash
+	if hashContent(data) != lockHash {
+		return true
+	}
+	lockTreeHash = strings.TrimSpace(lockTreeHash)
+	if lockTreeHash == "" {
+		return false
+	}
+	treeHash, err := skillTreeHash(filepath.Dir(skill.Path))
+	return err != nil || treeHash != lockTreeHash
 }
