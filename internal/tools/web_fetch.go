@@ -36,6 +36,7 @@ type webFetchTool struct {
 	baseTool
 	client   *http.Client
 	resolver webFetchResolver
+	aimlapi  webFetchAIMLAPIBackend
 }
 
 type webFetchResolver interface {
@@ -147,6 +148,7 @@ func newWebFetchToolWithClientAndResolver(client *http.Client, resolver webFetch
 		},
 		client:   client,
 		resolver: resolver,
+		aimlapi:  defaultWebFetchAIMLAPIBackend(),
 	}
 }
 
@@ -198,6 +200,10 @@ func (tool webFetchTool) run(ctx context.Context, args map[string]any) Result {
 	}
 	if err := validateWebFetchURLBeforePermission(rawURL); err != nil {
 		return errorResult("Error: Unsafe URL for web_fetch: " + err.Error())
+	}
+	// Opt-in only: an AI/ML API key alone never switches the backend.
+	if webFetchAIMLAPISelected() {
+		return tool.runAIMLAPI(ctx, rawURL, maxBytes, format)
 	}
 
 	parsedURL, err := validateWebFetchURL(ctx, rawURL, tool.resolver)

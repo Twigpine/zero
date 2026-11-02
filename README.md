@@ -426,6 +426,45 @@ are refused) and carry `X-AIMLAPI-Source: agent/zero` and an
 `X-AIMLAPI-Partner-ID` header. The `domains` argument is sent to the Toolbox as
 `include_domains`, and results are still filtered locally.
 
+### AI/ML API Toolbox backend for `web_fetch`
+
+`web_fetch` can fetch pages through the AI/ML API Toolbox tool
+`search1api/crawl` instead of a direct HTTP GET. It is off unless you choose it:
+
+```bash
+export ZERO_WEBFETCH_PROVIDER=aimlapi
+```
+
+Having an AI/ML API key never switches it on by itself, and any other value (or
+none) keeps the direct fetch. The variable is read on every fetch.
+
+- **Billing:** every fetch is a billed Toolbox run on your AI/ML API balance,
+  about $0.0013 each. Each run is sent with `max_cost_usd` 0.005, so a run
+  priced above that is refused before it starts and not charged. Rate-limited
+  or gateway-failed requests are retried with the same idempotency key, so a
+  retry is never billed twice.
+- **Key:** the key comes from your `aimlapi` provider profile (including a key
+  in the credential store), or from `AIMLAPI_API_KEY` when there is no such
+  profile. It is withheld, and `web_fetch` returns an error, when any `aimlapi`
+  profile or any profile using `AIMLAPI_API_KEY` points at a base URL other than
+  `https://api.aimlapi.com/v1`, or when `AIMLAPI_INFERENCE_URL` is overridden:
+  the key may then belong to a proxy.
+- **Destination:** requests go only to the fixed `https://tools.aimlapi.com`
+  endpoint, with `Authorization: Bearer <key>` and the attribution headers
+  `X-AIMLAPI-Source: agent/zero` and `X-AIMLAPI-Partner-ID`. Redirects are
+  refused. `HTTP_PROXY`/`HTTPS_PROXY` apply to these requests as to Zero's other
+  aimlapi.com calls.
+- **No fallback:** without a usable key, or when the run fails, `web_fetch`
+  returns an error and does not fetch the page directly. Unset the variable to
+  go back to direct fetches.
+- **Remote fetch:** the page is fetched by a remote service, which may serve a
+  cached copy, and the full URL (query string included) is sent to it. The URL
+  checks above still run first, so loopback, private and metadata URLs are
+  never handed to it. The result is Markdown with a
+  `Backend: aimlapi (search1api/crawl)` line; `max_bytes` cuts the Markdown,
+  and `format: "raw"` is refused because the original response is not
+  available.
+
 For local dev servers, use shell commands such as `curl` through `exec_command`
 so the normal sandbox and permission policy applies. Long-running commands stay
 attached to a background terminal session and can be listed or stopped from the
