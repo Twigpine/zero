@@ -367,7 +367,8 @@ type toolFailureRecord struct {
 type failureKind uint8
 
 const (
-	failureKindNone failureKind = iota
+	// The zero value: no failure recorded.
+	_ failureKind = iota
 	// failureKindExecuted: the tool ran and returned an error. The key is the
 	// normalized error signature, which is tool-controlled text.
 	failureKindExecuted
@@ -388,7 +389,8 @@ type failureIdentity struct {
 type toolFailureCause uint8
 
 const (
-	toolFailureCauseNone toolFailureCause = iota
+	// The zero value: the guard did not stop.
+	_ toolFailureCause = iota
 	// toolFailureCauseSameError: the same executed error signature, six times.
 	toolFailureCauseSameError
 	// toolFailureCauseSameRefusal: the same denial category, six times. The prose
