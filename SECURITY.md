@@ -33,4 +33,8 @@ Please include, where possible:
   depend on a user explicitly disabling the sandbox (`--skip-permissions-unsafe`), are generally
   out of scope — but please report anything you are unsure about.
 - Zero sends no telemetry. Network calls go to the model/tool providers you configure (and, for
-  keyless web search, to Exa's hosted MCP endpoint at `https://mcp.exa.ai/mcp`).
+  keyless web search, to Exa's hosted MCP endpoint at `https://mcp.exa.ai/mcp`). The built-in
+  AI/ML API MCP server (`https://mcp.aimlapi.com/mcp`) is off until you run
+  `zero mcp enable aimlapi`. Once enabled, it receives your AI/ML API key, but only when the
+  aimlapi provider uses the canonical `https://api.aimlapi.com/v1` base URL (see
+  [docs/EXTENDING.md](docs/EXTENDING.md#built-in-servers)).

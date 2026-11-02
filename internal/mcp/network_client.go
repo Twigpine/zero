@@ -427,6 +427,7 @@ func (client *networkClient) applyHeaders(request *http.Request) {
 	if client.sessionID != "" {
 		request.Header.Set("Mcp-Session-Id", client.sessionID)
 	}
+	applyAIMLAPIRequestHeaders(client.server, request)
 }
 
 func (client *remoteSSEClient) applyStreamHeaders(request *http.Request) {
@@ -434,6 +435,7 @@ func (client *remoteSSEClient) applyStreamHeaders(request *http.Request) {
 		request.Header.Set(key, value)
 	}
 	request.Header.Set("Accept", "text/event-stream")
+	applyAIMLAPIRequestHeaders(client.server, request)
 }
 
 func (client *remoteSSEClient) applyPostHeaders(request *http.Request) {
@@ -442,6 +444,7 @@ func (client *remoteSSEClient) applyPostHeaders(request *http.Request) {
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
+	applyAIMLAPIRequestHeaders(client.server, request)
 }
 
 func closeResponseBody(errp *error, server Server, body io.Closer) {
@@ -609,10 +612,11 @@ func (client *remoteSSEClient) failPending(err error) {
 func httpStatusError(server Server, response *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(response.Body, 1024))
 	detail := strings.TrimSpace(string(body))
+	hint := aimlapiUnauthorizedHint(server, response.StatusCode)
 	if detail == "" {
-		return fmt.Errorf("MCP %s server %s returned HTTP %d", server.Type, server.Name, response.StatusCode)
+		return fmt.Errorf("MCP %s server %s returned HTTP %d%s", server.Type, server.Name, response.StatusCode, hint)
 	}
-	return fmt.Errorf("MCP %s server %s returned HTTP %d: %s", server.Type, server.Name, response.StatusCode, detail)
+	return fmt.Errorf("MCP %s server %s returned HTTP %d: %s%s", server.Type, server.Name, response.StatusCode, detail, hint)
 }
 
 func decodeSSERPCMessage(reader io.Reader) (rpcMessage, error) {

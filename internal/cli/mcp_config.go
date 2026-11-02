@@ -741,6 +741,13 @@ func (cfg *mcpWritableConfig) upsertServer(name string, server config.MCPServerC
 	if err != nil {
 		return false, err
 	}
+	if !mergedServer.Disabled && config.IsDefaultMCPServerDisabled(name) {
+		// Adding a server under the name of a default that ships disabled means
+		// the user wants it on; the omitted flag would otherwise keep it off.
+		if data, err = setMCPServerRawDisabledFalse(data); err != nil {
+			return false, err
+		}
+	}
 	cfg.serverRaw[name] = data
 	if _, err := cfg.removeLegacyServer(name); err != nil {
 		return false, err
@@ -805,6 +812,18 @@ func mergeMCPServerRaw(existing json.RawMessage, server config.MCPServerConfig) 
 	return json.Marshal(merged)
 }
 
+func setMCPServerRawDisabledFalse(data json.RawMessage) (json.RawMessage, error) {
+	var server map[string]json.RawMessage
+	if err := json.Unmarshal(data, &server); err != nil {
+		return nil, err
+	}
+	if server == nil {
+		server = map[string]json.RawMessage{}
+	}
+	server["disabled"] = json.RawMessage("false")
+	return json.Marshal(server)
+}
+
 func (cfg *mcpWritableConfig) removeServer(name string) (bool, error) {
 	cfg.ensureRaw()
 	removed := false
@@ -856,15 +875,19 @@ func (cfg *mcpWritableConfig) setServerDisabled(name string, disabled bool) (boo
 		server = map[string]json.RawMessage{}
 	}
 
-	current := false
+	// A default that ships disabled (aimlapi) stays off until an entry says
+	// otherwise, so an absent flag reads as disabled and enabling it must be
+	// written out explicitly: dropping the flag would leave it off.
+	shippedDisabled := config.IsDefaultMCPServerDisabled(name)
+	current := shippedDisabled
 	if rawDisabled, ok := server["disabled"]; ok && len(rawDisabled) > 0 && string(rawDisabled) != "null" {
 		if err := json.Unmarshal(rawDisabled, &current); err != nil {
 			return false, false, err
 		}
 	}
 	changed := current != disabled
-	if disabled {
-		data, err := json.Marshal(true)
+	if disabled || shippedDisabled {
+		data, err := json.Marshal(disabled)
 		if err != nil {
 			return false, false, err
 		}
