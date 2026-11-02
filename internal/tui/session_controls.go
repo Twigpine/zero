@@ -740,27 +740,40 @@ func (m model) runCompact() tea.Cmd {
 // handleRewindCommand restores workspace files to a checkpoint and truncates the
 // session log. "/rewind" or "/rewind latest" undoes the most recent checkpoint;
 // "/rewind <n>" rewinds to a specific event sequence.
-func (m model) handleRewindCommand(args string) (model, string) {
+func (m model) handleRewindCommand(args string) (model, string, tea.Cmd) {
 	if m.sessionStore == nil || m.activeSession.SessionID == "" {
-		return m, "Rewind\nno active session to rewind."
+		return m, "Rewind\nno active session to rewind.", nil
 	}
 	if m.pending {
-		return m, "Rewind\ncannot rewind while a run is in progress."
+		return m, "Rewind\ncannot rewind while a run is in progress.", nil
 	}
 	// A cancelled run's late flush hasn't appended its checkpoint events yet:
 	// ApplyRewind would prune those checkpoint blobs as unreferenced, then the
 	// flush would re-append pre-rewind events after the rewind marker.
 	if len(m.flushRunIDs) > 0 {
-		return m, "Rewind\ncannot rewind while a cancelled run is still flushing — retry in a moment."
+		return m, "Rewind\ncannot rewind while a cancelled run is still flushing — retry in a moment.", nil
 	}
 	arg := strings.TrimSpace(strings.ToLower(args))
 	target, err := m.resolveRewindTarget(arg)
 	if err != nil {
-		return m, "Rewind\n" + err.Error()
+		return m, "Rewind\n" + err.Error(), nil
 	}
+
+	// Workspace files may be touched or restored starting with ApplyRewind:
+	// Invalidate file view cache immediately so any partial or full disk mutation
+	// cannot serve stale pre-rewind snapshots regardless of subsequent step failures.
+	defaultFileViewCache.invalidateUnknownScope()
+	if m.fileView.active {
+		m.fileView.requiredSourceRev++
+	}
+
 	report, err := m.sessionStore.ApplyRewind(m.activeSession.SessionID, m.cwd, target)
 	if err != nil {
-		return m, "Rewind\n" + err.Error()
+		var refreshCmd tea.Cmd
+		if m.fileView.active && m.fileView.mode == fileViewFull {
+			m, refreshCmd = m.startFileViewRefreshCmd(m.chatColumnWidth())
+		}
+		return m, "Rewind\n" + err.Error(), refreshCmd
 	}
 
 	// ApplyRewind truncated the persisted event log, restored files, and appended a
@@ -776,7 +789,11 @@ func (m model) handleRewindCommand(args string) (model, string) {
 	events, readErr := m.sessionStore.ReadEvents(m.activeSession.SessionID)
 	if readErr != nil {
 		m.sessionEvents = nil // drop stale context so it can't reach the next prompt
-		return m, fmt.Sprintf("Rewind\nrewound to sequence %d, but reloading the session failed (in-memory context cleared): %s", target, readErr.Error())
+		var refreshCmd tea.Cmd
+		if m.fileView.active && m.fileView.mode == fileViewFull {
+			m, refreshCmd = m.startFileViewRefreshCmd(m.chatColumnWidth())
+		}
+		return m, fmt.Sprintf("Rewind\nrewound to sequence %d, but reloading the session failed (in-memory context cleared): %s", target, readErr.Error()), refreshCmd
 	}
 	m.sessionEvents = append([]sessions.Event{}, events...)
 	rows := initialTranscript()
@@ -786,12 +803,17 @@ func (m model) handleRewindCommand(args string) (model, string) {
 	// pre-rewind scrollback above it stays, as scrollback cannot be un-printed.
 	m.resetFlushFrontier("· rewound ·")
 
+	var refreshCmd tea.Cmd
+	if m.fileView.active && m.fileView.mode == fileViewFull {
+		m, refreshCmd = m.startFileViewRefreshCmd(m.chatColumnWidth())
+	}
+
 	summary := fmt.Sprintf("Rewound to sequence %d\n%d file(s) restored, %d deleted, %d skipped.",
 		target, report.FilesRestored, report.FilesDeleted, len(report.Skipped))
 	if len(report.Skipped) > 0 {
 		summary += "\nskipped (not recoverable): " + strings.Join(report.Skipped, ", ")
 	}
-	return m, summary
+	return m, summary, refreshCmd
 }
 
 // resolveRewindTarget maps a /rewind argument to a keep-through event sequence.
