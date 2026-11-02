@@ -397,6 +397,30 @@ and can rewrite every request through it, so this is the trust you accept by
 configuring one. Leave the variables unset for the checks to be enforced end to
 end.
 
+The built-in `web_search` tool is registered only when a search backend is
+configured: `ZERO_WEBSEARCH_BASE_URL` (with an optional `ZERO_WEBSEARCH_API_KEY`)
+for a generic JSON endpoint, `ZERO_WEBSEARCH_PROVIDER=searxng` with a SearXNG
+base URL, or the AI/ML API Toolbox:
+
+```bash
+export ZERO_WEBSEARCH_PROVIDER=aimlapi
+```
+
+The AI/ML API backend runs the Toolbox tool `web/search`, and every search is
+billed to your AI/ML API balance: about $0.0013 per result, and each search is
+sent with a $0.025 spending cap, which the Toolbox enforces. It is used only when
+`ZERO_WEBSEARCH_PROVIDER` is set to `aimlapi`; an AI/ML API key alone never
+enables it. The key is the one the aimlapi provider uses (its profile, including
+a key in the credential store, or `AIMLAPI_API_KEY` without a profile), resolved
+again on every search; `ZERO_WEBSEARCH_API_KEY` is not used. When an aimlapi
+profile points at a base URL other than `https://api.aimlapi.com/v1`, or
+`AIMLAPI_INFERENCE_URL` is overridden, the key may belong to a proxy, so it is
+not sent and the search fails without a request. Requests go only to
+`https://tools.aimlapi.com` (`ZERO_WEBSEARCH_BASE_URL` is ignored and redirects
+are refused) and carry `X-AIMLAPI-Source: agent/zero` and an
+`X-AIMLAPI-Partner-ID` header. The `domains` argument is sent to the Toolbox as
+`include_domains`, and results are still filtered locally.
+
 For local dev servers, use shell commands such as `curl` through `exec_command`
 so the normal sandbox and permission policy applies. Long-running commands stay
 attached to a background terminal session and can be listed or stopped from the

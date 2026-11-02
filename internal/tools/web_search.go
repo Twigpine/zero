@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Twigpine/zero/internal/config"
 	"github.com/Twigpine/zero/internal/redaction"
 	zeroSandbox "github.com/Twigpine/zero/internal/sandbox"
 )
@@ -41,6 +42,18 @@ type searchResult struct {
 // nil means no backend is configured.
 type searchBackend interface {
 	Search(ctx context.Context, query string, limit int) ([]searchResult, error)
+}
+
+// timedSearchBackend is implemented by a backend that needs a time budget other
+// than webSearchTimeout.
+type timedSearchBackend interface {
+	searchTimeout() time.Duration
+}
+
+// domainScopedSearchBackend is implemented by a backend that can restrict a
+// search to an allowlist of hostnames itself. Run still filters the results.
+type domainScopedSearchBackend interface {
+	searchDomains(ctx context.Context, query string, limit int, domains []string) ([]searchResult, error)
 }
 
 type webSearchTool struct {
@@ -132,13 +145,22 @@ func (tool webSearchTool) Run(ctx context.Context, args map[string]any) Result {
 	}
 
 	if tool.backend == nil {
-		return errorResult("Error: no search backend configured. Set ZERO_WEBSEARCH_BASE_URL (and ZERO_WEBSEARCH_API_KEY) to enable web_search.")
+		return errorResult("Error: no search backend configured. Set ZERO_WEBSEARCH_BASE_URL (and ZERO_WEBSEARCH_API_KEY), or ZERO_WEBSEARCH_PROVIDER=aimlapi to use the AI/ML API Toolbox (billed per search), to enable web_search.")
 	}
 
-	runCtx, cancel := context.WithTimeout(ctx, webSearchTimeout)
+	timeout := webSearchTimeout
+	if timed, ok := tool.backend.(timedSearchBackend); ok {
+		timeout = timed.searchTimeout()
+	}
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	results, err := tool.backend.Search(runCtx, query, limit)
+	var results []searchResult
+	if scoped, ok := tool.backend.(domainScopedSearchBackend); ok && len(domains) > 0 {
+		results, err = scoped.searchDomains(runCtx, query, limit, domains)
+	} else {
+		results, err = tool.backend.Search(runCtx, query, limit)
+	}
 	if err != nil {
 		return errorResult("Error performing web search: " + redactWebSearchText(err.Error()))
 	}
@@ -188,9 +210,18 @@ func formatSearchResults(results []searchResult) string {
 	return strings.Join(lines, "\n")
 }
 
-// defaultSearchBackend returns the env-configured generic backend, or nil when
-// ZERO_WEBSEARCH_BASE_URL is unset (the tool then reports it as unconfigured).
+// defaultSearchBackend returns the env-configured backend, or nil when none is
+// configured (the tool then reports it as unconfigured).
+//
+// ZERO_WEBSEARCH_PROVIDER=aimlapi selects the AI/ML API Toolbox. It ignores
+// ZERO_WEBSEARCH_BASE_URL and ZERO_WEBSEARCH_API_KEY: the Toolbox host is fixed
+// and the key is the AI/ML API service key. Otherwise the generic backend is
+// used when ZERO_WEBSEARCH_BASE_URL is set.
 func defaultSearchBackend() searchBackend {
+	provider := strings.TrimSpace(os.Getenv("ZERO_WEBSEARCH_PROVIDER"))
+	if strings.EqualFold(provider, aimlapiSearchProvider) {
+		return newAIMLAPISearchBackend(nil, config.LoadAIMLAPIServiceKey)
+	}
 	baseURL := strings.TrimSpace(os.Getenv("ZERO_WEBSEARCH_BASE_URL"))
 	if baseURL == "" {
 		return nil
@@ -202,7 +233,7 @@ func defaultSearchBackend() searchBackend {
 		},
 		baseURL:  baseURL,
 		apiKey:   strings.TrimSpace(os.Getenv("ZERO_WEBSEARCH_API_KEY")),
-		provider: strings.TrimSpace(os.Getenv("ZERO_WEBSEARCH_PROVIDER")),
+		provider: provider,
 	}
 }
 
