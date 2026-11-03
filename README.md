@@ -434,7 +434,9 @@ none) keeps the direct fetch. The variable is read on every fetch.
   never handed to it. The result is Markdown with a
   `Backend: aimlapi (search1api/crawl)` line; `max_bytes` cuts the Markdown,
   and `format: "raw"` is refused because the original response is not
-  available.
+  available. The complete Toolbox run response is limited to 8 MiB before JSON
+  decoding; larger responses return an error even if `max_bytes` is smaller.
+  The remote run may already have been billed when this limit is detected.
 
 For local dev servers, use shell commands such as `curl` through `exec_command`
 so the normal sandbox and permission policy applies. Long-running commands stay
