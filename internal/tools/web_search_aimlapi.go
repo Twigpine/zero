@@ -270,7 +270,7 @@ func aimlapiRunResults(run aimlapiRun, key string) ([]searchResult, error) {
 		if strings.TrimSpace(item.URL) == "" {
 			continue
 		}
-		out = append(out, searchResult{Title: item.Title, URL: item.URL, Snippet: item.Snippet})
+		out = append(out, searchResult{Title: scrubAIMLAPIResult(item.Title, key), URL: scrubAIMLAPIResult(item.URL, key), Snippet: scrubAIMLAPIResult(item.Snippet, key)})
 	}
 	return out, nil
 }
@@ -308,4 +308,9 @@ func aimlapiErrorText(value, key string) string {
 		text = string(runes[:aimlapiMaxErrorTextRunes]) + "…"
 	}
 	return text
+}
+
+// scrubAIMLAPIResult redacts the active credential without clipping page content.
+func scrubAIMLAPIResult(value, key string) string {
+	return redaction.RedactString(value, redaction.Options{ExtraSecretValues: []string{key}})
 }

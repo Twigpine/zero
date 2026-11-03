@@ -167,7 +167,7 @@ func (tool webSearchTool) Run(ctx context.Context, args map[string]any) Result {
 	// Filter by domains BEFORE the empty-result short-circuit so a non-empty
 	// allowlist that ate every hit surfaces as a clear "no results matched
 	// domains" error rather than a misleading "no results" message.
-	if len(results) > 0 && len(domains) > 0 {
+	if len(domains) > 0 {
 		filtered, err := filterWebSearchByDomains(results, domains)
 		if err != nil {
 			return errorResult("Error: " + redactWebSearchText(err.Error()))
