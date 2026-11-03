@@ -51,8 +51,14 @@ func AIMLAPIServiceKey(resolved ResolvedConfig, store APIKeyGetter, getenv func(
 		if !sameBaseURL(profile.BaseURL, aimlapi.CanonicalInferenceBaseURL) {
 			return "", ErrAIMLAPIProxyProfile
 		}
-		if store != nil {
-			profile = ApplyStoredAPIKey(profile, store)
+		if store != nil && profile.APIKeyStored && strings.TrimSpace(profile.APIKey) == "" && strings.TrimSpace(profile.Name) != "" {
+			key, found, err := store.Get(strings.TrimSpace(profile.Name))
+			if err != nil {
+				return "", fmt.Errorf("read AI/ML API credential store: %w", err)
+			}
+			if found {
+				profile.APIKey = key
+			}
 		}
 		return validAIMLAPIServiceKey(profile.APIKey)
 	}
@@ -75,14 +81,18 @@ func LoadAIMLAPIServiceKey() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var store APIKeyGetter
-	credentials, storeErr := ProviderKeyStoreAt(filepath.Dir(userConfigPath))
-	if storeErr != nil {
-		if profile, ok := aimlapiServiceProfile(resolved); ok && profile.APIKeyStored && strings.TrimSpace(profile.APIKey) == "" {
-			return "", fmt.Errorf("open AI/ML API credential store: %w", storeErr)
-		}
-	} else if credentials != nil {
-		store = credentials
+	// Check proxy eligibility and already-resolved keys before opening a store.
+	key, keyErr := AIMLAPIServiceKey(resolved, nil, os.Getenv)
+	if !errors.Is(keyErr, ErrAIMLAPIKeyMissing) {
+		return key, keyErr
+	}
+	profile, ok := aimlapiServiceProfile(resolved)
+	if !ok || !profile.APIKeyStored {
+		return key, keyErr
+	}
+	store, err := ProviderKeyStoreAt(filepath.Dir(userConfigPath))
+	if err != nil {
+		return "", fmt.Errorf("open AI/ML API credential store: %w", err)
 	}
 	return AIMLAPIServiceKey(resolved, store, os.Getenv)
 }
