@@ -167,6 +167,15 @@ func (tool webFetchTool) RejectBeforePermission(args map[string]any) (Result, bo
 	if err := validateWebFetchURLBeforePermission(rawURL); err != nil {
 		return errorResult("Error: Unsafe URL for web_fetch: " + err.Error()), true
 	}
+	if webFetchAIMLAPISelected() {
+		format, err := stringArg(args, "format", "auto", false)
+		if err != nil {
+			return errorResult("Error: Invalid arguments for web_fetch: " + err.Error()), true
+		}
+		if strings.EqualFold(strings.TrimSpace(format), "raw") {
+			return webFetchAIMLAPIRawFormatError(), true
+		}
+	}
 	return Result{}, false
 }
 

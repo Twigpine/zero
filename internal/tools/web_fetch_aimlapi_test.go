@@ -468,11 +468,18 @@ func TestWebFetchAIMLAPIPollsAQueuedRun(t *testing.T) {
 
 func TestWebFetchAIMLAPIStopsPollingWhenTheContextEnds(t *testing.T) {
 	h := newWebFetchAIMLAPIHarness(t, "aimlapi", func(_ int, request *http.Request) *http.Response {
+		if request.Method == http.MethodGet {
+			t.Error("poll GET sent after canceled sleep")
+			return toolboxJSON(request, http.StatusOK, `{"id":"run-1","status":"failed"}`)
+		}
 		return toolboxJSON(request, http.StatusAccepted, `{"id":"run-1","status":"queued"}`)
 	})
-	h.tool.aimlapi.sleep = sleepWebFetchContext
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	defer cancel()
+	h.tool.aimlapi.sleep = func(sleepCtx context.Context, delay time.Duration) error {
+		cancel()
+		return sleepWebFetchContext(sleepCtx, delay)
+	}
 
 	result := h.tool.Run(ctx, map[string]any{"url": "https://example.com/"})
 
@@ -728,5 +735,54 @@ func TestWebFetchAIMLAPIRetryDelay(t *testing.T) {
 	cancel()
 	if err := sleepWebFetchContext(ctx, time.Hour); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled sleep = %v, want context.Canceled", err)
+	}
+}
+
+func TestWebFetchAIMLAPIRawRejectedBeforePermission(t *testing.T) {
+	tool := newWebFetchToolWithClientAndResolver(nil, nil)
+	for _, provider := range []string{"aimlapi", ""} {
+		t.Setenv("ZERO_WEBFETCH_PROVIDER", provider)
+		for _, format := range []string{"raw", " RAW ", "markdown", "auto"} {
+			result, rejected := tool.(interface {
+				RejectBeforePermission(map[string]any) (Result, bool)
+			}).RejectBeforePermission(map[string]any{"url": "https://example.com/", "format": format})
+			want := provider == "aimlapi" && strings.EqualFold(strings.TrimSpace(format), "raw")
+			if rejected != want {
+				t.Fatalf("provider=%q format=%q: rejected=%v result=%s", provider, format, rejected, result.Output)
+			}
+		}
+	}
+}
+func TestWebFetchAIMLAPIPollHonorsRetryAfter(t *testing.T) {
+	for _, header := range []string{"2", time.Now().Add(4 * time.Second).UTC().Format(http.TimeFormat)} {
+		t.Run(header, func(t *testing.T) {
+			h := newWebFetchAIMLAPIHarness(t, "aimlapi", func(index int, request *http.Request) *http.Response {
+				if index == 0 {
+					return toolboxJSON(request, http.StatusAccepted, `{"id":"run-1","status":"queued","next_poll_hint_ms":250}`)
+				}
+				if index == 1 {
+					response := toolboxJSON(request, http.StatusTooManyRequests, `{}`)
+					response.Header.Set("Retry-After", header)
+					return response
+				}
+				return toolboxJSON(request, http.StatusOK, webFetchAIMLAPICompletedRun)
+			})
+			result := h.tool.Run(context.Background(), map[string]any{"url": "https://example.com/"})
+			if result.Status != StatusOK {
+				t.Fatalf("fetch failed: %s", result.Output)
+			}
+			if sleeps := *h.sleeps; len(sleeps) != 2 || sleeps[1] < 2*time.Second {
+				t.Fatalf("Retry-After not honored: %v", sleeps)
+			}
+		})
+	}
+}
+func TestWebFetchAIMLAPIOversizedRunIsRejected(t *testing.T) {
+	h := newWebFetchAIMLAPIHarness(t, "aimlapi", func(_ int, request *http.Request) *http.Response {
+		return toolboxJSON(request, http.StatusOK, completedToolboxRun(strings.Repeat("x", webFetchAIMLAPIResponseLimit)))
+	})
+	result := h.tool.Run(context.Background(), map[string]any{"url": "https://example.com/", "max_bytes": 32})
+	if result.Status != StatusError || !strings.Contains(result.Output, "larger than") {
+		t.Fatalf("oversized envelope accepted: %s", result.Output)
 	}
 }

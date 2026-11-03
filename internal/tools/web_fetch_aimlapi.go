@@ -133,7 +133,7 @@ func (tool webFetchTool) runAIMLAPI(ctx context.Context, rawURL string, maxBytes
 	// so format "raw" cannot be honoured. Refusing it (before any billed run)
 	// is clearer than returning Markdown the caller asked not to get.
 	if format == "raw" {
-		return errorResult(`Error: format "raw" is not available with ZERO_WEBFETCH_PROVIDER=aimlapi: the AI/ML API Toolbox returns the page as Markdown, not the original response. Use format "auto" or "markdown", or unset ZERO_WEBFETCH_PROVIDER to fetch the page directly.`)
+		return webFetchAIMLAPIRawFormatError()
 	}
 
 	backend := tool.aimlapi
@@ -267,18 +267,23 @@ func (backend webFetchAIMLAPIBackend) scrape(ctx context.Context, key string, ta
 		}
 	}
 
+	pollRetryDelay := time.Duration(0)
 	for !webFetchToolboxTerminal(run.Status) {
 		if run.ID == "" {
 			return webFetchToolboxRun{}, 0, errors.New("the run is still pending but has no run id")
 		}
-		if err := backend.sleep(ctx, webFetchAIMLAPIPollDelay(run.NextPollHintMS)); err != nil {
+		if err := backend.sleep(ctx, max(webFetchAIMLAPIPollDelay(run.NextPollHintMS), pollRetryDelay)); err != nil {
 			return webFetchToolboxRun{}, 0, err
 		}
 		response, err := backend.send(ctx, &client, http.MethodGet, backend.baseURL+"/runs/"+url.PathEscape(run.ID), nil, key)
 		if err != nil {
 			return webFetchToolboxRun{}, 0, err
 		}
+		pollRetryDelay = 0
 		if webFetchAIMLAPIRetryable(response.StatusCode) {
+			if retryAfter := strings.TrimSpace(response.Header.Get("Retry-After")); retryAfter != "" {
+				pollRetryDelay = webFetchAIMLAPIRetryDelay(retryAfter, 1)
+			}
 			discardWebFetchBody(response)
 			continue
 		}
@@ -501,4 +506,9 @@ func sleepWebFetchContext(ctx context.Context, delay time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+// webFetchAIMLAPIRawFormatError is shared by preflight and execution.
+func webFetchAIMLAPIRawFormatError() Result {
+	return errorResult(`Error: format "raw" is not available with ZERO_WEBFETCH_PROVIDER=aimlapi: the AI/ML API Toolbox returns the page as Markdown, not the original response. Use format "auto" or "markdown", or unset ZERO_WEBFETCH_PROVIDER to fetch the page directly.`)
 }
