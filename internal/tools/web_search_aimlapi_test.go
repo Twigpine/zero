@@ -478,22 +478,26 @@ func TestAIMLAPISearchRateLimitedReportsRetryAfter(t *testing.T) {
 
 func TestAIMLAPISearchRefusesRedirect(t *testing.T) {
 	isolateAIMLAPISearchEnv(t)
-	fake := &fakeToolbox{respond: func(index int, _ *http.Request) *http.Response {
-		if index == 0 {
-			response := toolboxResponse(http.StatusTemporaryRedirect, ``)
-			response.Header.Set("Location", "https://collector.example/run")
-			return response
-		}
-		return toolboxResponse(http.StatusOK, aimlapiCompletedRun)
-	}}
-	tool := newWebSearchToolWithBackend(newAIMLAPISearchBackend(fake, staticKey("test-aiml-key")))
+	for _, location := range []string{"https://collector.example/run", "https://tools.aimlapi.com/v1/tools/run"} {
+		t.Run(location, func(t *testing.T) {
+			fake := &fakeToolbox{respond: func(index int, _ *http.Request) *http.Response {
+				if index == 0 {
+					response := toolboxResponse(http.StatusTemporaryRedirect, ``)
+					response.Header.Set("Location", location)
+					return response
+				}
+				return toolboxResponse(http.StatusOK, aimlapiCompletedRun)
+			}}
+			tool := newWebSearchToolWithBackend(newAIMLAPISearchBackend(fake, staticKey("test-aiml-key")))
 
-	res := tool.Run(context.Background(), map[string]any{"query": "q"})
-	if res.Status != StatusError || !strings.Contains(res.Output, "refusing redirect") {
-		t.Fatalf("status = %v, output = %q, want a refused redirect", res.Status, res.Output)
-	}
-	if calls := fake.recorded(); len(calls) != 1 {
-		t.Fatalf("requests = %d, want the redirect not followed", len(calls))
+			res := tool.Run(context.Background(), map[string]any{"query": "q"})
+			if res.Status != StatusError || !strings.Contains(res.Output, "refusing redirect") {
+				t.Fatalf("status = %v, output = %q, want a refused redirect", res.Status, res.Output)
+			}
+			if calls := fake.recorded(); len(calls) != 1 {
+				t.Fatalf("requests = %d, want the redirect not followed", len(calls))
+			}
+		})
 	}
 }
 
@@ -588,5 +592,29 @@ func TestWebSearchUnconfiguredHintNamesAIMLAPI(t *testing.T) {
 	res := newWebSearchToolWithBackend(nil).Run(context.Background(), map[string]any{"query": "q"})
 	if res.Status != StatusError || !strings.Contains(res.Output, "ZERO_WEBSEARCH_PROVIDER=aimlapi") {
 		t.Fatalf("status = %v, output = %q", res.Status, res.Output)
+	}
+}
+
+func TestAIMLAPISearchRedactsKeyInSuccessfulResults(t *testing.T) {
+	isolateAIMLAPISearchEnv(t)
+	const key = "zq7Mv2Lp9Xr4Tn8Wk3"
+	fake := &fakeToolbox{respond: func(_ int, _ *http.Request) *http.Response {
+		return toolboxResponse(http.StatusOK, `{"status":"completed","output":{"results":[{"title":"`+key+`","url":"https://example.com/`+key+`","snippet":"echo `+key+`"}]}}`)
+	}}
+	tool := newWebSearchToolWithBackend(newAIMLAPISearchBackend(fake, staticKey(key)))
+	result := tool.Run(context.Background(), map[string]any{"query": "q"})
+	if result.Status != StatusOK || strings.Contains(result.Output, key) {
+		t.Fatalf("successful result leaked key: %s", result.Output)
+	}
+}
+func TestAIMLAPISearchEmptyScopedResultsReportAllowlist(t *testing.T) {
+	isolateAIMLAPISearchEnv(t)
+	fake := &fakeToolbox{respond: func(_ int, _ *http.Request) *http.Response {
+		return toolboxResponse(http.StatusOK, `{"status":"completed","output":{"results":[]}}`)
+	}}
+	tool := newWebSearchToolWithBackend(newAIMLAPISearchBackend(fake, staticKey("test-key")))
+	result := tool.Run(context.Background(), map[string]any{"query": "q", "domains": []any{"example.com"}})
+	if result.Status != StatusError || !strings.Contains(result.Output, "loosen the allowlist") {
+		t.Fatalf("missing allowlist guidance: %s", result.Output)
 	}
 }
