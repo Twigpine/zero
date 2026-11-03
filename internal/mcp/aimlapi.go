@@ -63,5 +63,14 @@ func aimlapiUnauthorizedHint(server Server, status int) string {
 	if err != nil || !isAIMLAPIMCPURL(target) {
 		return ""
 	}
+	oauthHint := fmt.Sprintf("To sign in instead, set \"auth\": \"oauth\" on this server and run `zero mcp oauth login %s`", server.Name)
+	if server.ProjectConfigured {
+		return " (" + oauthHint + ")"
+	}
+	for name, value := range server.Headers {
+		if strings.EqualFold(name, "Authorization") && value != "" {
+			return " (" + oauthHint + ")"
+		}
+	}
 	return fmt.Sprintf(" (set up the aimlapi.com provider with `zero providers setup aimlapi` or set AIMLAPI_API_KEY; the key is not sent while the aimlapi provider points at a proxy. To sign in instead, set \"auth\": \"oauth\" on this server and run `zero mcp oauth login %s`)", server.Name)
 }

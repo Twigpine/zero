@@ -399,3 +399,28 @@ func TestAIMLAPIMCPKeyStaysOutOfServerConfigAndIdentity(t *testing.T) {
 		}
 	}
 }
+
+func TestAIMLAPIMCPUnauthorizedHintRespectsCredentialEligibility(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		headers   map[string]string
+		project   bool
+		wantSetup bool
+	}{
+		{"default", nil, false, true},
+		{"project", nil, true, false},
+		{"custom bearer", map[string]string{"Authorization": "Bearer manual"}, false, false},
+		{"mixed case header", map[string]string{"aUtHoRiZaTiOn": "Bearer manual"}, false, false},
+		{"empty header", map[string]string{"authorization": ""}, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := aimlapiTestServer("aimlapi", aimlapi.MCPServerURL)
+			server.Headers = tc.headers
+			server.ProjectConfigured = tc.project
+			hint := aimlapiUnauthorizedHint(server, http.StatusUnauthorized)
+			if strings.Contains(hint, "zero providers setup aimlapi") != tc.wantSetup || !strings.Contains(hint, "zero mcp oauth login aimlapi") {
+				t.Fatalf("incorrect hint: %s", hint)
+			}
+		})
+	}
+}
