@@ -2,9 +2,11 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/Twigpine/zero/internal/aimlapi"
 	"github.com/Twigpine/zero/internal/providercatalog"
@@ -74,7 +76,12 @@ func LoadAIMLAPIServiceKey() (string, error) {
 		return "", err
 	}
 	var store APIKeyGetter
-	if credentials, err := ProviderKeyStoreAt(filepath.Dir(userConfigPath)); err == nil && credentials != nil {
+	credentials, storeErr := ProviderKeyStoreAt(filepath.Dir(userConfigPath))
+	if storeErr != nil {
+		if profile, ok := aimlapiServiceProfile(resolved); ok && profile.APIKeyStored && strings.TrimSpace(profile.APIKey) == "" {
+			return "", fmt.Errorf("open AI/ML API credential store: %w", storeErr)
+		}
+	} else if credentials != nil {
 		store = credentials
 	}
 	return AIMLAPIServiceKey(resolved, store, os.Getenv)
@@ -108,7 +115,7 @@ func validAIMLAPIServiceKey(raw string) (string, error) {
 		return "", ErrAIMLAPIKeyMissing
 	}
 	for _, r := range key {
-		if r <= ' ' || r == 0x7f || r == ',' || (r >= 0x80 && r <= 0x9f) {
+		if unicode.IsSpace(r) || r <= ' ' || r == 0x7f || r == ',' || (r >= 0x80 && r <= 0x9f) {
 			return "", ErrAIMLAPIKeyInvalid
 		}
 	}
