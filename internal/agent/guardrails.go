@@ -476,9 +476,17 @@ func toolFailureStopAnswer(toolName string, count int, cause toolFailureCause) s
 // toolFailureIncompleteReason describes a guard halt for the headless
 // completion gate. A guard halt is BY DEFINITION unfinished work: the run
 // stopped because a tool would not stop failing, not because the task was done.
+//
+// It makes the same claim as toolFailureStopAnswer for the same halt, including
+// the mixed case: a headless caller reads this reason and an interactive one
+// reads the stop answer, and the two must not describe one halt differently.
+// Reported by @jatmn.
 func toolFailureIncompleteReason(toolName string, cause toolFailureCause) string {
-	if cause.Refused() {
+	switch {
+	case cause.Refused():
 		return "halted after `" + toolName + "` was refused repeatedly, without completing the task"
+	case cause == toolFailureCauseVariedMixed:
+		return "halted after `" + toolName + "` failed or was refused repeatedly, without completing the task"
 	}
 	return "halted after `" + toolName + "` failed repeatedly, without completing the task"
 }

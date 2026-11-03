@@ -78,6 +78,12 @@ const (
 // rather than counted as a denial) but still wrong.
 const PolicyRefusalMeta = "policy_refusal"
 
+// PermissionActionMeta carries the permission decision on a result the loop
+// builds for a call it stopped. The loop reads "deny" there as a refusal, so it
+// makes the same claim about the call as PolicyRefusalMeta and the execution
+// boundary strips it the same way.
+const PermissionActionMeta = "permission_action"
+
 // The gates that can refuse before execution. Values are stable strings because
 // they are written into result metadata that session readers persist.
 const (
@@ -351,20 +357,26 @@ func promptSafety(sideEffect SideEffect, reason string) Safety {
 // copying metadata forward from something it called, or deliberately, would
 // forge that claim one layer below the output text this branch stopped trusting.
 //
+// PermissionActionMeta goes for the same reason. The loop reads a "deny" there
+// as a refusal, so an executed failure carrying one was counted toward the
+// refusal halt as if the user had refused the call. Reported by @jatmn.
+//
 // Stripping rather than validating the value keeps it unforgeable for future
 // implementations as well: there is no spelling a tool can return that survives
 // execution. Genuine pre-execution refusals are untouched, including
 // RejectBeforePermission, which decides before any of this and never runs the
 // tool. Ordinary metadata is preserved.
 func executedToolResult(result Result) Result {
-	if _, marked := result.Meta[PolicyRefusalMeta]; !marked {
+	_, refusal := result.Meta[PolicyRefusalMeta]
+	_, action := result.Meta[PermissionActionMeta]
+	if !refusal && !action {
 		return result
 	}
 	// Copied rather than deleted in place: the map belongs to the tool, and a
 	// tool that reuses one across calls would see this mutation.
 	meta := make(map[string]string, len(result.Meta))
 	for key, value := range result.Meta {
-		if key == PolicyRefusalMeta {
+		if key == PolicyRefusalMeta || key == PermissionActionMeta {
 			continue
 		}
 		meta[key] = value

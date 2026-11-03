@@ -44,7 +44,7 @@ func (t *readAheadTool) Run(_ context.Context, args map[string]any) tools.Result
 
 func readCall(id string) []zeroruntime.StreamEvent {
 	return []zeroruntime.StreamEvent{
-		{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: id, ToolName: "read_probe"},
+		{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: id, ToolCallProviderID: "provider-" + id, ToolName: "read_probe"},
 		{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: id, ArgumentsFragment: `{"id":"` + id + `"}`},
 		{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: id},
 	}
@@ -115,6 +115,11 @@ func TestParallelSiblingsAreFinalizedWhenTheGuardHalts(t *testing.T) {
 		byID[message.ToolCallID]++
 		if message.ToolCallID == "pB" {
 			siblingContent = message.Content
+		}
+		// A strict replay pairs each result to its tool_use by the provider
+		// call ID, so the drained sibling needs it as much as the consumed call.
+		if (message.ToolCallID == "pA" || message.ToolCallID == "pB") && message.ToolCallProviderID != "provider-"+message.ToolCallID {
+			t.Errorf("tool result %s carries provider call ID %q, want %q", message.ToolCallID, message.ToolCallProviderID, "provider-"+message.ToolCallID)
 		}
 	}
 	for _, id := range []string{"pA", "pB"} {

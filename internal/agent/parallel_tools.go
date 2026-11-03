@@ -13,8 +13,17 @@ import (
 // them one after another serializes pure I/O waits. A consecutive run of
 // capability-safe read-only calls is executed concurrently instead; results are
 // then consumed in the original call order, so guard counters, message
-// ordering, abort semantics, and the surface's call/result event pairing are
-// byte-identical to sequential execution. Runs never span a mutating call: a
+// ordering, abort semantics, and the surface's call/result event pairing match
+// sequential execution.
+//
+// What can differ is how many calls RAN. A run executes before the guard
+// consumes its first result, so a halt on an earlier call can leave up to
+// maxParallelReadTools-1 siblings already executed. The guard bounds count
+// consumed results, not executions, and the extra executions are reads by the
+// eligibility rule below; closeOutRemaining records them without feeding the
+// guard. Reported by @jatmn.
+//
+// Runs never span a mutating call: a
 // read that follows a write must observe the write, so eligibility is decided
 // per consecutive run, not per batch.
 //

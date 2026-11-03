@@ -756,12 +756,17 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				for _, name := range sibling.LoadedTools {
 					loaded[name] = true
 				}
+				// The same fields the consumption path below records, provider call
+				// ID included: a strict replay pairs the result to its tool_use by
+				// that ID, and a finalized sibling without it was the one result in
+				// the turn that could not be paired. Reported by @jatmn.
 				messages = append(messages, zeroruntime.Message{
-					Role:         zeroruntime.MessageRoleTool,
-					Content:      sibling.ModelOutput(),
-					ToolCallID:   sibling.ToolCallID,
-					IsError:      sibling.Status == tools.StatusError,
-					ChangedFiles: append([]string(nil), sibling.ChangedFiles...),
+					Role:               zeroruntime.MessageRoleTool,
+					Content:            sibling.ModelOutput(),
+					ToolCallID:         sibling.ToolCallID,
+					ToolCallProviderID: nextCall.ProviderCallID,
+					IsError:            sibling.Status == tools.StatusError,
+					ChangedFiles:       append([]string(nil), sibling.ChangedFiles...),
 				})
 				if len(sibling.Images) > 0 {
 					toolResultsWithImages = append(toolResultsWithImages, sibling)
@@ -2259,7 +2264,7 @@ func isPolicyRefusal(result ToolResult) bool {
 	if result.DenialReason != DenialNone {
 		return true
 	}
-	if result.Meta["permission_action"] == string(PermissionActionDeny) {
+	if result.Meta[tools.PermissionActionMeta] == string(PermissionActionDeny) {
 		return true
 	}
 	// STRUCTURED ONLY. This used to fall back to matching phrases in Output
@@ -2843,7 +2848,7 @@ func deniedPermissionResult(call ToolCall, reason string, requestEvent Permissio
 		Output:       "Error: Permission denied for " + call.Name + ": " + reason,
 		DenialReason: denial,
 		Meta: map[string]string{
-			"permission_action": string(event.Action),
+			tools.PermissionActionMeta: string(event.Action),
 		},
 	}
 }
@@ -2869,7 +2874,7 @@ func canceledPermissionResult(call ToolCall, reason string, requestEvent Permiss
 		Output:       "Error: Permission approval cancelled for " + call.Name + ": " + reason,
 		DenialReason: DenialApprovalCanceled,
 		Meta: map[string]string{
-			"permission_action": string(event.Action),
+			tools.PermissionActionMeta: string(event.Action),
 		},
 	}
 }
