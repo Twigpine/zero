@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/Twigpine/zero/internal/aimlapi"
 	"github.com/Twigpine/zero/internal/providercatalog"
@@ -114,7 +115,7 @@ func validAIMLAPIServiceKey(raw string) (string, error) {
 		return "", ErrAIMLAPIKeyMissing
 	}
 	for _, r := range key {
-		if r <= ' ' || r == 0x7f || r == ',' || (r >= 0x80 && r <= 0x9f) {
+		if unicode.IsSpace(r) || r <= ' ' || r == 0x7f || r == ',' || (r >= 0x80 && r <= 0x9f) {
 			return "", ErrAIMLAPIKeyInvalid
 		}
 	}
