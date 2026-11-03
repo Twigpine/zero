@@ -35,6 +35,11 @@ Please include, where possible:
 - Zero sends no telemetry. Network calls go to the model/tool providers you configure (and, for
   keyless web search, to Exa's hosted MCP endpoint at `https://mcp.exa.ai/mcp`). The built-in
   AI/ML API MCP server (`https://mcp.aimlapi.com/mcp`) is off until you run
-  `zero mcp enable aimlapi`. Once enabled, it receives your AI/ML API key, but only when the
-  aimlapi provider uses the canonical `https://api.aimlapi.com/v1` base URL (see
-  [docs/EXTENDING.md](docs/EXTENDING.md#built-in-servers)).
+  `zero mcp enable aimlapi`. Once enabled, it can use your aimlapi provider key,
+  or `AIMLAPI_API_KEY` when no aimlapi profile exists. The automatic key is withheld
+  if an aimlapi profile (or a profile reading `AIMLAPI_API_KEY`) uses a base URL
+  other than `https://api.aimlapi.com/v1`, `AIMLAPI_INFERENCE_URL` points elsewhere,
+  a non-empty user Authorization header is configured, OAuth is selected, project
+  config has touched the server, or the key is missing or not a single token
+  (including Unicode whitespace). See
+  [docs/EXTENDING.md](docs/EXTENDING.md#built-in-servers).
