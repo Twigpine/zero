@@ -68,7 +68,7 @@ func TestAIMLAPIServiceKeyWithholdsProxyCredentials(t *testing.T) {
 }
 
 func TestAIMLAPIServiceKeyRejectsKeysThatAreNotOneToken(t *testing.T) {
-	for _, raw := range []string{"first,second", "first\nsecond", "first\r\nsecond", "a b", "key\x00tail", "key\u0085tail"} {
+	for _, raw := range []string{"first\u00a0second", "first\u2003second", "first,second", "first\nsecond", "first\r\nsecond", "a b", "key\x00tail", "key\u0085tail"} {
 		resolved := ResolvedConfig{Provider: ProviderProfile{Name: "aimlapi", CatalogID: "aimlapi", BaseURL: "https://api.aimlapi.com/v1", APIKey: raw}}
 		if key, err := AIMLAPIServiceKey(resolved, nil, aimlapiServiceKeyEnv(nil)); !errors.Is(err, ErrAIMLAPIKeyInvalid) || key != "" {
 			t.Errorf("key %q: AIMLAPIServiceKey = %q, %v; want ErrAIMLAPIKeyInvalid", raw, key, err)
