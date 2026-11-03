@@ -407,8 +407,9 @@ export ZERO_WEBSEARCH_PROVIDER=aimlapi
 ```
 
 The AI/ML API backend runs the Toolbox tool `web/search`, and every search is
-billed to your AI/ML API balance: about $0.0013 per result, and each search is
-sent with a $0.025 spending cap, which the Toolbox enforces. It is used only when
+billed to your AI/ML API balance: about $0.0013 per result, with a documented
+minimum of $0.0091 per search. Each search is sent with a $0.025 spending cap,
+which the Toolbox enforces. It is used only when
 `ZERO_WEBSEARCH_PROVIDER` is set to `aimlapi`; an AI/ML API key alone never
 enables it. The key is the one the aimlapi provider uses (its profile, including
 a key in the credential store, or `AIMLAPI_API_KEY` without a profile), resolved
