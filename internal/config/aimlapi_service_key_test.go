@@ -143,11 +143,28 @@ func TestLoadAIMLAPIServiceKeyStoreOpenFailure(t *testing.T) {
 	if key, err := LoadAIMLAPIServiceKey(); key != "" || err == nil || !strings.Contains(err.Error(), "unknown storage") {
 		t.Fatalf("stored key must report store failure: %q, %v", key, err)
 	}
+	t.Setenv("AIMLAPI_INFERENCE_URL", "https://proxy.example/v1")
+	if key, err := LoadAIMLAPIServiceKey(); key != "" || !errors.Is(err, ErrAIMLAPIProxyProfile) {
+		t.Fatalf("proxy rejection must precede store open: %q, %v", key, err)
+	}
+	t.Setenv("AIMLAPI_INFERENCE_URL", "")
 	data = `{"activeProvider":"aimlapi","providers":[{"name":"aimlapi","catalogID":"aimlapi","model":"m","apiKeyStored":true,"apiKey":"inline-key"}]}`
 	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if key, err := LoadAIMLAPIServiceKey(); err != nil || key != "inline-key" {
 		t.Fatalf("inline key must not require a store: %q, %v", key, err)
+	}
+}
+
+func TestAIMLAPIServiceKeyReportsStoreReadFailure(t *testing.T) {
+	want := errors.New("test credential read failure")
+	resolved := ResolvedConfig{Provider: ProviderProfile{Name: "aimlapi", CatalogID: "aimlapi", BaseURL: "https://api.aimlapi.com/v1", APIKeyStored: true}}
+	if key, err := AIMLAPIServiceKey(resolved, fakeKeyGetter{err: want}, aimlapiServiceKeyEnv(nil)); key != "" || !errors.Is(err, want) {
+		t.Fatalf("read failure was hidden: %q, %v", key, err)
+	}
+	resolved.Provider.BaseURL = "https://proxy.example/v1"
+	if _, err := AIMLAPIServiceKey(resolved, fakeKeyGetter{err: want}, aimlapiServiceKeyEnv(nil)); !errors.Is(err, ErrAIMLAPIProxyProfile) {
+		t.Fatalf("proxy check must precede store read: %v", err)
 	}
 }
