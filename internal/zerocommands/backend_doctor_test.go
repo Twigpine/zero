@@ -136,6 +136,11 @@ func TestNewBackendDoctorReportPassesShippedDefaults(t *testing.T) {
 	}
 	assertBackendDoctorCheck(t, report, "backend.mcp.disabled", "aimlapi", BackendDoctorStatusPass, "zero mcp enable aimlapi")
 
+	edited := config.DefaultMCPServers()["aimlapi"]
+	edited.URL = "https://mcp.aimlapi.com/mcp?edited=1"
+	report = NewBackendDoctorReport(BackendDoctorInput{MCP: config.MCPConfig{Servers: map[string]config.MCPServerConfig{"aimlapi": edited}}})
+	assertBackendDoctorCheck(t, report, "backend.mcp.disabled", "aimlapi", BackendDoctorStatusWarn, "zero mcp enable aimlapi")
+
 	userDisabled := config.DefaultMCPServers()["exa"]
 	userDisabled.Disabled = true
 	report = NewBackendDoctorReport(BackendDoctorInput{MCP: config.MCPConfig{Servers: map[string]config.MCPServerConfig{"exa": userDisabled}}})
