@@ -156,7 +156,9 @@ func (tool webSearchTool) Run(ctx context.Context, args map[string]any) Result {
 	defer cancel()
 
 	var results []searchResult
+	scopedSearch := false
 	if scoped, ok := tool.backend.(domainScopedSearchBackend); ok && len(domains) > 0 {
+		scopedSearch = true
 		results, err = scoped.searchDomains(runCtx, query, limit, domains)
 	} else {
 		results, err = tool.backend.Search(runCtx, query, limit)
@@ -166,8 +168,10 @@ func (tool webSearchTool) Run(ctx context.Context, args map[string]any) Result {
 	}
 	// Filter by domains BEFORE the empty-result short-circuit so a non-empty
 	// allowlist that ate every hit surfaces as a clear "no results matched
-	// domains" error rather than a misleading "no results" message.
-	if len(domains) > 0 {
+	// domains" error rather than a misleading "no results" message. A scoped
+	// backend applied the allowlist itself, so its empty result gets the same
+	// error; an unscoped backend's empty result is an ordinary "no results".
+	if len(domains) > 0 && (len(results) > 0 || scopedSearch) {
 		filtered, err := filterWebSearchByDomains(results, domains)
 		if err != nil {
 			return errorResult("Error: " + redactWebSearchText(err.Error()))

@@ -213,6 +213,7 @@ func TestCoreNetworkToolsOmitWebSearchWhenUnconfigured(t *testing.T) {
 	// No backend configured → don't offer web_search (it could only error, which
 	// makes the model waste calls + prompts before falling back to an MCP search).
 	t.Setenv("ZERO_WEBSEARCH_BASE_URL", "")
+	t.Setenv("ZERO_WEBSEARCH_PROVIDER", "")
 	names := map[string]bool{}
 	for _, tool := range CoreNetworkTools() {
 		names[tool.Name()] = true

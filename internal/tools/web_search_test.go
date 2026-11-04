@@ -300,6 +300,20 @@ func TestWebSearchDomainsFilterEmptyResultIsError(t *testing.T) {
 	}
 }
 
+func TestWebSearchDomainsUnscopedEmptyResultIsNoResults(t *testing.T) {
+	// A backend that cannot scope by domain never saw the allowlist, so an empty
+	// result is an ordinary "no results", not an allowlist that ate every hit.
+	tool := newWebSearchToolWithBackend(&fakeSearchBackend{})
+
+	res := tool.Run(context.Background(), map[string]any{
+		"query":   "x",
+		"domains": []any{"react.dev"},
+	})
+	if res.Status != StatusOK || !strings.Contains(res.Output, "No results for query") {
+		t.Fatalf("want ordinary no-results for an unscoped backend, got %v: %s", res.Status, res.Output)
+	}
+}
+
 func TestWebSearchDomainsFilterToleratesStringSlice(t *testing.T) {
 	// Some providers send []string instead of []any. The tool must accept both.
 	backend := &fakeSearchBackend{results: []searchResult{
