@@ -175,6 +175,7 @@ func toolNames(toolset []Tool) []string {
 func TestCoreNetworkToolsExposeSafetyMetadata(t *testing.T) {
 	// web_search is only registered when a backend is configured.
 	t.Setenv("ZERO_WEBSEARCH_BASE_URL", "https://search.example/api")
+	t.Setenv("ZERO_WEBSEARCH_PROVIDER", "")
 	byName := map[string]Tool{}
 	for _, tool := range CoreNetworkTools() {
 		byName[tool.Name()] = tool
