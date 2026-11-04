@@ -69,7 +69,9 @@ func AIMLAPIServiceKey(resolved ResolvedConfig, store APIKeyGetter, getenv func(
 // the user credential store, then applies AIMLAPIServiceKey. Project config is
 // not read: provider keys are user-scoped. A config with no active provider
 // still resolves its profiles (ErrNoActiveProvider), so the key is looked up in
-// that partial config; every other resolve error is returned.
+// that partial config; every other resolve error is returned. Resolve drops a
+// non-active profile it cannot normalize, so the configured profiles are
+// checked as well: such a profile still withholds the key when it carries it.
 func LoadAIMLAPIServiceKey() (string, error) {
 	userConfigPath, err := DefaultUserConfigPath()
 	if err != nil {
@@ -82,6 +84,17 @@ func LoadAIMLAPIServiceKey() (string, error) {
 	resolved, err := Resolve(ResolveOptions{UserConfigPath: existing, ExcludeProject: true})
 	if err != nil && !errors.Is(err, ErrNoActiveProvider) {
 		return "", err
+	}
+	if existing != "" {
+		fileConfig, err := loadConfigFile(existing)
+		if err != nil {
+			return "", err
+		}
+		var configured FileConfig
+		mergeConfig(&configured, fileConfig)
+		if droppedAIMLAPIProxyProfile(configured.Providers, resolved.Providers) {
+			return "", ErrAIMLAPIProxyProfile
+		}
 	}
 	// Check proxy eligibility and already-resolved keys before opening a store.
 	key, keyErr := AIMLAPIServiceKey(resolved, nil, os.Getenv)
@@ -107,6 +120,26 @@ func isAIMLAPIProfile(profile ProviderProfile) bool {
 // an aimlapi catalog profile, or any profile that reads AIMLAPI_API_KEY.
 func aimlapiKeyedProfile(profile ProviderProfile) bool {
 	return isAIMLAPIProfile(profile) || strings.EqualFold(strings.TrimSpace(profile.APIKeyEnv), aimlapiKeyEnv)
+}
+
+// droppedAIMLAPIProxyProfile reports whether a configured profile missing from
+// the resolved list (Resolve could not normalize it) carries an AI/ML API
+// credential and is not explicitly on the canonical base URL. Its endpoint was
+// never resolved, so an empty base URL counts as a proxy.
+func droppedAIMLAPIProxyProfile(configured, resolved []ProviderProfile) bool {
+	kept := make(map[string]bool, len(resolved))
+	for _, profile := range resolved {
+		kept[profile.Name] = true
+	}
+	for _, profile := range configured {
+		if kept[strings.TrimSpace(profile.Name)] || !aimlapiKeyedProfile(profile) {
+			continue
+		}
+		if !sameBaseURL(profile.BaseURL, aimlapi.CanonicalInferenceBaseURL) {
+			return true
+		}
+	}
+	return false
 }
 
 func aimlapiServiceProfile(resolved ResolvedConfig) (ProviderProfile, bool) {
