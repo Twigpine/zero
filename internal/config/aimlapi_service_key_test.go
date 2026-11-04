@@ -115,6 +115,56 @@ func TestLoadAIMLAPIServiceKeyResolvesUserConfig(t *testing.T) {
 	}
 }
 
+// Several profiles and no activeProvider make Resolve return
+// ErrNoActiveProvider with the normalized profiles; the interactive app keeps
+// running on that partial config, so the service key must still resolve.
+func TestLoadAIMLAPIServiceKeyWithoutActiveProvider(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("APPDATA", filepath.Join(home, "AppData"))
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("ZERO_CRED_STORAGE", "file")
+	t.Setenv("ZERO_PROVIDER", "")
+	t.Setenv("AIMLAPI_INFERENCE_URL", "")
+	t.Setenv("AIMLAPI_API_KEY", "env-key")
+	path, err := DefaultUserConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	other := `{"name":"other","provider":"openai","model":"m","apiKey":"other-key"}`
+	for _, tc := range []struct {
+		name    string
+		active  string
+		profile string
+		want    string
+		wantErr error
+	}{
+		{name: "environment key", profile: `{"name":"second","provider":"openai","model":"m","apiKey":"second-key"}`, want: "env-key"},
+		{name: "stale active provider", active: "gone", profile: `{"name":"second","provider":"openai","model":"m","apiKey":"second-key"}`, want: "env-key"},
+		{name: "aimlapi profile key", profile: `{"name":"aimlapi","catalogID":"aimlapi","model":"m","apiKey":"profile-key"}`, want: "profile-key"},
+		{name: "proxy profile", profile: `{"name":"aimlapi","catalogID":"aimlapi","baseURL":"https://proxy.example/v1","model":"m"}`, wantErr: ErrAIMLAPIProxyProfile},
+	} {
+		data := `{"activeProvider":"` + tc.active + `","providers":[` + other + `,` + tc.profile + `]}`
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		key, err := LoadAIMLAPIServiceKey()
+		if tc.wantErr != nil {
+			if !errors.Is(err, tc.wantErr) || key != "" {
+				t.Fatalf("%s: LoadAIMLAPIServiceKey = %q, %v; want %v", tc.name, key, err, tc.wantErr)
+			}
+			continue
+		}
+		if err != nil || key != tc.want {
+			t.Fatalf("%s: LoadAIMLAPIServiceKey = %q, %v; want %q", tc.name, key, err, tc.want)
+		}
+	}
+}
+
 func TestLoadAIMLAPIServiceKeyStoreOpenFailure(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

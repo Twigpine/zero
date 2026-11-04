@@ -67,7 +67,9 @@ func AIMLAPIServiceKey(resolved ResolvedConfig, store APIKeyGetter, getenv func(
 
 // LoadAIMLAPIServiceKey resolves the user configuration, the environment and
 // the user credential store, then applies AIMLAPIServiceKey. Project config is
-// not read: provider keys are user-scoped.
+// not read: provider keys are user-scoped. A config with no active provider
+// still resolves its profiles (ErrNoActiveProvider), so the key is looked up in
+// that partial config; every other resolve error is returned.
 func LoadAIMLAPIServiceKey() (string, error) {
 	userConfigPath, err := DefaultUserConfigPath()
 	if err != nil {
@@ -78,7 +80,7 @@ func LoadAIMLAPIServiceKey() (string, error) {
 		return "", err
 	}
 	resolved, err := Resolve(ResolveOptions{UserConfigPath: existing, ExcludeProject: true})
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrNoActiveProvider) {
 		return "", err
 	}
 	// Check proxy eligibility and already-resolved keys before opening a store.

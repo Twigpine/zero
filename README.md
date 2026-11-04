@@ -411,12 +411,16 @@ billed to your AI/ML API balance: about $0.0013 per result, with a documented
 minimum of $0.0091 per search. Each search is sent with a $0.025 spending cap,
 which the Toolbox enforces. It is used only when
 `ZERO_WEBSEARCH_PROVIDER` is set to `aimlapi`; an AI/ML API key alone never
-enables it. The key is the one the aimlapi provider uses (its profile, including
-a key in the credential store, or `AIMLAPI_API_KEY` without a profile), resolved
-again on every search; `ZERO_WEBSEARCH_API_KEY` is not used. When an aimlapi
-profile points at a base URL other than `https://api.aimlapi.com/v1`, or
-`AIMLAPI_INFERENCE_URL` is overridden, the key may belong to a proxy, so it is
-not sent and the search fails without a request. Requests go only to
+enables it. The key is read from your user configuration only; provider
+profiles in a project `.zero` config are not used. It is the aimlapi profile's
+key (the active profile when it is aimlapi, otherwise the first aimlapi
+profile), including a key in the credential store, or `AIMLAPI_API_KEY` when no
+aimlapi profile exists. It is resolved again on every search;
+`ZERO_WEBSEARCH_API_KEY` is not used. When any aimlapi profile, or any profile
+that reads `AIMLAPI_API_KEY`, points at a base URL other than
+`https://api.aimlapi.com/v1`, or `AIMLAPI_INFERENCE_URL` is overridden, the key
+may belong to a proxy, so it is not sent and the search fails without a request.
+Requests go only to
 `https://tools.aimlapi.com` (`ZERO_WEBSEARCH_BASE_URL` is ignored and redirects
 are refused) and carry `X-AIMLAPI-Source: agent/zero` and an
 `X-AIMLAPI-Partner-ID` header. The `domains` argument is sent to the Toolbox as
