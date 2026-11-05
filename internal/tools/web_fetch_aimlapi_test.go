@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -683,6 +684,20 @@ func TestWebFetchAIMLAPIRedactsTheKey(t *testing.T) {
 		"key at the cut": func(request *http.Request) *http.Response {
 			return webFetchTestResponse(request, http.StatusForbidden, "text/plain", strings.Repeat("x", webFetchErrorBodyLimit-8)+key)
 		},
+		// A key split by an invisible character reads whole once a terminal or
+		// log viewer drops that character, so it must be scrubbed as well.
+		"split key in error body": func(request *http.Request) *http.Response {
+			return webFetchTestResponse(request, http.StatusForbidden, "text/plain", "denied for Bearer aiml/Zx9\u200b-echo-key")
+		},
+		"split key in run error": func(request *http.Request) *http.Response {
+			return toolboxJSON(request, http.StatusOK, `{"id":"r","status":"completed","is_error":true,"error":{"message":"bad key aiml/Zx9\u0000-echo-key"}}`)
+		},
+		"split key in content": func(request *http.Request) *http.Response {
+			return toolboxJSON(request, http.StatusOK, completedToolboxRun("page echoing aiml/Zx9\u200b-echo-key"))
+		},
+		"split key in run id": func(request *http.Request) *http.Response {
+			return toolboxJSON(request, http.StatusOK, strings.Replace(completedToolboxRun("page"), `"id":"run-1"`, `"id":"run aiml/Zx9\u0000-echo-key"`, 1))
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newWebFetchAIMLAPIHarness(t, "aimlapi", func(_ int, request *http.Request) *http.Response { return respond(request) })
@@ -690,17 +705,56 @@ func TestWebFetchAIMLAPIRedactsTheKey(t *testing.T) {
 
 			result := h.tool.Run(context.Background(), map[string]any{"url": "https://example.com/"})
 
-			if strings.Contains(result.Output, key) || strings.Contains(result.Output, "Zx9-echo-key") || strings.Contains(result.Output, "aiml/Z") {
+			if output := withoutInvisibleRunes(result.Output); strings.Contains(output, key) || strings.Contains(output, "Zx9-echo-key") || strings.Contains(output, "aiml/Z") {
 				t.Fatalf("the key leaked: %q", result.Output)
 			}
 			for metaKey, value := range result.Meta {
-				if strings.Contains(value, "Zx9-echo-key") {
+				if strings.Contains(withoutInvisibleRunes(value), "Zx9-echo-key") {
 					t.Fatalf("the key leaked in meta[%s]: %q", metaKey, value)
 				}
 			}
 			// The cut case keeps only the start of the marker.
-			if !strings.Contains(result.Output, "[REDAC") {
+			if !strings.Contains(result.Output, "[REDAC") && !strings.Contains(result.Meta["run_id"], "[REDAC") {
 				t.Fatalf("expected a redaction marker, got %q", result.Output)
+			}
+		})
+	}
+}
+
+// A transport failure is reported by its cause, not by the *url.Error around
+// it: that quotes the polling URL, whose run id the Toolbox chose and which
+// carries any key echoed in it percent-escaped, past the key scrubbing.
+func TestWebFetchAIMLAPITransportErrorOmitsPollingURL(t *testing.T) {
+	for name, separator := range map[string]string{"NUL": `\u0000`, "ZWSP": `\u200b`} {
+		t.Run(name, func(t *testing.T) {
+			h := newWebFetchAIMLAPIHarness(t, "aimlapi", nil)
+			queued := `{"id":"run_` + splitAIMLAPIKey(webFetchAIMLAPITestKey, separator) + `","status":"queued","next_poll_hint_ms":1}`
+			polls := 0
+			h.tool.aimlapi.client = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				if request.Method == http.MethodPost {
+					return toolboxJSON(request, http.StatusAccepted, queued), nil
+				}
+				polls++
+				return nil, errors.New("connection reset by peer")
+			})}
+
+			result := h.tool.Run(context.Background(), map[string]any{"url": "https://example.com/"})
+
+			if polls != 1 {
+				t.Fatalf("polls = %d, want the failing poll to be sent once", polls)
+			}
+			decoded, err := url.PathUnescape(result.Output)
+			if err != nil {
+				decoded = result.Output
+			}
+			if strings.Contains(withoutInvisibleRunes(decoded), webFetchAIMLAPITestKey) {
+				t.Fatalf("the AI/ML API key leaked into the output: %q", result.Output)
+			}
+			if strings.Contains(result.Output, "/runs/") {
+				t.Fatalf("the polling URL leaked into the output: %q", result.Output)
+			}
+			if result.Status != StatusError || !strings.Contains(result.Output, "connection reset by peer") {
+				t.Fatalf("status = %v, output = %q, want the transport failure", result.Status, result.Output)
 			}
 		})
 	}

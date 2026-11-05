@@ -341,6 +341,14 @@ func (backend webFetchAIMLAPIBackend) send(ctx context.Context, client *http.Cli
 	}
 	response, err := client.Do(request)
 	if err != nil {
+		// Report the cause without the *url.Error around it, as web_search
+		// does: that quotes the request URL, and a polling URL carries the run
+		// id the Toolbox returned percent-escaped, a form of any key echoed in
+		// it that scrubbing cannot match.
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			return nil, urlErr.Err
+		}
 		return nil, err
 	}
 	if response.Body == nil {
@@ -481,12 +489,13 @@ func webFetchAIMLAPIPollDelay(hintMS *float64) time.Duration {
 }
 
 // scrubWebFetchKey removes an echoed AI/ML API key from text shown to the
-// model. An empty key is no key: replacing "" would rewrite every byte gap.
+// model, whole or split by invisible characters, as web_search does. An empty
+// key is no key: replacing "" would rewrite every byte gap.
 func scrubWebFetchKey(value string, key string) string {
 	if key == "" {
 		return value
 	}
-	return strings.ReplaceAll(value, key, "[REDACTED]")
+	return scrubAIMLAPIResult(value, key)
 }
 
 func discardWebFetchBody(response *http.Response) {
