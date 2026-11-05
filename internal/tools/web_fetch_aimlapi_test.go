@@ -41,16 +41,16 @@ type recordedToolboxRequest struct {
 	body   []byte
 }
 
-// fakeToolbox records every request that reaches the Toolbox client and
+// webFetchFakeToolbox records every request that reaches the Toolbox client and
 // answers from respond, indexed by request order.
-type fakeToolbox struct {
+type webFetchFakeToolbox struct {
 	t        *testing.T
 	mu       sync.Mutex
 	requests []recordedToolboxRequest
 	respond  func(index int, request *http.Request) *http.Response
 }
 
-func (fake *fakeToolbox) client() *http.Client {
+func (fake *webFetchFakeToolbox) client() *http.Client {
 	return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		var body []byte
 		if request.Body != nil {
@@ -73,7 +73,7 @@ func (fake *fakeToolbox) client() *http.Client {
 	})}
 }
 
-func (fake *fakeToolbox) recorded() []recordedToolboxRequest {
+func (fake *webFetchFakeToolbox) recorded() []recordedToolboxRequest {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
 	return append([]recordedToolboxRequest(nil), fake.requests...)
@@ -81,7 +81,7 @@ func (fake *fakeToolbox) recorded() []recordedToolboxRequest {
 
 type webFetchAIMLAPIHarness struct {
 	tool    webFetchTool
-	toolbox *fakeToolbox
+	toolbox *webFetchFakeToolbox
 	direct  *[]string
 	sleeps  *[]time.Duration
 }
@@ -125,7 +125,7 @@ func newWebFetchAIMLAPIHarness(t *testing.T, provider string, respond func(int, 
 		return []netip.Addr{netip.MustParseAddr("93.184.216.34")}, nil
 	})
 	tool := newWebFetchToolWithClientAndResolver(directClient, resolver).(webFetchTool)
-	toolbox := &fakeToolbox{t: t, respond: respond}
+	toolbox := &webFetchFakeToolbox{t: t, respond: respond}
 	tool.aimlapi.client = toolbox.client()
 	tool.aimlapi.serviceKey = func() (string, error) { return webFetchAIMLAPITestKey, nil }
 	tool.aimlapi.sleep = func(ctx context.Context, delay time.Duration) error {
