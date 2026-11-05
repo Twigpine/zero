@@ -3,8 +3,10 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -532,6 +534,48 @@ func TestAIMLAPISearchRedactsKeyEchoedInErrors(t *testing.T) {
 			}
 			if !strings.Contains(res.Output, "req_") && !strings.Contains(res.Output, "run_") {
 				t.Fatalf("output lost the request or run id: %q", res.Output)
+			}
+		})
+	}
+}
+
+// A failed request must not echo its URL. The polling URL carries the run id
+// the Toolbox returned, percent-escaped, and an escaped key ("%00",
+// "%E2%80%8B") is not the text the key scrubber matches.
+func TestAIMLAPISearchTransportErrorOmitsPollingURL(t *testing.T) {
+	isolateAIMLAPISearchEnv(t)
+	const key = "zq7Mv2Lp9Xr4Tn8Wk3"
+	for name, separator := range map[string]string{"NUL": `\u0000`, "ZWSP": `\u200b`} {
+		t.Run(name, func(t *testing.T) {
+			queued := `{"id":"run_` + splitAIMLAPIKey(key, separator) + `","status":"queued","next_poll_hint_ms":1}`
+			var polls int
+			transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				if request.Method == http.MethodPost {
+					response := toolboxResponse(http.StatusAccepted, queued)
+					response.Request = request
+					return response, nil
+				}
+				polls++
+				return nil, errors.New("connection reset by peer")
+			})
+			tool := newWebSearchToolWithBackend(newAIMLAPISearchBackend(transport, staticKey(key)))
+
+			res := tool.Run(context.Background(), map[string]any{"query": "q"})
+			if polls != 1 {
+				t.Fatalf("polls = %d, want the failing poll to be sent once", polls)
+			}
+			decoded, err := url.PathUnescape(res.Output)
+			if err != nil {
+				decoded = res.Output
+			}
+			if strings.Contains(withoutInvisibleRunes(decoded), key) {
+				t.Fatalf("the AI/ML API key leaked into the output: %q", res.Output)
+			}
+			if strings.Contains(res.Output, "/runs/") {
+				t.Fatalf("the polling URL leaked into the output: %q", res.Output)
+			}
+			if res.Status != StatusError || !strings.Contains(res.Output, "AI/ML API search request failed: connection reset by peer") {
+				t.Fatalf("status = %v, output = %q, want the transport failure", res.Status, res.Output)
 			}
 		})
 	}

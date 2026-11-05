@@ -161,7 +161,16 @@ func (backend *aimlapiSearchBackend) do(ctx context.Context, method, target stri
 	}
 	response, err := backend.client.Do(request)
 	if err != nil {
-		return aimlapiRun{}, fmt.Errorf("AI/ML API search request failed: %s", aimlapiErrorText(err.Error(), key))
+		// Report the cause without the *url.Error around it: that quotes the
+		// request URL, and a polling URL carries the run id the Toolbox returned
+		// percent-escaped, a form of any key echoed in it that scrubbing cannot
+		// match.
+		cause := err
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			cause = urlErr.Err
+		}
+		return aimlapiRun{}, fmt.Errorf("AI/ML API search request failed: %s", aimlapiErrorText(cause.Error(), key))
 	}
 	defer response.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(response.Body, webSearchBodyLimit))
