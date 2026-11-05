@@ -2,6 +2,7 @@ package providermodeldiscovery
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -96,7 +97,10 @@ func TestChatGPTCatalogBoundsOptionalMetadata(t *testing.T) {
 
 func TestChatGPTDiscoveryRedactsRefreshedOAuthBearer(t *testing.T) {
 	const oldToken, newToken = "opaque-old-subscription", "opaque-new-subscription"
-	for _, split := range []string{"", "\x00", "\x1b", "\u0085", "\x1b[31m", "\u200b", "\u2060", "\ufeff", "\u202e", "\u00ad"} {
+	// A CSI whose final byte is a credential letter consumes that letter, so
+	// the display would hold a damaged copy; those errors are withheld whole.
+	withheld := map[string]bool{"\x1b[": true, "\x1b[9": true}
+	for _, split := range []string{"", "\x00", "\x1b", "\u0085", "\x1b[31m", "\u200b", "\u2060", "\ufeff", "\u202e", "\u00ad", "\u034f", "\ufe0f", "\u180b", "\x1b[", "\x1b[9", "\u009b"} {
 		t.Run(fmt.Sprintf("split-%x", split), func(t *testing.T) {
 			var requests int
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -122,6 +126,12 @@ func TestChatGPTDiscoveryRedactsRefreshedOAuthBearer(t *testing.T) {
 			})
 			if err == nil || requests != 2 {
 				t.Fatalf("expected failed refresh retry: requests=%d err=%v", requests, err)
+			}
+			if withheld[split] {
+				if !errors.Is(err, errWithheldDiscoveryDetails) {
+					t.Fatalf("damaged OAuth bearer was not withheld: %q", err)
+				}
+				return
 			}
 			if !strings.Contains(err.Error(), "expired [REDACTED] and [REDACTED]") || strings.Contains(err.Error(), oldToken) || strings.Contains(err.Error(), "new-subscription") {
 				t.Fatalf("discovery error exposed OAuth bearer: %v", err)
