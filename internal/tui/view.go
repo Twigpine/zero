@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -21,6 +22,7 @@ const (
 	suggestionPaletteMaxWidth   = 76
 	suggestionPaletteMinWidth   = 44
 	pickerOverlayMaxVisible     = 10
+	modelPickerMaxNoticeLines   = 4
 	pickerOverlayMaxWidth       = 92
 	pickerOverlayMinWidth       = 56
 	modelPickerOverlayMaxWidth  = 76
@@ -1110,14 +1112,38 @@ func (m model) renderModelPickerOverlay(width, start, count int) string {
 	return centerRenderedBlock(styledBlockFillTitle(overlayWidth, title, lines, zeroTheme.lineStrong, lipgloss.NewStyle()), width)
 }
 
-// Share wrapped notice rows with mouse hit testing so both agree where models start.
+// Share wrapped notice rows with mouse hit testing so both agree where models
+// start. Rows are capped so several failing accounts cannot push the model
+// rows and footer out of the overlay; /model list prints every notice.
 func (m model) modelPickerDiscoveryNoticeLines(innerWidth int) []string {
-	var lines []string
 	width := maxInt(1, innerWidth-lipgloss.Width("❯ "))
+	var wrapped [][]string
+	total := 0
 	for _, status := range m.modelPickerDiscoveryNotices(m.modelPickerProviders(), "Ctrl+R") {
-		lines = append(lines, strings.Split(ansi.Wrap(status, width, ""), "\n")...)
+		rows := strings.Split(ansi.Wrap(status, width, ""), "\n")
+		wrapped = append(wrapped, rows)
+		total += len(rows)
 	}
-	return lines
+	if total <= modelPickerMaxNoticeLines {
+		return slices.Concat(wrapped...)
+	}
+	// Keep whole notices while a summary row still fits, and at least the start
+	// of the first notice so the leading failure stays visible.
+	var lines []string
+	shown := 0
+	for shown < len(wrapped) && len(lines)+len(wrapped[shown]) < modelPickerMaxNoticeLines {
+		lines = append(lines, wrapped[shown]...)
+		shown++
+	}
+	if shown == 0 {
+		lines = wrapped[0][:modelPickerMaxNoticeLines-1]
+		shown = 1
+	}
+	more := "… /model list shows the full notice."
+	if hidden := len(wrapped) - shown; hidden > 0 {
+		more = fmt.Sprintf("+%d more discovery notices; /model list shows all.", hidden)
+	}
+	return append(lines, ansi.Truncate(more, width, "…"))
 }
 
 func (m model) modelPickerLoadingOverlay(width int) string {
