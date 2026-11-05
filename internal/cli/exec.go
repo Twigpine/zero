@@ -365,6 +365,18 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			return writeExecProviderError(stdout, stderr, options.outputFormat, "mcp_error", err.Error())
 		}
 		defer closeMCPRuntime(stderr, mcpRuntime)
+		// Said HERE, before --list-tools and before the first result, because both
+		// return early and the process this describes is already running by now. On
+		// stderr, so text, JSON and stream-JSON framing on stdout are untouched:
+		// this is the same channel the skipped-server and trust notices use.
+		// Deferred AFTER closeMCPRuntime was deferred, so it runs BEFORE it: the
+		// pump stops and joins while stderr is still ours, and only then are the
+		// clients closed.
+		// Adopt the guarded writer for the rest of startup: the pump is live from
+		// here until stop, and everything below writes to this same stderr.
+		guardedStderr, stopDisclosures := reportMCPStartupDisclosures(stderr, mcpRuntime)
+		stderr = guardedStderr
+		defer stopDisclosures()
 	}
 	pluginActivation = activatePlugins(workspaceRoot, registry, deps, stderr, trustRoot, executionRunner)
 	registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
@@ -722,25 +734,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		},
 		OnToolResult: func(result agent.ToolResult) {
 			writer.toolResult(result)
-			payload := map[string]any{
-				"toolCallId": result.ToolCallID,
-				"name":       result.Name,
-				"status":     string(result.Status),
-				"output":     result.Output,
-			}
-			if len(result.Meta) > 0 {
-				payload["meta"] = result.Meta
-			}
-			if result.Truncated {
-				payload["truncated"] = true
-			}
-			if result.Redacted {
-				payload["redacted"] = true
-			}
-			if len(result.ChangedFiles) > 0 {
-				payload["changedFiles"] = result.ChangedFiles
-			}
-			sessionRecorder.append(sessions.EventToolResult, payload)
+			sessionRecorder.append(sessions.EventToolResult, persistedToolResultPayload(result))
 		},
 		OnUsage: func(u agent.Usage) {
 			writer.usage(u)
@@ -1503,4 +1497,29 @@ func writeTraceSnapshot(snapshot *trace.TurnTrace, dest string, stderr io.Writer
 	}
 	defer file.Close()
 	return trace.WriteNDJSON(file, snapshot)
+}
+
+// persistedToolResultPayload renders one tool result for the durable session
+// log.
+//
+// IT USES THE ACCESSOR, NOT THE RAW FIELD. agent.ToolResult stores the
+// undecorated model text alongside the typed enforcement notices, and
+// ModelOutput is what composes the two. Replay reads this payload straight back
+// into the transcript without reconstructing a ToolResult, so a disclosure that
+// is not rendered here is simply absent from resumed and compacted context even
+// though it was visible during the original run.
+//
+// Both headless writers go through this, because they previously spelled the
+// same payload separately and had already drifted: one persisted the raw field
+// while the stream writer used the accessor.
+func persistedToolResultPayload(result agent.ToolResult) map[string]any {
+	// ONE CONTRACT WITH THE TUI. This used to build its own payload with the
+	// decorated output only, and both writers append to the same default
+	// session store the TUI resumes from. A CLI-written result restored into
+	// the TUI therefore arrived without typed enforcement notices and without
+	// the undecorated card body, so a long collapsed result rendered no body
+	// and, with it, no disclosure. internal/agent owns the shape now, beside
+	// ToolResult, and every writer calls the same function rather than keeping
+	// a matching copy of it.
+	return agent.ToolResultSessionPayload(result)
 }

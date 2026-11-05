@@ -36,7 +36,25 @@ type DispatchOutcome struct {
 	// Messages collects the output (stdout, else stderr) of each hook that
 	// produced any, in run order. afterTool validators use this to feed results
 	// (e.g. a formatter diff or vet warning) back to the model on the tool result.
+	//
+	// PRESENTATION TEXT, NOT A NOTICE CHANNEL, and it no longer carries notices at
+	// all. hookMessage used to fold them in so afterTool got both on one line;
+	// that made the disclosure arrive twice once the typed slice was composed by
+	// every surface. Enforcement disclosures are on Notices, for both hook phases.
+	// A caller that only wants to know what the sandbox did must read that:
+	// delivering this slice would put every successful hook's routine logging into
+	// the model's context.
 	Messages []string
+	// Notices carries only the enforcement disclosures, one entry per notice, in
+	// run order across every hook that ran.
+	//
+	// Separate from Messages because they answer different questions and have
+	// different audiences. A notice says the hook ran under a weakened token,
+	// which the model and the operator both need; the hook's own output is for
+	// afterTool validators that asked to be heard. Appended as each hook runs,
+	// rather than read off the final result, so a disclosure from a hook that
+	// already ran survives a later hook's veto ending the chain.
+	Notices []string
 }
 
 type commandResult struct {
@@ -45,6 +63,13 @@ type commandResult struct {
 	Stderr   string
 	Err      error // set when the command could not be executed (not a non-zero exit)
 	TimedOut bool  // the hook started but its deadline/cancellation fired before it returned
+	// Notices carries the enforcement disclosures the execution runner attached.
+	//
+	// Same reason as the plugin path: the generic execution contract is not
+	// transport-only. Enforcement.Notices says what the sandbox actually did, and
+	// a projection that keeps only stdout, stderr and an exit code drops it, so a
+	// hook ran under a weakened token with nothing said about it.
+	Notices []string
 }
 
 // commandRunner executes one hook command. It is injectable so the dispatch
@@ -139,6 +164,10 @@ func executionCommandRunner(runner *execution.Runner) commandRunner {
 			Stderr:   stderr,
 			Err:      commandErr,
 			TimedOut: result.Outcome.Kind == execution.OutcomeTimedOut,
+			// One shared decision: see Outcome.AppliedEnforcementNotices. A setup
+			// failure or a missing executable launched no hook child, so the notice
+			// would describe a token trade nobody made.
+			Notices: result.Outcome.AppliedEnforcementNotices(),
 		}
 	}
 }
@@ -182,11 +211,19 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, input DispatchInput)
 		if message := hookMessage(result); message != "" {
 			outcome.Messages = append(outcome.Messages, message)
 		}
+		// Appended per hook rather than read off the final result, so hook A's
+		// disclosure is not lost when hook B stops the chain. A notice describes
+		// something that ALREADY happened.
+		for _, notice := range result.Notices {
+			if strings.TrimSpace(notice) != "" {
+				outcome.Notices = append(outcome.Notices, notice)
+			}
+		}
 
 		if blocked {
 			outcome.Blocked = true
 			outcome.BlockedBy = hook.ID
-			outcome.Reason = blockReason(result)
+			outcome.Reason = blockCause(result)
 			// Stop on the first veto: the action is already denied.
 			return outcome
 		}
@@ -243,14 +280,38 @@ func classifyResult(event Event, result commandResult) (AuditStatus, bool) {
 
 // hookMessage returns the output worth surfacing from a hook run: stdout when
 // present, else stderr. Empty when the hook produced no output.
+// STDOUT OR STDERR, AND NOTHING ELSE. The enforcement notices used to be
+// prepended here as well, so that afterTool got the disclosure and its own output
+// on one line. That was the only delivery available when this was written, and it
+// is not any more: the notices travel typed on DispatchOutcome.Notices, and the
+// agent loop merges them into ToolResult.EnforcementNotices for beforeTool and
+// afterTool alike.
+//
+// Keeping the fold as well made the same disclosure arrive twice, once from the
+// typed slice that every surface composes and once inside the hook feedback block
+// in the body. The two writers carry the identical fixed string, so the model saw
+// it doubled and a bash or exec card showed it in both the furniture and the body.
+// One owner per fact, and for a notice that owner is the typed slice.
 func hookMessage(result commandResult) string {
-	if trimmed := strings.TrimSpace(result.Stdout); trimmed != "" {
-		return trimmed
+	message := strings.TrimSpace(result.Stdout)
+	if message == "" {
+		message = strings.TrimSpace(result.Stderr)
 	}
-	return strings.TrimSpace(result.Stderr)
+	return message
 }
 
-func blockReason(result commandResult) string {
+// blockCause explains a veto in the hook's own words, and says nothing about
+// enforcement.
+//
+// THE SAME RULE AS hookMessage. The blocking hook's notices used to be folded in
+// here as well, from before the typed slice existed, and Dispatch had already
+// appended them to DispatchOutcome.Notices, so a hook that vetoed while running
+// without write confinement put one disclosure on two channels. The one consumer
+// made up for it by dropping every notice whose text appeared anywhere in the
+// reason, which also dropped an EARLIER hook's disclosure whenever the blocking
+// hook's output happened to quote it. The notice now travels on the typed slice
+// only, whichever hook in the chain produced it. Reported by CodeRabbit.
+func blockCause(result commandResult) string {
 	if result.TimedOut {
 		if trimmed := strings.TrimSpace(result.Stderr); trimmed != "" {
 			return "hook timed out: " + trimmed
@@ -288,7 +349,14 @@ func (dispatcher *Dispatcher) recordCompleted(hook Definition, input DispatchInp
 		Matcher:    hook.Matcher,
 		ToolCallID: input.ToolCallID,
 		Status:     status,
-		Results:    []AuditResult{{ExitCode: result.ExitCode, Stdout: result.Stdout, Stderr: result.Stderr}},
+		Results: []AuditResult{{
+			ExitCode: result.ExitCode,
+			Stdout:   result.Stdout,
+			Stderr:   result.Stderr,
+			// The notice is not in stdout or stderr by design, so the durable record
+			// has to carry it or the fact ends with the dispatch result.
+			EnforcementNotices: append([]string(nil), result.Notices...),
+		}},
 		DurationMs: durationMs,
 	})
 }

@@ -56,6 +56,16 @@ func runWindowsCommandAsUser(token windows.Token, config WindowsSandboxCommandCo
 	startup.StdErr = stderr
 	var process windows.ProcessInformation
 	envPtr := &envBlock[0]
+	// Claim the report side channel BEFORE the launch. Publishing can fail, and
+	// after CreateProcessAsUser succeeds a running child exists whether or not the
+	// fact can be recorded; taking the file first moves that failure to a point
+	// where there is still nothing to own.
+	report, err := openWindowsExecutionReport(config.ExecutionReportPath)
+	if err != nil {
+		return 1, err
+	}
+	published := false
+	defer func() { report.close(published) }()
 	if err := windows.CreateProcessAsUser(
 		token,
 		nil,
@@ -63,7 +73,7 @@ func runWindowsCommandAsUser(token windows.Token, config WindowsSandboxCommandCo
 		nil,
 		nil,
 		true,
-		windows.CREATE_UNICODE_ENVIRONMENT,
+		windows.CREATE_UNICODE_ENVIRONMENT|windows.CREATE_SUSPENDED,
 		envPtr,
 		cwdPtr,
 		&startup,
@@ -73,6 +83,39 @@ func runWindowsCommandAsUser(token windows.Token, config WindowsSandboxCommandCo
 	}
 	defer windows.CloseHandle(process.Process)
 	defer windows.CloseHandle(process.Thread)
+	// THE TRANSITION ONLY THIS PROCESS CAN SEE. Everything above can fail with the
+	// helper already running, and the parent's exec.Cmd.Process cannot tell those
+	// failures apart from a real sandboxed launch. The restricted child exists as
+	// of this line, so this is where the fact is published.
+	//
+	// CREATED SUSPENDED, SO REPORTING CANNOT LOSE A RACE IT IS IN. The child
+	// inherits the MCP pipes. Created runnable, it could answer initialize, emit a
+	// malformed response, or close stdout before this helper was next scheduled,
+	// and a parent reading the report at that moment would see the empty file the
+	// open above created and cache "no child" about a server that was already
+	// running unconfined. It could also fail to publish AFTER a runnable child had
+	// begun making external changes, and reaping the child then does not undo the
+	// work it did.
+	//
+	// A suspended child has executed nothing. Publish first and resume second, and
+	// the absence of a report becomes a fact rather than a race: every failure
+	// between creation and resume terminates a process that never ran, so "no child
+	// launched" is true when the parent reads it.
+	//
+	// AND THE RECORD HAS TO MEAN THE SAME THING ON THE WAY BACK OUT. The report
+	// is published before the resume, so a failure between the two leaves a report
+	// saying a child launched about a process that is being reaped without ever
+	// having run. publishThenResume unwinds the record on that path, which is
+	// what keeps "no child launched" true for the parent on every failure before
+	// the child could execute, not just the ones before the write.
+	published, err = publishThenResume(report, func() error {
+		_, err := windows.ResumeThread(process.Thread)
+		return err
+	})
+	if err != nil {
+		terminateSuspendedWindowsChild(process.Process)
+		return 1, err
+	}
 	if _, err := windows.WaitForSingleObject(process.Process, windows.INFINITE); err != nil {
 		return 1, fmt.Errorf("wait for sandboxed process: %w", err)
 	}

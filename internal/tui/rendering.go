@@ -1524,6 +1524,28 @@ func (m model) renderRunningToolCard(row transcriptRow, width int, rc rowContext
 	return toolCard(head, glyph, nil, "", zeroTheme.cardRun, width)
 }
 
+// toolCardNoticeLines renders the enforcement disclosures that belong to this
+// result, in the card itself.
+//
+// The notice reached row.text and stopped there: toolCardHead takes row.text but
+// renders the action and target, so a result with a rich preview (every edit and
+// write card) displayed no disclosure at all, collapsed or expanded. It is shown
+// above the body and on the collapsed paths too, because a trade the operator has
+// to expand a card to discover is not disclosed.
+func toolCardNoticeLines(notices []string, width int) []string {
+	var lines []string
+	for _, notice := range notices {
+		notice = strings.TrimSpace(notice)
+		if notice == "" {
+			continue
+		}
+		for _, wrapped := range wrapPlainText(notice, width) {
+			lines = append(lines, zeroTheme.amber.Render(wrapped))
+		}
+	}
+	return lines
+}
+
 func renderToolResultCard(row transcriptRow, width int, rc rowContext, opts cardRenderOptions) string {
 	name := toolRowName(row)
 	failed := row.status == tools.StatusError
@@ -1541,6 +1563,7 @@ func renderToolResultCard(row transcriptRow, width int, rc rowContext, opts card
 		borderStyle = zeroTheme.cardErr
 	}
 	key := rcKey(row.runID, row.id)
+	noticeLines := toolCardNoticeLines(row.enforcementNotices, width)
 	headTarget := rc.hints[key]
 	headArg := rc.args[key]
 	if !failed && isExploreTool(name) {
@@ -1554,7 +1577,7 @@ func renderToolResultCard(row transcriptRow, width int, rc rowContext, opts card
 	// Only for clean OK results: errors and anything multi-line keep their body.
 	if !failed && opts.bodyCap > 0 && !toolCardAlwaysExpands(name) && looksLikeRedundantConfirmation(row.detail) {
 		head := toolCardHead(name, headTarget, headArg, "", row.detail, row.text, false, nameStyle, rc.auto[key], width, opts)
-		return toolCard(head, glyph, nil, "", borderStyle, width)
+		return toolCard(head, glyph, noticeLines, "", borderStyle, width)
 	}
 	// Collapse long, noisy output (web-search/MCP/read dumps) by default so the
 	// transcript stays scannable; the model still received the full output. Click
@@ -1567,7 +1590,7 @@ func renderToolResultCard(row transcriptRow, width int, rc rowContext, opts card
 	}
 	if collapsedFooter != "" && !row.expanded {
 		head := toolCardHead(name, headTarget, headArg, toolResultBudgetTag(row.meta), row.detail, row.text, false, nameStyle, rc.auto[key], width, opts)
-		return toolCard(head, glyph, nil, collapsedFooter, borderStyle, width)
+		return toolCard(head, glyph, noticeLines, collapsedFooter, borderStyle, width)
 	}
 	bodyOpts := opts
 	bodyOpts.expanded = row.expanded
@@ -1577,7 +1600,7 @@ func renderToolResultCard(row transcriptRow, width int, rc rowContext, opts card
 	if collapsedFooter != "" && row.expanded && footer == "" {
 		footer = "▾ collapse"
 	}
-	return toolCard(head, glyph, body.lines, footer, borderStyle, width)
+	return toolCard(head, glyph, append(noticeLines, body.lines...), footer, borderStyle, width)
 }
 
 func joinToolHeadTags(tags ...string) string {

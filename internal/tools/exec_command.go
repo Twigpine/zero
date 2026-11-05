@@ -221,6 +221,9 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 			Command:     command,
 			Enforcement: executionEnforcement(plan),
 			Report:      plan.ExecutionReport,
+			// A wrapped plan starts a helper; the requested child is created inside
+			// it and only the adapter sees that transition.
+			ChildLaunchOwnedByAdapter: plan.ChildLaunchOwnedByAdapter(),
 			Cleanup: func() {
 				plan.Cleanup()
 				cancel()
@@ -246,18 +249,14 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 		exitCode: processResult.ExitCode, exited: processResult.Exited, relativeCwd: processResult.RelativeCwd,
 		tty: processResult.TTY, request: processResult.Request, enforcement: processResult.Enforcement,
 		report: processResult.Report, reportErr: processResult.ReportErr, changes: processResult.Changes,
-		sandboxMeta:     processResult.Metadata,
-		maxOutputTokens: maxOutputTokens,
+		childLaunchOwnedByAdapter: processResult.ChildLaunchOwnedByAdapter,
+		sandboxMeta:               processResult.Metadata,
+		maxOutputTokens:           maxOutputTokens,
 	}, directBudget)
 }
 
 func executionEnforcement(plan zeroSandbox.CommandPlan) execution.Enforcement {
-	return execution.Enforcement{
-		Backend:         string(plan.TargetBackend),
-		Level:           string(plan.EnforcementLevel),
-		Degraded:        plan.EnforcementLevel == zeroSandbox.EnforcementDegraded,
-		DowngradeReason: plan.DowngradeReason,
-	}
+	return zeroSandbox.EnforcementFor(plan)
 }
 
 type writeStdinTool struct {
@@ -388,7 +387,8 @@ func (tool writeStdinTool) RunWithOptions(ctx context.Context, args map[string]a
 		exitCode: processResult.ExitCode, exited: processResult.Exited, relativeCwd: processResult.RelativeCwd,
 		tty: processResult.TTY, interrupted: processResult.Interrupted, request: processResult.Request,
 		enforcement: processResult.Enforcement, report: processResult.Report, reportErr: processResult.ReportErr,
-		changes: processResult.Changes, sandboxMeta: processResult.Metadata,
+		childLaunchOwnedByAdapter: processResult.ChildLaunchOwnedByAdapter,
+		changes:                   processResult.Changes, sandboxMeta: processResult.Metadata,
 		maxOutputTokens: maxOutputTokens,
 	})
 }
@@ -425,16 +425,25 @@ type execToolResultInput struct {
 	sessionID             int
 	exitCode              int
 	exited                bool
-	relativeCwd           string
-	tty                   bool
-	interrupted           bool
-	request               execution.Request
-	enforcement           execution.Enforcement
-	sandboxMeta           map[string]string
-	report                execution.AdapterReport
-	reportErr             error
-	changes               []execution.Change
-	maxOutputTokens       int
+	// launched records whether an OS process was actually created, observed at
+	// the boundary that ran it rather than assumed from the outcome shape. The
+	// exec_command paths set it true because a start failure returns an
+	// errorResult before reaching here; bash cannot, because it routes a
+	// pre-start Run error through the same conversion.
+	launched bool
+	// childLaunchOwnedByAdapter marks a wrapped plan, where launched above
+	// describes the helper rather than the requested process.
+	childLaunchOwnedByAdapter bool
+	relativeCwd               string
+	tty                       bool
+	interrupted               bool
+	request                   execution.Request
+	enforcement               execution.Enforcement
+	sandboxMeta               map[string]string
+	report                    execution.AdapterReport
+	reportErr                 error
+	changes                   []execution.Change
+	maxOutputTokens           int
 }
 
 func execToolResult(input execToolResultInput) Result {
@@ -454,6 +463,15 @@ func execToolResultWithBudget(input execToolResultInput, directBudget bool) Resu
 	for key, value := range input.sandboxMeta {
 		meta[key] = value
 	}
+	// A process started here by construction, because a start failure returns an
+	// errorResult above without building an execution outcome. But for a wrapped
+	// plan that process is the SANDBOX HELPER, which creates the requested child
+	// only after marker, ACL, network, SID and token setup. So hand the observation
+	// to the same resolution every other launcher uses instead of asserting it.
+	// The retained path matters most here: the helper can be returned before it
+	// has attempted the inner launch, and an absent report then means not yet
+	// launched rather than launched.
+	input.launched = execution.ResolveChildLaunched(true, input.childLaunchOwnedByAdapter, input.report)
 	outcome := execExecutionOutcome(input)
 	if input.exited {
 		meta["exit_code"] = strconv.Itoa(input.exitCode)
@@ -548,29 +566,40 @@ func execExecutionRequest(command *exec.Cmd, plan zeroSandbox.CommandPlan, cwd s
 
 func execExecutionOutcome(input execToolResultInput) execution.Outcome {
 	enforcement := input.enforcement
+	// EVERY OUTCOME BUILT HERE DESCRIBES A PROCESS THAT STARTED. A command that
+	// could not be started returns an error result before this point, so there is
+	// no path in without a process behind it. Stated rather than inferred, so the
+	// disclosure derived from it does not rest on the terminal outcome kind.
+	// READ, not assumed. This used to be a const true, documented as safe
+	// because exec_command returns early on a start failure. That holds for
+	// exec_command and not for bash, which hands every Run error to this same
+	// conversion, so a command whose executable did not exist claimed the
+	// DenyRead token trade had been applied.
+	launched := input.launched
 	if !input.exited {
 		return execution.Outcome{
 			State:       execution.StateRetained,
 			Kind:        execution.OutcomeRunning,
+			Launched:    launched,
 			ProcessID:   strconv.Itoa(input.sessionID),
 			Enforcement: enforcement,
 		}
 	}
 	exit := &execution.Exit{Code: input.exitCode}
 	if input.reportErr != nil {
-		return execution.Outcome{State: execution.StateFailed, Kind: execution.OutcomeSandboxSetupFailure, Exit: exit, Enforcement: enforcement, Changes: input.changes}
+		return execution.Outcome{State: execution.StateFailed, Kind: execution.OutcomeSandboxSetupFailure, Launched: launched, Exit: exit, Enforcement: enforcement, Changes: input.changes}
 	}
 	if input.report.Denial != nil {
 		denial := *input.report.Denial
-		return execution.Outcome{State: execution.StateDenied, Kind: execution.OutcomeEnforcementDenied, Exit: exit, Denial: &denial, Enforcement: enforcement, Changes: input.changes}
+		return execution.Outcome{State: execution.StateDenied, Kind: execution.OutcomeEnforcementDenied, Launched: launched, Exit: exit, Denial: &denial, Enforcement: enforcement, Changes: input.changes}
 	}
 	if input.interrupted {
-		return execution.Outcome{State: execution.StateCancelled, Kind: execution.OutcomeCancelled, Exit: exit, Enforcement: enforcement, Changes: input.changes}
+		return execution.Outcome{State: execution.StateCancelled, Kind: execution.OutcomeCancelled, Launched: launched, Exit: exit, Enforcement: enforcement, Changes: input.changes}
 	}
 	if input.exitCode == 0 {
-		return execution.Outcome{State: execution.StateCompleted, Kind: execution.OutcomeSuccess, Exit: exit, Enforcement: enforcement, Changes: input.changes}
+		return execution.Outcome{State: execution.StateCompleted, Kind: execution.OutcomeSuccess, Launched: launched, Exit: exit, Enforcement: enforcement, Changes: input.changes}
 	}
-	return execution.Outcome{State: execution.StateFailed, Kind: execution.OutcomeApplicationFailure, Exit: exit, Enforcement: enforcement, Changes: input.changes}
+	return execution.Outcome{State: execution.StateFailed, Kind: execution.OutcomeApplicationFailure, Launched: launched, Exit: exit, Enforcement: enforcement, Changes: input.changes}
 }
 
 func executionChangedFiles(changes []execution.Change) []string {

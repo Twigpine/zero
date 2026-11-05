@@ -248,7 +248,11 @@ func toolCallResult(result agent.ToolResult) ToolCallUpdate {
 
 func toolResultContent(result agent.ToolResult) []ToolCallContent {
 	content := make([]ToolCallContent, 0, 1+len(result.FileDiffs))
-	text := strings.TrimRight(result.Output, "\n")
+	// ModelOutput, not the raw field. agent.ToolResult stores the undecorated
+	// model text alongside the typed enforcement notices, and the accessor is
+	// what composes the two; reading Output directly sends an ACP client the
+	// output with the disclosure missing.
+	text := strings.TrimRight(result.ModelOutput(), "\n")
 	if text == "" {
 		text = result.Display.Summary
 	}

@@ -161,22 +161,7 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 			if info, ok := execSpecDraftInfoFromToolResult(result); ok {
 				draftInfo = info
 			}
-			payload := map[string]any{
-				"toolCallId": result.ToolCallID,
-				"name":       result.Name,
-				"status":     string(result.Status),
-				"output":     result.Output,
-			}
-			if len(result.Meta) > 0 {
-				payload["meta"] = result.Meta
-			}
-			if result.Redacted {
-				payload["redacted"] = true
-			}
-			if len(result.ChangedFiles) > 0 {
-				payload["changedFiles"] = result.ChangedFiles
-			}
-			sessionRecorder.append(sessions.EventToolResult, payload)
+			sessionRecorder.append(sessions.EventToolResult, persistedToolResultPayload(result))
 		},
 		OnUsage: func(u agent.Usage) {
 			writer.usage(u)

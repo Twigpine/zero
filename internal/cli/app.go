@@ -874,6 +874,19 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		}
 		fmt.Fprintf(stderr, "warning: MCP server %s unavailable, skipped: %s\n", skipped.Name, redaction.ErrorMessage(skipped.Err, redaction.Options{}))
 	}
+	// AND WHAT THE SERVERS THAT DID START RAN UNDER. A stdio MCP server prepared
+	// with a weakened write jail serves the whole session from that process, so
+	// the disclosure is about startup and no later tool result can carry it. Said
+	// once, here, next to the skip warnings, rather than pasted onto every
+	// response the server produces. Network servers launch no local process and
+	// report nothing, which is why the optional background registration is not
+	// asked: its only member is the built-in HTTP default, which starts no local
+	// process. A stdio default would need this statement from that path too.
+	// NOT deferred: stderr here is the bare terminal, and the TUI takes it over at
+	// deps.runTUI below. Delivery stops before that hand-off, so a late launch can
+	// never write raw text into the alt screen; see stopMCPDisclosures's call site.
+	guardedStderr, stopMCPDisclosures := reportMCPStartupDisclosures(stderr, mcpRuntime)
+	stderr = guardedStderr
 	// Make local plugins live: register their declared tools into the registry and
 	// collect their hooks + skill roots for the dispatcher and skill tool below.
 	// Done after specialist + MCP registration so plugin tools are part of the
@@ -969,6 +982,10 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// describes the sandbox they actually get.
 	startupNotices := []string{sandboxEngine.DegradedNotice()}
 	modelRPM := zeroruntime.NewModelRPMLimiter(resolved.ModelRPM)
+	// The terminal stops being ours on the next line. Stop and join the disclosure
+	// pump first: anything already queued is printed here, on this goroutine, and a
+	// launch that resolves later is dropped rather than written raw over the TUI.
+	stopMCPDisclosures()
 	return deps.runTUI(context.Background(), tui.Options{
 		ModelRPM:             modelRPM,
 		Cwd:                  workspaceRoot,
