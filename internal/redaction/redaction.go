@@ -467,14 +467,17 @@ func RedactString(value string, options Options) string {
 		sort.SliceStable(secrets, func(i, j int) bool {
 			return len(secrets[i]) > len(secrets[j])
 		})
+		// Each value, longest first, is claimed whole or split by invisible
+		// separators before any shorter one runs, so a shorter value can never
+		// take part of a longer one and leave the rest of it visible. A
+		// caller-supplied secret matches no shape, so the split pass at the end
+		// never sees it.
 		for _, secret := range secrets {
 			if strings.TrimSpace(secret) != "" {
 				redacted = strings.ReplaceAll(redacted, secret, replacement)
+				redacted = redactControlSplitExtraSecret(redacted, secret, replacement)
 			}
 		}
-		// A caller-supplied secret matches no shape, so the split pass at the
-		// end never sees it: match it across invisible separators here.
-		redacted = redactControlSplitExtraSecrets(redacted, secrets, replacement)
 	}
 
 	if strings.Contains(redacted, "-----BEGIN ") && strings.Contains(redacted, "PRIVATE KEY") {

@@ -138,6 +138,27 @@ func TestRedactStringRedactsExtraSecretValuesSplitByInvisibleCharacters(t *testi
 			}
 		})
 	}
+	// A SHORTER SECRET MUST NOT CLAIM PART OF A SPLIT LONGER ONE. Longest first
+	// has to hold across the contiguous and split matches together: replacing
+	// a contiguous shorter value first left the rest of the split longer one
+	// ("[REDACTED]\x00Lp9Xr4Tn8Wk3") visible.
+	for _, testCase := range []struct {
+		name    string
+		secrets []string
+		value   string
+		want    string
+	}{
+		{"prefix", []string{secret[:6], secret}, "key " + secret[:6] + "\x00" + secret[6:], "key [REDACTED]"},
+		{"suffix", []string{secret[9:], secret}, "key " + secret[:9] + "\u200b" + secret[9:], "key [REDACTED]"},
+		{"inside", []string{secret[4:10], secret}, "key " + secret[:2] + "\x00" + secret[2:], "key [REDACTED]"},
+		{"shorter alone too", []string{secret, secret[:6]}, secret[:6] + " and " + secret[:6] + "\x00" + secret[6:], "[REDACTED] and [REDACTED]"},
+	} {
+		t.Run("overlap "+testCase.name, func(t *testing.T) {
+			if got := RedactString(testCase.value, Options{ExtraSecretValues: testCase.secrets}); got != testCase.want {
+				t.Errorf("RedactString(%q, %q) = %q, want %q", testCase.value, testCase.secrets, got, testCase.want)
+			}
+		})
+	}
 	// A value the caller names that is NOT in the text leaves the text alone,
 	// separators and all.
 	if value := "unrelated\x00text \u200bhere"; RedactString(value, options) != value {
