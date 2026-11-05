@@ -119,14 +119,14 @@ func newWebFetchToolWithClientAndResolver(client *http.Client, resolver webFetch
 					},
 					"max_bytes": {
 						Type:        "integer",
-						Description: "Maximum raw response body bytes to download before conversion.",
+						Description: "Maximum raw response body bytes to download before conversion. With the AI/ML API Toolbox backend (ZERO_WEBFETCH_PROVIDER=aimlapi), the maximum bytes of crawled Markdown returned.",
 						Default:     defaultWebFetchMaxBytes,
 						Minimum:     intPtr(1),
 						Maximum:     intPtr(maxWebFetchMaxBytes),
 					},
 					"format": {
 						Type:        "string",
-						Description: "auto (default): HTML responses are converted to compact markdown, everything else is returned as-is. raw: never convert. markdown: force conversion.",
+						Description: "auto (default): HTML responses are converted to compact markdown, everything else is returned as-is. raw: never convert. markdown: force conversion. With the AI/ML API Toolbox backend (ZERO_WEBFETCH_PROVIDER=aimlapi), the page is always returned as crawled Markdown and raw is rejected.",
 						Enum:        []string{"auto", "raw", "markdown"},
 						Default:     "auto",
 					},
