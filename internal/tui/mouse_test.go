@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -1158,4 +1159,41 @@ func setupMouseTestModel() model {
 	m.height = 30
 	m.altScreen = true
 	return m
+}
+
+func TestModelPickerCapsDiscoveryNoticesFromManyAccounts(t *testing.T) {
+	m := subscriptionTestModel(t)
+	m.width, m.height = 80, 24
+	m.modelPickerErrorsByProvider = map[string]string{}
+	for i := 0; i < 8; i++ {
+		name := fmt.Sprintf("account-%d", i)
+		m.savedProviders = append(m.savedProviders, config.ProviderProfile{
+			Name: name, CatalogID: "chatgpt", BaseURL: m.providerProfile.BaseURL,
+			ProviderKind: config.ProviderKindOpenAICompatible,
+		})
+		m.modelPickerErrorsByProvider[name] = "login expired; authenticate again before refreshing account models"
+	}
+	m.picker = &commandPicker{kind: pickerModel, items: []pickerItem{
+		{Group: "Models", Label: "first-row", Value: "first"},
+		{Group: "Models", Label: "target-row", Value: "target"},
+	}}
+	if got := len(m.modelPickerDiscoveryNoticeLines(76)); got > modelPickerMaxNoticeLines {
+		t.Fatalf("discovery notices use %d rows, want at most %d", got, modelPickerMaxNoticeLines)
+	}
+	overlay := m.modelPickerOverlay(80)
+	text := plainRender(t, overlay)
+	for _, want := range []string{"target-row", "Esc close", "more discovery notices; /model list shows all."} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("picker lacks %q with many failing accounts:\n%s", want, text)
+		}
+	}
+	rect := m.overlayMouseRect(len(viewLines(overlay)), 80)
+	for row, line := range strings.Split(text, "\n") {
+		if strings.Contains(line, "target-row") {
+			target, ok := m.selectModelPickerAtMouse(testMouseClick(tea.MouseLeft, 40, rect.y+row))
+			if !ok || target.Value != "target" {
+				t.Fatalf("click on rendered model selected %#v, ok=%v; want target", target, ok)
+			}
+		}
+	}
 }
