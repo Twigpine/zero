@@ -72,5 +72,5 @@ func aimlapiUnauthorizedHint(server Server, status int) string {
 			return " (" + oauthHint + ")"
 		}
 	}
-	return fmt.Sprintf(" (set up the aimlapi.com provider with `zero providers setup aimlapi` or set AIMLAPI_API_KEY; the key is not sent while the aimlapi provider points at a proxy. To sign in instead, set \"auth\": \"oauth\" on this server and run `zero mcp oauth login %s`)", server.Name)
+	return fmt.Sprintf(" (set up the aimlapi.com provider with `zero providers setup aimlapi` or set AIMLAPI_API_KEY; automatic injection is also disabled for proxy profiles, OAuth, project config, and non-empty Authorization headers — see docs/EXTENDING.md#built-in-servers. To sign in instead, set \"auth\": \"oauth\" on this server and run `zero mcp oauth login %s`)", server.Name)
 }

@@ -272,19 +272,30 @@ Zero seeds two MCP servers before your config is merged. Both show up in
   `zero mcp disable aimlapi`. A project config cannot turn it on.
 
 When `aimlapi` connects, Zero sends your AI/ML API key as
-`Authorization: Bearer <key>`. The key comes from the aimlapi.com provider
-profile (`zero providers setup aimlapi`, including a key held in the
-credential store), or from `AIMLAPI_API_KEY` when there is no such profile. It
-is read again for every request and is never written to `config.json`. No key
-is sent when an aimlapi profile, or a profile reading `AIMLAPI_API_KEY`, points
-at a base URL other than `https://api.aimlapi.com/v1`, or when
-`AIMLAPI_INFERENCE_URL` is overridden, because that key may belong to a proxy.
-No key is sent either when the key is not a single token (for example a
-comma- or newline-separated pool), when you set your own `Authorization`
-header, when the server uses `"auth": "oauth"`, or when project config touched
-the server. Without a key the server answers 401. To sign in with your
-aimlapi.com account instead, set `"auth": "oauth"` on the server and run
-`zero mcp oauth login aimlapi`.
+`Authorization: Bearer <key>`. The key is resolved again on every request and
+is never written to `config.json`. With an aimlapi.com provider profile
+(`zero providers setup aimlapi`), the key is chosen in this order:
+
+1. An inline key on the profile (if set in config).
+2. Otherwise the environment variable named by the profile's `apiKeyEnv`
+   (the catalog default is `AIMLAPI_API_KEY`).
+3. Otherwise the key held in the credential store when the profile uses
+   `apiKeyStored`.
+
+When there is no aimlapi profile, Zero uses `AIMLAPI_API_KEY` alone. If both
+`AIMLAPI_API_KEY` and a stored profile key exist, step 2 wins over the store
+whenever the inline key is empty — MCP requests may bill the environment key's
+account, not the stored key.
+
+No automatic key is sent when an aimlapi profile, or any profile reading
+`AIMLAPI_API_KEY`, uses a base URL other than `https://api.aimlapi.com/v1`, or
+when `AIMLAPI_INFERENCE_URL` is overridden, because that credential may belong
+to a proxy. No key is sent when the resolved value is not a single token (for
+example a comma- or newline-separated pool), when you set your own
+non-empty `Authorization` header, when the server uses `"auth": "oauth"`, or
+when project config touched the server. Without a key the server answers 401.
+To sign in with your aimlapi.com account instead, set `"auth": "oauth"` on the
+server and run `zero mcp oauth login aimlapi`.
 
 Every request to exactly `https://mcp.aimlapi.com` (https, default port,
 whatever the server is named, including one you add by hand) also carries the

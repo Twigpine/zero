@@ -28,9 +28,13 @@ var (
 // aimlapi.com Toolbox and MCP server. It is resolved again on every call, so a
 // provider change is seen by the next request.
 //
-// The key comes from the aimlapi provider profile (the active one when it is
-// aimlapi, otherwise the first), including a key held in the credential store,
-// or from AIMLAPI_API_KEY when no aimlapi profile exists. The key is withheld
+// With an aimlapi profile (the active one when it is aimlapi, otherwise the
+// first), the key is the profile's inline apiKey when set; otherwise the value
+// already resolved from the profile's apiKeyEnv (AIMLAPI_API_KEY by default)
+// during config normalization; otherwise a credential-store entry when
+// apiKeyStored is set and the store is opened. With no aimlapi profile, the key
+// is AIMLAPI_API_KEY. Env hydration wins over the store when both are set. The
+// key is withheld
 // when that profile, any aimlapi profile, or any profile reading
 // AIMLAPI_API_KEY points at a base URL other than the canonical
 // https://api.aimlapi.com/v1, and when AIMLAPI_INFERENCE_URL is overridden:
