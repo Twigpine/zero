@@ -33,7 +33,6 @@ func TestAIMLAPIServiceKeyReadsCredentialStore(t *testing.T) {
 }
 
 func TestAIMLAPIServiceKeyPrefersResolvedProfileKeyOverCredentialStore(t *testing.T) {
-	// normalizeProvider fills profile.APIKey from apiKeyEnv before the store opens.
 	resolved := ResolvedConfig{Provider: ProviderProfile{
 		Name: "aimlapi", CatalogID: "aimlapi", BaseURL: "https://api.aimlapi.com/v1",
 		APIKey: "env-key", APIKeyStored: true,
@@ -125,6 +124,106 @@ func TestLoadAIMLAPIServiceKeyResolvesUserConfig(t *testing.T) {
 	}
 	if key, err := LoadAIMLAPIServiceKey(); err != nil || key != "env-key" {
 		t.Fatalf("canonical profile: LoadAIMLAPIServiceKey = %q, %v; want env-key", key, err)
+	}
+}
+
+// Several profiles and no activeProvider make Resolve return
+// ErrNoActiveProvider with the normalized profiles; the interactive app keeps
+// running on that partial config, so the service key must still resolve.
+func TestLoadAIMLAPIServiceKeyWithoutActiveProvider(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("APPDATA", filepath.Join(home, "AppData"))
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("ZERO_CRED_STORAGE", "file")
+	t.Setenv("ZERO_PROVIDER", "")
+	t.Setenv("AIMLAPI_INFERENCE_URL", "")
+	t.Setenv("AIMLAPI_API_KEY", "env-key")
+	path, err := DefaultUserConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	other := `{"name":"other","provider":"openai","model":"m","apiKey":"other-key"}`
+	for _, tc := range []struct {
+		name    string
+		active  string
+		profile string
+		want    string
+		wantErr error
+	}{
+		{name: "environment key", profile: `{"name":"second","provider":"openai","model":"m","apiKey":"second-key"}`, want: "env-key"},
+		{name: "stale active provider", active: "gone", profile: `{"name":"second","provider":"openai","model":"m","apiKey":"second-key"}`, want: "env-key"},
+		{name: "aimlapi profile key", profile: `{"name":"aimlapi","catalogID":"aimlapi","model":"m","apiKey":"profile-key"}`, want: "profile-key"},
+		{name: "proxy profile", profile: `{"name":"aimlapi","catalogID":"aimlapi","baseURL":"https://proxy.example/v1","model":"m"}`, wantErr: ErrAIMLAPIProxyProfile},
+	} {
+		data := `{"activeProvider":"` + tc.active + `","providers":[` + other + `,` + tc.profile + `]}`
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		key, err := LoadAIMLAPIServiceKey()
+		if tc.wantErr != nil {
+			if !errors.Is(err, tc.wantErr) || key != "" {
+				t.Fatalf("%s: LoadAIMLAPIServiceKey = %q, %v; want %v", tc.name, key, err, tc.wantErr)
+			}
+			continue
+		}
+		if err != nil || key != tc.want {
+			t.Fatalf("%s: LoadAIMLAPIServiceKey = %q, %v; want %q", tc.name, key, err, tc.want)
+		}
+	}
+}
+
+// Resolve drops a non-active profile it cannot normalize (here an unknown
+// catalog entry). Such a profile still shows that AIMLAPI_API_KEY belongs to a
+// proxy, so the key is withheld whether or not a provider is active.
+func TestLoadAIMLAPIServiceKeyWithholdsForDroppedProxyProfile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("APPDATA", filepath.Join(home, "AppData"))
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("ZERO_CRED_STORAGE", "file")
+	t.Setenv("ZERO_PROVIDER", "")
+	t.Setenv("AIMLAPI_INFERENCE_URL", "")
+	t.Setenv("AIMLAPI_API_KEY", "env-key")
+	path, err := DefaultUserConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	canonical := `{"name":"aimlapi","catalogID":"aimlapi","model":"m","apiKey":"profile-key"}`
+	other := `{"name":"other","provider":"openai","model":"m","apiKey":"other-key"}`
+	dropped := `{"name":"future","catalogID":"no-such-catalog","baseURL":"https://proxy.example/v1","apiKeyEnv":"AIMLAPI_API_KEY","model":"m"}`
+	unrelated := `{"name":"future","catalogID":"no-such-catalog","baseURL":"https://proxy.example/v1","apiKeyEnv":"OTHER_API_KEY","model":"m"}`
+	for _, tc := range []struct {
+		name    string
+		data    string
+		want    string
+		wantErr error
+	}{
+		{name: "active aimlapi profile", data: `{"activeProvider":"aimlapi","providers":[` + canonical + `,` + dropped + `]}`, wantErr: ErrAIMLAPIProxyProfile},
+		{name: "no active provider", data: `{"providers":[` + other + `,` + dropped + `]}`, wantErr: ErrAIMLAPIProxyProfile},
+		{name: "dropped profile without the key", data: `{"activeProvider":"aimlapi","providers":[` + canonical + `,` + unrelated + `]}`, want: "profile-key"},
+	} {
+		if err := os.WriteFile(path, []byte(tc.data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		key, err := LoadAIMLAPIServiceKey()
+		if tc.wantErr != nil {
+			if !errors.Is(err, tc.wantErr) || key != "" {
+				t.Fatalf("%s: LoadAIMLAPIServiceKey = %q, %v; want %v", tc.name, key, err, tc.wantErr)
+			}
+			continue
+		}
+		if err != nil || key != tc.want {
+			t.Fatalf("%s: LoadAIMLAPIServiceKey = %q, %v; want %q", tc.name, key, err, tc.want)
+		}
 	}
 }
 
