@@ -32,6 +32,18 @@ func TestAIMLAPIServiceKeyReadsCredentialStore(t *testing.T) {
 	}
 }
 
+func TestAIMLAPIServiceKeyPrefersResolvedProfileKeyOverCredentialStore(t *testing.T) {
+	resolved := ResolvedConfig{Provider: ProviderProfile{
+		Name: "aimlapi", CatalogID: "aimlapi", BaseURL: "https://api.aimlapi.com/v1",
+		APIKey: "env-key", APIKeyStored: true,
+	}}
+	store := fakeKeyGetter{keys: map[string]string{"aimlapi": "stored-key"}}
+	key, err := AIMLAPIServiceKey(resolved, store, aimlapiServiceKeyEnv(map[string]string{"AIMLAPI_API_KEY": "env-key"}))
+	if err != nil || key != "env-key" {
+		t.Fatalf("AIMLAPIServiceKey = %q, %v; want env-key from resolved profile, not stored-key", key, err)
+	}
+}
+
 func TestAIMLAPIServiceKeyFallsBackToEnvironmentWithoutProfile(t *testing.T) {
 	key, err := AIMLAPIServiceKey(ResolvedConfig{}, nil, aimlapiServiceKeyEnv(map[string]string{"AIMLAPI_API_KEY": "env-key"}))
 	if err != nil || key != "env-key" {
