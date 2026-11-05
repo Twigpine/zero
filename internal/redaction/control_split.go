@@ -63,6 +63,13 @@ import (
 // rest of a key from prose written after a whole one: that prose would be eaten,
 // and a following JWT would lose its header.
 //
+// CALLER-SUPPLIED SECRETS (Options.ExtraSecretValues) get the same treatment
+// from redactControlSplitExtraSecrets. Such a value is often opaque, matching no
+// shape here, so without its own gap-tolerant match a separator inside it left
+// both fragments in the output. It runs straight after the contiguous
+// replacement of those values, before any shape matcher, so a caller that clips
+// or reformats the result afterwards never sees a fragment.
+//
 // WHAT THIS DELIBERATELY DOES NOT TREAT AS A SEPARATOR: tab, newline and
 // carriage return. Those three are real text structure rather than invisible
 // filler, so a credential broken across a line boundary is still two visible
@@ -433,6 +440,33 @@ func openAIShapeIsSecret(match string) bool {
 		return true
 	}
 	return !strings.Contains(strings.TrimPrefix(match, "sk-"), "-")
+}
+
+// redactControlSplitExtraSecrets replaces every occurrence of a caller-supplied
+// secret whose characters are interrupted by runs of invisible separators. The
+// separators inside the match are covered by the replacement; a match never
+// starts or ends on one, so those beside it stay. secrets must already be
+// ordered longest first, as RedactString orders them, so a longer value is
+// claimed before a shorter one inside it. A no-op for text with no separator.
+func redactControlSplitExtraSecrets(value string, secrets []string, replacement string) string {
+	if !containsSplitSeparator(value) {
+		return value
+	}
+	gap := splitSeparatorClass + "*"
+	for _, secret := range secrets {
+		if strings.TrimSpace(secret) == "" || !utf8.ValidString(secret) || utf8.RuneCountInString(secret) < 2 {
+			continue
+		}
+		var pattern strings.Builder
+		for i, r := range secret {
+			if i > 0 {
+				pattern.WriteString(gap)
+			}
+			pattern.WriteString(regexp.QuoteMeta(string(r)))
+		}
+		value = regexp.MustCompile(pattern.String()).ReplaceAllLiteralString(value, replacement)
+	}
+	return value
 }
 
 // redactControlSplitSecrets replaces credentials whose body is interrupted by

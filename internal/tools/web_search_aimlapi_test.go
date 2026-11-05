@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/Twigpine/zero/internal/aimlapi"
 	"github.com/Twigpine/zero/internal/config"
@@ -513,6 +514,10 @@ func TestAIMLAPISearchRedactsKeyEchoedInErrors(t *testing.T) {
 	}{
 		"http error": {status: http.StatusUnauthorized, body: `{"error":{"code":"invalid_api_key","message":"API key ` + key + ` is not valid","request_id":"req_` + key + `"}}`},
 		"run error":  {status: http.StatusOK, body: `{"id":"run_` + key + `","status":"failed","is_error":true,"error":{"code":"bad_auth","message":"rejected ` + key + `"}}`},
+		// The same key split by characters nobody sees: a reader that drops
+		// them gets the key back, so the split form has to be redacted too.
+		"http error split by NUL": {status: http.StatusUnauthorized, body: `{"error":{"code":"invalid_api_key","message":"API key ` + splitAIMLAPIKey(key, `\u0000`) + ` is not valid","request_id":"req_` + splitAIMLAPIKey(key, `\u200b`) + `"}}`},
+		"run error split by ZWSP": {status: http.StatusOK, body: `{"id":"run_` + splitAIMLAPIKey(key, `\u200b`) + `","status":"failed","is_error":true,"error":{"code":"bad_auth","message":"rejected ` + splitAIMLAPIKey(key, `\u0000`) + `"}}`},
 	}
 	for name, tc := range bodies {
 		t.Run(name, func(t *testing.T) {
@@ -522,7 +527,7 @@ func TestAIMLAPISearchRedactsKeyEchoedInErrors(t *testing.T) {
 			if res.Status != StatusError {
 				t.Fatalf("status = %v, output = %q", res.Status, res.Output)
 			}
-			if strings.Contains(res.Output, key) {
+			if strings.Contains(withoutInvisibleRunes(res.Output), key) {
 				t.Fatalf("the AI/ML API key leaked into the output: %q", res.Output)
 			}
 			if !strings.Contains(res.Output, "req_") && !strings.Contains(res.Output, "run_") {
@@ -606,6 +611,39 @@ func TestAIMLAPISearchRedactsKeyInSuccessfulResults(t *testing.T) {
 	if result.Status != StatusOK || strings.Contains(result.Output, key) {
 		t.Fatalf("successful result leaked key: %s", result.Output)
 	}
+}
+
+func TestAIMLAPISearchRedactsSplitKeyInSuccessfulResults(t *testing.T) {
+	isolateAIMLAPISearchEnv(t)
+	const key = "zq7Mv2Lp9Xr4Tn8Wk3"
+	fake := &fakeToolbox{respond: func(_ int, _ *http.Request) *http.Response {
+		return toolboxResponse(http.StatusOK, `{"status":"completed","output":{"results":[{"title":"`+splitAIMLAPIKey(key, `\u0000`)+`","url":"https://example.com/`+splitAIMLAPIKey(key, `\u200b`)+`","snippet":"echo `+splitAIMLAPIKey(key, `\u2060`)+`"}]}}`)
+	}}
+	tool := newWebSearchToolWithBackend(newAIMLAPISearchBackend(fake, staticKey(key)))
+	result := tool.Run(context.Background(), map[string]any{"query": "q"})
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v, output = %q", result.Status, result.Output)
+	}
+	if strings.Contains(withoutInvisibleRunes(result.Output), key) {
+		t.Fatalf("successful result leaked the split key: %q", result.Output)
+	}
+}
+
+// splitAIMLAPIKey puts a JSON-escaped invisible character into the middle of
+// key, as a response that echoes it that way would.
+func splitAIMLAPIKey(key, escapedSeparator string) string {
+	return key[:len(key)/2] + escapedSeparator + key[len(key)/2:]
+}
+
+// withoutInvisibleRunes drops the control and format characters a terminal,
+// log viewer or copy-paste would never show, so a key split by one reads whole.
+func withoutInvisibleRunes(value string) string {
+	return strings.Map(func(r rune) rune {
+		if r != '\t' && r != '\n' && r != '\r' && (unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Cf, r)) {
+			return -1
+		}
+		return r
+	}, value)
 }
 func TestAIMLAPISearchEmptyScopedResultsReportAllowlist(t *testing.T) {
 	isolateAIMLAPISearchEnv(t)

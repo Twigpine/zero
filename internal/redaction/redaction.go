@@ -472,6 +472,9 @@ func RedactString(value string, options Options) string {
 				redacted = strings.ReplaceAll(redacted, secret, replacement)
 			}
 		}
+		// A caller-supplied secret matches no shape, so the split pass at the
+		// end never sees it: match it across invisible separators here.
+		redacted = redactControlSplitExtraSecrets(redacted, secrets, replacement)
 	}
 
 	if strings.Contains(redacted, "-----BEGIN ") && strings.Contains(redacted, "PRIVATE KEY") {
