@@ -184,6 +184,28 @@ func TestRedactStringRedactsExtraSecretValuesSplitByInvisibleCharacters(t *testi
 			}
 		})
 	}
+	// A SECRET AS WRITTEN IS ALWAYS REDACTED. The split match compares the text
+	// and the value with separators removed; it adds to the whole match and
+	// must never replace it. Once the text held any separator, a value made only
+	// of separators compacted to nothing and was skipped, and separators at
+	// either end of a value fell outside its compacted match, so both stayed
+	// visible where a plain replacement had always caught them.
+	for _, testCase := range []struct {
+		name    string
+		secrets []string
+		value   string
+		want    string
+	}{
+		{"separator-only secret", []string{"\x00"}, "a\x00b", "a[REDACTED]b"},
+		{"separator-only secret beside another separator", []string{"\u200b"}, "a\u200bb\x00", "a[REDACTED]b\x00"},
+		{"separators at both ends", []string{"\u200babc\x00"}, "x\u200babc\x00y", "x[REDACTED]y"},
+	} {
+		t.Run("as written "+testCase.name, func(t *testing.T) {
+			if got := RedactString(testCase.value, Options{ExtraSecretValues: testCase.secrets}); got != testCase.want {
+				t.Errorf("RedactString(%q, %q) = %q, want %q", testCase.value, testCase.secrets, got, testCase.want)
+			}
+		})
+	}
 	// A value the caller names that is NOT in the text leaves the text alone,
 	// separators and all.
 	if value := "unrelated\x00text \u200bhere"; RedactString(value, options) != value {

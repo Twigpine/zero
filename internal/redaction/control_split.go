@@ -454,9 +454,10 @@ func openAIShapeIsSecret(match string) bool {
 // values that overlap all left a fragment visible. Occurrences that only touch
 // stay separate replacements, as they always were.
 //
-// Separators inside a match are covered by its replacement; a match never
-// starts or ends on one, so those beside it stay. Tab, newline and carriage
-// return are not separators (see above).
+// Separators inside a match are covered by its replacement; a split match never
+// starts or ends on one, so those beside it stay, unless the value as written
+// starts or ends with them. Tab, newline and carriage return are not separators
+// (see above).
 func redactExtraSecretValues(value string, secrets []string, replacement string) string {
 	haystack, offsets := value, []int(nil)
 	if containsSplitSeparator(value) {
@@ -469,6 +470,15 @@ func redactExtraSecretValues(value string, secrets []string, replacement string)
 		}
 		needle := secret
 		if offsets != nil {
+			// The value as written always matches, as it did before split
+			// matching existed. The compacted match cannot stand in for it: a
+			// value made only of separators compacts to nothing, and separators
+			// at either end of a value fall outside its compacted match.
+			if strings.Contains(value, secret) {
+				for _, at := range overlappingIndexes(value, secret) {
+					spans = append(spans, [2]int{at, at + len(secret)})
+				}
+			}
 			needle = stripSplitSeparators(secret)
 		}
 		if needle == "" || !strings.Contains(haystack, needle) {
