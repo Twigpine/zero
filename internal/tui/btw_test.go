@@ -10,9 +10,13 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/Twigpine/zero/internal/agent"
 	"github.com/Twigpine/zero/internal/config"
 	"github.com/Twigpine/zero/internal/notify"
+	"github.com/Twigpine/zero/internal/peermsg"
+	"github.com/Twigpine/zero/internal/planmode"
 	"github.com/Twigpine/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 func newBTWTestModel(t *testing.T) model {
@@ -533,5 +537,286 @@ func TestBTWCtrlCDuringRunDoesNotClearDraft(t *testing.T) {
 	}
 	if !transcriptContains(got.transcript, "BTW response is still running") {
 		t.Fatalf("missing in-flight return guidance: %#v", got.transcript)
+	}
+}
+
+// Regression: entering plan mode then /btw used to copy permissionMode and the
+// shared update_plan state onto the side surface. Match /new and /resume: the
+// side conversation must exit plan mode and clear plan state, while the hidden
+// parent keeps plan mode for restore.
+func TestBTWExitsPlanModeOnSideAndPreservesParent(t *testing.T) {
+	isolatePlanConfig(t)
+	planTool := tools.NewUpdatePlanTool()
+	planTool.SetPlan([]tools.PlanItem{{Content: "draft step", Status: "pending"}})
+	registry := tools.NewRegistry()
+	registry.Register(planTool)
+
+	m := newBTWTestModel(t)
+	m.cwd = t.TempDir()
+	m.registry = registry
+	m.permissionMode = agent.PermissionModePlan
+	m.permissionModeBeforePlan = agent.PermissionModeAsk
+	m.plan.updateFromItems(planTool.CurrentPlan(), m.now())
+
+	side, _ := m.handleBTWCommand("")
+	if side.permissionMode == agent.PermissionModePlan {
+		t.Fatalf("BTW side kept plan mode: %s", side.permissionMode)
+	}
+	if side.permissionMode != agent.PermissionModeAsk {
+		t.Fatalf("BTW side permission mode = %s, want restored Ask", side.permissionMode)
+	}
+	if !transcriptContains(side.transcript, "This BTW session uses ask permission mode.") {
+		t.Fatal("missing BTW permission mode notice")
+	}
+	if side.permissionModeBeforePlan != "" {
+		t.Fatalf("BTW side left permissionModeBeforePlan set: %q", side.permissionModeBeforePlan)
+	}
+	if !side.plan.isEmpty() {
+		t.Fatalf("BTW side leaked the parent plan panel: %+v", side.plan)
+	}
+	if len(planTool.CurrentPlan()) != 0 {
+		t.Fatalf("BTW side left shared update_plan state: %+v", planTool.CurrentPlan())
+	}
+	if side.btw.parent == nil {
+		t.Fatal("expected saved parent after /btw")
+	}
+	if side.btw.parent.permissionMode != agent.PermissionModePlan {
+		t.Fatalf("hidden parent lost plan mode: %s", side.btw.parent.permissionMode)
+	}
+	if side.btw.parent.permissionModeBeforePlan != agent.PermissionModeAsk {
+		t.Fatalf("hidden parent lost permissionModeBeforePlan: %q", side.btw.parent.permissionModeBeforePlan)
+	}
+	if side.btw.parent.plan.isEmpty() {
+		t.Fatal("hidden parent lost its sticky plan panel")
+	}
+
+	returned, _ := side.leaveBTW()
+	if returned.permissionMode != agent.PermissionModePlan {
+		t.Fatalf("returning from BTW lost parent plan mode: %s", returned.permissionMode)
+	}
+	if !transcriptContains(returned.transcript, "Plan mode is active again.") {
+		t.Fatal("missing parent Plan mode restoration notice")
+	}
+	if returned.permissionModeBeforePlan != agent.PermissionModeAsk {
+		t.Fatalf("returning from BTW lost permissionModeBeforePlan: %q", returned.permissionModeBeforePlan)
+	}
+	// The captured parent in-memory plan is restored on return even when no
+	// durable plan file exists.
+	if returned.plan.isEmpty() {
+		t.Fatal("returning from BTW unexpectedly cleared parent's sticky plan panel")
+	}
+	if len(planTool.CurrentPlan()) != 1 || planTool.CurrentPlan()[0].Content != "draft step" {
+		t.Fatalf("expected shared update_plan restored from parent snapshot, got %+v", planTool.CurrentPlan())
+	}
+}
+
+func TestBTWLeaveRestoresParentPeerIdentity(t *testing.T) {
+	isolatePlanConfig(t)
+	svc, err := peermsg.New(peermsg.Options{
+		RootDir: t.TempDir(),
+		Identity: peermsg.Identity{
+			Name:            "zero",
+			Cwd:             t.TempDir(),
+			PermissionClass: peermsg.PermissionBypass,
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := svc.Start(func(peermsg.InboundMessage) bool { return true }); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = svc.Close() })
+
+	m := newBTWTestModel(t)
+	m.cwd = t.TempDir()
+	m.permissionMode = agent.PermissionModeUnsafe
+	m.peerService = svc
+
+	updated, _ := m.handlePlanCommand("on")
+	parent := updated.(model)
+	if got := svc.Self().PermissionClass; got != peermsg.PermissionPrompting {
+		t.Fatalf("after /plan on PermissionClass = %q, want %q", got, peermsg.PermissionPrompting)
+	}
+
+	side, _ := parent.handleBTWCommand("")
+	if got := svc.Self().PermissionClass; got != peermsg.PermissionBypass {
+		t.Fatalf("inside /btw PermissionClass = %q, want %q", got, peermsg.PermissionBypass)
+	}
+
+	returned, _ := side.leaveBTW()
+	if returned.permissionMode != agent.PermissionModePlan {
+		t.Fatalf("returning from BTW lost parent plan mode: %s", returned.permissionMode)
+	}
+	if got := svc.Self().PermissionClass; got != peermsg.PermissionPrompting {
+		t.Fatalf("after returning from /btw PermissionClass = %q, want %q", got, peermsg.PermissionPrompting)
+	}
+}
+
+func TestBTWCommandUnavailableBlocksPlan(t *testing.T) {
+	if !btwCommandUnavailable(parsedCommand{kind: commandPlan, name: "/plan"}) {
+		t.Fatal("expected /plan to be unavailable inside a BTW conversation")
+	}
+	// Sanity: help stays available so the blocklist is not total.
+	if btwCommandUnavailable(parsedCommand{kind: commandHelp, name: "/help"}) {
+		t.Fatal("expected /help to remain available in BTW")
+	}
+}
+
+// Regression: enterBTW clears shared update_plan; leaveBTW must re-hydrate it
+// from the parent session plan file the way /resume does after a switch.
+func TestBTWLeaveResyncsSharedPlanFromParentFile(t *testing.T) {
+	isolatePlanConfig(t)
+	cwd := t.TempDir()
+	planTool := tools.NewUpdatePlanTool()
+	items := []tools.PlanItem{{Content: "draft step", Status: "pending"}}
+	planTool.SetPlan(items)
+	registry := tools.NewRegistry()
+	registry.Register(planTool)
+
+	m := newBTWTestModel(t)
+	m.cwd = cwd
+	m.registry = registry
+	m.permissionMode = agent.PermissionModePlan
+	m.permissionModeBeforePlan = agent.PermissionModeAsk
+	m.plan.updateFromItems(items, m.now())
+	if _, err := planmode.WritePlan(cwd, m.activeSession.SessionID, formatPlanItems(items)); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+
+	side, _ := m.handleBTWCommand("")
+	if len(planTool.CurrentPlan()) != 0 {
+		t.Fatalf("BTW side left shared update_plan state: %+v", planTool.CurrentPlan())
+	}
+
+	returned, _ := side.leaveBTW()
+	got := planTool.CurrentPlan()
+	if len(got) != 1 || got[0].Content != "draft step" {
+		t.Fatalf("leaveBTW did not re-sync shared update_plan from parent plan file: %+v", got)
+	}
+	if returned.plan.isEmpty() {
+		t.Fatal("leaveBTW left sticky plan panel empty after re-sync")
+	}
+}
+
+// Regression: when the durable plan file is gone (ok=false, err=nil), leaveBTW
+// Regression: when the durable plan file is missing (ok=false, err=nil), leaveBTW
+// restores the captured parent in-memory plan draft so the parent's draft and panel
+// are preserved rather than lost.
+func TestBTWLeavePreservesInMemPlanWhenPlanFileMissing(t *testing.T) {
+	isolatePlanConfig(t)
+	cwd := t.TempDir()
+	planTool := tools.NewUpdatePlanTool()
+	items := []tools.PlanItem{{Content: "draft step", Status: "pending"}}
+	planTool.SetPlan(items)
+	registry := tools.NewRegistry()
+	registry.Register(planTool)
+
+	m := newBTWTestModel(t)
+	m.cwd = cwd
+	m.registry = registry
+	m.permissionMode = agent.PermissionModePlan
+	m.permissionModeBeforePlan = agent.PermissionModeAsk
+	m.plan.updateFromItems(items, m.now())
+
+	side, _ := m.handleBTWCommand("")
+	if len(planTool.CurrentPlan()) != 0 {
+		t.Fatalf("BTW side left shared update_plan state: %+v", planTool.CurrentPlan())
+	}
+
+	returned, _ := side.leaveBTW()
+	got := planTool.CurrentPlan()
+	if len(got) != 1 || got[0].Content != "draft step" {
+		t.Fatalf("leaveBTW did not restore parent in-memory plan when file was missing, got: %+v", got)
+	}
+	if returned.plan.isEmpty() {
+		t.Fatal("expected sticky plan panel preserved when plan file is missing")
+	}
+}
+
+// Regression: leaveBTW must surface a durable plan reload failure while preserving
+// the parent's captured in-memory plan so an error does not destroy usable state.
+func TestBTWLeaveReportsPlanReloadErrorAndPreservesParentPlan(t *testing.T) {
+	isolatePlanConfig(t)
+	cwd := t.TempDir()
+	planTool := tools.NewUpdatePlanTool()
+	items := []tools.PlanItem{{Content: "draft step", Status: "pending"}}
+	planTool.SetPlan(items)
+	registry := tools.NewRegistry()
+	registry.Register(planTool)
+
+	m := newBTWTestModel(t)
+	m.cwd = cwd
+	m.registry = registry
+	m.permissionMode = agent.PermissionModePlan
+	m.permissionModeBeforePlan = agent.PermissionModeAsk
+	m.plan.updateFromItems(items, m.now())
+	if _, err := planmode.WritePlan(cwd, m.activeSession.SessionID, formatPlanItems(items)); err != nil {
+		t.Fatalf("WritePlan: %v", err)
+	}
+
+	// Replace the plan file with a directory so ReadPlan fails with a real
+	// I/O error (missing file is not an error).
+	path, err := planmode.PlanFilePath(cwd, m.activeSession.SessionID)
+	if err != nil {
+		t.Fatalf("PlanFilePath: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("Remove plan file: %v", err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatalf("Mkdir over plan path: %v", err)
+	}
+
+	side, _ := m.handleBTWCommand("")
+	returned, _ := side.leaveBTW()
+	if !transcriptContains(returned.transcript, "plan reload error:") {
+		t.Fatalf("leaveBTW did not surface plan reload failure: %#v", returned.transcript)
+	}
+	got := planTool.CurrentPlan()
+	if len(got) != 1 || got[0].Content != "draft step" {
+		t.Fatalf("expected parent in-memory plan preserved after failed reload, got %+v", got)
+	}
+	if returned.plan.isEmpty() {
+		t.Fatal("expected sticky plan panel preserved after failed reload")
+	}
+}
+
+// TestBTWLeaveSidePlanUpdateDoesNotLeakToParent verifies that plan updates made
+// inside a BTW conversation stay isolated and never overwrite or leak into the parent.
+func TestBTWLeaveSidePlanUpdateDoesNotLeakToParent(t *testing.T) {
+	isolatePlanConfig(t)
+	cwd := t.TempDir()
+	planTool := tools.NewUpdatePlanTool()
+	parentItems := []tools.PlanItem{{Content: "parent step", Status: "in_progress"}}
+	planTool.SetPlan(parentItems)
+	registry := tools.NewRegistry()
+	registry.Register(planTool)
+
+	m := newBTWTestModel(t)
+	m.cwd = cwd
+	m.registry = registry
+	m.permissionMode = agent.PermissionModePlan
+	m.permissionModeBeforePlan = agent.PermissionModeAsk
+	m.plan.updateFromItems(parentItems, m.now())
+
+	side, _ := m.handleBTWCommand("")
+	if len(planTool.CurrentPlan()) != 0 {
+		t.Fatalf("expected side update_plan initially empty, got: %+v", planTool.CurrentPlan())
+	}
+
+	// Side conversation updates its own plan
+	sideItems := []tools.PlanItem{{Content: "side step", Status: "pending"}}
+	planTool.SetPlan(sideItems)
+	side.plan.updateFromItems(sideItems, side.now())
+
+	// Return to parent
+	returned, _ := side.leaveBTW()
+	got := planTool.CurrentPlan()
+	if len(got) != 1 || got[0].Content != "parent step" {
+		t.Fatalf("side plan leaked into parent session: got %+v, want parent step", got)
+	}
+	if returned.plan.isEmpty() {
+		t.Fatal("parent sticky plan panel was lost after returning from BTW")
 	}
 }

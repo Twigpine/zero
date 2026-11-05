@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -67,6 +69,10 @@ func TestSpecApproveStartsImplementationSession(t *testing.T) {
 	if review == nil {
 		t.Fatal("expected pending review before approval")
 	}
+	next = startFixedLoop(next, "draft-session loop", time.Minute)
+	next.permissionMode = agent.PermissionModePlan
+	next.permissionModeBeforePlan = agent.PermissionModeAsk
+	next, _ = next.pauseLoopsForPlan()
 
 	updated, cmd = next.Update(testKeyText("a"))
 	next = updated.(model)
@@ -78,6 +84,12 @@ func TestSpecApproveStartsImplementationSession(t *testing.T) {
 	}
 	if next.activeSession.SessionKind != sessions.SessionKindSpecImpl {
 		t.Fatalf("expected active implementation session, got %#v", next.activeSession)
+	}
+	if next.permissionMode != agent.PermissionModeAsk || !transcriptContains(next.transcript, "Implementation uses ask permission mode.") {
+		t.Fatal("spec approval must restore and announce Ask permission mode")
+	}
+	if len(next.loops) != 0 {
+		t.Fatalf("expected approval to clear loops from the draft session, got %+v", next.loops)
 	}
 
 	updated, _ = next.Update(execCmd(cmd))
@@ -278,5 +290,96 @@ func TestSpecLaunchesSeedElapsedClock(t *testing.T) {
 	}
 	if next.turnStartedAt.IsZero() {
 		t.Fatal("impl launch did not seed turnStartedAt (elapsed clock would not render)")
+	}
+}
+
+func TestSpecCommandExitsPlanMode(t *testing.T) {
+	isolatePlanConfig(t)
+	store := testSessionStore(t)
+	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{
+		submitSpecScript("call-1", "Review Flow", "# Goal\n\nAdd review flow."),
+	}}
+	m := newSpecModeTestModel(t.TempDir(), provider, store)
+	planTool := tools.NewUpdatePlanTool()
+	planTool.SetPlan([]tools.PlanItem{{Content: "prior draft", Status: "pending"}})
+	m.registry.Register(planTool)
+	m.plan.updateFromItems(planTool.CurrentPlan(), m.now())
+	var err error
+	m, err = m.ensureActiveSession("")
+	if err != nil {
+		t.Fatalf("ensureActiveSession: %v", err)
+	}
+	m = startFixedLoop(m, "previous-session loop", time.Minute)
+	updated, _ := m.handlePlanCommand("on")
+	m = updated.(model)
+	if len(m.loops) != 1 || !m.loops[0].paused {
+		t.Fatalf("expected /plan on to pause the existing loop, got %+v", m.loops)
+	}
+	m.input.SetValue("/spec add review flow")
+
+	updated, _ = m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if next.permissionMode == agent.PermissionModePlan {
+		t.Fatalf("expected /spec to exit plan mode, got %s", next.permissionMode)
+	}
+	if !transcriptContains(next.transcript, "Plan mode ended for the previous session.") {
+		t.Fatal("missing spec session Plan mode exit notice")
+	}
+	if next.permissionModeBeforePlan != "" {
+		t.Fatalf("expected permissionModeBeforePlan cleared after /spec, got %q", next.permissionModeBeforePlan)
+	}
+	if len(planTool.CurrentPlan()) != 0 {
+		t.Fatalf("expected shared update_plan cleared after successful /spec, got %+v", planTool.CurrentPlan())
+	}
+	if !next.plan.isEmpty() {
+		t.Fatalf("expected sticky plan panel cleared after successful /spec, got %+v", next.plan)
+	}
+	if len(next.loops) != 0 {
+		t.Fatalf("expected /spec to clear loops from the previous session, got %+v", next.loops)
+	}
+}
+
+// Regression: /spec used to clear plan mode before createSpecDraftSession.
+// On create failure the user stayed on the original session with plan mode
+// already wiped. Create first; only reset plan state after success.
+func TestSpecCommandCreateFailurePreservesPlanMode(t *testing.T) {
+	root := t.TempDir()
+	// Point the session store root at a regular file so Create fails on MkdirAll.
+	badRoot := filepath.Join(root, "not-a-dir")
+	if err := os.WriteFile(badRoot, []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: badRoot})
+	provider := &scriptedProvider{scripts: [][]zeroruntime.StreamEvent{
+		submitSpecScript("call-1", "Review Flow", "# Goal\n\nAdd review flow."),
+	}}
+	m := newSpecModeTestModel(root, provider, store)
+	planTool := tools.NewUpdatePlanTool()
+	planTool.SetPlan([]tools.PlanItem{{Content: "keep me", Status: "pending"}})
+	m.registry.Register(planTool)
+	m.permissionMode = agent.PermissionModePlan
+	m.permissionModeBeforePlan = agent.PermissionModeAsk
+	m.plan.updateFromItems(planTool.CurrentPlan(), m.now())
+	m.input.SetValue("/spec add review flow")
+
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	next := updated.(model)
+	if next.pending || next.activeRunID != 0 {
+		t.Fatalf("expected no agent run when session create fails, pending=%v activeRunID=%d", next.pending, next.activeRunID)
+	}
+	if next.permissionMode != agent.PermissionModePlan {
+		t.Fatalf("expected plan mode preserved after failed /spec create, got %s", next.permissionMode)
+	}
+	if next.permissionModeBeforePlan != agent.PermissionModeAsk {
+		t.Fatalf("expected permissionModeBeforePlan preserved, got %q", next.permissionModeBeforePlan)
+	}
+	if len(planTool.CurrentPlan()) != 1 || planTool.CurrentPlan()[0].Content != "keep me" {
+		t.Fatalf("expected shared plan preserved after failed /spec create, got %+v", planTool.CurrentPlan())
+	}
+	if next.plan.isEmpty() {
+		t.Fatal("expected sticky plan panel preserved after failed /spec create")
+	}
+	if !transcriptContains(next.transcript, "session create error") {
+		t.Fatalf("expected session create error in transcript, got %#v", next.transcript)
 	}
 }

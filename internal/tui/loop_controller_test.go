@@ -9,6 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/Twigpine/zero/internal/agent"
 	"github.com/Twigpine/zero/internal/usercommands"
 )
 
@@ -22,6 +23,19 @@ func loopTestModel(t *testing.T, now time.Time) model {
 func startFixedLoop(m model, prompt string, interval time.Duration) model {
 	m, _ = m.startLoop(loopCommand{action: loopActionStart, mode: loopModeFixed, prompt: prompt, interval: interval})
 	return m
+}
+
+func TestStartLoopPausesWhilePlanModeActive(t *testing.T) {
+	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	m := loopTestModel(t, now)
+	m.permissionMode = agent.PermissionModePlan
+	m = startFixedLoop(m, "check the build", 5*time.Minute)
+	if len(m.loops) != 1 || !m.loops[0].paused {
+		t.Fatalf("a loop started in plan mode should be paused, got %+v", m.loops)
+	}
+	if m.loops[0].due(now) {
+		t.Fatal("a loop started in plan mode must not be due")
+	}
 }
 
 func TestStartLoopRegistersAndSchedules(t *testing.T) {
@@ -169,6 +183,22 @@ func TestStopLoopByID(t *testing.T) {
 	m, _ = m.stopAllLoops()
 	if len(m.loops) != 0 {
 		t.Fatalf("stopAllLoops should clear all loops")
+	}
+}
+
+func TestFireDueLoopSkipsInPlanMode(t *testing.T) {
+	// Regression: a due loop must stay armed and not fire while plan mode is
+	// read-only. Implementation turns cannot make progress there.
+	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	m := loopTestModel(t, now)
+	m = startFixedLoop(m, "x", time.Minute)
+	m.permissionMode = agent.PermissionModePlan
+	got, cmd := m.fireDueLoopIfIdle()
+	if got.activeLoopID != "" || cmd != nil {
+		t.Fatal("a due loop must not fire while plan mode is active")
+	}
+	if got.loops[0].nextRunAt.IsZero() {
+		t.Fatal("a loop skipped in plan mode must stay scheduled")
 	}
 }
 
