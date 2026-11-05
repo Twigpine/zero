@@ -159,6 +159,31 @@ func TestRedactStringRedactsExtraSecretValuesSplitByInvisibleCharacters(t *testi
 			}
 		})
 	}
+	// OVERLAPPING OCCURRENCES ARE ONE SPAN. Replacing one occurrence (either
+	// form) and then looking for the next consumed bytes the other needed:
+	// "abc\x00abcabc" holds a split "abc\x00abc" overlapping a whole "abcabc",
+	// and replacing the whole one first left "abc\x00" in front of it. Every
+	// occurrence of every value, in either form, has to be found in the same
+	// text and overlapping ones replaced together.
+	for _, testCase := range []struct {
+		name    string
+		secrets []string
+		value   string
+		want    string
+	}{
+		{"split then whole, periodic secret", []string{"abcabc"}, "abc\x00abcabc", "[REDACTED]"},
+		{"whole then split, periodic secret", []string{"abcabc"}, "abcabc\x00abc", "[REDACTED]"},
+		{"shared first and last character", []string{"xY7qx"}, "key xY7q\u200bxY7qx", "key [REDACTED]"},
+		{"two secrets overlapping across a split", []string{"zq7Mv2Lp", "Lp9Xr4Tn"}, "key zq7Mv2L\x00p9Xr4Tn", "key [REDACTED]"},
+		{"whole occurrences overlapping", []string{"xY7qx"}, "xY7qxY7qx", "[REDACTED]"},
+		{"adjacent occurrences stay two", []string{"abc"}, "abc\x00abc", "[REDACTED]\x00[REDACTED]"},
+	} {
+		t.Run("overlapping occurrences "+testCase.name, func(t *testing.T) {
+			if got := RedactString(testCase.value, Options{ExtraSecretValues: testCase.secrets}); got != testCase.want {
+				t.Errorf("RedactString(%q, %q) = %q, want %q", testCase.value, testCase.secrets, got, testCase.want)
+			}
+		})
+	}
 	// A value the caller names that is NOT in the text leaves the text alone,
 	// separators and all.
 	if value := "unrelated\x00text \u200bhere"; RedactString(value, options) != value {
