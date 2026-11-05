@@ -25,6 +25,11 @@ type aimlapiRecorder struct {
 	headers      []http.Header
 	urls         []string
 	unauthorized bool
+	// redirectFirstTo, when set, answers the first request with a 307 to it.
+	redirectFirstTo string
+	// failStatus, when set, answers every request with it and failBody.
+	failStatus int
+	failBody   string
 }
 
 func (recorder *aimlapiRecorder) RoundTrip(request *http.Request) (*http.Response, error) {
@@ -37,8 +42,17 @@ func (recorder *aimlapiRecorder) RoundTrip(request *http.Request) (*http.Respons
 	recorder.headers = append(recorder.headers, request.Header.Clone())
 	recorder.urls = append(recorder.urls, request.URL.String())
 	unauthorized := recorder.unauthorized
+	redirect := recorder.redirectFirstTo != "" && len(recorder.headers) == 1
 	recorder.mu.Unlock()
 
+	if redirect {
+		response := fakeHTTPResponse(request, http.StatusTemporaryRedirect, "")
+		response.Header.Set("Location", recorder.redirectFirstTo)
+		return response, nil
+	}
+	if recorder.failStatus != 0 {
+		return fakeHTTPResponse(request, recorder.failStatus, recorder.failBody), nil
+	}
 	if unauthorized {
 		response := fakeHTTPResponse(request, http.StatusUnauthorized, `{"error":"invalid_token"}`)
 		response.Header.Set("WWW-Authenticate", `Bearer resource_metadata="https://mcp.aimlapi.com/.well-known/oauth-protected-resource/mcp"`)
@@ -422,5 +436,102 @@ func TestAIMLAPIMCPUnauthorizedHintRespectsCredentialEligibility(t *testing.T) {
 				t.Fatalf("incorrect hint: %s", hint)
 			}
 		})
+	}
+}
+
+// net/http copies the first request's headers onto every redirect hop without
+// calling the header hooks, so the redirect guard has to apply the per-request
+// rule again: a same-origin hop that fails the exact-URL rule (userinfo) gets
+// neither the key nor attribution, an eligible hop gets a freshly resolved key,
+// and a user's own Authorization header still follows as before.
+func TestAIMLAPIMCPRedirectHopsReapplyAutomaticHeaders(t *testing.T) {
+	isolateAIMLAPIKeyLookup(t, "")
+	userHeader := aimlapiTestServer("aimlapi", aimlapi.MCPServerURL)
+	userHeader.Headers = map[string]string{"authorization": "Bearer user-token"}
+	for _, tc := range []struct {
+		name            string
+		server          Server
+		location        string
+		wantFirst       string
+		wantHop         string
+		wantAttribution bool
+	}{
+		{"userinfo hop", aimlapiTestServer("aimlapi", aimlapi.MCPServerURL), "https://user@mcp.aimlapi.com/mcp", "Bearer aiml-first", "", false},
+		{"eligible hop", aimlapiTestServer("aimlapi", aimlapi.MCPServerURL), "https://mcp.aimlapi.com/mcp/", "Bearer aiml-first", "Bearer aiml-second", true},
+		{"user header hop", userHeader, "https://user@mcp.aimlapi.com/mcp", "Bearer user-token", "Bearer user-token", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			keys := []string{"aiml-first", "aiml-second"}
+			previous := loadAIMLAPIServiceKey
+			loadAIMLAPIServiceKey = func() (string, error) {
+				key := keys[0]
+				if len(keys) > 1 {
+					keys = keys[1:]
+				}
+				return key, nil
+			}
+			t.Cleanup(func() { loadAIMLAPIServiceKey = previous })
+
+			recorder := &aimlapiRecorder{redirectFirstTo: tc.location}
+			client := newRecordedNetworkClient(tc.server, recorder)
+			if err := client.initialize(context.Background()); err != nil {
+				t.Fatalf("initialize: %v", err)
+			}
+			requests := recorder.recorded()
+			if len(requests) < 2 || recorder.urls[1] != tc.location {
+				t.Fatalf("redirect was not followed: %v", recorder.urls)
+			}
+			if got := requests[0].Get("Authorization"); got != tc.wantFirst {
+				t.Fatalf("first hop Authorization = %q, want %q", got, tc.wantFirst)
+			}
+			hop := requests[1]
+			// With no key, net/http fills Basic auth from the hop's own userinfo;
+			// only the automatic key must be absent.
+			if got := hop.Get("Authorization"); (tc.wantHop == "" && strings.Contains(got, "aiml-")) || (tc.wantHop != "" && got != tc.wantHop) {
+				t.Fatalf("redirect hop Authorization = %q, want %q", got, tc.wantHop)
+			}
+			if tc.wantAttribution {
+				assertAIMLAPIAttribution(t, hop)
+			} else if hop.Get(aimlapi.SourceHeaderName) != "" || hop.Get(aimlapi.PartnerHeaderName) != "" {
+				t.Fatalf("redirect hop kept attribution headers: %v", hop)
+			}
+		})
+	}
+}
+
+// An error body can echo the key Zero injected; the body is left out of the
+// error rather than matched, so a key cut by the 1024-byte read limit cannot
+// leak its prefix either. Requests without the automatic key keep the detail.
+func TestAIMLAPIMCPStatusErrorOmitsBodyWhenKeyWasInjected(t *testing.T) {
+	const key = "sk-echo-0123456789abcdef"
+	isolateAIMLAPIKeyLookup(t, key)
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"echoed key", `{"error":"invalid credential ` + key + `"}`},
+		{"key across the read limit", strings.Repeat("x", 1020) + key},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := &aimlapiRecorder{failStatus: http.StatusPaymentRequired, failBody: tc.body}
+			err := newRecordedNetworkClient(aimlapiTestServer("aimlapi", aimlapi.MCPServerURL), recorder).initialize(context.Background())
+			if err == nil {
+				t.Fatal("initialize succeeded against a failing server")
+			}
+			if got := recorder.recorded()[0].Get("Authorization"); got != "Bearer "+key {
+				t.Fatalf("request did not carry the injected key: %q", got)
+			}
+			if strings.Contains(err.Error(), key[:4]) || !strings.Contains(err.Error(), "HTTP 402") {
+				t.Fatalf("error = %q, want HTTP 402 without the echoed key", err)
+			}
+		})
+	}
+
+	userHeader := aimlapiTestServer("aimlapi", aimlapi.MCPServerURL)
+	userHeader.Headers = map[string]string{"Authorization": "Bearer user-token"}
+	recorder := &aimlapiRecorder{failStatus: http.StatusPaymentRequired, failBody: `{"error":"insufficient balance"}`}
+	err := newRecordedNetworkClient(userHeader, recorder).initialize(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "insufficient balance") {
+		t.Fatalf("error without the automatic key = %v, want the response detail", err)
 	}
 }

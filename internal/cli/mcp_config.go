@@ -807,6 +807,12 @@ func mergeMCPServerRaw(existing json.RawMessage, server config.MCPServerConfig) 
 		if key == "oauth" && preserveRawOAuth {
 			continue
 		}
+		// `mcp add` replaces the entry: it writes only a disable, never a stale
+		// explicit false carried over from the old entry (upsertServer adds the
+		// false a default that ships disabled needs).
+		if key == "disabled" && string(value) == "false" {
+			continue
+		}
 		merged[key] = value
 	}
 	return json.Marshal(merged)

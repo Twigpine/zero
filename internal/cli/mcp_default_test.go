@@ -174,6 +174,19 @@ func TestRunMCPEnableAIMLAPIDefaultWritesOnlyTheToggle(t *testing.T) {
 	if server := cfg.Servers["aimlapi"]; server.Disabled || config.IsUnconfiguredDefault("aimlapi", server) {
 		t.Fatalf("enabled aimlapi = %#v, want enabled and user-configured", server)
 	}
+	// An unrelated save rewrites the whole file through FileConfig; the
+	// explicit enable has to survive it or the shipped disable comes back.
+	if _, err := config.SetTheme(configPath, "dark"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = config.ResolveMCP(config.ResolveOptions{UserConfigPath: configPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Servers["aimlapi"].Disabled {
+		data, _ := os.ReadFile(configPath)
+		t.Fatalf("an unrelated config save turned aimlapi off again: %s", data)
+	}
 	if len(wire.recorded()) != 0 {
 		t.Fatal("enable must not connect")
 	}

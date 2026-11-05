@@ -610,9 +610,14 @@ func (client *remoteSSEClient) failPending(err error) {
 }
 
 func httpStatusError(server Server, response *http.Response) error {
+	hint := aimlapiUnauthorizedHint(server, response.StatusCode)
+	if sentAIMLAPIServiceKey(server, response.Request) {
+		// The body is server text that may echo the key Zero injected, whole or
+		// cut by the read limit, so it is left out rather than matched.
+		return fmt.Errorf("MCP %s server %s returned HTTP %d (response body omitted: the request carried your AI/ML API key)%s", server.Type, server.Name, response.StatusCode, hint)
+	}
 	body, _ := io.ReadAll(io.LimitReader(response.Body, 1024))
 	detail := strings.TrimSpace(string(body))
-	hint := aimlapiUnauthorizedHint(server, response.StatusCode)
 	if detail == "" {
 		return fmt.Errorf("MCP %s server %s returned HTTP %d%s", server.Type, server.Name, response.StatusCode, hint)
 	}
