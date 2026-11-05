@@ -55,7 +55,7 @@ func TestRootFlagsComposeInAnyOrder(t *testing.T) {
 			wantMode := agent.PermissionModeAsk
 			for _, arg := range args {
 				if arg == "--skip-permissions-unsafe" {
-					wantMode = agent.PermissionModeUnsafe
+					wantMode = agent.PermissionModeFullAuto
 				}
 			}
 			if options.PermissionMode != wantMode {

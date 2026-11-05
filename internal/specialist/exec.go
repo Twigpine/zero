@@ -140,7 +140,7 @@ type TaskRunOptions struct {
 // for a caller that omitted it.) The child's authority never exceeds the parent's.
 func specialistAutonomy(permissionMode string) string {
 	switch strings.TrimSpace(permissionMode) {
-	case string(permissionModeUnsafe):
+	case string(permissionModeFullAuto), string(permissionModeUnsafe):
 		return "high"
 	default:
 		return "low" // unset/unknown modes do NOT inherit unsafe autonomy
@@ -167,7 +167,7 @@ func memberAwareAutonomy(permissionMode string, member bool) string {
 // childPermissionModeFlag returns the --permission-mode value to pass a child
 // process, or "" when the child's tool set must be driven by --auto alone.
 // Only plan and spec-draft require the flag: resolveExecPermissionMode prefers
-// --permission-mode over --auto, so forwarding auto/ask/member/unsafe would
+// --permission-mode over --auto, so forwarding auto/ask/member/full-auto would
 // discard the member rung and widen headless ask children.
 func childPermissionModeFlag(permissionMode string) string {
 	switch strings.TrimSpace(permissionMode) {
@@ -178,10 +178,18 @@ func childPermissionModeFlag(permissionMode string) string {
 	}
 }
 
-// permissionModeUnsafe mirrors agent.PermissionModeUnsafe without importing the
-// agent package (which would create an import cycle): exec resolves "--auto high"
-// to this mode.
-const permissionModeUnsafe = "unsafe"
+// permissionModeFullAuto mirrors agent.PermissionModeFullAuto without importing
+// the agent package (which would create an import cycle): exec resolves
+// "--auto high" to this mode.
+//
+// permissionModeUnsafe is what that mode used to be called. Both are matched
+// because the value crosses this boundary as a raw string, so the deprecated Go
+// alias in the agent package does not apply to it. Recognizing only one spelling
+// silently drops a full-auto parent's specialists to read-only "low" autonomy.
+const (
+	permissionModeFullAuto = "full-auto"
+	permissionModeUnsafe   = "unsafe"
+)
 
 // readOnlySpecialistTools are the tools a "safe" specialist may hold — pure reads
 // plus planning. A specialist whose resolved tools are ALL in this set cannot

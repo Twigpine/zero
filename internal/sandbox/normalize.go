@@ -5,13 +5,21 @@ import (
 	"strings"
 )
 
+// legacyFullAutoPermissionMode is what full-auto used to be called on disk.
+//
+// Accepted permanently rather than migrated: this value lives in user configs
+// and in scripts, and a session that silently fell back to auto because its
+// saved mode no longer parsed would be a confusing downgrade rather than a
+// visible error.
+const legacyFullAutoPermissionMode PermissionMode = "unsafe"
+
 func NormalizePermissionMode(value PermissionMode) PermissionMode {
 	normalized := PermissionMode(strings.ToLower(strings.TrimSpace(string(value))))
 	switch normalized {
 	case PermissionModeAsk:
 		return PermissionModeAsk
-	case PermissionUnsafe:
-		return PermissionUnsafe
+	case PermissionFullAuto, legacyFullAutoPermissionMode:
+		return PermissionFullAuto
 	default:
 		return PermissionModeAuto
 	}

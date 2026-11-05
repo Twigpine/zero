@@ -995,11 +995,11 @@ func TestRunSkipPermissionsUnsafeLaunchesTUIInUnsafeMode(t *testing.T) {
 	if !launched {
 		t.Fatal("expected the interactive TUI to launch, but runTUI was never called")
 	}
-	if launchedOptions.PermissionMode != agent.PermissionModeUnsafe {
-		t.Fatalf("PermissionMode = %q, want %q", launchedOptions.PermissionMode, agent.PermissionModeUnsafe)
+	if launchedOptions.PermissionMode != agent.PermissionModeFullAuto {
+		t.Fatalf("PermissionMode = %q, want %q", launchedOptions.PermissionMode, agent.PermissionModeFullAuto)
 	}
-	if launchedOptions.AgentOptions.PermissionMode != agent.PermissionModeUnsafe {
-		t.Fatalf("AgentOptions.PermissionMode = %q, want %q", launchedOptions.AgentOptions.PermissionMode, agent.PermissionModeUnsafe)
+	if launchedOptions.AgentOptions.PermissionMode != agent.PermissionModeFullAuto {
+		t.Fatalf("AgentOptions.PermissionMode = %q, want %q", launchedOptions.AgentOptions.PermissionMode, agent.PermissionModeFullAuto)
 	}
 }
 
@@ -1110,8 +1110,8 @@ func TestRunSkipPermissionsUnsafeMergesAddDirGrants(t *testing.T) {
 			if exitCode != 0 {
 				t.Fatalf("expected exit code 0, got %d: %s", exitCode, stderr.String())
 			}
-			if launchedOptions.PermissionMode != agent.PermissionModeUnsafe {
-				t.Fatalf("PermissionMode = %q, want %q", launchedOptions.PermissionMode, agent.PermissionModeUnsafe)
+			if launchedOptions.PermissionMode != agent.PermissionModeFullAuto {
+				t.Fatalf("PermissionMode = %q, want %q", launchedOptions.PermissionMode, agent.PermissionModeFullAuto)
 			}
 			if launchedOptions.AgentOptions.Sandbox == nil {
 				t.Fatal("AgentOptions.Sandbox = nil, want sandbox engine")
