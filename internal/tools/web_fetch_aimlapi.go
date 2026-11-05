@@ -20,8 +20,8 @@ import (
 )
 
 // The AI/ML API Toolbox backend fetches the page as Markdown through a
-// Toolbox tool run instead of a direct GET. Every run is billed to the user's
-// AI/ML API balance, so it is opt-in only: it runs when
+// Toolbox tool run instead of a direct GET. Toolbox runs are billed to the
+// user's AI/ML API balance, so it is opt-in only: it runs when
 // ZERO_WEBFETCH_PROVIDER=aimlapi is set, never just because a key exists.
 const (
 	webFetchProviderEnv     = "ZERO_WEBFETCH_PROVIDER"
@@ -29,7 +29,7 @@ const (
 
 	// webFetchAIMLAPITool is the Toolbox tool web_fetch runs: the lowest fixed
 	// price ($0.0013 per run), main-content Markdown that keeps links, and a 404
-	// or unresolvable host comes back as an unbilled is_error run.
+	// or unresolvable host comes back as an is_error run, reported as an error.
 	webFetchAIMLAPITool = "search1api/crawl"
 	// webFetchAIMLAPIMaxCostUSD is sent with every run. It leaves room for a
 	// small price change; a run quoted above it is refused before it starts

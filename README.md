@@ -438,8 +438,8 @@ export ZERO_WEBFETCH_PROVIDER=aimlapi
 Having an AI/ML API key never switches it on by itself, and any other value (or
 none) keeps the direct fetch. The variable is read on every fetch.
 
-- **Billing:** every fetch is a billed Toolbox run on your AI/ML API balance,
-  about $0.0013 each. Each run is sent with `max_cost_usd` 0.005, so a run
+- **Billing:** Toolbox runs are billed to your AI/ML API balance, about
+  $0.0013 per run. Each run is sent with `max_cost_usd` 0.005, so a run
   priced above that is refused before it starts and not charged. Rate-limited
   or gateway-failed requests are retried with the same idempotency key, so a
   retry is never billed twice.
