@@ -435,7 +435,7 @@ type model struct {
 	// A []byte (not strings.Builder) because the model is copied by value on every
 	// Update, which would trip strings.Builder's copy check.
 	streamingText              []byte
-	streamingReasoning         string // live provider reasoning for the current segment
+	streamingReasoning         []byte // live provider reasoning for the current segment; []byte for the same O(1)-append reason as streamingText (see above) — read via streamingReasoningString()
 	streamingReasoningExpanded bool
 	// turnStreamedRunes accumulates every reasoning+answer rune streamed in the
 	// current turn so the working line can show a live, monotonic token estimate.
@@ -2447,7 +2447,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.runID != m.activeRunID {
 			return m, nil
 		}
-		m.streamingReasoning += msg.delta
+		m.streamingReasoning = append(m.streamingReasoning, msg.delta...)
 		m.turnStreamedRunes += utf8.RuneCountInString(msg.delta)
 		// Reasoning IS live provider output, so refresh the activity clock — else the
 		// quiet-generation hint can wrongly read "still generating…" mid-think.
@@ -2763,7 +2763,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		for _, row := range msg.rows {
 			if row.kind == rowReasoning {
-				m.streamingReasoning = ""
+				m.streamingReasoning = nil
 				m.streamingReasoningExpanded = false
 			}
 			m.transcript = appendTranscriptRow(m.transcript, row)
@@ -2772,7 +2772,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// A failed turn has no final answer row to supersede the streamed
 			// text the user already watched — keep the partial answer instead of
 			// letting it vanish from history.
-			if row, ok := reasoningTranscriptRow("", msg.runID, m.streamingReasoning); ok {
+			if row, ok := reasoningTranscriptRow("", msg.runID, m.streamingReasoningString()); ok {
 				m.transcript = appendTranscriptRow(m.transcript, row)
 			}
 			if text := strings.TrimRight(m.streamingTextString(), "\n"); strings.TrimSpace(text) != "" {
@@ -2797,7 +2797,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.streamingText = nil
-		m.streamingReasoning = ""
+		m.streamingReasoning = nil
 		m.streamingReasoningExpanded = false
 		if msg.goalAware {
 			m = m.reconcileGoalAfterRun(msg.usageEvents, msg.err)
@@ -2993,7 +2993,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.row.kind == rowReasoning {
-			m.streamingReasoning = ""
+			m.streamingReasoning = nil
 			m.streamingReasoningExpanded = false
 		}
 		// A tool call ends the current streamed text segment. The segment is the
@@ -3001,9 +3001,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// non-final assistant row so it stays in history instead of silently
 		// vanishing when the tool card replaces the interim block.
 		if msg.row.kind == rowToolCall {
-			if row, ok := reasoningTranscriptRow("", msg.runID, m.streamingReasoning); ok {
+			if row, ok := reasoningTranscriptRow("", msg.runID, m.streamingReasoningString()); ok {
 				m.transcript = appendTranscriptRow(m.transcript, row)
-				m.streamingReasoning = ""
+				m.streamingReasoning = nil
 				m.streamingReasoningExpanded = false
 			}
 			if text := strings.TrimRight(m.streamingTextString(), "\n"); strings.TrimSpace(text) != "" {
@@ -3810,7 +3810,7 @@ func (m model) liveReasoningBodyCap() int {
 
 func (m model) interimBlock(width int) string {
 	text := strings.TrimRight(m.streamingTextString(), "\n")
-	reasoning := strings.TrimRight(m.streamingReasoning, "\n")
+	reasoning := strings.TrimRight(m.streamingReasoningString(), "\n")
 	blocks := []string{}
 	if strings.TrimSpace(reasoning) != "" {
 		blocks = append(blocks, renderReasoningBlock(reasoning, m.streamingReasoningExpanded, width, true, 0, m.liveReasoningBodyCap()))
@@ -4033,20 +4033,36 @@ func formatWorkingElapsed(d time.Duration) string {
 // stream as a dimmed preview so a long "Thinking" phase shows live, changing
 // content instead of a static header. Each line shows its TAIL (the most recent
 // text) so a single continuously-growing reasoning line still visibly moves as
-// tokens arrive. Returns nil when there is no reasoning text.
+// tokens arrive. Only the tail is ever shown, so it scans backwards from the end
+// instead of splitting the whole (continuously growing) string on every frame.
+// Returns nil when there is no reasoning text.
 func reasoningPreviewLines(reasoning string, width int) []string {
-	var lines []string
-	for _, raw := range strings.Split(strings.TrimSpace(reasoning), "\n") {
-		if t := strings.TrimSpace(raw); t != "" {
-			lines = append(lines, t)
+	// Collect up to the last 2 non-blank lines, walking backwards from the end.
+	var tail [2]string
+	count := 0
+	rest := reasoning
+	for count < 2 {
+		end := len(rest)
+		for end > 0 && rest[end-1] == '\n' {
+			end--
 		}
+		if end == 0 {
+			break
+		}
+		lineStart := strings.LastIndexByte(rest[:end], '\n') + 1
+		if t := strings.TrimSpace(rest[lineStart:end]); t != "" {
+			tail[1-count] = t
+			count++
+		}
+		if lineStart == 0 {
+			break
+		}
+		rest = rest[:lineStart-1]
 	}
-	if len(lines) == 0 {
+	if count == 0 {
 		return nil
 	}
-	if len(lines) > 2 {
-		lines = lines[len(lines)-2:]
-	}
+	lines := tail[2-count:]
 	avail := width - 2
 	if avail < 8 {
 		avail = 8
@@ -4060,16 +4076,34 @@ func reasoningPreviewLines(reasoning string, width int) []string {
 
 // previewTail returns the last `width` runes of s, prefixed with "…" when text
 // was dropped, so a streaming preview shows the newest content. s is plain text
-// (reasoning deltas carry no ANSI), so rune counting is a safe width proxy.
+// (reasoning deltas carry no ANSI), so rune counting is a safe width proxy. It
+// decodes only the last `width` runes instead of converting the whole line,
+// because a single growing reasoning line is re-previewed on every frame.
 func previewTail(s string, width int) string {
-	runes := []rune(s)
-	if width <= 0 || len(runes) <= width {
+	if width <= 0 || s == "" {
 		return s
 	}
 	if width == 1 {
-		return string(runes[len(runes)-1:])
+		_, size := utf8.DecodeLastRuneInString(s)
+		return s[len(s)-size:]
 	}
-	return "…" + string(runes[len(runes)-(width-1):])
+	// Walk back at most `width` runes, remembering where the last width-1 runes
+	// start. If fewer than width runes exist, nothing was dropped; if exactly
+	// width exist, the original whole-line return still applies. Only when a
+	// width+1-th rune exists do we truncate and prefix "…".
+	i := len(s)
+	cut := len(s)
+	for consumed := 0; i > 0 && consumed < width; consumed++ {
+		_, size := utf8.DecodeLastRuneInString(s[:i])
+		i -= size
+		if consumed == width-2 {
+			cut = i
+		}
+	}
+	if i == 0 {
+		return s
+	}
+	return "…" + s[cut:]
 }
 
 func (m model) appendStreamingCursor(lines []string, width int) []string {
@@ -5499,7 +5533,7 @@ func (m *model) cancelRun() {
 		// A cancelled run must terminate visibly in the transcript: first the
 		// partial streamed answer (if any), then the cancellation marker — the
 		// session log gets the same marker below.
-		if row, ok := reasoningTranscriptRow("", m.activeRunID, m.streamingReasoning); ok {
+		if row, ok := reasoningTranscriptRow("", m.activeRunID, m.streamingReasoningString()); ok {
 			m.transcript = appendTranscriptRow(m.transcript, row)
 		}
 		if text := strings.TrimRight(m.streamingTextString(), "\n"); strings.TrimSpace(text) != "" {
@@ -5537,7 +5571,7 @@ func (m *model) cancelRun() {
 	// The interim block renders streamingText live; a cancelled run's partial
 	// answer must not leak into (and concatenate with) the next turn's stream.
 	m.streamingText = nil
-	m.streamingReasoning = ""
+	m.streamingReasoning = nil
 	m.streamingReasoningExpanded = false
 	// Hard-stop the fade and drop the per-line age map. The next turn's
 	// first agentTextMsg will seed a fresh lineAges slice and restart
@@ -6208,6 +6242,15 @@ func (m model) sendAgentText(runID int, delta string) {
 // by the segment length, the same cost the renderer already pays.
 func (m model) streamingTextString() string {
 	return string(m.streamingText)
+}
+
+// streamingReasoningString returns the accumulated live reasoning. Like
+// streamingText it is stored as []byte so each reasoning delta is an O(1)
+// amortized append instead of the O(n²) that string += delta incurs across a
+// long thinking segment; the conversion here is bounded by the segment length,
+// the same cost the renderer already pays in interimBlock.
+func (m model) streamingReasoningString() string {
+	return string(m.streamingReasoning)
 }
 
 func (m model) sendToolCallStreamStart(runID int, id, name string) {

@@ -352,7 +352,7 @@ func TestWorkingTokenIndicatorAccumulatesAcrossSegmentClears(t *testing.T) {
 
 	// Simulate the segment boundary that clears the live buffers, then stream
 	// answer text in the next segment.
-	m.streamingReasoning = ""
+	m.streamingReasoning = nil
 	m.streamingText = nil
 	updated, _ = m.Update(agentTextMsg{runID: rid, delta: strings.Repeat("b", 40)})
 	m = updated.(model)
@@ -373,6 +373,40 @@ func TestWorkingTokenIndicatorAccumulatesAcrossSegmentClears(t *testing.T) {
 	}
 }
 
+func TestReasoningPreviewLines(t *testing.T) {
+	plain := func(lines []string) []string {
+		out := make([]string, 0, len(lines))
+		for _, line := range lines {
+			out = append(out, ansiPattern.ReplaceAllString(line, ""))
+		}
+		return out
+	}
+	if got := reasoningPreviewLines("", 80); got != nil {
+		t.Errorf("empty reasoning must render no preview, got %q", got)
+	}
+	if got := reasoningPreviewLines("   \n\n  \n", 80); got != nil {
+		t.Errorf("blank-only reasoning must render no preview, got %q", got)
+	}
+	got := plain(reasoningPreviewLines("first line\n\n  second line  \nthird\n\n", 200))
+	want := []string{"  second line", "  third"}
+	if len(got) != len(want) {
+		t.Fatalf("preview lines = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("preview line %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+	// A single continuously-growing line shows its TAIL, newest last.
+	single := plain(reasoningPreviewLines(strings.Repeat("a", 500)+" tail", 20))
+	if len(single) != 1 || !strings.Contains(single[0], "tail") {
+		t.Fatalf("single growing line must preview its tail, got %q", single)
+	}
+	if strings.HasPrefix(strings.TrimLeft(single[0], " "), "a") {
+		t.Errorf("long line must be truncated with an ellipsis, got %q", single[0])
+	}
+}
+
 func TestPreviewTail(t *testing.T) {
 	cases := []struct {
 		in    string
@@ -383,6 +417,12 @@ func TestPreviewTail(t *testing.T) {
 		{"exactlyten", 10, "exactlyten"},
 		{"abcdefghijklmnop", 6, "…lmnop"}, // tail with leading ellipsis
 		{"", 8, ""},
+		{"four", 4, "four"},          // exactly width runes: no ellipsis
+		{"five!", 4, "…ve!"},         // width+1 runes: truncate to width incl. ellipsis
+		{"x", 1, "x"},                // width 1 keeps the last rune
+		{"日本語abc", 4, "…abc"},        // multibyte runes counted, not bytes
+		{"héllo wörld", 6, "…wörld"}, // accented tail
+		{"🙂🙂🙂", 2, "…🙂"},             // 4-byte emoji runes
 	}
 	for _, c := range cases {
 		if got := previewTail(c.in, c.width); got != c.want {
@@ -399,7 +439,7 @@ func TestInterimBlockShowsReasoningPreviewWhileThinking(t *testing.T) {
 	base := time.Date(2026, 6, 18, 23, 0, 0, 0, time.UTC)
 	m.now = func() time.Time { return base.Add(90 * time.Second) }
 	m.turnStartedAt = base
-	m.streamingReasoning = "analyzing the layout\nthe patch was corrupt so re-planning the css edits"
+	m.streamingReasoning = []byte("analyzing the layout\nthe patch was corrupt so re-planning the css edits")
 	m.streamingText = nil // thinking phase: no answer yet
 
 	got := plainRender(t, m.interimBlock(96))
@@ -418,7 +458,7 @@ func TestInterimBlockNoPreviewWhenReasoningExpanded(t *testing.T) {
 	m.width = 100
 	m.now = func() time.Time { return time.Date(2026, 6, 18, 23, 0, 0, 0, time.UTC) }
 	m.streamingReasoningExpanded = true
-	m.streamingReasoning = "only line of reasoning here"
+	m.streamingReasoning = []byte("only line of reasoning here")
 	m.streamingText = nil
 	got := plainRender(t, m.interimBlock(96))
 	if strings.Count(got, "only line of reasoning here") != 1 {
