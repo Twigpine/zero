@@ -877,7 +877,10 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			// run wrote ten times into the user's real tree that way, each write
 			// allowed with the reason "workspace write is allowed", because by
 			// then it genuinely was inside the child's write roots.
-			ExtraWriteRoots: scope.ExtraRoots,
+			//
+			// withinTurn selects whether TURN-SCOPED grants may ride along: only
+			// for a child that exits before this turn does (see childWriteRoots).
+			ExtraWriteRoots: func(withinTurn bool) []string { return childWriteRoots(scope, withinTurn) },
 			// The read counterpart: a request_permissions READ grant lands in the
 			// scope's readRoots, which ExtraRoots (write grants) does not return, so
 			// without this a plan auditing a granted path failed "outside the
@@ -1383,7 +1386,8 @@ type orchestrateWiring struct {
 	// ExtraWriteRoots reports the run's non-workspace roots at LAUNCH time, so a
 	// child's sandbox covers the same ground its parent's does. nil means the
 	// workspace only, which is what every child got before this existed.
-	ExtraWriteRoots func() []string
+	// withinTurn: see specialist.Executor.ExtraWriteRoots.
+	ExtraWriteRoots func(withinTurn bool) []string
 	// ExtraReadRoots reports the paths the run may READ beyond its workspace — its
 	// request_permissions grants — at DISPATCH time, so a plan's tasks can read a
 	// granted external path instead of failing "outside the workspace". The read

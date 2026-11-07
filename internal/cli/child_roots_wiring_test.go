@@ -60,7 +60,7 @@ func TestTheCLIExecutorWithholdsAnAncestorRootFromAnIsolatedChild(t *testing.T) 
 	executor := specialist.Executor{
 		NewSessionID: func() (string, error) { return "specialist_00000000000000000000000a", nil },
 	}
-	wireChildRoots(&executor, workspace, orchestrateWiring{ExtraWriteRoots: scope.ExtraRoots})
+	wireChildRoots(&executor, workspace, orchestrateWiring{ExtraWriteRoots: func(withinTurn bool) []string { return childWriteRoots(scope, withinTurn) }})
 
 	isolated, err := executor.BuildArgs(specialist.BuildArgsInput{
 		Manifest: specialist.Manifest{Metadata: specialist.Metadata{Name: "explorer"}},

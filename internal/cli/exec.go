@@ -333,8 +333,8 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 				// built further down this function, and a child is launched long
 				// after both. Reading it here would capture nil forever — the same
 				// reason planGate above is a pointer.
-				ExtraWriteRoots: func() []string {
-					return execChildWriteRoots(execScope)
+				ExtraWriteRoots: func(withinTurn bool) []string {
+					return childWriteRoots(execScope, withinTurn)
 				},
 				// The read counterpart: a request_permissions READ grant lands in a
 				// separate scope list the write roots above do not cover, so without
@@ -1742,16 +1742,24 @@ func execPlanPaths(workspaceRoot string) specialist.PlanPaths {
 	return specialist.DefaultPlanPaths(workspaceRoot, userConfigDir)
 }
 
-// execChildWriteRoots is what a headless run's children may WRITE beyond their
-// own workspace: the run's granted extra roots, and never the parent workspace
-// root itself. It returned execScope.Roots() — workspace included — and for an
+// childWriteRoots is what a run's children may WRITE beyond their own
+// workspace: the run's granted extra roots, and never the parent workspace root
+// itself. It returned execScope.Roots() — workspace included — and for an
 // ISOLATED plan that defeats the isolation outright: the worktree exists so a
 // write-capable plan cannot touch the parent tree, and the wiring was handing
-// the parent tree back as a writable --add-dir. The TUI has always passed only
-// scope.ExtraRoots; the two surfaces now agree.
-func execChildWriteRoots(scope *sandbox.Scope) []string {
+// the parent tree back as a writable --add-dir. Both surfaces (TUI and headless)
+// use this one function.
+//
+// TURN-SCOPED GRANTS ONLY FOR A CHILD THAT ENDS WITHIN THE TURN. A root in a
+// child's argv is permanent for the child's life; the parent's end-of-turn
+// release cannot reach it. So a child that may outlive the turn (background
+// Task, plan task, swarm member) gets only the roots that outlive it as well.
+func childWriteRoots(scope *sandbox.Scope, withinTurn bool) []string {
 	if scope == nil {
 		return nil
 	}
-	return scope.ExtraRoots()
+	if withinTurn {
+		return scope.ExtraRoots()
+	}
+	return scope.SessionExtraRoots()
 }
