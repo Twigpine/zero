@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -303,7 +304,8 @@ func (m model) savedProviderModelPickerItems(profile config.ProviderProfile, act
 	if endpointKey != "" {
 		discovered = m.modelPickerLiveByProvider[endpointKey]
 	}
-	if len(discovered) == 0 && hasDescriptor && !genericProviderCatalogID(descriptor.ID) {
+	if len(discovered) == 0 && hasDescriptor && !genericProviderCatalogID(descriptor.ID) &&
+		(descriptor.ID != "chatgpt" || strings.TrimSpace(profile.Name) == "") {
 		discovered = m.modelPickerLiveByProvider[descriptor.ID]
 	}
 
@@ -386,6 +388,7 @@ func (m model) openModelPicker() (model, tea.Cmd) {
 	}
 	m.picker = picker
 	m.clearModelPickerLoadState()
+	m.modelPickerDiscoveryGeneration++
 	// Live-discover every usable provider's real models in the background. The list
 	// shows immediately from the static catalog and each provider's section refreshes
 	// as its discovery returns — no blocking overlay.
@@ -452,14 +455,71 @@ func (m model) modelPickerProviderDiscoveryCmd(descriptor providercatalog.Descri
 				k = resolved
 			}
 		}
-		models, err := discover(ctx, providerWizardDiscoveryProfile(descriptor, k, authed.BaseURL))
+		discoveryProfile := providerWizardDiscoveryProfile(descriptor, k, authed.BaseURL)
+		discoveryProfile.Name = authed.Name
+		models, err := discover(ctx, discoveryProfile)
 		return modelPickerModelsDiscoveredMsg{
 			providerID:  providerID,
 			endpointKey: endpointKey,
 			models:      models,
 			err:         err,
+			secrets:     []string{k, authed.APIKey, authed.AuthHeaderValue},
+			generation:  m.modelPickerDiscoveryGeneration,
 		}
 	}
+}
+
+// modelListDiscoveryCmd refreshes the active account before printing /model list.
+// The popup and text command share both the discovery path and its cached results.
+func (m model) modelListDiscoveryCmd() tea.Cmd {
+	descriptor, ok := m.activeProviderDescriptor()
+	if !ok || !config.HasProviderProfile(m.providerProfile) {
+		return nil
+	}
+	cmd := m.modelPickerProviderDiscoveryCmd(descriptor, m.providerProfile)
+	if cmd == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		msg := cmd().(modelPickerModelsDiscoveredMsg)
+		msg.showList = true
+		return msg
+	}
+}
+
+// The caller supplies only profiles that its refresh action can refresh.
+func (m model) modelPickerDiscoveryNotices(profiles []config.ProviderProfile, refreshAction string) []string {
+	var notices []string
+	if status := strings.TrimSpace(m.modelPickerLoadError); status != "" {
+		notices = append(notices, status)
+	}
+	for _, profile := range profiles {
+		descriptor, ok := m.descriptorForProfile(profile)
+		if !ok {
+			continue
+		}
+		key := providerEndpointKey(profile, descriptor)
+		failure := m.modelPickerErrorsByProvider[key]
+		catalogFallback := descriptor.ID != "chatgpt" || strings.TrimSpace(profile.Name) == ""
+		if failure == "" && catalogFallback {
+			failure = m.modelPickerErrorsByProvider[descriptor.ID]
+		}
+		discovered := m.modelPickerLiveByProvider[key]
+		if len(discovered) == 0 && catalogFallback {
+			discovered = m.modelPickerLiveByProvider[descriptor.ID]
+		}
+		label := firstProviderDisplayValue(profile.Name, descriptor.Name)
+		if failure != "" {
+			source := "fallback suggestions (unverified)"
+			if len(discovered) > 0 {
+				source = "previously discovered models"
+			}
+			notices = append(notices, fmt.Sprintf("%s: %s; refresh failed: %s. %s to retry.", label, source, failure, refreshAction))
+		} else if descriptor.ID == "chatgpt" && len(discovered) == 0 {
+			notices = append(notices, label+": fallback suggestions (unverified). "+refreshAction+" to refresh.")
+		}
+	}
+	return notices
 }
 
 func (m model) modelPickerDiscoveryOptions(profile config.ProviderProfile) providermodeldiscovery.Options {
@@ -900,6 +960,11 @@ func (m model) activeDiscoveryKeys() []string {
 	if key := providerEndpointKey(m.providerProfile, descriptor); key != "" {
 		add(key)
 	}
+	if hasDescriptor && descriptor.ID == "chatgpt" && strings.TrimSpace(m.providerProfile.Name) != "" {
+		// The canonical profile may itself be named "chatgpt". Its cache key
+		// must not become a catalog-wide fallback for a different account.
+		return keys
+	}
 	if m.providerProfile.Name != "" {
 		add(m.providerProfile.Name)
 	}
@@ -939,6 +1004,9 @@ type modelPickerModelsDiscoveredMsg struct {
 	endpointKey string
 	models      []providermodeldiscovery.Model
 	err         error
+	secrets     []string
+	showList    bool
+	generation  int
 }
 
 // ollamaContextWindowDiscoveredMsg carries the result of an async /api/show
@@ -1026,6 +1094,19 @@ func profileMatchesProviderBaseURL(profile config.ProviderProfile, provider prov
 func (m model) applyModelPickerModelsDiscovered(msg modelPickerModelsDiscoveredMsg) model {
 	m.modelPickerLoading = false
 	m.modelPickerLoadingProviderID = ""
+	key := firstProviderDisplayValue(msg.endpointKey, msg.providerID)
+	errorsByProvider := make(map[string]string, len(m.modelPickerErrorsByProvider)+1)
+	for k, v := range m.modelPickerErrorsByProvider {
+		errorsByProvider[k] = v
+	}
+	delete(errorsByProvider, key)
+	if msg.err != nil {
+		message := providermodeldiscovery.RedactError(msg.err, msg.secrets...).Error()
+		errorsByProvider[key] = truncateTUIOutput(sanitizeCardField(message), 240)
+	} else if len(msg.models) == 0 {
+		errorsByProvider[key] = "models endpoint returned no visible coding models"
+	}
+	m.modelPickerErrorsByProvider = errorsByProvider
 	if msg.err != nil || len(msg.models) == 0 {
 		return m
 	}
@@ -1037,7 +1118,9 @@ func (m model) applyModelPickerModelsDiscovered(msg modelPickerModelsDiscoveredM
 	if msg.endpointKey != "" {
 		newMap[msg.endpointKey] = modelsCopy
 	}
-	if msg.providerID != "" && (!genericProviderCatalogID(msg.providerID) || msg.endpointKey == "") {
+	// Subscription catalogs belong to the account/profile, so a second ChatGPT
+	// login must not overwrite another profile's entitlements under a shared ID.
+	if msg.providerID != "" && ((!genericProviderCatalogID(msg.providerID) && msg.providerID != "chatgpt") || msg.endpointKey == "") {
 		newMap[msg.providerID] = modelsCopy
 	}
 	m.modelPickerLiveByProvider = newMap
