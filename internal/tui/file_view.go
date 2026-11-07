@@ -1319,10 +1319,10 @@ func (m model) renderFileViewDiff(width int) string {
 // this session's diffs added (matched by exact text — an approximation that
 // tolerates later drift; a stale marker just doesn't highlight).
 // It is strictly non-blocking and performs O(1) lookup without invoking formatters.
+// A read error is a completed snapshot like any other: it is shown only while
+// that snapshot is still the authoritative one, so a pending reload or a fork
+// that invalidated it falls through to the loading placeholder.
 func (m model) renderFileViewFull(width int) string {
-	if m.fileView.hasError {
-		return m.fileView.renderedContent
-	}
 	target := m.fileView.path
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(m.cwd, target)
@@ -1333,7 +1333,9 @@ func (m model) renderFileViewFull(width int) string {
 		m.fileView.loadedRev >= m.fileView.requiredSourceRev &&
 		m.fileView.loadedGen == defaultFileViewCache.generation() &&
 		m.fileView.loadedToken == m.fileView.lifetimeToken {
-		defaultFileViewCache.recordHit()
+		if !m.fileView.hasError {
+			defaultFileViewCache.recordHit()
+		}
 		return m.fileView.renderedContent
 	}
 	if cached, ok := defaultFileViewCache.peekRenderOnly(target, width, m.fileView.desiredFingerprint, m.fileView.loadedSeq, m.fileView.desiredSeq, m.fileView.loadedRev, m.fileView.requiredSourceRev); ok {
