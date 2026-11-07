@@ -366,11 +366,17 @@ func shellRuntimeForEngine(engine *zeroSandbox.Engine, absoluteCwd string) shell
 func shellStartsUnderEngine(engine *zeroSandbox.Engine, path string, absoluteCwd string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	command, _, err := engine.CommandContext(ctx, zeroSandbox.CommandSpec{
+	command, plan, err := engine.CommandContext(ctx, zeroSandbox.CommandSpec{
 		Name: path,
 		Args: []string{"-NoLogo", "-NoProfile", "-Command", "exit 0"},
 		Dir:  absoluteCwd,
 	})
+	// THE PLAN HOLDS RESOURCES even for a probe: building it takes a shared
+	// lease on the workspace's sandbox runtime directory, which only Cleanup
+	// releases. Discarding the plan leaked that lease for the rest of the
+	// process, so the runtime root stayed "in use" to every other Zero process's
+	// cleanup and, on Windows, kept a handle open under the cache directory.
+	defer plan.Cleanup()
 	if err != nil || command == nil {
 		return false
 	}
