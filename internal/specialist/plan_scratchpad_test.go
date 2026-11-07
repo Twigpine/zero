@@ -290,3 +290,75 @@ func TestACancelledTasksPartialOutputIsStillRecorded(t *testing.T) {
 		t.Fatalf("recorded outside the scratchpad: %s", path)
 	}
 }
+
+// RECORD NEVER WRITES THROUGH SOMETHING ALREADY AT THE DESTINATION. The pad is
+// listable and, for a write-capable task, writable; a link planted under a
+// not-yet-recorded task's id would otherwise aim the unsandboxed parent's write
+// at a file of the planter's choosing.
+func TestRecordRefusesAnythingAlreadyAtTheDestination(t *testing.T) {
+	pad, err := NewScratchpad("p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pad.Release()
+
+	victimDir := t.TempDir()
+	const original = "victim settings"
+	newVictim := func(name string) string {
+		path := filepath.Join(victimDir, name)
+		if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	assertUntouched := func(path string) {
+		t.Helper()
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != original {
+			t.Fatalf("Record wrote through a planted link: %s now holds %q", path, got)
+		}
+	}
+	refuses := func(id string) {
+		t.Helper()
+		path, err := pad.Record(id, "model-chosen content")
+		if err == nil || path != "" {
+			t.Fatalf("Record(%q) = %q, %v; it must refuse an occupied destination", id, path, err)
+		}
+	}
+
+	symlinkVictim := newVictim("symlinked.json")
+	if err := os.Symlink(symlinkVictim, filepath.Join(pad.Root(), "via_symlink.md")); err != nil {
+		t.Logf("symlinks unsupported here, skipping that case: %v", err)
+	} else {
+		refuses("via_symlink")
+		assertUntouched(symlinkVictim)
+	}
+
+	// A dangling symlink must not be created-through either.
+	dangling := filepath.Join(victimDir, "not-yet.json")
+	if err := os.Symlink(dangling, filepath.Join(pad.Root(), "via_dangling.md")); err == nil {
+		refuses("via_dangling")
+		if _, err := os.Lstat(dangling); !os.IsNotExist(err) {
+			t.Fatalf("Record created the dangling symlink's target: %v", err)
+		}
+	}
+
+	hardVictim := newVictim("hardlinked.json")
+	if err := os.Link(hardVictim, filepath.Join(pad.Root(), "via_hardlink.md")); err != nil {
+		t.Logf("hard links unsupported here, skipping that case: %v", err)
+	} else {
+		refuses("via_hardlink")
+		assertUntouched(hardVictim)
+	}
+
+	// And a plain file already there is not overwritten.
+	planted := filepath.Join(pad.Root(), "via_file.md")
+	if err := os.WriteFile(planted, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	refuses("via_file")
+	assertUntouched(planted)
+}
