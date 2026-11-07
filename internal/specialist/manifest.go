@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/Twigpine/zero/internal/config"
 	"github.com/Twigpine/zero/internal/modelregistry"
@@ -34,13 +33,31 @@ type Metadata struct {
 }
 
 type Manifest struct {
-	Metadata      Metadata  `json:"metadata"`
-	SystemPrompt  string    `json:"systemPrompt"`
-	ResolvedTools []string  `json:"resolvedTools,omitempty"`
-	Location      Location  `json:"location"`
-	FilePath      string    `json:"filePath"`
-	LastModified  time.Time `json:"lastModified,omitempty"`
-	Warnings      []string  `json:"warnings,omitempty"`
+	Metadata      Metadata `json:"metadata"`
+	SystemPrompt  string   `json:"systemPrompt"`
+	ResolvedTools []string `json:"resolvedTools,omitempty"`
+	// ToolsResolved reports that ResolvedTools is AUTHORITATIVE — including
+	// when it is empty, which then means "deliberately nothing" rather than
+	// "not resolved yet".
+	//
+	// A bare []string cannot express that difference. Absence and emptiness are
+	// both len()==0, and `omitempty` erases the distinction outright: an empty
+	// ResolvedTools does not survive marshalling at all, so `!= nil` is not a
+	// usable test either. That is the same defect shape as audit finding M24 (a
+	// meaningful zero that omitempty deletes), and it let an empty grant fall
+	// through to the default read-only category — a narrower parent producing a
+	// wider child.
+	//
+	// A flag rather than a sentinel string or a distinct type: the meaningful
+	// value is TRUE, so omitempty only ever drops the meaningless false and the
+	// field round-trips correctly. A sentinel would be a magic tool name every
+	// consumer had to know to exclude (deny-list shaped, invariant 2), and a
+	// distinct type would touch every reader of ResolvedTools for no additional
+	// safety.
+	ToolsResolved bool     `json:"toolsResolved,omitempty"`
+	Location      Location `json:"location"`
+	FilePath      string   `json:"filePath"`
+	Warnings      []string `json:"warnings,omitempty"`
 }
 
 type Summary struct {
@@ -262,11 +279,16 @@ func Validate(manifest *Manifest) error {
 		if err != nil {
 			return fmt.Errorf("load model registry: %w", err)
 		}
-		modelID, ok := registry.ResolveID(manifest.Metadata.Model)
-		if !ok {
-			return fmt.Errorf("specialist %q references unknown model %q", manifest.Metadata.Name, manifest.Metadata.Model)
+		// CANONICALISE WHAT IS KNOWN, PASS THROUGH WHAT IS NOT. The registry is a
+		// curated subset used for display, pricing and alias resolution — not an
+		// inventory of what a provider serves. Refusing anything outside it meant
+		// a specialist could not be pointed at a model the active provider offers
+		// unless it happened to be one of thirteen, which on an xAI or Ollama
+		// account is none of them. A name this provider cannot serve still fails,
+		// in providers/factory.go, which is the component that knows.
+		if modelID, ok := registry.ResolveID(manifest.Metadata.Model); ok {
+			manifest.Metadata.Model = modelID
 		}
-		manifest.Metadata.Model = modelID
 	}
 	if manifest.Metadata.ReasoningEffort != "" {
 		effort := strings.ToLower(manifest.Metadata.ReasoningEffort)
@@ -280,6 +302,7 @@ func Validate(manifest *Manifest) error {
 		return fmt.Errorf("specialist %q: %w", manifest.Metadata.Name, err)
 	}
 	manifest.ResolvedTools = resolved
+	manifest.ToolsResolved = true
 	return nil
 }
 
@@ -514,9 +537,11 @@ func loadDirectory(dir string, location Location) ([]Manifest, []string, error) 
 		}
 		manifest.Location = location
 		manifest.FilePath = path
-		if info, err := entry.Info(); err == nil {
-			manifest.LastModified = info.ModTime()
-		}
+		// REMOVED: a LastModified stamped from the directory entry here and read
+		// by nothing — not by Go, and not by any JSON surface, because Manifest
+		// is never marshalled. Dead state on a struct is not free: it reads like
+		// something downstream depends on, and the next person to touch loading
+		// has to prove otherwise before changing it.
 		manifests = append(manifests, manifest)
 	}
 	return manifests, warnings, nil

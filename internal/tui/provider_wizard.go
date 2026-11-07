@@ -119,7 +119,11 @@ func (m model) resolveProviderWizardAimlapi(cmd tea.Cmd, outcome aimlapiOutcome)
 	}
 	// Keep the shared spinner tick alive whenever the sub-flow just entered a busy
 	// or progress state, so its animated spinner advances during onboarding.
-	return m, tea.Batch(cmd, m.ensureSpinnerTick())
+	// Sequenced: ensureSpinnerTick has a pointer receiver and sets
+	// spinnerTicking, and Go does not specify whether the plain operand m is
+	// copied before or after the call operand in the same return.
+	tick := m.ensureSpinnerTick()
+	return m, tea.Batch(cmd, tick)
 }
 
 // applyProviderWizardDeviceCode handles phase 1 of device-code login: show the

@@ -24,7 +24,15 @@ type StreamUsage struct {
 	PromptTokens     int
 	CompletionTokens int
 	TotalTokens      int
-	Events           int
+	// CachedInputTokens, CacheWriteTokens and ReasoningTokens are what make a
+	// child's turn PRICEABLE by its parent. Absent, every rolled-up sub-agent
+	// turn was costed as if nothing had been cached — on a plan task, where the
+	// same large prompt is re-sent each turn, that is the overwhelming majority
+	// of the input.
+	CachedInputTokens int
+	CacheWriteTokens  int
+	ReasoningTokens   int
+	Events            int
 }
 
 func (usage StreamUsage) HasUsage() bool {
@@ -87,6 +95,17 @@ func SummarizeStream(events []streamjson.Event, processExitCode int) StreamResul
 			} else {
 				result.Usage.TotalTokens += eventPromptTokens + eventCompletionTokens
 			}
+			// Summed, not overwritten: a task makes one provider call per turn
+			// and each reports its own cache split.
+			if event.CachedInputTokens != nil {
+				result.Usage.CachedInputTokens += *event.CachedInputTokens
+			}
+			if event.CacheWriteTokens != nil {
+				result.Usage.CacheWriteTokens += *event.CacheWriteTokens
+			}
+			if event.ReasoningTokens != nil {
+				result.Usage.ReasoningTokens += *event.ReasoningTokens
+			}
 		}
 	}
 	if finalText != "" {
@@ -95,6 +114,41 @@ func SummarizeStream(events []streamjson.Event, processExitCode int) StreamResul
 		result.Text = strings.TrimSpace(strings.Join(textParts, ""))
 	}
 	return result
+}
+
+// sessionIDLinePrefix heads the line BuildFinalResult prepends to a successful
+// subagent's output, so the parent can continue that child by id.
+const sessionIDLinePrefix = "session_id: "
+
+// WithoutSessionIDLine removes that line for a caller that already holds the id
+// structurally and whose output a PERSON reads.
+//
+// A PLAN TASK IS BOTH. ExecResult.SessionID carries the id to the plan runner
+// already, so the line adds nothing there — and a plan task's output is not a
+// tool result the parent model consumes on its own. It is quoted into the report
+// under "result:", pasted into the dependency briefing every downstream task
+// reads, and rendered in the plan panel, so the line surfaced a raw child
+// session id in the middle of a user-facing answer three separate ways. Nothing
+// can continue a plan task's child by that id in any case: the plan owns its
+// children's lifetimes.
+//
+// KEYED ON THE ID WE KNOW, never on the pattern. It strips the first line only
+// when that line is exactly this prefix followed by the id the caller was handed,
+// so it cannot cut a line of the child's own prose that happens to begin the same
+// way — the fuzzy-match rule that this repo has broken more than once.
+func WithoutSessionIDLine(output, sessionID string) string {
+	if sessionID == "" {
+		return output
+	}
+	line := sessionIDLinePrefix + sessionID
+	rest, ok := strings.CutPrefix(output, line)
+	if !ok {
+		return output
+	}
+	if rest != "" && !strings.HasPrefix(rest, "\n") {
+		return output
+	}
+	return strings.TrimLeft(rest, "\n")
 }
 
 func BuildFinalResult(events []streamjson.Event, stderrOutput string, processExitCode int, signalDesc string) tools.Result {
@@ -111,7 +165,7 @@ func BuildFinalResult(events []streamjson.Event, stderrOutput string, processExi
 	if !hasErrors {
 		output := summary.Text
 		if summary.SessionID != "" {
-			output = "session_id: " + summary.SessionID + "\n" + output
+			output = sessionIDLinePrefix + summary.SessionID + "\n" + output
 		}
 		return tools.Result{Status: tools.StatusOK, Output: strings.TrimSpace(output)}
 	}

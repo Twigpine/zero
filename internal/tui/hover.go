@@ -18,6 +18,8 @@ const (
 	// hoverFileRow: a touched-file row in the sidebar's FILES section, identified
 	// by path.
 	hoverFileRow
+	hoverOrchestrateTask
+	hoverZeromaxingChip
 )
 
 // hoverTarget identifies the single clickable row (if any) currently under the
@@ -38,6 +40,7 @@ type hoverTarget struct {
 	sessionID string // hoverSidebarAgent
 	stepIndex int    // hoverPlanStep
 	filePath  string // hoverFileRow
+	taskID    string // hoverOrchestrateTask
 }
 
 // mouseHover reports whether msg is a plain cursor-movement event with NO button
@@ -55,6 +58,12 @@ func mouseHover(msg tea.MouseMsg) bool {
 // Context data lives in the run-details overlay; the former sidebar rail is not
 // rendered and therefore cannot own a hover target.
 func (m model) updateHoverTarget(msg tea.MouseMsg) model {
+	// The posture chip remains an active footer control on main's compact layout.
+	// It is outside the transcript hit-test and does not revive removed sidebar
+	// rail hit targets.
+	if m.zeromaxingChipAtMouse(msg) {
+		return m.withHover(hoverTarget{kind: hoverZeromaxingChip})
+	}
 	if line, ok := m.transcriptLineAtMouse(msg); ok {
 		// A permission option reuses its OWN existing keyboard-cursor highlight
 		// (see hoverPermissionOption) rather than the m.hover mechanism, so there's

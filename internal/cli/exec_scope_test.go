@@ -115,6 +115,26 @@ func runExecAddDirWriteProbe(t *testing.T, cwd string, args []string, target str
 // is known the scoped core tools are re-registered and Registry.Register
 // replaces the earlier instances BY NAME. The before/after write_file probes
 // prove both the overwrite and the scoped enforcement it ships.
+// --add-read-dir grants READ, not write, at the process boundary: a write_file
+// inside the read-only root is DENIED. This pins exec's readDirs loop to
+// scope.AddRead — had it used scope.Add (write), or emitted --add-dir, this write
+// would land, and a path the parent may only read would be writable in the child.
+func TestAddReadDirGrantsReadOnlyAtTheProcessBoundary(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	cwd := t.TempDir()
+	readRoot := tempDirOutsideDefaultTemp(t)
+	target := filepath.Join(readRoot, "must-not-write.txt")
+
+	args := []string{"exec", "--add-read-dir", readRoot, "--skip-permissions-unsafe", "write the note"}
+	exitCode, stderr := runExecAddDirWriteProbe(t, cwd, args, target)
+	if exitCode != exitSuccess {
+		t.Fatalf("exit = %d, want %d; stderr = %q", exitCode, exitSuccess, stderr)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("a write inside a --add-read-dir root landed — a read grant escalated to write (stat err=%v)", err)
+	}
+}
+
 func TestExecScopeReRegistrationSwapsCoreToolsByName(t *testing.T) {
 	root := t.TempDir()
 	extra := tempDirOutsideDefaultTemp(t)

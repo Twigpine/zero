@@ -37,6 +37,14 @@ type RunOptions struct {
 	ReasoningEffort   string
 	Depth             int
 	Cwd               string
+	// UserMessage is the RAW text the user typed for this turn, before any tool
+	// output, file content or previous assistant turn joined the context.
+	//
+	// It exists so a tool that costs real money can require the USER to have
+	// asked for it, rather than firing because an imperative sentence appeared in
+	// something the model read. Empty when the caller does not supply it, and a
+	// gate reading it must decide what empty means for itself.
+	UserMessage string
 	// FileTracker, when set, records the version of each file read or written this
 	// session so write_file/edit_file can refuse to clobber a file that changed on
 	// disk outside Zero since it was last read. nil disables the feature entirely
@@ -79,6 +87,32 @@ type optionsAwareTool interface {
 // withhold their full schema and advertise them via tool_search instead.
 type deferredTool interface {
 	Deferred() bool
+}
+
+// ChildProgressStreamer is an optional interface a tool implements to declare
+// that it spawns child agent runs whose stream-json events should surface to
+// the parent's UI. The agent loop supplies RunOptions.Progress only to tools
+// that declare it.
+//
+// A DECLARATION, NOT A NAME. The loop previously gated this on
+// `call.Name == "Task"`, so a second sub-agent-spawning tool (orchestrate) got
+// a nil callback and ran invisibly. Adding `|| call.Name == "orchestrate"`
+// would be the same defect one name later — this codebase's most repeated
+// shape. A tool that spawns children says so itself, and the loop asks.
+//
+// Tools that do not implement this keep receiving a nil Progress, which is
+// exactly their behaviour today: swarm tools included, deliberately, since the
+// swarm launcher does not forward a progress callback either.
+type ChildProgressStreamer interface {
+	StreamsChildProgress() bool
+}
+
+// StreamsChildProgress reports whether a tool opts into receiving
+// RunOptions.Progress. Tools that do not implement ChildProgressStreamer are
+// silent, which is the default.
+func StreamsChildProgress(t Tool) bool {
+	streamer, ok := t.(ChildProgressStreamer)
+	return ok && streamer.StreamsChildProgress()
 }
 
 func NewRegistry() *Registry {

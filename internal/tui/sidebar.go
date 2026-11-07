@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -110,6 +111,16 @@ func (m model) sidebarHasContent() bool {
 		// FILES pulse for the session's first mutation isn't hidden.
 		return true
 	}
+	if m.orchestrate.visible(m.orchestrateNow()) {
+		// An admitted plan counts from the moment it is admitted, before its
+		// first task has spawned an agent row. Without this the column arrives a
+		// beat late, and the inline panel — which stands down as soon as the
+		// sidebar takes the plan — flashes on screen for exactly that beat.
+		// visible(), not isEmpty(): a finished plan's tasks are kept for the
+		// record, and holding the column open for them would mean the sidebar
+		// never auto-hides again once a session has run one.
+		return true
+	}
 	return !m.plan.isEmpty()
 }
 
@@ -150,14 +161,36 @@ func (m model) sidebarSpecialists() []specialistInfo {
 			continue
 		}
 		// Linger a finished specialist for sidebarAgentLinger (a fading ✓), then
-		// drop it — a smooth exit rather than an abrupt pop.
-		if a.status != specialistRunning && !a.completedAt.IsZero() &&
+		// drop it — a smooth exit rather than an abrupt pop. Unless the user has
+		// asked to keep them, in which case they stay for the session: a plan's
+		// finished tasks are its RESULT, and dropping them left a nine-task run
+		// showing an empty AGENTS section the moment it succeeded.
+		if !m.showDoneAgents && a.status != specialistRunning && !a.completedAt.IsZero() &&
 			m.now().Sub(a.completedAt) >= sidebarAgentLinger {
 			continue
 		}
 		out = append(out, a)
 	}
 	return out
+}
+
+// doneAgentCount is how many finished specialists the toggle would reveal —
+// those past their linger, which the section would otherwise have dropped.
+//
+// Counted from the tracker rather than from sidebarSpecialists, because that
+// already applies the toggle and would report zero whenever the toggle is on.
+func (m model) doneAgentCount() int {
+	var n int
+	for _, a := range m.specialists.all() {
+		if a.status == specialistError && strings.Contains(strings.ToLower(a.errorMsg), "not found") {
+			continue
+		}
+		if a.status != specialistRunning && !a.completedAt.IsZero() &&
+			m.now().Sub(a.completedAt) >= sidebarAgentLinger {
+			n++
+		}
+	}
+	return n
 }
 
 // sidebarHasAgents reports whether the session has agent activity worth keeping
@@ -170,10 +203,29 @@ func (m model) sidebarHasAgents() bool {
 // active agents — specialist delegations plus swarm/team members.
 func (m model) sidebarAgentHeader(width int) string {
 	n := len(m.sidebarSpecialists()) + len(m.swarmSpawnedAgents())
-	if n == 0 {
-		return sidebarHeader("AGENTS", width)
+	count := ""
+	if n > 0 {
+		count = fmt.Sprintf("%d", n)
 	}
-	return sidebarHeaderWithCount("AGENTS", fmt.Sprintf("%d", n), zeroTheme.muted, width)
+	// The finished-agents toggle rides the header's count. A plan's finished
+	// tasks are its RESULT, and they used to vanish a second and a half after
+	// each one landed — so a nine-task run that succeeded showed an empty
+	// AGENTS section and no way to ask what any of them did.
+	if done := m.doneAgentCount(); done > 0 || m.showDoneAgents {
+		mark := fmt.Sprintf("▸%d done", done)
+		if m.showDoneAgents {
+			mark = fmt.Sprintf("▾%d done", done)
+		}
+		if count != "" {
+			count += " · " + mark
+		} else {
+			count = mark
+		}
+	}
+	if count == "" {
+		return m.postureHeader("AGENTS", width)
+	}
+	return m.postureHeaderWithCount("AGENTS", count, zeroTheme.muted, width)
 }
 
 // swarmSpawnRe extracts a member id from a swarm_spawn tool result, whose text
@@ -333,6 +385,14 @@ type sidebarAgentHit struct {
 	lineOffset int
 	sessionID  string
 	title      string
+	// toggleDone marks the header's finished-agents control rather than an agent.
+	toggleDone bool
+	// expands marks a row whose click TOGGLES ITS DETAIL in place rather than
+	// drilling into a child session. Specialist rows are keyed by their card,
+	// and a plan task's card key is not a session id until the task finishes and
+	// reconciles one — so the drill-in has nothing to open while the task is
+	// running, which is exactly when its detail is worth reading.
+	expands bool
 }
 
 // sidebarAgentLines renders one line per active agent. Specialist delegations
@@ -367,13 +427,14 @@ func (m model) sidebarAgentRows(width int) ([]string, []sidebarAgentHit) {
 			icon = zeroTheme.accent.Render(m.spinnerGlyph())
 		case specialistError:
 			icon = zeroTheme.red.Render("✗")
+		case specialistCancelled:
+			// Neutral, not red: a stopped or skipped task is not a defect.
+			icon = zeroTheme.faint.Render("⊘")
 		default: // completed
 			icon = zeroTheme.green.Render("✓")
 		}
-		name := strings.TrimSpace(a.name)
-		if name == "" {
-			name = "agent"
-		}
+		// THE ASSIGNED JOB, not the generic specialist type. See specialistJobName.
+		name := specialistJobName(a.name, a.description)
 		nameStyle := zeroTheme.ink
 		// As a finished specialist nears the end of its linger, dim the whole row
 		// toward faint so its removal reads as a fade-out rather than a pop.
@@ -385,25 +446,44 @@ func (m model) sidebarAgentRows(width int) ([]string, []sidebarAgentHit) {
 			icon = zeroTheme.faint.Render(glyph)
 			nameStyle = zeroTheme.faint
 		}
-		lines = append(lines, " "+icon+" "+nameStyle.Render(truncateStep(name, room)))
-		if a.status != specialistRunning {
-			continue
+		// Recorded before the line is appended, so the offset is the row's own.
+		if a.childSessionID != "" {
+			hits = append(hits, sidebarAgentHit{lineOffset: len(lines), sessionID: a.childSessionID, title: name, expands: true})
 		}
-		// Live working detail for a running subagent: current tool + arg hint,
-		// falling back to the running tool count.
-		detail := strings.TrimSpace(a.currentTool)
-		if d := strings.TrimSpace(a.currentDetail); d != "" {
+		lines = append(lines, " "+icon+" "+nameStyle.Render(truncateStep(name, room)))
+		// ALWAYS-VISIBLE SPEND: tokens then the model, per sub-agent, so the
+		// panel answers "what did each one cost, and on what" without a click.
+		// Order is deliberate — token consumption first, model after it.
+		if spend := specialistSpendLine(a); spend != "" {
+			lines = append(lines, "   "+zeroTheme.faint.Render(truncateStep(spend, maxInt(2, room-2))))
+		}
+		if a.status == specialistRunning {
+			// Live working detail for a running subagent: current tool + arg hint,
+			// falling back to the running tool count.
+			detail := strings.TrimSpace(a.currentTool)
+			if d := strings.TrimSpace(a.currentDetail); d != "" {
+				if detail != "" {
+					detail += " " + d
+				} else {
+					detail = d
+				}
+			}
+			if detail == "" && a.toolCount > 0 {
+				detail = fmt.Sprintf("%d tools", a.toolCount)
+			}
 			if detail != "" {
-				detail += " " + d
-			} else {
-				detail = d
+				lines = append(lines, "   "+zeroTheme.faint.Render("↳ "+truncateStep(detail, maxInt(2, room-2))))
 			}
 		}
-		if detail == "" && a.toolCount > 0 {
-			detail = fmt.Sprintf("%d tools", a.toolCount)
-		}
-		if detail != "" {
-			lines = append(lines, "   "+zeroTheme.faint.Render("↳ "+truncateStep(detail, maxInt(2, room-2))))
+		// NON-EMPTY, matching the hit above. "" is the zero value of BOTH sides:
+		// expandedAgent when nothing is open, and childSessionID for a specialist
+		// keyed by a tool-call id the provider left blank. Comparing them bare
+		// makes such a row permanently expanded — and since the sidebar clips to
+		// its height, four uninvited lines at the top push PLAN, FILES and
+		// ACTIVITY off the bottom. A row that cannot be clicked open must not be
+		// able to open itself.
+		if a.childSessionID != "" && a.childSessionID == m.expandedAgent {
+			lines = append(lines, m.sidebarAgentExpansion(a, room)...)
 		}
 	}
 	// Swarm/team members: a live member's whole task-name carries a mild, slow cool
@@ -440,6 +520,131 @@ func (m model) sidebarAgentRows(width int) ([]string, []sidebarAgentHit) {
 	return lines, hits
 }
 
+// sidebarAgentExpansionBriefLines caps how much of the brief the expansion
+// shows. Two lines is enough to say what a task was asked to do; the whole
+// prompt belongs in the task's card, not in a 26-cell column.
+const sidebarAgentExpansionBriefLines = 2
+
+// sidebarAgentExpansionResultLines caps the head of the agent's own output. Four
+// lines is a look at what it produced, not a reader for it — the whole answer is
+// in the child's session, which the card's drill-in opens.
+const sidebarAgentExpansionResultLines = 4
+
+// fitSegments joins as many " · "-separated segments as fit in width and DROPS
+// the rest, rather than joining them all and truncating the result.
+//
+// The difference matters because these segments are figures. Prose that runs
+// out of room ends in an ellipsis and is still read as prose; a number that does
+// reads as a different number — "3,4…" is three thousand or three million with
+// equal authority, and the whole point of the line is to report a spend. Losing
+// the last segment says less; truncating it says something false.
+func fitSegments(segments []string, width int) string {
+	line := ""
+	for _, segment := range segments {
+		candidate := segment
+		if line != "" {
+			candidate = line + " · " + segment
+		}
+		if lipgloss.Width(candidate) > width {
+			break
+		}
+		line = candidate
+	}
+	return line
+}
+
+// sidebarAgentExpansion is what a clicked agent row opens: the brief it was
+// given, what it has spent, and — when it did not simply finish — why.
+//
+// A LITTLE MORE, not a drawer. The collapsed row says which agent and which
+// tool; the three questions it cannot answer are what the agent was actually
+// asked to do, how much it has cost, and what happened to it. Those fit in four
+// lines, and four lines is the cap: this section shares its height with PLAN,
+// FILES and ACTIVITY, and an expansion that pushes them off the column has
+// traded three sections for one.
+func (m model) sidebarAgentExpansion(info specialistInfo, room int) []string {
+	body := maxInt(4, room-4)
+	indent := "     "
+	var out []string
+
+	if brief := strings.TrimSpace(info.description); brief != "" {
+		for i, line := range wrapPlainText(brief, body) {
+			if i >= sidebarAgentExpansionBriefLines {
+				break
+			}
+			out = append(out, indent+zeroTheme.muted.Render(line))
+		}
+	}
+
+	// Spend, most-wanted first: how long, what it cost, how much it did. Each
+	// segment is omitted when it has nothing to report rather than shown as a
+	// zero — "0 tools" on a task that has not called one yet reads as a stuck
+	// agent, which is the thing this panel is meant to disambiguate.
+	var spent []string
+	if !info.startedAt.IsZero() {
+		until := m.now()
+		if !info.completedAt.IsZero() {
+			until = info.completedAt
+		}
+		if elapsed := until.Sub(info.startedAt); elapsed > 0 {
+			// The footer's format (1m10s), not 70.0s: same clock, same reading,
+			// and a character shorter in a column that has 19 of them at its
+			// minimum width.
+			spent = append(spent, formatWorkingElapsed(elapsed))
+		}
+	}
+	if info.tokenCount > 0 {
+		// humanCount, the column floor's own format (3.4K), not the card's
+		// grouped digits — "3,400" does not fit beside the other segments here.
+		spent = append(spent, humanCount(info.tokenCount)+" tok")
+	}
+	// The MODEL goes on its own line rather than into the spend segments: names
+	// like grok-4.20-0309-non-reasoning are longer than everything else combined,
+	// and fitSegments would drop the elapsed and the spend to make room for it.
+	if model := strings.TrimSpace(info.model); model != "" {
+		out = append(out, indent+zeroTheme.accent.Render(truncateStep("on "+model, body)))
+	}
+	if info.toolCount > 0 {
+		spent = append(spent, fmt.Sprintf("%d tools", info.toolCount))
+	}
+	if line := fitSegments(spent, body); line != "" {
+		out = append(out, indent+zeroTheme.faint.Render(line))
+	}
+
+	// The reason, for the two statuses that have one. A cancelled task is NOT
+	// red: the user stopped it, and colouring their own decision as a fault is
+	// the same mistake the ⊘ glyph exists to avoid.
+	if reason := strings.TrimSpace(info.errorMsg); reason != "" {
+		switch info.status {
+		case specialistError:
+			out = append(out, indent+zeroTheme.red.Render(truncateStep(reason, body)))
+		case specialistCancelled:
+			out = append(out, indent+zeroTheme.faint.Render(truncateStep(reason, body)))
+		}
+	}
+
+	// WHAT IT PRODUCED, which is the thing the agent was run for. Everything
+	// above says how the work went; this is the work. Sanitised per line, since
+	// a child's answer is untrusted text and an ANSI escape in it would repaint
+	// the column.
+	if result := strings.TrimSpace(info.result); result != "" {
+		shown := 0
+		for _, raw := range strings.Split(result, "\n") {
+			line := strings.TrimSpace(sanitizeCardText(raw))
+			if line == "" {
+				continue
+			}
+			if shown >= sidebarAgentExpansionResultLines {
+				out = append(out, indent+zeroTheme.faint.Render("…"))
+				break
+			}
+			out = append(out, indent+zeroTheme.ink.Render(truncateStep(line, body)))
+			shown++
+		}
+	}
+	return out
+}
+
 // sidebarAgentSelectables returns the clickable swarm-member lines with their
 // ABSOLUTE index inside the rendered sidebar (the AGENTS header occupies index 0,
 // so agent rows start at index 1). Recomputed on demand by the mouse hit-test —
@@ -450,8 +655,60 @@ func (m model) sidebarAgentSelectables(width int) []sidebarAgentHit {
 	for i := range hits {
 		hits[i].lineOffset++ // shift past the AGENTS header at sidebar index 0
 	}
-	return hits
+	// The header's toggle is registered INDEPENDENTLY of the rows. When every
+	// agent has finished and the toggle is off there are no rows at all, and
+	// hanging the control off them would make it unclickable in precisely the
+	// state it exists for.
+	if m.doneAgentCount() > 0 || m.showDoneAgents {
+		hits = append(hits, sidebarAgentHit{
+			lineOffset: 0,
+			sessionID:  agentsToggleHitID,
+			title:      "completed agents",
+			toggleDone: true,
+		})
+	}
+	kept := hits[:0]
+	for _, hit := range hits {
+		if m.sidebarRowOnScreen(hit.lineOffset) {
+			kept = append(kept, hit)
+		}
+	}
+	return kept
 }
+
+// sidebarRowOnScreen reports whether a sidebar offset names a row the user can
+// actually see.
+//
+// renderContextSidebar clips the column to height-1 and pins the token readout
+// at that last row, but the selectable lists are computed from the FULL section
+// heights — so any offset at or past the clip names a row that was never drawn.
+// Only fileRowAtMouse checked this, inline; the plan, orchestrate and agent
+// hit-testers did not, and a click on the token readout opened whichever row had
+// been pushed underneath it.
+//
+// Applied to the LISTS rather than to each hit-test, so hover resolution and
+// every future consumer inherit it instead of each having to remember.
+func (m model) sidebarRowOnScreen(lineOffset int) bool {
+	if lineOffset < 0 {
+		return false
+	}
+	if m.height <= 0 {
+		// No measured terminal yet, so nothing is known to be off screen. Fail
+		// OPEN here rather than closed: every hit-test that consumes these
+		// tables already requires a live sidebar, and a filter that swallowed
+		// the whole table before the first WindowSizeMsg would make the offsets
+		// untestable in isolation while changing nothing in production.
+		return true
+	}
+	return lineOffset < m.height-1
+}
+
+// agentsToggleHitID keys the header control for hover resolution, which matches
+// hits by session id. The NUL prefix is not decoration: it makes collision with
+// a real session id — a uuid, a plantask key, a provider tool-call id —
+// impossible rather than merely unlikely, and an id that collides would light
+// the wrong row on hover.
+const agentsToggleHitID = "\x00agents-done-toggle"
 
 // agentExitFading reports whether a finished agent is in the later half of its
 // linger window (sidebarAgentLinger), so its row dims toward faint just before
@@ -509,9 +766,103 @@ func swarmPulseStyles() []lipgloss.Style {
 	return out
 }
 
+// specialistSpendLine is the always-visible per-agent cost: token consumption
+// first, then the specific model it ran on. Empty when neither is known yet, so
+// a just-spawned row shows only its name rather than a line of zeros.
+//
+// TOKENS BEFORE MODEL, deliberately: "how much did this cost" is the more
+// wanted number, and the model is the qualifier after it.
+func specialistSpendLine(info specialistInfo) string {
+	var parts []string
+	if info.tokenCount > 0 {
+		parts = append(parts, humanCount(info.tokenCount)+" tok")
+	}
+	if model := strings.TrimSpace(info.model); model != "" {
+		parts = append(parts, model)
+	}
+	return strings.Join(parts, " · ")
+}
+
+// specialistJobName is the 1-2 word name a specialist row shows: the ASSIGNED
+// JOB, not the generic specialist type.
+//
+// The row used to render info.name, which for a Task sub-agent is the specialist
+// TYPE — so four workers all read "worker" and the panel could not tell them
+// apart. The job lives in the description ("W1: HTML link extractor"), so this
+// condenses THAT: strip a leading worker label like "W1:" or the "plan task "
+// prefix, then take the first two significant words — "HTML link", "HTTP
+// checker", "Concurrency pool". Falls back to the name when there is no
+// description to condense, so a bare Task keeps its type.
+func specialistJobName(name, description string) string {
+	job := stripSpecialistLabel(strings.TrimSpace(description))
+	condensed := shortTaskName(job)
+	// A description that reads as a SENTENCE — "You are auditing package X" — is
+	// a prompt, not a label, and its first words are conversational. The agent's
+	// own name is the better identifier there, so prefer it. A short job label
+	// ("HTML link extractor") has no such opener and wins.
+	if condensed != "" && !startsWithConversationalWord(condensed) {
+		return condensed
+	}
+	if n := strings.TrimSpace(name); n != "" {
+		return n
+	}
+	return "agent"
+}
+
+// startsWithConversationalWord reports whether a condensed name opens with a
+// pronoun or filler that marks it as prose rather than a job label.
+func startsWithConversationalWord(condensed string) bool {
+	fields := strings.Fields(condensed)
+	if len(fields) == 0 {
+		return false
+	}
+	switch strings.ToLower(strings.Trim(fields[0], ".,:;!?\"'`")) {
+	case "you", "your", "i", "i'll", "i'm", "we", "we'll", "it", "they",
+		"he", "she", "let", "let's", "here", "now", "please", "this", "the":
+		return true
+	default:
+		return false
+	}
+}
+
+// stripSpecialistLabel removes a leading bookkeeping prefix that is not part of
+// the job: a worker tag like "W1:" / "W12 -" and the "plan task " prefix that
+// plan_runner stamps on every plan child.
+func stripSpecialistLabel(description string) string {
+	trimmed := strings.TrimSpace(description)
+	// "plan task " is the prefix plan_runner stamps (internal/specialist); a
+	// literal here rather than an import, since one string does not justify one.
+	const planTaskPrefix = "plan task "
+	if len(trimmed) >= len(planTaskPrefix) && strings.EqualFold(trimmed[:len(planTaskPrefix)], planTaskPrefix) {
+		return strings.TrimSpace(trimmed[len(planTaskPrefix):])
+	}
+	// A worker label: one or two letters, some digits, then a separator.
+	if m := workerLabelRe.FindString(trimmed); m != "" {
+		return strings.TrimSpace(trimmed[len(m):])
+	}
+	return trimmed
+}
+
+// workerLabelRe matches a leading "W1:", "W12 -", "S3 —" style tag.
+var workerLabelRe = regexp.MustCompile(`^[A-Za-z]{1,2}[0-9]{1,3}\s*[:.)\-\x{2014}]\s*`)
+
 // shortTaskName condenses a task briefing into a 1-2 word agent name: the first
 // significant word (usually the verb) plus the next non-filler word, so a member
 // reads as e.g. "Explore repository" instead of the full one-line briefing.
+// EVERY SCRIPT, not just Latin. The ASCII ranges this used to test rejected
+// every CJK, Cyrillic, Greek, Hebrew and Arabic token as "not a word", so a task
+// or agent described in one of them had every token dropped and the sidebar row
+// fell back to a generic label — a silent degradation for anyone not writing in
+// English. unicode.IsLetter/IsDigit is the same question asked correctly.
+func hasNameLetter(token string) bool {
+	for _, r := range token {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
+}
+
 func shortTaskName(task string) string {
 	task = strings.TrimSpace(task)
 	if task == "" {
@@ -520,7 +871,10 @@ func shortTaskName(task string) string {
 	picked := make([]string, 0, 2)
 	for _, w := range strings.Fields(task) {
 		clean := strings.Trim(w, ".,:;!?\"'`()[]{}")
-		if clean == "" {
+		// A token that is ALL punctuation ("+", "&", "->") is not a word: it left
+		// "CLI + report" reading as "CLI +". Skip it rather than spend a name
+		// slot on it.
+		if clean == "" || !hasNameLetter(clean) {
 			continue
 		}
 		if len(picked) > 0 && nameFillerWords[strings.ToLower(clean)] {
@@ -535,6 +889,19 @@ func shortTaskName(task string) string {
 		return task
 	}
 	return strings.Join(picked, " ")
+}
+
+// hiddenAgentsPlaceholder is what the AGENTS section says when it has no lines
+// to show, which is not always because nothing ran.
+func hiddenAgentsPlaceholder(done int) string {
+	switch {
+	case done == 1:
+		return "1 finished — click to show"
+	case done > 1:
+		return fmt.Sprintf("%d finished — click to show", done)
+	default:
+		return "no agents spawned"
+	}
 }
 
 // nameFillerWords are skipped (after the first word) when condensing a task into
@@ -563,7 +930,14 @@ func (m model) renderContextSidebar(width, height int) []string {
 	add(m.sidebarAgentHeader(width))
 	agentLines := m.sidebarAgentLines(width)
 	if len(agentLines) == 0 {
-		add(sidebarPlaceholder("no agents spawned", width))
+		// "no agents spawned" IS ONLY TRUE WHEN NONE WERE. sidebarSpecialists drops
+		// a finished agent once it is past its linger, while doneAgentCount counts
+		// exactly those — so a completed two-task plan rendered "AGENTS ▸2 done"
+		// above "no agents spawned", a header and a body contradicting each other
+		// about the same run. The count is the true one; the placeholder was
+		// reporting the emptiness of a filtered list as the emptiness of the
+		// session, and it names the toggle that brings them back.
+		add(sidebarPlaceholder(hiddenAgentsPlaceholder(m.doneAgentCount()), width))
 	} else {
 		lines = append(lines, agentLines...)
 	}
@@ -572,10 +946,14 @@ func (m model) renderContextSidebar(width, height int) []string {
 	add("")
 	add(m.sidebarPlanHeader(width))
 	planLines := m.sidebarPlanLines(width)
-	if len(planLines) == 0 {
-		add(sidebarPlaceholder("no active plan", width))
-	} else {
+	switch {
+	case m.plan.isEmpty() && m.orchestrate.sidebarCollapsed && !m.orchestrate.isEmpty():
+		// Collapsed by a click on the header: the count stays, the body goes.
+		add(sidebarPlaceholder("collapsed — click PLAN to open", width))
+	case len(planLines) > 0:
 		lines = append(lines, planLines...)
+	default:
+		add(sidebarPlaceholder("no active plan", width))
 	}
 
 	// FILES section: the files this session has touched (files_panel.go).
@@ -591,14 +969,38 @@ func (m model) renderContextSidebar(width, height int) []string {
 		lines = append(lines, fileLines...)
 	}
 
+	// MODELS section: the live mix of models the fleet runs on (models_panel.go).
+	// Absent until an agent runs on a known model, so a plain session's layout is
+	// untouched. Below FILES for the same click-offset reason: nothing hit-tested
+	// sits beneath it.
+	if modelLines := m.sidebarModelLines(width); len(modelLines) > 0 {
+		add("")
+		lines = append(lines, modelLines...)
+	}
+
 	// ACTIVITY section: recent completed work + a live "generating…" pulse. Shown
 	// BELOW the plan steps so it never shifts sidebarPlanSelectables' click offsets,
 	// and budgeted (height-1 minus what's used) so it clips ITSELF from the bottom
 	// rather than letting the end-truncation eat into the plan. Absent when empty.
 	if activityLines := m.sidebarActivityLines(width, maxInt(0, height-1-len(lines))); len(activityLines) > 0 {
 		add("")
-		add(sidebarHeader("ACTIVITY", width))
+		add(m.postureHeader("ACTIVITY", width))
 		lines = append(lines, activityLines...)
+	}
+	// PREFLIGHT: what auto-assignment is doing before a plan exists. Rendered
+	// here, under ACTIVITY, because it IS activity — and as a line rather than a
+	// plan row, since admission may still refuse the plan it is preparing.
+	// Without it a foreground run looks frozen for the tens of seconds spent
+	// listing models, probing them and asking the router.
+	if status := strings.TrimSpace(m.planPreflight); status != "" {
+		add(" " + zeroTheme.muted.Render(truncateStep("· "+status, maxInt(6, width-2))))
+	}
+
+	// PLAN DETAIL: the selected task, drawn into the space that was otherwise
+	// padded with blank lines down to the token floor. Last, so it only ever
+	// consumes what the sections above did not want.
+	if detail := m.sidebarPlanDetailLines(width, maxInt(0, height-1-len(lines))); len(detail) > 0 {
+		lines = append(lines, detail...)
 	}
 
 	// Token readout pinned to the bottom.
@@ -661,6 +1063,16 @@ func (m model) hoveredSidebarLineOffset(width int) (int, bool) {
 				return hit.lineOffset, true
 			}
 		}
+	case hoverOrchestrateTask:
+		// Re-resolved by task ID every render: a task that faded out of the
+		// list since the hover was set simply stops highlighting, rather than
+		// lighting up whatever row slid into its slot.
+		for _, hit := range m.sidebarOrchestrateSelectables(width) {
+			if hit.taskIndex < len(m.orchestrate.tasks) &&
+				m.orchestrate.tasks[hit.taskIndex].id == m.hover.taskID {
+				return hit.lineOffset, true
+			}
+		}
 	}
 	return 0, false
 }
@@ -677,7 +1089,12 @@ func sidebarHeader(label string, _ int) string {
 // count (e.g. "PLAN   2/5") rendered in countStyle, so a section can colour its
 // count by state — accent while in-flight, green when complete.
 func sidebarHeaderWithCount(label, count string, countStyle lipgloss.Style, width int) string {
-	left := zeroTheme.muted.Bold(true).Render(strings.ToUpper(label))
+	return sidebarHeaderAlign(zeroTheme.muted.Bold(true).Render(strings.ToUpper(label)), count, countStyle, width)
+}
+
+// sidebarHeaderAlign right-aligns a rendered count beside an already-rendered
+// label — the shared core of the plain and posture-painted header variants.
+func sidebarHeaderAlign(left, count string, countStyle lipgloss.Style, width int) string {
 	right := countStyle.Render(count)
 	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
@@ -695,7 +1112,18 @@ func sidebarPlaceholder(text string, width int) string {
 func (m model) sidebarPlanHeader(width int) string {
 	state := m.plan
 	if state.isEmpty() {
-		return sidebarHeader("PLAN", width)
+		if orchestrate := m.orchestrate; !orchestrate.isEmpty() {
+			done, failed, _, _, _ := orchestrate.counts()
+			style := zeroTheme.accent
+			if failed > 0 {
+				style = zeroTheme.red
+			} else if done == len(orchestrate.tasks) {
+				style = zeroTheme.green
+			}
+			return m.postureHeaderWithCount("PLAN",
+				fmt.Sprintf("%d/%d", done, len(orchestrate.tasks)), style, width)
+		}
+		return m.postureHeader("PLAN", width)
 	}
 	total := len(state.steps)
 	done := 0
@@ -709,20 +1137,45 @@ func (m model) sidebarPlanHeader(width int) string {
 	if done == total {
 		countStyle = zeroTheme.green
 	}
-	return sidebarHeaderWithCount("PLAN", fmt.Sprintf("%d/%d", done, total), countStyle, width)
+	return m.postureHeaderWithCount("PLAN", fmt.Sprintf("%d/%d", done, total), countStyle, width)
 }
 
 // sidebarPlanLines renders the plan step list for the sidebar using the same
 // status glyphs as the pinned panel (✓ done, • in-progress, ○ pending, ✗
 // failed), reading m.plan directly so it stays in sync. Returns nil for an
 // empty plan (the caller then shows a placeholder).
+// BOTH PLANS, NOT WHICHEVER CAME FIRST. update_plan and orchestrate are not
+// alternatives — a zeromaxing turn routinely runs an update_plan checklist whose
+// middle step IS "run this orchestrate plan", so both are live at once. The
+// section used to hand itself entirely to update_plan whenever it had steps,
+// which left the running plan with no sidebar surface at all and pushed it back
+// into the footer panel it was supposed to have replaced.
+//
+// Everything the PLAN section draws is assembled HERE, including the progress
+// bar. sidebarFileSelectables derives the FILES section's click offsets from
+// len(sidebarPlanLines); anything drawn beside it needs its own correction term,
+// and the one that used to exist for the bar was a standing invitation to drift.
 func (m model) sidebarPlanLines(width int) []string {
+	return append(m.updatePlanStepLines(width), m.sidebarOrchestrateBlock(width)...)
+}
+
+// updatePlanStepLines renders the update_plan checklist, or nil when it has no
+// steps.
+func (m model) updatePlanStepLines(width int) []string {
 	state := m.plan
 	if state.isEmpty() {
 		return nil
 	}
 	room := maxInt(4, width-3)
-	lines := make([]string, 0, len(state.steps))
+	lines := make([]string, 0, len(state.steps)+1)
+	// The zeromaxing bar, when the posture wears one — INSIDE this list, so
+	// everything measured off this renderer (sidebarOrchestrateSelectables'
+	// prefix math) stays correct without a hand-written correction term.
+	// sidebarPlanSelectables carries the one remaining correction, beside its
+	// own base formula.
+	if bar := m.todoPlanBar(width); bar != "" {
+		lines = append(lines, bar)
+	}
 	for _, step := range state.steps {
 		var icon, body string
 		switch step.status {
@@ -742,6 +1195,46 @@ func (m model) sidebarPlanLines(width int) []string {
 		lines = append(lines, " "+icon+" "+body)
 	}
 	return lines
+}
+
+// sidebarOrchestrateBlock is the running plan's place in the PLAN section: its
+// progress bar and task list, and — only when update_plan steps sit above it —
+// a naming line, so two stacked lists never read as one.
+func (m model) sidebarOrchestrateBlock(width int) []string {
+	tasks := m.sidebarOrchestrateLines(width)
+	if len(tasks) == 0 {
+		return nil
+	}
+	var lines []string
+	if !m.plan.isEmpty() {
+		// The section header is already spent on update_plan's count, so the
+		// running plan carries its own name and tally here. Without it the two
+		// lists abut and "1/3" appears to describe nine tasks.
+		done, failed, _, _, _ := m.orchestrate.counts()
+		style := zeroTheme.accent
+		if failed > 0 {
+			style = zeroTheme.red
+		} else if done == len(m.orchestrate.tasks) {
+			style = zeroTheme.green
+		}
+		name := strings.TrimSpace(m.orchestrate.name)
+		if name == "" {
+			name = "plan"
+		}
+		count := style.Render(fmt.Sprintf("%d/%d", done, len(m.orchestrate.tasks)))
+		// Count flush right, the way the section headers above it sit, so the two
+		// tallies line up in a column instead of floating mid-row.
+		label := zeroTheme.faint.Render(truncateStep(name, maxInt(4, width-2-lipgloss.Width(count))))
+		gap := width - 1 - lipgloss.Width(label) - lipgloss.Width(count)
+		if gap < 1 {
+			gap = 1
+		}
+		lines = append(lines, " "+label+strings.Repeat(" ", gap)+count)
+	}
+	if bar := m.orchestratePlanBar(width); bar != "" {
+		lines = append(lines, bar)
+	}
+	return append(lines, tasks...)
 }
 
 // maxSidebarActivityLines caps the ACTIVITY feed so it stays a glanceable tail,
@@ -879,16 +1372,16 @@ func (m model) sidebarTokenText() string {
 // divider cell between them, into total-width rows. Both blocks are normalized
 // to their column widths and to the same row count first, so every joined row
 // is exactly chatWidth + 1 + sidebarWidth cells and the columns stay aligned.
-func joinColumns(chat []string, sidebar []string, chatW, sidebarW int) []string {
+
+// joinColumnsWith is joinColumns with a caller-supplied divider painter, so a
+// skin can colour the rule per row (the zeromaxing rail) without this function
+// knowing about postures. The painter receives (row, rows) and must return the
+// same three cells every plain divider renders.
+func joinColumnsWith(chat []string, sidebar []string, chatW, sidebarW int, divider func(row, rows int) string) []string {
 	rows := len(chat)
 	if len(sidebar) > rows {
 		rows = len(sidebar)
 	}
-	// A cell of air on each side of the rule (" │ ") so the columns don't butt
-	// flush against it. The chat side gets its gutter from the leading space; the
-	// sidebar side from the trailing space (plus items' own leading inset, which
-	// nests them under the flush section headers). Budgeted by chatColumnWidth(-3).
-	divider := " " + zeroTheme.line.Render("│") + " "
 	out := make([]string, rows)
 	for i := 0; i < rows; i++ {
 		left := ""
@@ -901,7 +1394,7 @@ func joinColumns(chat []string, sidebar []string, chatW, sidebarW int) []string 
 		}
 		left = padStyledLine(left, chatW)
 		right = padStyledLine(right, sidebarW)
-		out[i] = left + divider + right
+		out[i] = left + divider(i, rows) + right
 	}
 	return out
 }

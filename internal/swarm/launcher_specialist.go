@@ -69,7 +69,27 @@ func NewSpecialistLauncher(executor specialist.Executor) MemberLauncher {
 			// still drillable, and carry its report as the failure message.
 			return MemberResult{SessionID: res.SessionID}, errors.New(res.Result.Output)
 		}
-		return MemberResult{Result: res.Result.Output, SessionID: res.SessionID}, nil
+		// THE ID TRAVELS IN SessionID, NOT IN THE PROSE — the same fix the plan
+		// path already carries, and this is its sibling.
+		//
+		// BuildFinalResult prefixes "session_id: <id>" to a successful child's
+		// output so a Task caller can continue that child. A swarm member has no
+		// such caller: MemberResult.SessionID carries the id structurally, the
+		// coordinator stores it separately (coordinator.go), and the string goes
+		// on to be RENDERED — swarm_collect writes `result: <text>` and collapse
+		// only flattens newlines and truncates, so the id reaches the user
+		// verbatim. The Task path escapes the same leak only because the TUI
+		// drops its raw result row entirely (toolCardSuppressedInTranscript is
+		// "Task" or "update_plan"); swarm_collect has no such suppression, so it
+		// has to be stripped at the source instead.
+		//
+		// ONLY THE SUCCESS PATH NEEDS IT. BuildFinalResult adds the line in its
+		// no-errors branch alone, so the StatusError return above carries a
+		// diagnostic that never had one.
+		return MemberResult{
+			Result:    specialist.WithoutSessionIDLine(res.Result.Output, res.SessionID),
+			SessionID: res.SessionID,
+		}, nil
 	}}
 }
 

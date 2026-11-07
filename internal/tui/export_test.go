@@ -189,16 +189,8 @@ func renderSelectableList(options selectableListOptions) string {
 	return strings.Join(lines, "\n")
 }
 
-// addTokens adds tokens to the running total for the specialist with
-// childSessionID. Unknown specialists are ignored.
-func (t *specialistTracker) addTokens(childSessionID string, tokens int) {
-	for index := range t.specialists {
-		if t.specialists[index].childSessionID == childSessionID {
-			t.specialists[index].tokenCount += tokens
-			return
-		}
-	}
-}
+// addTokens now lives in specialist_card.go — it moved from here (test-only,
+// so production never called it) to the OnToolProgress usage bridge.
 
 // hasRunning reports whether any tracked specialist is still running.
 func (t *specialistTracker) hasRunning() bool {
@@ -276,4 +268,20 @@ func transcriptViewportStartForFrame(body string, frame transcriptFrameLayout, s
 
 func transcriptViewportForBody(body string, frame transcriptFrameLayout, offset int) transcriptViewport {
 	return newTranscriptViewport(len(viewLines(body)), frame.bodyRect.height, offset)
+}
+
+// Moved from the production file: test-only convenience seam (deadcode gate).
+func (s *orchestratePanelState) markDone(taskID, outcome string, tokens, attempts int, now time.Time) {
+	s.markDoneOn(taskID, outcome, "", "", tokens, attempts, now)
+}
+
+// Moved from the production file: test-only convenience seam (deadcode gate).
+func joinColumns(chat []string, sidebar []string, chatW, sidebarW int) []string {
+	// A cell of air on each side of the rule (" │ ") so the columns don't butt
+	// flush against it. The chat side gets its gutter from the leading space; the
+	// sidebar side from the trailing space (plus items' own leading inset, which
+	// nests them under the flush section headers). Budgeted by chatColumnWidth(-3).
+	return joinColumnsWith(chat, sidebar, chatW, sidebarW, func(int, int) string {
+		return " " + zeroTheme.line.Render("│") + " "
+	})
 }

@@ -715,7 +715,10 @@ func (m model) resolveSetupAimlapi(cmd tea.Cmd, outcome aimlapiOutcome) (tea.Mod
 	}
 	// Keep the shared spinner tick alive whenever the sub-flow just entered a busy
 	// or progress state, so its animated spinner advances during onboarding.
-	return m, tea.Batch(cmd, m.ensureSpinnerTick())
+	// Sequenced: see the note in provider_wizard.go — the pointer receiver
+	// must run before m is copied into the return.
+	tick := m.ensureSpinnerTick()
+	return m, tea.Batch(cmd, tick)
 }
 
 func (m model) nextSetupStage() setupStage {

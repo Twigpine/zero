@@ -162,3 +162,25 @@ func TestSummarizeTaskDataCollectsErrors(t *testing.T) {
 		t.Fatalf("raw = %#v", raw)
 	}
 }
+
+// A TERMINAL TASKOUTPUT POLL EXPOSES THE CHILD'S SPEND in Meta, so the AGENTS
+// panel can show it for a detached background child that never streamed.
+func TestTaskOutputMetaCarriesTokensAndToolCount(t *testing.T) {
+	// A stream-json blob a background child would have written: usage + tools.
+	data := strings.Join([]string{
+		`{"schemaVersion":2,"type":"run_start","runId":"r","sessionId":"child"}`,
+		`{"schemaVersion":2,"type":"tool_call","runId":"r","id":"c1","name":"grep"}`,
+		`{"schemaVersion":2,"type":"tool_call","runId":"r","id":"c2","name":"read_file"}`,
+		`{"schemaVersion":2,"type":"usage","runId":"r","totalTokens":1355600}`,
+		`{"schemaVersion":2,"type":"final","runId":"r","text":"done"}`,
+		`{"schemaVersion":2,"type":"run_end","runId":"r","status":"success","exitCode":0}`,
+	}, "\n")
+
+	summary, _ := summarizeTaskData(data, 0)
+	if got := summary.Usage.EffectiveTotalTokens(); got != 1355600 {
+		t.Fatalf("summary tokens = %d, want 1355600", got)
+	}
+	if len(summary.Tools) != 2 {
+		t.Fatalf("summary tool count = %d, want 2", len(summary.Tools))
+	}
+}

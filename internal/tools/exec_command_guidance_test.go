@@ -44,7 +44,7 @@ func TestExecCommandDescriptionMatchesReportedGuidance(t *testing.T) {
 			// condition in execCommandDescription and a POSIX host starts
 			// appending its own guidance (about 150 characters on darwin) with
 			// the ratchet still charging every byte of it to the schemas.
-			platformGuidance := shellGuidanceForGOOS(goos)
+			platformGuidance := shellGuidanceForRuntime(detectShellRuntime(goos))
 			if platformGuidance == "" {
 				t.Fatalf("SETUP INVALID: %s produces no shell guidance at all, so the check below cannot fail", goos)
 			}

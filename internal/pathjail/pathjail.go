@@ -50,6 +50,16 @@ var ErrReparse = errors.New("refusing to write through a link")
 // a link). Everything BELOW it is resolved against the returned handle and
 // cannot escape.
 func Open(root, dir string) (*os.Root, string, error) {
+	return open(root, dir, true)
+}
+
+// OpenExisting is Open's read-only counterpart. It never creates the declared
+// root, so discovering an absent optional store remains a read-only operation.
+func OpenExisting(root, dir string) (*os.Root, string, error) {
+	return open(root, dir, false)
+}
+
+func open(root, dir string, create bool) (*os.Root, string, error) {
 	// Only a genuinely EMPTY value is treated as missing; every other spelling is
 	// used verbatim. Testing TrimSpace(...) == "" instead would retarget the very
 	// paths this guards: " " is a legal directory name on unix, so trimming would
@@ -76,8 +86,10 @@ func Open(root, dir string) (*os.Root, string, error) {
 	// stores this replaced called MkdirAll on the whole tree, so this creates
 	// strictly less by pathname than before, and everything BELOW root is opened
 	// relative to the handle.
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		return nil, "", fmt.Errorf("create %s: %w", root, err)
+	if create {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			return nil, "", fmt.Errorf("create %s: %w", root, err)
+		}
 	}
 	handle, err := os.OpenRoot(root)
 	if err != nil {

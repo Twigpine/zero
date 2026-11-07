@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Twigpine/zero/internal/execprofile"
 	"github.com/Twigpine/zero/internal/sessions"
 	"github.com/Twigpine/zero/internal/specialist"
 )
@@ -129,6 +130,19 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 				return options, false, err
 			}
 			options.addDirs = append(options.addDirs, value)
+		case arg == "--add-read-dir":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return options, false, err
+			}
+			options.readDirs = append(options.readDirs, value)
+			index = next
+		case strings.HasPrefix(arg, "--add-read-dir="):
+			value, err := requiredInlineFlagValue(arg, "--add-read-dir")
+			if err != nil {
+				return options, false, err
+			}
+			options.readDirs = append(options.readDirs, value)
 		case arg == "--mode":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
@@ -553,9 +567,33 @@ func nextFlagValue(args []string, index int, flag string) (string, int, error) {
 		default:
 			return "", index, execUsageError{fmt.Sprintf("Invalid input format %q. Expected text or stream-json.", next)}
 		}
-	case "--reasoning-effort", "--spec-reasoning-effort":
+	case "--reasoning-effort":
+		// zeromaxing is accepted here as a POSTURE name, not a provider effort
+		// level: normalizeZeromaxingEffort converts it into the equivalent
+		// --exec-profile selection before anything reads it as an effort, and
+		// forwardedReasoningEffort refuses to forward it even if that regressed.
+		//
+		// "max" is deliberately NOT accepted, exactly as before — the flag has
+		// always rejected it and that spelling stays reserved for a real
+		// provider rung. Adding it here would burn the name.
+		switch strings.ToLower(next) {
+		case "low", "medium", "high", execprofile.Name:
+		default:
+			return "", index, execUsageError{fmt.Sprintf("invalid %s %q. Expected low, medium, high, or %s.", flag, next, execprofile.Name)}
+		}
+	case "--spec-reasoning-effort":
+		// The spec-draft effort is a plain provider level; the posture is a RUN
+		// posture and has no meaning for a draft, so it is not accepted here.
 		switch strings.ToLower(next) {
 		case "low", "medium", "high":
+		case execprofile.Name:
+			// Rejecting this with the generic "Expected low, medium, or high"
+			// reads like a bug to anyone who just learned the name works on
+			// --reasoning-effort. Say why it does not apply, and name the two
+			// flags that do what they were reaching for.
+			return "", index, execUsageError{fmt.Sprintf(
+				"invalid %s %q. %s is a run posture, not a reasoning level, so it does not apply to spec drafting. Use %s high for the draft, or --reasoning-effort %s to run under the posture.",
+				flag, next, execprofile.Name, flag, execprofile.Name)}
 		default:
 			return "", index, execUsageError{fmt.Sprintf("invalid %s %q. Expected low, medium, or high.", flag, next)}
 		}

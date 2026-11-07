@@ -66,7 +66,7 @@ func TestExecCommandToolDescribesHostStateEscalation(t *testing.T) {
 	}
 }
 
-func TestExecCommandToolDescribesHostShellSyntax(t *testing.T) {
+func TestExecCommandToolDefersShellSyntaxToTheRunEnvironment(t *testing.T) {
 	tool := NewScopedExecCommandTool(t.TempDir(), nil, nil)
 	schema := tool.Parameters()
 	descriptionParts := []string{tool.Description()}
@@ -76,15 +76,11 @@ func TestExecCommandToolDescribesHostShellSyntax(t *testing.T) {
 	description := strings.ToLower(strings.Join(descriptionParts, " "))
 
 	if runtime.GOOS == "windows" {
-		shell := detectShellRuntime(runtime.GOOS)
-		if shell.Kind == shellKindPowerShell {
-			for _, want := range []string{"powershell", "cwd", "get-childitem", "select-string", "$env:name"} {
-				if !strings.Contains(description, want) {
-					t.Fatalf("expected Windows PowerShell guidance %q in exec_command description, got %q", want, description)
-				}
-			}
-		} else if !strings.Contains(description, "cmd.exe") || !strings.Contains(description, "cwd") {
-			t.Fatalf("expected Windows cmd.exe fallback guidance in exec_command description, got %q", description)
+		if !strings.Contains(description, "effective shell syntax") || !strings.Contains(description, "<environment>") {
+			t.Fatalf("exec_command schema must defer to sandbox-aware run guidance, got %q", description)
+		}
+		if strings.Contains(description, "powershell cmdlets") || strings.Contains(description, "windows cmd.exe syntax") {
+			t.Fatalf("static schema guessed a Windows shell before the sandbox probe: %q", description)
 		}
 	}
 }
@@ -424,10 +420,15 @@ func parseListeningAddress(output string) string {
 	return ""
 }
 
-func TestExecCommandReapsFinishedUnpolledSession(t *testing.T) {
+// The production write_stdin path honours completed-result retention in both
+// directions: a re-poll after the session was reaped is answered from the
+// completed store inside the window, and refused once the window ends.
+func TestWriteStdinReturnsAReapedSessionThroughTheCompletedStore(t *testing.T) {
 	root := execTestRoot(t)
-	manager := execution.NewProcessManager(execution.ProcessManagerOptions{CompletedRetention: 10 * time.Millisecond})
+	const retention = time.Second
+	manager := execution.NewProcessManager(execution.ProcessManagerOptions{CompletedRetention: retention})
 	execTool := NewScopedExecCommandTool(root, nil, manager)
+	writeTool := NewWriteStdinTool(manager)
 
 	start := execTool.Run(context.Background(), map[string]any{
 		"cmd":           helperCommand("sleep"),
@@ -441,15 +442,49 @@ func TestExecCommandReapsFinishedUnpolledSession(t *testing.T) {
 		t.Fatalf("session_id is not numeric: %v", err)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
+	finished := writeTool.Run(context.Background(), map[string]any{
+		"session_id":    sessionID,
+		"yield_time_ms": 5000,
+	})
+	if finished.Status != StatusOK || finished.Meta["exit_code"] != "0" {
+		t.Fatalf("poll did not observe the exit: status=%s meta=%#v output=%q", finished.Status, finished.Meta, finished.Output)
+	}
+	if manager.Len() != 0 {
+		t.Fatalf("session %d was not reaped after its exit was observed; manager has %d sessions", sessionID, manager.Len())
+	}
+
+	late := writeTool.Run(context.Background(), map[string]any{
+		"session_id": sessionID,
+	})
+	if late.Status != StatusOK || !strings.Contains(late.Output, "woke up") {
+		t.Fatalf("late write_stdin poll did not return the completed result: status=%s output=%q", late.Status, late.Output)
+	}
+	if late.Meta["exit_code"] != "0" || late.Meta["cwd"] != "." || late.Meta["tty"] != "false" {
+		t.Fatalf("late result lost terminal metadata: %#v", late.Meta)
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if late.ExecutionRequest == nil || late.ExecutionRequest.WorkingDirectory != canonicalRoot || len(late.ExecutionRequest.WorkspaceRoots) != 1 || late.ExecutionRequest.WorkspaceRoots[0] != canonicalRoot {
+		t.Fatalf("late result lost its execution request: %#v", late.ExecutionRequest)
+	}
+
+	deadline := time.Now().Add(retention + 5*time.Second)
 	for {
-		if _, ok := manager.Snapshot(sessionID); !ok {
-			return
+		if _, remembered := manager.Completed(sessionID); !remembered {
+			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("session %d was not reaped; manager has %d sessions", sessionID, manager.Len())
+			t.Fatalf("session %d is still answerable %s after its %s retention ended", sessionID, 5*time.Second, retention)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+	expired := writeTool.Run(context.Background(), map[string]any{
+		"session_id": sessionID,
+	})
+	if expired.Status != StatusError || expired.Output != UnknownExecSessionError(sessionID) {
+		t.Fatalf("write_stdin after retention = status %s output %q; want the unknown-session error", expired.Status, expired.Output)
 	}
 }
 

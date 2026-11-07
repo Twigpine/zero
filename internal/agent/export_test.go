@@ -2,6 +2,7 @@
 package agent
 
 import (
+	"github.com/Twigpine/zero/internal/specialist"
 	"github.com/Twigpine/zero/internal/tools"
 	"github.com/Twigpine/zero/internal/zeroruntime"
 )
@@ -38,4 +39,16 @@ func parsePreservedState(summaryContent string) (string, []skillEntry) {
 // so the inactive path is stable.
 func partitionTools(registry *tools.Registry, permissionMode PermissionMode, options Options, loaded map[string]bool) ([]zeroruntime.ToolDefinition, string) {
 	return partitionToolsCached(registry, permissionMode, options, loaded, nil)
+}
+
+// Phase 2 additivity-proof seam. The identity test uses the REAL orchestrate
+// tool rather than a stub, so it exercises the actual Deferred() contract that
+// enforces the posture-off constraint. internal/specialist does not import
+// internal/agent, so this direction creates no cycle.
+const phase2ToolName = specialist.OrchestrateToolName
+
+// registerPhase2ToolForTest registers the real tool with the posture OFF, which
+// is the condition the identity test is about.
+func registerPhase2ToolForTest(registry *tools.Registry) {
+	registry.Register(&specialist.OrchestrateTool{PostureActive: func() bool { return false }})
 }

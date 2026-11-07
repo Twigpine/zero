@@ -112,7 +112,7 @@ func TestCoreToolsExposeShellTools(t *testing.T) {
 	}
 }
 
-func TestBashToolDescribesHostShellSyntax(t *testing.T) {
+func TestBashToolDefersShellSyntaxToTheRunEnvironment(t *testing.T) {
 	tool := NewScopedBashTool(t.TempDir(), nil)
 	schema := tool.Parameters()
 	descriptionParts := []string{tool.Description()}
@@ -127,21 +127,11 @@ func TestBashToolDescribesHostShellSyntax(t *testing.T) {
 		t.Fatalf("expected sandbox escalation guidance in bash description, got %q", description)
 	}
 
-	if runtime.GOOS == "windows" {
-		shell := detectShellRuntime(runtime.GOOS)
-		if shell.Kind == shellKindPowerShell {
-			for _, want := range []string{"powershell", "cwd", "get-childitem", "select-string", "$env:name"} {
-				if !strings.Contains(description, want) {
-					t.Fatalf("expected Windows PowerShell guidance %q in bash description, got %q", want, description)
-				}
-			}
-		} else if !strings.Contains(description, "cmd.exe") || !strings.Contains(description, "cwd") {
-			t.Fatalf("expected Windows cmd.exe fallback guidance in bash description, got %q", description)
-		}
-		return
+	if !strings.Contains(description, "effective shell syntax") || !strings.Contains(description, "<environment>") {
+		t.Fatalf("bash schema must defer to sandbox-aware run guidance, got %q", description)
 	}
-	if !strings.Contains(description, "/bin/sh") {
-		t.Fatalf("expected /bin/sh guidance in bash description, got %q", description)
+	if runtime.GOOS == "windows" && (strings.Contains(description, "powershell cmdlets") || strings.Contains(description, "windows cmd.exe syntax")) {
+		t.Fatalf("static schema guessed a Windows shell before the sandbox probe: %q", description)
 	}
 }
 

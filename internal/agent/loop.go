@@ -13,6 +13,7 @@ import (
 
 	"github.com/Twigpine/zero/internal/execution"
 	"github.com/Twigpine/zero/internal/hooks"
+	"github.com/Twigpine/zero/internal/measurements"
 	"github.com/Twigpine/zero/internal/modelregistry"
 	"github.com/Twigpine/zero/internal/redaction"
 	"github.com/Twigpine/zero/internal/sandbox"
@@ -23,7 +24,15 @@ import (
 )
 
 const maxTurnsAnswer = "Agent reached maximum number of turns without a final answer."
+const maxTokensAnswer = "Agent reached its token budget without a final answer."
 const maxTurnsFinalAnswerPrompt = "You have reached the tool-turn limit. Do not call tools. Give a concise final answer now: summarize what you completed, what you found, and any remaining blockers."
+
+// maxTokensFinalAnswerPrompt is the same ending for a different reason, and it
+// says which. A run stopped for spend and a run stopped for round trips call for
+// the same next action from the model and a different explanation to the reader,
+// who otherwise reaches for the wrong lever — raising a turn count that was never
+// what ran out.
+const maxTokensFinalAnswerPrompt = "You have reached this run's token budget. Do not call tools. Give a concise final answer now: summarize what you completed, what you found, and any remaining blockers."
 
 // maxStreamStallRetries bounds how many times a turn that timed out (idle/stall)
 // OR hit a mid-stream transport abort (#973) with no answer text yet is re-issued
@@ -178,6 +187,10 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	// this local, so no signatures change anywhere downstream.
 	provider = sessionProvider{session: session}
 
+	// The turn's raw user text, carried to tools so a gate can tell "the user
+	// asked for this" from "the model read a sentence that said to".
+	options.userMessage = prompt
+
 	maxTurns := options.MaxTurns
 	if maxTurns <= 0 {
 		maxTurns = 12
@@ -256,6 +269,18 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	// FileDiagnostics callback is wired; every method no-ops on nil.
 	postEditDiagnostics := newAsyncDiagnostics(options.FileDiagnostics, options.Cwd)
 
+	// THE RUN'S OWN TIMINGS, so a final answer cannot report a number no command
+	// here produced. Every tool result is read for `go test` durations; the final
+	// answer is checked against them once before it is returned.
+	//
+	// POSTURE-GATED, and nil when the posture is off — every method no-ops on
+	// nil, so a run that never heard of zeromaxing takes exactly the path it took
+	// before this existed. See internal/measurements for the failure it is for.
+	var measured *measurements.Ledger
+	if options.Zeromaxing != ZeromaxingOff {
+		measured = measurements.NewLedger()
+	}
+
 	// loaded tracks deferred-eligible tools the model has pulled via tool_search
 	// during THIS run. It is consulted by partitionTools each turn to expose a
 	// loaded tool's full schema; it lives only for the run (v1 within-run scope).
@@ -271,6 +296,12 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	// doesn't re-run the recursive schema→map conversion for every tool every turn.
 	toolDefCache := map[string]zeroruntime.ToolDefinition{}
 
+	// SPEND, accumulated from what the provider actually reported rather than
+	// estimated. Only read when options.MaxTokens > 0, so an unbounded run adds
+	// one integer and changes nothing else.
+	spentTokens := 0
+	stoppedOnTokens := false
+
 	result = Result{Messages: copyMessages(messages)}
 	dispatchSessionStart(ctx, options)
 	defer func() {
@@ -283,6 +314,27 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 	for turn := 0; turn < maxTurns; turn++ {
 		result.Turns = turn + 1
 
+		// CHECKED HERE, at the top of a turn, for the same reason the turn count
+		// is: the previous turn's tool calls have run and their results are in
+		// hand. Stopping mid-turn would discard work already paid for.
+		if options.MaxTokens > 0 && spentTokens >= options.MaxTokens {
+			stoppedOnTokens = true
+			break
+		}
+
+		// The zeromaxing posture's reminders. Appended to the CONVERSATION tail
+		// as user-role messages — the same channel as the diagnostics nudge
+		// below and the failure/plan hints later in the turn — and never into
+		// the system prompt, which is built once per run and must stay
+		// byte-stable so the provider's cached prefix survives. See
+		// internal/agent/zeromaxing.go.
+		for _, reminder := range zeromaxingReminders(options.Zeromaxing, result.Turns, options.OrchestrateAvailable) {
+			messages = append(messages, zeroruntime.Message{
+				Role:    zeroruntime.MessageRoleUser,
+				Content: reminder,
+			})
+		}
+
 		// Deliver background post-edit diagnostics from the previous turn's edits
 		// BEFORE compaction so the nudge is part of the request being budgeted.
 		// A brief wait at most (asyncDiagnosticsDrainTimeout); an unfinished check
@@ -292,6 +344,19 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				Role:    zeroruntime.MessageRoleUser,
 				Content: nudge,
 			})
+		}
+
+		// A BACKGROUND PLAN that finished since the last turn. Same channel and
+		// the same point in the turn as the diagnostics nudge above: the model
+		// was told the plan was not finished and must not report it as done, so
+		// this is the message that makes that promise good.
+		if options.PlanCompletions != nil {
+			if finished := options.PlanCompletions(); finished != "" {
+				messages = append(messages, zeroruntime.Message{
+					Role:    zeroruntime.MessageRoleUser,
+					Content: finished,
+				})
+			}
 		}
 
 		// Build the per-turn tool list first so proactive compaction can include
@@ -555,6 +620,11 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// assistant reply is appended below, after this, so `messages` is still the
 		// sent request.
 		compactor.calibrate(estimateTokens(messages)+estimateToolDefTokens(exposed), collected.Usage.InputTokens)
+		// Accumulated at the same point the estimator is calibrated: past error
+		// recovery, and past any reactive compaction that re-sent the request, so
+		// this counts the exchange that actually happened rather than one that was
+		// abandoned and replaced.
+		spentTokens += collected.Usage.TotalTokens()
 
 		// Carry the turn's terminal stop reason so a final answer cut off at the
 		// output token cap (or by a content filter) is reported as truncated. A
@@ -662,6 +732,23 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				})
 				continue
 			}
+			// THE ANSWER IS CHECKED AGAINST THE TRANSCRIPT before it is returned.
+			// Same channel and the same gate as the diagnostics drain above, and
+			// for the same reason: a final answer means there is no later turn, so
+			// a number that contradicts what actually ran has to be raised now or
+			// never. Each name is raised at most once by the ledger, so an answer
+			// that comes back unchanged is returned rather than asked again.
+			// ACROSS RUNS, because a final answer may summarise several commands
+			// and this caller cannot say which one any given number came from.
+			// Holding it to a single run would accuse the model of inventing a
+			// number one of the other commands really printed.
+			if nudge := measurements.Nudge(measured.ConflictsAcrossRuns(collected.Text)); nudge != "" {
+				messages = append(messages, zeroruntime.Message{
+					Role:    zeroruntime.MessageRoleUser,
+					Content: nudge,
+				})
+				continue
+			}
 			result.FinalAnswer = collected.Text
 			result.Messages = copyMessages(messages)
 			return result, nil
@@ -750,6 +837,14 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			}
 			options.Trace.Counter(trace.CounterToolCalls, 1)
 			recordOutputBudgetTrace(options.Trace, toolResult)
+			// Read before anything can truncate or summarize it: this is the only
+			// place the command's own words are in hand — and the only place the
+			// CALL that produced them is in hand too. Recording which tool and
+			// which arguments printed a timing is what stops a claim about one
+			// command being answered by a number a different one produced: a
+			// `-race` run is routinely several times slower, which is the size of
+			// discrepancy this check exists to catch.
+			measured.Record(measurements.Run{Command: call.Name, Args: []string{call.Arguments}}, toolResult.Output)
 			task.observe(taskStateEvent{kind: taskStateEventToolResult, arguments: call.Arguments, toolResult: toolResult})
 			if options.OnToolResult != nil {
 				options.OnToolResult(toolResult)
@@ -992,22 +1087,31 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		})
 	}
 	finalExposed, _ := partitionToolsCached(registry, permissionMode, options, loaded, toolDefCache)
-	if answer, finalMessages, finishReason := finalAnswerAfterMaxTurns(ctx, provider, planner, messages, finalExposed, options); strings.TrimSpace(answer) != "" {
+	// WHICH BOUND FIRED reaches the reader, because the two call for different
+	// responses: a turn-count stop is a round-trip problem, a token stop is a
+	// spend one, and reporting the first for the second sends someone to raise a
+	// limit that was never what ran out.
+	finalPrompt, exhaustedAnswer, limitName := maxTurnsFinalAnswerPrompt, maxTurnsAnswer, "max-turns limit"
+	if stoppedOnTokens {
+		finalPrompt, exhaustedAnswer, limitName = maxTokensFinalAnswerPrompt, maxTokensAnswer, "token budget"
+	}
+
+	if answer, finalMessages, finishReason := finalAnswerAfterMaxTurns(ctx, provider, planner, messages, finalExposed, options, finalPrompt); strings.TrimSpace(answer) != "" {
 		result.FinalAnswer = answer
 		result.FinishReason = finishReason
 		result.Messages = copyMessages(finalMessages)
 		if options.RequireCompletionSignal {
 			result.Incomplete = true
-			result.IncompleteReason = "reached the max-turns limit without completing"
+			result.IncompleteReason = "reached the " + limitName + " without completing"
 		}
 		return result, nil
 	}
 
-	result.FinalAnswer = maxTurnsAnswer
+	result.FinalAnswer = exhaustedAnswer
 	result.Messages = copyMessages(messages)
 	if options.RequireCompletionSignal {
 		result.Incomplete = true
-		result.IncompleteReason = "reached the max-turns limit without a final answer"
+		result.IncompleteReason = "reached the " + limitName + " without a final answer"
 	}
 	return result, nil
 }
@@ -1074,11 +1178,11 @@ func recordContextPlanTrace(recorder *trace.Recorder, plan contextPlan) {
 	})
 }
 
-func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, planner *contextPlanner, messages []zeroruntime.Message, toolDefs []zeroruntime.ToolDefinition, options Options) (string, []zeroruntime.Message, string) {
+func finalAnswerAfterMaxTurns(ctx context.Context, provider Provider, planner *contextPlanner, messages []zeroruntime.Message, toolDefs []zeroruntime.ToolDefinition, options Options, prompt string) (string, []zeroruntime.Message, string) {
 	finalMessages := copyMessages(messages)
 	finalMessages = append(finalMessages, zeroruntime.Message{
 		Role:    zeroruntime.MessageRoleUser,
-		Content: maxTurnsFinalAnswerPrompt,
+		Content: prompt,
 	})
 	// The max-turns final-answer call is a pre-content connect, often after a long
 	// autonomous/cron run — route it through the reconnect helper so a single
@@ -1489,10 +1593,17 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 	}
 	args = shellExecutionArgsForApproval(call.Name, args, decisionAction, options)
 
-	// Task tool: wire progress callback so the TUI sees live tool-call events
-	// from the specialist child process.
+	// Wire the progress callback so the TUI sees live tool-call events from a
+	// child agent process.
+	//
+	// Keyed on the TOOL'S OWN DECLARATION (tools.ChildProgressStreamer), not on
+	// its name. This was `call.Name == "Task"`, which made the second
+	// sub-agent-spawning tool run invisibly; `|| call.Name == "orchestrate"`
+	// would have been the same defect one name later. A tool that spawns
+	// children declares it, and every tool that does not keeps the nil callback
+	// it has today.
 	var progressCallback func(streamjson.Event)
-	if call.Name == "Task" && options.OnToolProgress != nil {
+	if options.OnToolProgress != nil && tools.StreamsChildProgress(tool) {
 		toolCallID := call.ID
 		onProgress := options.OnToolProgress
 		progressCallback = func(event streamjson.Event) {
@@ -1511,6 +1622,7 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		ReasoningEffort:   options.ReasoningEffort,
 		Depth:             options.Depth,
 		Cwd:               options.Cwd,
+		UserMessage:       options.userMessage,
 		// Per-session file version tracker so write_file/edit_file refuse to clobber
 		// a file that changed on disk outside Zero since it was last read.
 		FileTracker:                options.FileTracker,
@@ -2939,7 +3051,7 @@ func availablePermissionDecisions(event PermissionEvent, args map[string]any, op
 				decisions = append(decisions, PermissionDecisionAlwaysAllowPrefix)
 			}
 		}
-		if options.Sandbox.CanPersistGrants() && permissionSupportsPersistentDecision(event.ToolName) && !filesystemSandboxPrompt(event) && !inlineAdditionalPermissions {
+		if options.Sandbox.CanPersistGrants() && permissionSupportsPersistentDecision(event.ToolName, options) && !filesystemSandboxPrompt(event) && !inlineAdditionalPermissions {
 			decisions = append(decisions, PermissionDecisionAlwaysAllow)
 		}
 	}
@@ -3141,7 +3253,17 @@ func grantFilesystemForSandboxPrompt(event PermissionEvent, scope sandbox.Permis
 	}, scope)
 }
 
-func permissionSupportsPersistentDecision(toolName string) bool {
+func permissionSupportsPersistentDecision(toolName string, options Options) bool {
+	// THE TOOL'S OWN DECLARATION FIRST. A name list cannot describe a tool whose
+	// reach depends on its arguments, and it cannot cover a tool that RUNS the
+	// ones already refused below — see tools.PersistentPermissionRefuser.
+	if options.Registry != nil {
+		if tool, found := options.Registry.Get(toolName); found {
+			if refuser, ok := tool.(tools.PersistentPermissionRefuser); ok && refuser.RefusesPersistentPermission() {
+				return false
+			}
+		}
+	}
 	switch toolName {
 	case "bash", "exec_command", "write_stdin", "apply_patch":
 		return false

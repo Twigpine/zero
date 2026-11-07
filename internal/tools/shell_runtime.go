@@ -49,6 +49,13 @@ const windowsPowerShellExitSuffix = "\nif ($null -ne $LASTEXITCODE) { exit $LAST
 var (
 	hostShellOnce sync.Once
 	hostShell     shellRuntime
+
+	// The sandboxed answer is cached separately from the unsandboxed one
+	// because the two environments genuinely disagree: PowerShell probes fine
+	// in this process and then cannot start inside the sandbox. Sharing one
+	// cache would let whichever question was asked first answer both.
+	sandboxedShellOnce sync.Once
+	sandboxedShell     shellRuntime
 )
 
 // windowsMsysProneNames is the single source of truth for POSIX coreutil and
@@ -90,6 +97,30 @@ func detectShellRuntime(goos string) shellRuntime {
 		hostShell = detectShellRuntimeWithProbe(goos, exec.LookPath, os.Getenv, powerShellExecutableUsable)
 	})
 	return hostShell
+}
+
+// detectShellRuntimeSandboxed picks the shell using a probe that starts the
+// candidate the way a tool command will actually start it — inside the sandbox
+// — rather than in this unrestricted process.
+//
+// The plain probe asks the wrong environment. On Windows the sandbox runs
+// commands under a WRITE_RESTRICTED restricted token, and PowerShell is a .NET
+// program whose crypto initialization fails there:
+//
+//	System.DllNotFoundException: Unable to load DLL 'BCrypt.dll' ... (0x8007045A)
+//
+// So PowerShell answers "usable" when probed directly, is then selected, and
+// cannot run so much as `echo` once wrapped. cmd.exe does survive the token, and
+// is already the documented fallback, so an honest probe reaches it on its own.
+// This is the same restricted-token incompatibility class as the Schannel and
+// MSYS2 limitations recorded in internal/sandbox/windows_command_runner_windows.go.
+//
+// usable must run the candidate through the same sandbox the command will use.
+func detectShellRuntimeSandboxed(usable func(string) bool) shellRuntime {
+	sandboxedShellOnce.Do(func() {
+		sandboxedShell = detectShellRuntimeWithProbe(runtime.GOOS, exec.LookPath, os.Getenv, usable)
+	})
+	return sandboxedShell
 }
 
 func detectShellRuntimeWithLookup(goos string, lookPath func(string) (string, error), getenv func(string) string) shellRuntime {
@@ -162,10 +193,6 @@ func NewHostShellCommandContext(ctx context.Context, commandText string) *exec.C
 	return command
 }
 
-func shellGuidanceForGOOS(goos string) string {
-	return shellGuidanceForRuntime(detectShellRuntime(goos))
-}
-
 func shellGuidanceForRuntime(shell shellRuntime) string {
 	if shell.GOOS == "windows" && shell.Kind == shellKindPowerShell {
 		guidance := "Uses PowerShell syntax on Windows; prefer cwd/workdir over Set-Location when changing directories. Examples: Get-ChildItem -Force; Get-ChildItem -Recurse -Filter *.go; Get-ChildItem -Recurse | Select-String -Pattern 'TODO'; Get-Process | Where-Object { $_.ProcessName -like '*node*' }; $env:NAME='value'; @'\nprint('hello')\n'@ | python -. Do not invoke Git-for-Windows MSYS/Cygwin executables (bash, sh, grep.exe, sed.exe, head.exe, and similar) inside the restricted sandbox; prefer PowerShell cmdlets or native Zero tools."
@@ -196,17 +223,36 @@ func HostExecCommandShellGuidance() string {
 // hostExecCommandShellGuidance is the guidance a host running goos appends. It
 // is the pair of execCommandDescription, so the two can be checked against each
 // other for every platform rather than only for the running one.
+//
+// It is deliberately not the host-probed shell rule: the shell a command runs
+// in depends on the sandbox engine (a restricted token can reject PowerShell and
+// fall back to cmd.exe), so the description points at the run's <environment>
+// block, which is built from the engine-aware probe.
 func hostExecCommandShellGuidance(goos string) string {
 	if goos != "windows" {
 		return ""
 	}
-	return shellGuidanceForGOOS(goos)
+	return windowsExecCommandShellGuidance
 }
+
+// windowsExecCommandShellGuidance is the only text exec_command's description
+// appends, and only on Windows.
+const windowsExecCommandShellGuidance = "Use the effective shell syntax stated in the run's <environment> block."
 
 // HostShellEnvironmentGuidance returns the concise, model-facing shell rule
 // for the current host.
 func HostShellEnvironmentGuidance() string {
 	return hostShellEnvironmentGuidanceForRuntime(detectShellRuntime(runtime.GOOS))
+}
+
+// HostShellEnvironmentGuidanceForEngine describes the exact shell runtime an
+// exec_command/bash call will use with engine. On Windows the restricted-token
+// sandbox can reject a PowerShell binary that starts successfully on the host;
+// shellRuntimeForEngine performs that sandboxed probe and falls back to cmd.exe.
+// Keeping prompt guidance on this path prevents the model being taught one
+// grammar while its commands are executed by another shell.
+func HostShellEnvironmentGuidanceForEngine(engine *zeroSandbox.Engine, cwd string) string {
+	return hostShellEnvironmentGuidanceForRuntime(shellRuntimeForEngine(engine, cwd))
 }
 
 func hostShellEnvironmentGuidanceForRuntime(shell shellRuntime) string {

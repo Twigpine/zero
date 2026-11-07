@@ -282,15 +282,25 @@ func (writer *execEventWriter) usage(usage agent.Usage) {
 		cachedInputTokens := usage.CachedInputTokens
 		cacheWriteTokens := usage.CacheWriteTokens
 		totalTokens := usage.TotalTokens()
-		writer.writeStreamJSON(streamjson.Event{
-			Type:              streamjson.EventUsage,
-			RunID:             writer.runID,
-			PromptTokens:      &promptTokens,
-			CompletionTokens:  &completionTokens,
-			CachedInputTokens: &cachedInputTokens,
-			CacheWriteTokens:  &cacheWriteTokens,
-			TotalTokens:       &totalTokens,
-		})
+		event := streamjson.Event{
+			Type:             streamjson.EventUsage,
+			RunID:            writer.runID,
+			PromptTokens:     &promptTokens,
+			CompletionTokens: &completionTokens,
+			TotalTokens:      &totalTokens,
+		}
+		// Preserve the provider breakdown when it exists without widening the
+		// event shape for providers that report no cache or reasoning usage.
+		if cachedInputTokens > 0 {
+			event.CachedInputTokens = &cachedInputTokens
+		}
+		if cacheWriteTokens > 0 {
+			event.CacheWriteTokens = &cacheWriteTokens
+		}
+		if reasoning := usage.ReasoningTokens; reasoning > 0 {
+			event.ReasoningTokens = &reasoning
+		}
+		writer.writeStreamJSON(event)
 	}
 }
 

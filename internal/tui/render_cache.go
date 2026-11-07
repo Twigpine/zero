@@ -158,6 +158,13 @@ func (m model) renderRowCacheKey(row transcriptRow, width int, rc rowContext, op
 	appendRenderCacheField(&b, strconv.FormatBool(rc.auto[key]))
 	appendRenderCacheField(&b, permissionCacheFingerprint(row.permission))
 	appendRenderCacheField(&b, askUserCacheFingerprint(row.askUser))
+	// A specialist row carries NO id and NO text — every distinguishing field
+	// lives behind row.specialistInfo, and none of it was in this key. Two
+	// specialist cards in one run therefore produced an identical key, so the
+	// first one rendered was reused for the second: a failed sub-agent shown as
+	// a successful one. Rare with the Task tool (one child per run is typical),
+	// guaranteed with a plan, which produces one card per task.
+	appendRenderCacheField(&b, specialistCacheFingerprint(row.specialistInfo))
 	return b.String(), stable
 }
 
@@ -166,6 +173,45 @@ func appendRenderCacheField(b *strings.Builder, value string) {
 	b.WriteByte(':')
 	b.WriteString(value)
 	b.WriteByte('|')
+}
+
+// specialistCacheFingerprint covers every field of a specialist card that can
+// change what it renders. A field added to specialistInfo and not added here is
+// the same defect returning, which is why TestSpecialistFingerprintCoversEvery
+// Field walks the struct by reflection instead of listing fields by hand.
+//
+// THE THREE THAT WERE MISSING all share one shape: they are written AFTER the
+// card's first render — setTokens, setModel and setResult each mutate an entry
+// that has already been drawn and cached. So the key was unchanged, the stale
+// render was served, and a finished plan task kept showing no tokens, no model
+// and no output. A field that only ever arrives at start() would have hidden
+// the bug; these arrive late, which is exactly when a cache key has to move.
+func specialistCacheFingerprint(info *specialistInfo) string {
+	if info == nil {
+		return ""
+	}
+	fields := []string{
+		info.childSessionID,
+		info.name,
+		info.description,
+		strconv.Itoa(int(info.status)),
+		strconv.Itoa(info.exitCode),
+		info.errorMsg,
+		strconv.Itoa(info.toolCount),
+		strconv.Itoa(info.tokenCount),
+		info.currentTool,
+		info.currentDetail,
+		info.model,
+		strconv.FormatBool(info.background),
+		info.result,
+		strconv.FormatInt(info.startedAt.UnixNano(), 10),
+		strconv.FormatInt(info.completedAt.UnixNano(), 10),
+	}
+	var b strings.Builder
+	for _, field := range fields {
+		appendRenderCacheField(&b, field)
+	}
+	return b.String()
 }
 
 func permissionCacheFingerprint(event *agent.PermissionEvent) string {

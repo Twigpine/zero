@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -27,6 +28,7 @@ import (
 	"github.com/Twigpine/zero/internal/modelregistry"
 	"github.com/Twigpine/zero/internal/notify"
 	"github.com/Twigpine/zero/internal/peermsg"
+	"github.com/Twigpine/zero/internal/providercatalog"
 	"github.com/Twigpine/zero/internal/providerhealth"
 	"github.com/Twigpine/zero/internal/providermodeldiscovery"
 	"github.com/Twigpine/zero/internal/providers"
@@ -34,6 +36,7 @@ import (
 	"github.com/Twigpine/zero/internal/sandbox"
 	"github.com/Twigpine/zero/internal/sessions"
 	"github.com/Twigpine/zero/internal/skills"
+	"github.com/Twigpine/zero/internal/specialist"
 	"github.com/Twigpine/zero/internal/streamjson"
 	"github.com/Twigpine/zero/internal/terminalpet"
 	"github.com/Twigpine/zero/internal/tools"
@@ -133,14 +136,35 @@ type model struct {
 	// already been attempted this process, so a finished turn re-fires the title
 	// generator at most once per session (even before its async result lands).
 	// Lazily initialized.
-	titledSessions              map[string]bool
-	renamePrompt                *sessionRenamePrompt
-	usageTracker                *usage.Tracker
-	sessionCompactor            SessionCompactor
-	prService                   *PrService
-	prState                     PrState
-	prWatcherStop               func()
-	runtimeMessageSink          func(tea.Msg)
+	titledSessions     map[string]bool
+	renamePrompt       *sessionRenamePrompt
+	usageTracker       *usage.Tracker
+	sessionCompactor   SessionCompactor
+	prService          *PrService
+	prState            PrState
+	prWatcherStop      func()
+	runtimeMessageSink func(tea.Msg)
+	// planRunningCardKey is the card key of the plan task currently in flight.
+	// A plan's child progress events arrive keyed by the ORCHESTRATE tool call
+	// (the loop's callback carries only the parent's tool-call id), so they are
+	// attributed to this.
+	//
+	// GONE, and deliberately: a plan's child progress now arrives as
+	// planTaskProgressMsg carrying its own task id, resolved by the recorder
+	// that opened the card. What stood here guessed "whichever task was
+	// dispatched last", which stopped being true the moment two tasks could run
+	// at once.
+	// planProgress is the shared recorder the orchestrate tool holds. A POINTER
+	// for the same reason PostureGate is one: the TUI model is a value type
+	// copied on every update, so a closure over it would freeze the first run.
+	// planPreflight is what auto-assignment is doing before a plan is admitted.
+	// Empty when nothing is pending, which is almost always.
+	planPreflight string
+	planProgress  *PlanProgressBridge
+	// orchestrate is the live view of the running orchestrate plan. Distinct
+	// from m.plan, which is the update_plan tool's TODO list — two different
+	// things called "plan", kept apart by name everywhere but the command.
+	orchestrate                 orchestratePanelState
 	prepareRunCompletionWarning func()
 	runCompletionWarning        func() string
 	agentOptions                agent.Options
@@ -169,53 +193,69 @@ type model struct {
 	execProfileTurnsTouched       bool
 	execProfileEffortTouched      bool
 	execProfileSelfCorrectTouched bool
-	responseStyle                 string
-	petClient                     *terminalpet.Client
-	petRenderer                   *terminalpet.ImageRenderer
-	attachmentRenderers           []*terminalpet.ImageRenderer
-	petEntries                    map[string]terminalpet.Entry
-	petID                         string
-	petName                       string
-	petAnimation                  *terminalpet.Animation
-	petPreview                    *terminalpet.Animation
-	petPreviewSlug                string
-	petPreviewError               string
-	petPreviewLoading             bool
-	petPreviewSeq                 uint64
-	petPreviewCancel              context.CancelFunc
-	petRequestedSlug              string
-	petPhase                      int
-	petTickSeq                    uint64
-	petPlaybackState              terminalpet.State
-	petClickAnimationIndex        int
-	petOutcome                    terminalpet.State
-	petOutcomeAt                  time.Time
-	petLayoutRendering            bool
-	petPositionSet                bool
-	petPositionX                  int
-	petPositionY                  int
-	petDragActive                 bool
-	petDragMoved                  bool
-	petDragStartedDocked          bool
-	petDragOffsetX                int
-	petDragOffsetY                int
-	petDragTargetX                int
-	petDragTargetY                int
-	petDragTargetOffsetX          int
-	petDragTargetOffsetY          int
-	petPositionOffsetX            int
-	petPositionOffsetY            int
-	petCellPixelWidth             int
-	petCellPixelHeight            int
-	petPixelDrag                  bool
-	petPixelAnchorSet             bool
-	petDragOffsetPixelX           int
-	petDragOffsetPixelY           int
-	petDragState                  terminalpet.State
-	petLastClickAt                time.Time
-	keyBindings                   keyBindings
-	themeMode                     themeMode // palette preference: system (default) or named palette
-	hasDarkBg                     bool      // last terminal background-detection result, if one is delivered
+	// zeromaxing tracks where the session sits in the zeromaxing posture
+	// lifecycle so the agent loop can inject the enter/still-on/exit reminders.
+	// It spans runs (unlike headless exec, where a process is one run), which is
+	// why Active and Exiting exist: selecting it makes the NEXT run Entering,
+	// the run after that Active, and leaving it makes the next run Exiting once.
+	zeromaxing agent.Zeromaxing
+	// zeromaxingDisabled mirrors resolved config's profiles.disableZeromaxing so
+	// /effort and /profile consult the same rule the headless path applies.
+	zeromaxingDisabled bool
+	// zeromaxingGate is the shared flag the orchestrate tool reads. Written on
+	// every posture transition so a run started afterwards sees it.
+	zeromaxingGate *specialist.PostureGate
+	// execProfileEffortUnraised names the effort level a profile asked for but
+	// could not apply on the active model, so the status output can say what it
+	// did not raise instead of silently pretending it did.
+	execProfileEffortUnraised modelregistry.ReasoningEffort
+	responseStyle             string
+	petClient                 *terminalpet.Client
+	petRenderer               *terminalpet.ImageRenderer
+	attachmentRenderers       []*terminalpet.ImageRenderer
+	petEntries                map[string]terminalpet.Entry
+	petID                     string
+	petName                   string
+	petAnimation              *terminalpet.Animation
+	petPreview                *terminalpet.Animation
+	petPreviewSlug            string
+	petPreviewError           string
+	petPreviewLoading         bool
+	petPreviewSeq             uint64
+	petPreviewCancel          context.CancelFunc
+	petRequestedSlug          string
+	petPhase                  int
+	petTickSeq                uint64
+	petPlaybackState          terminalpet.State
+	petClickAnimationIndex    int
+	petOutcome                terminalpet.State
+	petOutcomeAt              time.Time
+	petLayoutRendering        bool
+	petPositionSet            bool
+	petPositionX              int
+	petPositionY              int
+	petDragActive             bool
+	petDragMoved              bool
+	petDragStartedDocked      bool
+	petDragOffsetX            int
+	petDragOffsetY            int
+	petDragTargetX            int
+	petDragTargetY            int
+	petDragTargetOffsetX      int
+	petDragTargetOffsetY      int
+	petPositionOffsetX        int
+	petPositionOffsetY        int
+	petCellPixelWidth         int
+	petCellPixelHeight        int
+	petPixelDrag              bool
+	petPixelAnchorSet         bool
+	petDragOffsetPixelX       int
+	petDragOffsetPixelY       int
+	petDragState              terminalpet.State
+	petLastClickAt            time.Time
+	keyBindings               keyBindings
+	themeMode                 themeMode // palette preference: system (default) or named palette
+	hasDarkBg                 bool      // last terminal background-detection result, if one is delivered
 	// notifyMode and notifyFocusMode track the user's in-session notify
 	// preference (from options.Notify, updated by /notify). The notifier built
 	// at startup is independent, so changes apply on the NEXT permission prompt.
@@ -246,6 +286,24 @@ type model struct {
 	transcript         []transcriptRow
 	transcriptDetailed bool
 	helpOverlay        bool // the `?` keyboard-shortcut overlay is open
+	// planPaths locates saved plans, project first. Set once at startup: the
+	// workspace does not move for the life of a session.
+	planPaths specialist.PlanPaths
+	// planStaging owns the plans /plans restart and resume stage, so they are
+	// removed after admission without touching user-authored plans.
+	planStaging *planStaging
+	// orchestrateSelected is the plan task the sidebar's TASK section details.
+	// Clicking a task row in the sidebar sets it; ctrl+g cycles it.
+	orchestrateSelected int
+	// showDoneAgents keeps finished agents in the AGENTS section instead of
+	// dropping them after their linger. Off by default: during a run the live
+	// agents are the news. Toggled by clicking the header's "N done".
+	showDoneAgents bool
+	// expandedAgent is the AGENTS row showing its brief and spend, keyed by the
+	// specialist's card id. One at a time: the section shares its column with
+	// PLAN, FILES and ACTIVITY, and every row expanded at once would be a
+	// different panel rather than a detail on this one.
+	expandedAgent string
 	// leaderHelpOverlay is the Ctrl+X ? modal listing every leader slash chord.
 	leaderHelpOverlay bool
 	// leaderPending is true after Ctrl+X until a second key, Esc, or timeout
@@ -767,6 +825,11 @@ type specialistStartMsg struct {
 	name           string
 	description    string
 	childSessionID string
+	// model is what the child is EXPECTED to run on — the session's own, since
+	// a Task sub-agent inherits it unless its manifest names another. Shown
+	// while the agent runs, and corrected from the result's Meta["model"] when
+	// it finishes, which is the authoritative answer.
+	model string
 }
 
 // specialistCompleteMsg carries specialist completion info from the
@@ -777,6 +840,24 @@ type specialistCompleteMsg struct {
 	childSessionID string
 	status         specialistStatus
 	errorMsg       string
+	// model is what the child actually ran on, from the executor's own
+	// resolution. Empty leaves whatever the start message showed.
+	model string
+}
+
+// specialistRebindMsg rebinds a running specialist row from its temporary
+// tool-call key to the id later events will use, WITHOUT completing it.
+//
+// A BACKGROUND SPAWN NEEDS THIS AND A FOREGROUND ONE DOES NOT. A foreground
+// Task reconciles inside its completion, which fires when the child finishes. A
+// background Task returns immediately with a task_id and finishes later via a
+// TaskOutput poll keyed on THAT id — but the row is still keyed on the tool call
+// id, so the poll's completion never finds it and the row runs forever. This
+// rebinds the key the moment the spawn returns, so the later completion lands.
+type specialistRebindMsg struct {
+	runID   int
+	fromKey string
+	toKey   string
 }
 
 // unknownScopeMutationMsg carries the completion of a suppressed tool result
@@ -801,6 +882,33 @@ type specialistProgressMsg struct {
 	toolCallID string
 	toolName   string
 	detail     string
+}
+
+// specialistUsageMsg carries a running child's LIVE token spend, so the AGENTS
+// row shows what it costs WHILE it works — not only after. Bridged from the
+// child's EventUsage, which OnToolProgress previously ignored, which is why a
+// Task sub-agent's card sat at zero tokens for its whole life.
+type specialistUsageMsg struct {
+	runID       int
+	toolCallID  string
+	totalTokens int
+}
+
+// specialistTotalTokensMsg carries a background child's RUNNING TOTAL from a
+// TaskOutput poll — a whole number, not a per-turn delta, so it SETS rather than
+// adds. A detached child cannot stream per-turn usage; the poll is all it has.
+type specialistTotalTokensMsg struct {
+	runID       int
+	toolCallID  string
+	totalTokens int
+}
+
+// specialistToolCountMsg carries a background child's tool-call count from a
+// poll, likewise a total that sets rather than increments.
+type specialistToolCountMsg struct {
+	runID      int
+	toolCallID string
+	tools      int
 }
 
 type mcpCommandOrigin int
@@ -1049,6 +1157,7 @@ func newModel(ctx context.Context, options Options) model {
 		recentModels:                normalizeRecentModelEntries(options.RecentModels),
 		compactionModel:             options.CompactionModel,
 		recapsEnabled:               options.RecapsEnabled,
+		showDoneAgents:              options.KeepFinishedAgents,
 		provider:                    options.Provider,
 		newProvider:                 options.NewProvider,
 		newTurnSessionProvider:      options.NewTurnSessionProvider,
@@ -1061,6 +1170,8 @@ func newModel(ctx context.Context, options Options) model {
 		peerService:                 options.PeerService,
 		sandboxStore:                sandboxStore,
 		mcpConfig:                   options.MCPConfig,
+		zeromaxingDisabled:          options.ZeromaxingDisabled,
+		zeromaxingGate:              options.ZeromaxingGate,
 		mcpPermissionStore:          options.MCPPermissionStore,
 		mcpTokenStore:               options.MCPTokenStore,
 		mcpCommand:                  options.MCPCommand,
@@ -1070,6 +1181,9 @@ func newModel(ctx context.Context, options Options) model {
 		modelRPM:                    options.ModelRPM,
 		sessionCompactor:            options.SessionCompactor,
 		runtimeMessageSink:          options.RuntimeMessageSink,
+		planProgress:                options.PlanProgress,
+		planPaths:                   options.PlanPaths,
+		planStaging:                 newPlanStaging(),
 		permissionMode:              permissionMode,
 		reasoningEffort:             options.ReasoningEffort,
 		responseStyle:               defaultedResponseStyle(options.ResponseStyle),
@@ -2058,6 +2172,26 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.noBlockingModal() {
 				return m.cycleReasoningEffort()
 			}
+		case keyCtrl(msg, 'g'):
+			// Ctrl+G expands/collapses the ORCHESTRATE plan panel — the
+			// keyboard equivalent of clicking its header line.
+			//
+			// NOT Ctrl+O, which already toggles the detailed transcript view,
+			// and not Ctrl+P, which belongs to the update_plan panel: /plan and
+			// /plans are already two different things, and one key toggling
+			// whichever happened to be present would make that worse.
+			if m.noBlockingModal() && !m.orchestrate.isEmpty() {
+				// When the sidebar owns the plan, ctrl+g walks the task
+				// selection — the keyboard route to clicking a row. When the
+				// inline panel is the surface instead, ctrl+g keeps expanding
+				// that. Same predicate the panel itself uses, so the key always
+				// acts on whichever one is actually on screen.
+				if m.sidebarOwnsOrchestrate() {
+					return m.cycleOrchestrateSelection(), nil
+				}
+				m.orchestrate.expanded = !m.orchestrate.expanded
+				return m, nil
+			}
 		case m.keyMatch(m.keyBindings.toggleSidebar, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'b') }) && canFireComposerGatedToggle(m.keyBindings.toggleSidebar, defaultToggleSidebarChord, m.composerValue() == ""):
 			// Ctrl+B opens a compact, on-demand run summary. The composer-empty rule
 			// preserves readline's Ctrl+B move-to-beginning behavior; a remapped
@@ -2502,7 +2636,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// makes the glyph spin far too fast (and burns CPU) on screens that sit here
 			// for a while, e.g. the aimlapi checkout wait. The active-run path below
 			// already does this; this keeps idle animation at the same cadence.
-			if (m.sidebarHasAgents() || m.aimlapiOnboardAnimating()) && !m.reducedMotion {
+			if (m.sidebarHasAgents() || m.aimlapiOnboardAnimating() || m.zeromaxingChipAnimating()) && !m.reducedMotion {
 				var cmd tea.Cmd
 				m.spinner, cmd = m.spinner.Update(msg)
 				m.spinnerPhase++
@@ -2589,12 +2723,16 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// A resumed/idle session may already hold agents; keep their short lifecycle
 		// fade alive. No-op when the loop is already running or nothing animates.
+		// ensureSpinnerTick mutates m through its pointer receiver, so it is
+		// called before the return statement rather than inside it.
 		if m.fileView.active && m.fileView.mode == fileViewFull {
 			var cmd tea.Cmd
 			m, cmd = m.startFileViewLoadCmd(m.chatColumnWidth())
-			return m, batchCommands(m.ensureSpinnerTick(), cmd, resizeCmd)
+			tick := m.ensureSpinnerTick()
+			return m, batchCommands(tick, cmd, resizeCmd)
 		}
-		return m, batchCommands(m.ensureSpinnerTick(), resizeCmd)
+		tick := m.ensureSpinnerTick()
+		return m, batchCommands(tick, resizeCmd)
 	case permissionRequestMsg:
 		// The agent goroutine that raised this request is BLOCKED waiting on the
 		// decision callback, so every branch below must resolve it exactly once —
@@ -2740,6 +2878,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.petOutcomeAt = m.now()
 		m.pending = false
+		m = m.advanceZeromaxing()        // the one-shot enter/exit notices are now spent
 		m = m.disarmCancelConfirmation() // the run finished on its own — nothing left to confirm cancelling
 		// A newline-triggered redraw deferred by the stream-clear throttle
 		// (see agentTextMsg) may never get a later newline or fade tick to
@@ -2768,6 +2907,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.activeRunID = 0
 		m.terminalAutoAttach = nil
 		m.plan.frozenAt = m.now() // freeze the plan clock while idle (no run in flight)
+		// Same for the orchestrate panel: a plan left mid-flight when the run
+		// ends (interrupt, crash, a turn that yielded) must stop counting rather
+		// than tick forever against a turn that is gone.
+		m.orchestrate.frozenAt = m.now()
 		// A fully successful turn means the task is done. Weaker models often
 		// forget the final update_plan, leaving the panel stuck mid-progress;
 		// reconcile it to complete here. Read pendingAskUser/pendingPermission
@@ -2997,6 +3140,24 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.specialists.start(msg.name, msg.description, msg.childSessionID, m.now())
+		// SHOWN WHILE IT RUNS. The sidebar renders "on <model>" and had nothing
+		// to render for a Task sub-agent: setModel was reached from the plan
+		// path alone, so a delegated agent named no model for its whole life.
+		m.specialists.setModel(msg.childSessionID, msg.model)
+		return m, nil
+	case specialistRebindMsg:
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		if msg.fromKey != "" && msg.toKey != "" && msg.fromKey != msg.toKey {
+			m.specialists.reconcileSessionID(msg.fromKey, msg.toKey)
+		}
+		// A REBIND IS THE BACKGROUND SIGNAL. backgroundSpawnRebind emits this
+		// only for a Task whose result carried background=true, so reaching here
+		// is proof the child outlives this run.
+		if msg.toKey != "" {
+			m.specialists.markBackground(msg.toKey)
+		}
 		return m, nil
 	case specialistCompleteMsg:
 		if msg.runID != m.activeRunID {
@@ -3008,6 +3169,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// entry's childSessionID to the real session ID so subchat.enter can
 		// find the child session's events in the store.
 		m.specialists.complete(msg.toolCallID, msg.status, 0, msg.errorMsg, m.now())
+		// CORRECTED, not merely set: a specialist whose manifest names its own
+		// model did not run on the session's, and the row seeded at start would
+		// keep naming the wrong one. Empty leaves the seed alone.
+		if msg.model != "" {
+			m.specialists.setModel(msg.toolCallID, msg.model)
+		}
 		if msg.childSessionID != "" && msg.childSessionID != msg.toolCallID {
 			m.specialists.reconcileSessionID(msg.toolCallID, msg.childSessionID)
 		}
@@ -3029,10 +3196,153 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var refresh tea.Cmd
 		m, refresh = m.invalidateFileViewForUnknownMutation()
 		return m, refresh
+	case planAdmittedMsg:
+		// Before the stale-run guard: admission means the tool already read any
+		// plan staged for it, whichever run delivered the message.
+		m.planStaging.releaseAdmitted(msg.name)
+		// A BACKGROUND plan outlives the run that launched it, so the
+		// stale-run guard must not drop its progress: dropping it is
+		// right for a finished run's leftovers and wrong for a plan that
+		// is still working. Without this the panel simply freezes.
+		if !msg.background && msg.runID != m.activeRunID {
+			return m, nil
+		}
+		m.orchestrate.admit(msg, m.now())
+		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
+			kind:  rowSystem,
+			runID: msg.runID,
+			id:    fmt.Sprintf("plan-admitted-%s", msg.name),
+			text:  planAdmittedLine(msg.name, msg.taskCount),
+		})
+		return m, nil
+	case planTaskStartMsg:
+		// A BACKGROUND plan outlives the run that launched it, so the
+		// stale-run guard must not drop its progress: dropping it is
+		// right for a finished run's leftovers and wrong for a plan that
+		// is still working. Without this the panel simply freezes.
+		if !msg.background && msg.runID != m.activeRunID {
+			return m, nil
+		}
+		m.orchestrate.markStarted(msg.taskID, msg.summary, msg.cardKey, msg.model, m.now())
+		m.specialists.start(msg.taskID, msg.summary, msg.cardKey, m.now())
+		if msg.background {
+			// A background plan's tasks outlive this run, so cancelling the turn
+			// must not settle them — see specialistTracker.cancelRunning.
+			m.specialists.markBackground(msg.cardKey)
+		}
+		m.specialists.setModel(msg.cardKey, msg.model)
+		return m, nil
+	case planPreflightMsg:
+		// The stale-run guard applies as it does to every plan message: a status
+		// from a finished run must not linger over the next one.
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		m.planPreflight = msg.status
+		return m, nil
+	case planTaskDoneMsg:
+		// A BACKGROUND plan outlives the run that launched it, so the
+		// stale-run guard must not drop its progress: dropping it is
+		// right for a finished run's leftovers and wrong for a plan that
+		// is still working. Without this the panel simply freezes.
+		if !msg.background && msg.runID != m.activeRunID {
+			return m, nil
+		}
+		m.orchestrate.markDoneOn(msg.taskID, msg.outcome, msg.model, msg.fellBackFrom, msg.tokens, msg.attempts, m.now())
+		cardKey := msg.cardKey
+		if !msg.dispatched {
+			// Never started, so it has no card. Give it its own key and open one
+			// now, so a skipped or cancelled task is still SHOWN rather than
+			// closing the previously dispatched task's card.
+			cardKey = "planskipped_" + msg.taskID
+			m.specialists.start(msg.taskID, msg.reason, cardKey, m.now())
+		}
+		m.specialists.complete(cardKey, msg.status, 0, msg.reason, m.now())
+		m.specialists.setTokens(cardKey, msg.tokens)
+		m.specialists.setResult(cardKey, msg.output)
+		// WHAT IT RAN ON, not what it was dispatched with. set at start from the
+		// assigned model; a provider refusal re-runs on the session's and arrives
+		// here empty. Without this write the AGENTS row keeps naming the refused
+		// model after the PLAN row has already stopped claiming it.
+		if msg.fellBackFrom != "" || msg.model != "" {
+			m.specialists.setModel(cardKey, msg.model)
+		}
+		if msg.sessionID != "" && msg.sessionID != cardKey {
+			// The expansion follows the rename. It is keyed by the card id, and
+			// finishing swaps that for the child's real session id — so a row
+			// the user had open would collapse at the exact moment it gained a
+			// result to show.
+			if m.expandedAgent == cardKey {
+				m.expandedAgent = msg.sessionID
+			}
+			m.specialists.reconcileSessionID(cardKey, msg.sessionID)
+			cardKey = msg.sessionID
+		}
+		m.orchestrate.linkCard(msg.taskID, cardKey)
+		if info, ok := m.specialists.getBySessionID(cardKey); ok {
+			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
+				kind:           rowSpecialist,
+				runID:          msg.runID,
+				specialistInfo: &info,
+			})
+		}
+		return m, nil
+	case planCompletedMsg:
+		// A BACKGROUND plan outlives the run that launched it, so the
+		// stale-run guard must not drop its progress: dropping it is
+		// right for a finished run's leftovers and wrong for a plan that
+		// is still working. Without this the panel simply freezes.
+		if !msg.background && msg.runID != m.activeRunID {
+			return m, nil
+		}
+		m.orchestrate.complete(msg, m.now())
+		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
+			kind:  rowSystem,
+			runID: msg.runID,
+			id:    fmt.Sprintf("plan-completed-%s", msg.name),
+			text:  planCompletedLine(msg),
+		})
+		return m, nil
+	case planTaskProgressMsg:
+		// A BACKGROUND plan outlives the run that launched it, so the stale-run
+		// guard must not drop its progress.
+		if !msg.background && msg.runID != m.activeRunID {
+			return m, nil
+		}
+		// Already routed to the right card by the recorder, which is the only
+		// thing that knows which card belongs to which task. Nothing here has to
+		// guess, which is the whole point of the message existing.
+		m.specialists.incrementToolCount(msg.cardKey)
+		m.specialists.setCurrentTool(msg.cardKey, msg.toolName, msg.detail)
+		return m, nil
+	case specialistUsageMsg:
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		m.specialists.addTokens(msg.toolCallID, msg.totalTokens)
+		return m, nil
+	case specialistTotalTokensMsg:
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		m.specialists.setTokens(msg.toolCallID, msg.totalTokens)
+		return m, nil
+	case specialistToolCountMsg:
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		m.specialists.setToolCount(msg.toolCallID, msg.tools)
+		return m, nil
 	case specialistProgressMsg:
 		if msg.runID != m.activeRunID {
 			return m, nil
 		}
+		// A PLAN's progress no longer arrives here. It comes as
+		// planTaskProgressMsg, already carrying the task it belongs to. This
+		// used to attribute an unrecognised tool-call id to "whichever task was
+		// dispatched last", which was sound while one task ran at a time and
+		// became a lie the moment two could — so the guess is gone rather than
+		// conditioned.
 		// Each progress message is one specialist tool call (OnToolProgress fires only
 		// for EventToolCall); bump the card's tool-call counter so it stops showing a
 		// permanent "0 tool calls" (M18). The tracker is still keyed by the tool-call
@@ -4095,12 +4405,18 @@ func toolResultCardSuppressedInTranscript(name string, status tools.Status) bool
 }
 
 func (m model) workingStatusLine() string {
-	// Keep one quiet liveness signal at the start of the line. Tool and plan
-	// labels stay still, so the display reads as active without competing motion
-	// scattered through the transcript.
-	line := m.workingStatusLabel()
-	if indicator := m.workingStatusIndicator(); indicator != "" {
-		line = indicator + line
+	var line string
+	if m.postureSkinActive() {
+		working := rippleText(workingStatusText, m.postureRipplePalette(), m.spinnerPhase, m.postureRippleWaveLen())
+		line = zeroTheme.accent.Render(m.spinnerGlyph()) + " " + working
+	} else {
+		// Keep one quiet liveness signal at the start of the line. Tool and plan
+		// labels stay still, so the display reads as active without competing motion
+		// scattered through the transcript.
+		line = m.workingStatusLabel()
+		if indicator := m.workingStatusIndicator(); indicator != "" {
+			line = indicator + line
+		}
 	}
 	// Phase label so a long, output-less step reads as live progress rather than a
 	// frozen screen: "writing" while the answer streams, "thinking" otherwise
@@ -4599,14 +4915,16 @@ func (m model) composerBox(width int) string {
 	rightPad := strings.Repeat(" ", reserved)
 
 	rendered := make([]string, 0, len(lines)+3)
-	rendered = append(rendered, zeroTheme.lineStrong.Render("╭"+strings.Repeat("─", boxWidth-2)+"╮")+rightPad)
+	// postureComposerTop draws the box within boxWidth (#887 reserves the rest for
+	// the pet); rightPad holds those reserved columns.
+	rendered = append(rendered, m.postureComposerTop(boxWidth)+rightPad)
 	// On graphics-capable terminals the first image receives a real thumbnail in
 	// this compact strip. Text-only terminals retain the numbered chip row below.
 	if m.attachmentThumbnailVisible(width) {
 		for _, line := range m.attachmentThumbnailLines(innerWidth) {
 			fitted := fitStyledLine(line, innerWidth)
 			pad := strings.Repeat(" ", maxInt(0, innerWidth-lipgloss.Width(fitted)))
-			rendered = append(rendered, zeroTheme.lineStrong.Render("│ ")+fitted+pad+zeroTheme.lineStrong.Render(" │")+rightPad)
+			rendered = append(rendered, m.postureComposerSide(false)+fitted+pad+m.postureComposerSide(true)+rightPad)
 		}
 		// A thumbnail gallery makes the first few attachments visible. Keep a compact
 		// numbered row whenever there is more than one item (or a document), so the
@@ -4614,17 +4932,17 @@ func (m model) composerBox(width int) string {
 		if chips := m.attachmentThumbnailSupplementalChips(); chips != "" {
 			fitted := fitStyledLine(zeroTheme.muted.Render(chips), innerWidth)
 			pad := strings.Repeat(" ", maxInt(0, innerWidth-lipgloss.Width(fitted)))
-			rendered = append(rendered, zeroTheme.lineStrong.Render("│ ")+fitted+pad+zeroTheme.lineStrong.Render(" │")+rightPad)
+			rendered = append(rendered, m.postureComposerSide(false)+fitted+pad+m.postureComposerSide(true)+rightPad)
 		}
 	} else if chips := renderAttachmentChips(m.pendingImageLabels, m.pendingDocuments); chips != "" {
 		fitted := fitStyledLine(zeroTheme.muted.Render(chips), innerWidth)
 		pad := strings.Repeat(" ", maxInt(0, innerWidth-lipgloss.Width(fitted)))
-		rendered = append(rendered, zeroTheme.lineStrong.Render("│ ")+fitted+pad+zeroTheme.lineStrong.Render(" │")+rightPad)
+		rendered = append(rendered, m.postureComposerSide(false)+fitted+pad+m.postureComposerSide(true)+rightPad)
 	}
 	for _, line := range lines {
 		fitted := fitStyledLine(line, innerWidth)
 		pad := strings.Repeat(" ", maxInt(0, innerWidth-lipgloss.Width(fitted)))
-		rendered = append(rendered, zeroTheme.lineStrong.Render("│ ")+fitted+pad+zeroTheme.lineStrong.Render(" │")+rightPad)
+		rendered = append(rendered, m.postureComposerSide(false)+fitted+pad+m.postureComposerSide(true)+rightPad)
 	}
 	rendered = append(rendered, m.composerDividerLine(width))
 	return strings.Join(rendered, "\n")
@@ -4980,6 +5298,10 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "A run is in progress. Press Esc to cancel it first, then /new."})
 			return m, nil
 		}
+		if m.planProgress != nil && m.planProgress.BackgroundPlanLive() {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "A background plan still belongs to this session. Wait for it to finish or run /plans stop before /new."})
+			return m, nil
+		}
 		next := m.startNewSession()
 		var newCmd tea.Cmd
 		next, newCmd = next.refreshFileViewMarkers()
@@ -5092,6 +5414,16 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		return m.openSTTModelPicker()
 	case commandVoice:
 		return m.toggleVoiceMode()
+	case commandPlans:
+		// The control verbs are a SLASH COMMAND rather than a key chord, and
+		// deliberately: almost every ctrl letter is already bound, and only
+		// commandPrompt is queued while a run is pending — a slash command runs
+		// immediately, which is exactly what "stop the plan that is running
+		// right now" needs.
+		return m.handlePlansCommand(command.text)
+	case commandWorkers:
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.workersText()})
+		return m, nil
 	case commandContext:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.contextText()})
 		return m, nil
@@ -5122,6 +5454,13 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{
 				kind: actionAppendError,
 				text: "Cannot resume sessions while a run is active.",
+			})
+			return m, nil
+		}
+		if m.planProgress != nil && m.planProgress.BackgroundPlanLive() {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{
+				kind: actionAppendError,
+				text: "Cannot switch sessions while a background plan is running. Wait for it to finish or run /plans stop first.",
 			})
 			return m, nil
 		}
@@ -5577,6 +5916,19 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	// previous turn don't bleed into the new one.
 	m.specialists.clear()
 	m.plan.clear()
+	// The orchestrate panel survives a new run while a BACKGROUND plan is still
+	// working. Those plans outlive the run that launched them by design, and
+	// their messages carry the background flag to pass the stale-run guard —
+	// clearing byID here would let the guard pass them into an empty panel,
+	// where they no-op and the PLAN surface disappears until the plan ends.
+	if !m.planProgress.BackgroundPlanLive() {
+		m.orchestrate.clear()
+	}
+	// Re-bind the plan recorder to THIS run. The orchestrate tool holds the
+	// bridge for the process's life (the registry is built once per session),
+	// so the run id has to be pushed in per run — the PostureGate problem, same
+	// solution.
+	m.planProgress.Attach(m.runtimeMessageSink, m.runID, m.sessionStore, m.activeSession.SessionID)
 	m.stepWork = nil
 	m.stepNarration = nil
 	m.stepExplanation = nil
@@ -5600,7 +5952,7 @@ func (m *model) ensureSpinnerTick() tea.Cmd {
 	if m.spinnerTicking || m.reducedMotion {
 		return nil
 	}
-	if !m.sidebarHasAgents() && !m.aimlapiOnboardAnimating() {
+	if !m.sidebarHasAgents() && !m.aimlapiOnboardAnimating() && !m.zeromaxingChipAnimating() {
 		return nil
 	}
 	m.spinnerTicking = true
@@ -5726,11 +6078,37 @@ func (m *model) cancelRun() {
 		}
 	}
 	m.pending = false
+	*m = m.advanceZeromaxing() // a cancelled run spends the one-shot notices too
 	m.runCancel = nil
 	m.activeRunID = 0
 	m.terminalAutoAttach = nil
-	m.cancelConfirmActive = false // whatever path got here, there's nothing left to confirm cancelling
-	m.plan.frozenAt = m.now()     // freeze the plan clock while idle (no run in flight)
+	m.cancelConfirmActive = false    // whatever path got here, there's nothing left to confirm cancelling
+	m.plan.frozenAt = m.now()        // freeze the plan clock while idle (no run in flight)
+	m.orchestrate.frozenAt = m.now() // and the orchestrate panel's, for the same reason
+	// THE TRACKERS MUST AGREE WITH THE CANCEL. The children die with the run
+	// context, but a specialist row left specialistRunning keeps its spinner,
+	// its ticking clock and its "live" mark in MODELS forever — "Run cancelled."
+	// in the transcript beside agents that look like they are still working. An
+	// orchestrate task left orchestrateRunning does the same to the PLAN bar.
+	//
+	// EXCEPT WHEN A BACKGROUND PLAN IS STILL LIVE, and that exemption is the
+	// same one beginRun makes a few lines above: a background plan outlives the
+	// run that launched it BY DESIGN, so cancelling this turn does not cancel
+	// it. Marking its tasks cancelled here was the mirror image of the defect
+	// the background-status tests exist to prevent — work still spending tokens
+	// and writing files, reported to the user as stopped. The children of a
+	// FOREGROUND run do die with the run context, so they are still settled.
+	// SPECIALISTS SETTLE THEMSELVES: cancelRunning skips the rows marked
+	// background and settles the rest, because this tracker holds foreground and
+	// background children TOGETHER. Gating the whole call on BackgroundPlanLive
+	// — as the first version did — left every foreground sub-agent spinning
+	// forever whenever any background plan happened to be live.
+	m.specialists.cancelRunning(m.now())
+	// The orchestrate panel holds ONE plan at a time, so the panel is background
+	// or it is not; there is no mixed case to discriminate here.
+	if !m.planProgress.BackgroundPlanLive() {
+		m.orchestrate.cancelRunning(m.now())
+	}
 	m.pendingPermission = nil
 	m.pendingAskUser = nil
 	// The interim block renders streamingText live; a cancelled run's partial
@@ -5842,6 +6220,11 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		options.SessionID = m.activeSession.SessionID
 		options.ProviderName = m.providerName
 		options.Model = m.modelName
+		// FROM THE LIVE PROFILE, not the one captured at startup. /model can
+		// switch provider mid-session, and a family resolved once at launch would
+		// keep describing the provider the session began on — the same staleness
+		// that had plan discovery assigning from the wrong provider's model list.
+		options.ModelFamily = providercatalog.ModelFamilyFor(m.providerProfile.CatalogID)
 		options.ReasoningEffort = string(m.reasoningEffort)
 		options.ServiceTier = m.activeServiceTier()
 		options.ResponseStyle = m.responseStyle
@@ -6144,6 +6527,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 						name:           name,
 						description:    desc,
 						childSessionID: call.ID,
+						model:          m.modelName,
 					})
 				}
 			}
@@ -6178,7 +6562,16 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 		}
 
 		options.OnToolProgress = func(toolCallID string, event streamjson.Event) {
-			if event.Type == streamjson.EventToolCall && m.runtimeMessageSink != nil {
+			if m.runtimeMessageSink == nil {
+				return
+			}
+			if tokens, ok := specialistProgressTokens(event); ok {
+				// LIVE TOKEN SPEND. EventUsage was ignored here, so a Task
+				// sub-agent's card never moved off zero — the gap the tracker's
+				// setTokens comment named, and addTokens existed only in a test.
+				m.runtimeMessageSink(specialistUsageMsg{runID: runID, toolCallID: toolCallID, totalTokens: tokens})
+			}
+			if event.Type == streamjson.EventToolCall {
 				m.runtimeMessageSink(specialistProgressMsg{
 					runID:      runID,
 					toolCallID: toolCallID,
@@ -6233,8 +6626,28 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				Type:    sessions.EventToolResult,
 				Payload: toolResultSessionPayload(result),
 			})
-			// Complete specialist tracking when the Task tool returns.
-			if result.Name == "Task" {
+			// A BACKGROUND SPAWN REBINDS ITS ROW KEY NOW. The row was keyed on
+			// the tool call id; the child's later TaskOutput completion is keyed
+			// on the task_id (the child session id). Without rebinding here the
+			// completion can never find the row, and it runs forever — the
+			// regression the suppression below created.
+			if from, to, ok := backgroundSpawnRebind(result.Name, result.ToolCallID, result.Meta); ok && m.runtimeMessageSink != nil {
+				m.runtimeMessageSink(specialistRebindMsg{runID: runID, fromKey: from, toKey: to})
+			}
+			// Complete specialist tracking when the Task tool returns —
+			// EXCEPT for a background spawn, which returns the moment the child
+			// is launched.
+			//
+			// Completing on that return reported work as finished that had not
+			// begun: four background workers rendered "✓ completed · 0 tool
+			// calls · 1s" and the header said "4 finished" while every one was
+			// still running, with no specialist_stop recorded for any of them.
+			// The same invariant as "never report failure as success" — a
+			// not-yet-started agent is not a finished one.
+			//
+			// A background agent completes below instead, when TaskOutput polls
+			// it and reports a terminal status.
+			if taskResultFinishesSpecialist(result.Name, result.Meta) {
 				status := specialistCompleted
 				if result.Status == tools.StatusError {
 					status = specialistError
@@ -6249,6 +6662,37 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 						toolCallID:     result.ToolCallID,
 						childSessionID: childSessionID,
 						status:         status,
+						errorMsg:       result.Output,
+						// THE AUTHORITATIVE ANSWER. A specialist whose manifest
+						// names its own model did not run on the session's, and
+						// only the executor knows which applied.
+						model: result.Meta["model"],
+					})
+				}
+			}
+			// A POLLED BACKGROUND AGENT COMPLETES WHEN IT REALLY HAS. TaskOutput
+			// already carries task_id and status structurally, so this reads the
+			// status rather than the summary prose.
+			//
+			// AND IT CARRIES THE SPEND. A background child is detached and never
+			// streams via OnToolProgress, so the live token/tool bridge never
+			// sees it — its row sat at "0 tok · 0 tools" while the real numbers
+			// were recorded elsewhere. TaskOutput is its one channel, so the
+			// tokens and tool count ride the poll, on EVERY poll (not only the
+			// terminal one) so the row fills in while it is still running.
+			if update, ok := backgroundPollUpdate(result.Name, result.Meta); ok && m.runtimeMessageSink != nil {
+				if update.tokens > 0 {
+					m.runtimeMessageSink(specialistTotalTokensMsg{runID: runID, toolCallID: update.taskID, totalTokens: update.tokens})
+				}
+				if update.tools > 0 {
+					m.runtimeMessageSink(specialistToolCountMsg{runID: runID, toolCallID: update.taskID, tools: update.tools})
+				}
+				if update.done {
+					m.runtimeMessageSink(specialistCompleteMsg{
+						runID:          runID,
+						toolCallID:     update.taskID,
+						childSessionID: update.taskID,
+						status:         update.status,
 						errorMsg:       result.Output,
 					})
 				}
@@ -6499,4 +6943,106 @@ func toolResultRowText(result agent.ToolResult) string {
 		status = tools.StatusOK
 	}
 	return fmt.Sprintf("tool result: %s %s %s", result.Name, status, truncateTUIOutput(result.ModelOutput(), tuiToolOutputLimit))
+}
+
+// backgroundAgentStatus maps a polled background task's status onto the
+// tracker's, and reports whether it is terminal at all.
+//
+// "running" is the case this exists for: polling an agent that is still working
+// must leave it running, not quietly mark it done. Anything unrecognised is
+// treated as still running for the same reason — the fail-safe direction is to
+// keep showing work as in flight until something says otherwise.
+func backgroundAgentStatus(raw string) (specialistStatus, bool) {
+	switch raw {
+	case "completed":
+		return specialistCompleted, true
+	case "error":
+		return specialistError, true
+	case "killed":
+		return specialistCancelled, true
+	default:
+		return specialistRunning, false
+	}
+}
+
+// taskResultFinishesSpecialist reports whether a Task tool result means the
+// sub-agent is DONE.
+//
+// A BACKGROUND SPAWN DOES NOT. Task returns the instant the child is launched,
+// so completing on that return reported work as finished that had not begun:
+// four background workers rendered "✓ completed · 0 tool calls · 1s" with the
+// header reading "4 finished" while all four were still running. Those agents
+// finish via backgroundAgentStatus instead, when a TaskOutput poll reports a
+// terminal status.
+//
+// NAMED rather than left inline so the rule is one greppable thing with one
+// test, instead of a condition anyone can quietly widen back.
+func taskResultFinishesSpecialist(name string, meta map[string]string) bool {
+	return name == "Task" && meta["background"] != "true"
+}
+
+// backgroundSpawnRebind reports the key rebind a background Task spawn needs, if
+// any: from the tool-call id the row was registered under, to the task_id its
+// later TaskOutput completion will target.
+//
+// NAMED so the rule has one greppable definition and a test — the emission
+// itself lives inside runAgentWithOptions, which runs a full agent loop and is
+// not unit-driven, so this predicate is what a test can hold. Empty toolCallID
+// or a task_id equal to it means no rebind: a foreground Task, or a spawn whose
+// ids already agree.
+func backgroundSpawnRebind(name, toolCallID string, meta map[string]string) (from, to string, ok bool) {
+	if name != "Task" || meta["background"] != "true" {
+		return "", "", false
+	}
+	taskID := meta["task_id"]
+	if taskID == "" || taskID == toolCallID {
+		return "", "", false
+	}
+	return toolCallID, taskID, true
+}
+
+// specialistProgressTokens reports a child progress event's live token spend, if
+// it carries one. Named so the EventUsage bridge has a test — the OnToolProgress
+// callback lives inside runAgentWithOptions, a full agent loop that is not
+// unit-driven, so this predicate is what a test can hold.
+func specialistProgressTokens(event streamjson.Event) (int, bool) {
+	if event.Type != streamjson.EventUsage || event.TotalTokens == nil || *event.TotalTokens <= 0 {
+		return 0, false
+	}
+	return *event.TotalTokens, true
+}
+
+// backgroundPollUpdate parses a TaskOutput result into the AGENTS-panel updates
+// a poll carries: a background child's running token total, tool count, and — if
+// terminal — its completion.
+//
+// NAMED so the poll bridge has a test. The emit itself is in runAgentWithOptions
+// (a full agent loop, not unit-driven), so this predicate is what a mutation
+// check can hold. ok is false for anything that is not a TaskOutput carrying a
+// task id.
+type backgroundPoll struct {
+	taskID string
+	tokens int
+	tools  int
+	done   bool
+	status specialistStatus
+}
+
+func backgroundPollUpdate(toolName string, meta map[string]string) (backgroundPoll, bool) {
+	if toolName != "TaskOutput" {
+		return backgroundPoll{}, false
+	}
+	taskID := meta["task_id"]
+	if taskID == "" {
+		return backgroundPoll{}, false
+	}
+	update := backgroundPoll{taskID: taskID}
+	if tokens, err := strconv.Atoi(meta["tokens"]); err == nil && tokens > 0 {
+		update.tokens = tokens
+	}
+	if tools, err := strconv.Atoi(meta["tools"]); err == nil && tools > 0 {
+		update.tools = tools
+	}
+	update.status, update.done = backgroundAgentStatus(meta["status"])
+	return update, true
 }
