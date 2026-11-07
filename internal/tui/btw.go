@@ -146,7 +146,7 @@ func (m model) handleBTWCommand(question string) (model, tea.Cmd) {
 	side.plan.clear()
 	side.planDetailGen++
 	side.streamingText = nil
-	side.streamingReasoning = ""
+	side.streamingReasoning = nil
 	side.streamingReasoningExpanded = false
 	side.clearStreamingToolCall()
 	side.resetStreamingFade()
