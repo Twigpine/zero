@@ -527,6 +527,75 @@ func TestRecordSpecialistStopInProcessClaimRunIDEquivalence(t *testing.T) {
 	}
 }
 
+// When the durable ledger is briefly unavailable, the in-process fallback and a
+// durable claim on the same bridge must make one dispatch decision between
+// them, whichever order they happen in.
+func TestRecordSpecialistStopDurableAndFallbackClaimsShareOneDispatch(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		fallbackFirst bool
+	}{
+		{name: "fallback then durable", fallbackFirst: true},
+		{name: "durable then fallback", fallbackFirst: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+			parent, err := store.Create(sessions.CreateInput{SessionID: "parent_session"})
+			if err != nil {
+				t.Fatalf("Create parent returned error: %v", err)
+			}
+			eventsFile := filepath.Join(store.RootDir, parent.SessionID, sessions.EventsFile)
+			asideFile := eventsFile + ".aside"
+			// A directory where the event log lives makes every read and append
+			// fail on all platforms, the way a transient store error would.
+			breakLedger := func() {
+				t.Helper()
+				if err := os.Rename(eventsFile, asideFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("move event log aside: %v", err)
+				}
+				if err := os.Mkdir(eventsFile, 0o700); err != nil {
+					t.Fatalf("block event log: %v", err)
+				}
+			}
+			restoreLedger := func() {
+				t.Helper()
+				if err := os.Remove(eventsFile); err != nil {
+					t.Fatalf("unblock event log: %v", err)
+				}
+				if err := os.Rename(asideFile, eventsFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("restore event log: %v", err)
+				}
+			}
+
+			var stops atomic.Int32
+			executor := Executor{SessionStore: store, LifecycleHooks: stopCounterHooks(&stops)}
+			input := specialistAccountingInput{
+				ParentSessionID: parent.SessionID,
+				ChildSessionID:  "child_task",
+				SpecialistName:  "worker",
+				Mode:            "background",
+				Background:      true,
+			}
+			summary := StreamResult{RunID: "run_1"}
+
+			if tc.fallbackFirst {
+				breakLedger()
+				executor.recordSpecialistStop(input, summary, "success", 0, nil, false)
+				restoreLedger()
+				executor.recordSpecialistStop(input, summary, "success", 0, nil, false)
+			} else {
+				executor.recordSpecialistStop(input, summary, "success", 0, nil, false)
+				breakLedger()
+				executor.recordSpecialistStop(input, summary, "success", 0, nil, false)
+				restoreLedger()
+			}
+			if got := stops.Load(); got != 1 {
+				t.Fatalf("stop hooks = %d, want 1 across durable and fallback claims", got)
+			}
+		})
+	}
+}
+
 // A child that never started must not publish public lifecycle hooks, while the
 // internal attempt/stop accounting is retained and durably marks the stop as
 // ineligible so a later reaper cannot fire the hook either.
@@ -790,12 +859,23 @@ func TestRunBackgroundSetPIDFailureRecordsStopOnlyAfterTermination(t *testing.T)
 			}
 			stopDispatched := make(chan struct{}, 1)
 			metadataFile := filepath.Join(manager.RootDir(), "child_task.json")
+			// The child reads its prompt from this file, so it must outlive any
+			// child that may still be running.
+			promptFile := filepath.Join(t.TempDir(), "prompt.md")
+			promptExists := func() bool {
+				_, err := os.Stat(promptFile)
+				return err == nil
+			}
 			var onExitChild func(exitCode int)
 			executor := Executor{
 				BinaryPath:        "/usr/local/bin/zero",
 				SessionStore:      store,
 				BackgroundManager: manager,
 				NewSessionID:      func() (string, error) { return "child_task", nil },
+				PromptFileMaxSize: 1,
+				WritePromptFile: func(prompt string) (string, error) {
+					return promptFile, os.WriteFile(promptFile, []byte(prompt), 0o600)
+				},
 				LifecycleHooks: &LifecycleHooks{
 					Dispatch: func(_ context.Context, event string, _ string, _ map[string]any) {
 						hookMu.Lock()
@@ -859,11 +939,17 @@ func TestRunBackgroundSetPIDFailureRecordsStopOnlyAfterTermination(t *testing.T)
 				if got := hooksSoFar(); got != "specialistStart,specialistStop" {
 					t.Fatalf("lifecycle hooks = %q, want specialistStart,specialistStop", got)
 				}
+				if promptExists() {
+					t.Fatal("prompt file survived after the orphan was killed")
+				}
 				return
 			}
 
 			if !strings.Contains(runErr.Error(), "terminate orphaned pid 1234") {
 				t.Fatalf("Run error = %v, want the failed kill surfaced", runErr)
+			}
+			if !promptExists() {
+				t.Fatal("prompt file removed while the child may still be running")
 			}
 			if got := hooksSoFar(); got != "specialistStart" {
 				t.Fatalf("lifecycle hooks after failed kill = %q, want only specialistStart", got)
@@ -900,6 +986,14 @@ func TestRunBackgroundSetPIDFailureRecordsStopOnlyAfterTermination(t *testing.T)
 				t.Fatalf("after child exit: stop events = %d, claims = %d, want 1 and 1", len(stops), len(claims))
 			}
 			requirePayloadInt(t, eventPayload(t, stops[0]), "exitCode", 1)
+			// The exit callback owns the prompt cleanup once the child is gone.
+			deadline := time.Now().Add(10 * time.Second)
+			for promptExists() {
+				if time.Now().After(deadline) {
+					t.Fatal("exit callback never removed the prompt file")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
 		})
 	}
 }

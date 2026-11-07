@@ -105,7 +105,9 @@ const specialistStopHookEvent sessions.EventType = "specialist_stop_hook"
 //
 // Hooks are external side effects, so on a store error the durable claim cannot
 // be established; the hook then falls back to the in-process claim rather than
-// running unchecked, keeping at-most-once within this process.
+// running unchecked, keeping at-most-once within this process. A won durable
+// claim also takes the in-process claim, so a transient store error before or
+// after it on the same bridge cannot dispatch the same stop a second time.
 func (executor Executor) dispatchSpecialistStopHook(store *sessions.Store, input specialistAccountingInput, payload map[string]any, runID string) {
 	hooks := executor.LifecycleHooks
 	if hooks == nil || hooks.Dispatch == nil {
@@ -132,7 +134,12 @@ func (executor Executor) dispatchSpecialistStopHook(store *sessions.Store, input
 		}
 		return
 	}
-	if claimed && started {
+	if !claimed {
+		return
+	}
+	// Take the in-process claim even for an ineligible stop: this bridge has
+	// settled the decision, and a later fallback must not re-decide it.
+	if hooks.claimInProcessStopDispatch(input.ChildSessionID, runID) && started {
 		executor.dispatchLifecycleHook("specialistStop", input, payload)
 	}
 }

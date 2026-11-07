@@ -626,10 +626,10 @@ func (executor Executor) runBackground(ctx context.Context, built BuildArgsResul
 				// Don't mask a failed kill: a surviving orphan is worse than the
 				// SetPID error alone, so surface both to the caller. The child may
 				// still be running, so this is not a terminal stop: leave the task
-				// running and let the launcher's exit callback mark it exited and
-				// record the stop (and claim specialistStop) when it really ends.
+				// running and let the launcher's exit callback mark it exited,
+				// record the stop (and claim specialistStop), and remove the prompt
+				// file it may still need to read when it really ends.
 				err = errors.Join(err, fmt.Errorf("terminate orphaned pid %d: %w", pid, killErr))
-				executor.cleanupBackgroundPromptFile(built.SessionID, built.PromptFile)
 				return ExecResult{}, err
 			}
 			_ = manager.UpdateStatus(built.SessionID, background.StatusError, -1)
