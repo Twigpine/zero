@@ -1,13 +1,20 @@
 package tui
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/Twigpine/zero/internal/pathjail"
 	"github.com/Twigpine/zero/internal/specialist"
 )
 
@@ -387,9 +394,9 @@ func quotePlanParams(declared []string) []string {
 // reads exactly what is about to happen, and it travels the one execution path
 // every other plan travels.
 //
-// A FIXED reserved name keeps the staged plan inspectable. Publication is
-// exclusive: if a user already owns that name, restart refuses instead of
-// replacing their bytes.
+// The staged plan is inspectable under the name the notice reports. stagePlan
+// never replaces a plan a user already owns under the preferred name, and the
+// staged copy is removed once the plan is admitted.
 // resumeLastPlan runs the plan that last ran, from WHERE IT STOPPED — the
 // completed tasks are skipped and their findings are folded into the tasks that
 // remain (RemainingPlan). It is bare "/plans resume" when no plan is live to
@@ -443,7 +450,8 @@ func (m model) resumeLastPlan() (tea.Model, tea.Cmd) {
 	if dir == "" {
 		return m.appendPlansNotice(planControlNotice("warning", "There is nowhere to stage the plan in this run.")), nil
 	}
-	if _, err := specialist.SavePlanExclusive(root, dir, resumePlanName, remaining); err != nil {
+	stagedName, err := m.stagePlan(root, dir, resumePlanName, remaining)
+	if err != nil {
 		return m.appendPlansNotice(planControlNotice("warning", "Could not stage the remaining plan: "+err.Error())), nil
 	}
 	label := planName
@@ -451,8 +459,8 @@ func (m model) resumeLastPlan() (tea.Model, tea.Cmd) {
 		label = "the last plan"
 	}
 	m = m.appendPlansNotice(planControlNotice("info",
-		resumeNotice(label, plan, remaining, progress, resumePlanName)))
-	encoded, err := json.Marshal(resumePlanName)
+		resumeNotice(label, plan, remaining, progress, stagedName)))
+	encoded, err := json.Marshal(stagedName)
 	if err != nil {
 		return m.appendPlansNotice(planControlNotice("warning", "Could not reference that plan: "+err.Error())), nil
 	}
@@ -512,7 +520,8 @@ func (m model) restartLastPlan() (tea.Model, tea.Cmd) {
 		return m.appendPlansNotice(planControlNotice("warning",
 			"There is nowhere to stage the plan in this run.")), nil
 	}
-	if _, err := specialist.SavePlanExclusive(root, dir, restartPlanName, plan); err != nil {
+	stagedName, err := m.stagePlan(root, dir, restartPlanName, plan)
+	if err != nil {
 		return m.appendPlansNotice(planControlNotice("warning", "Could not stage the plan: "+err.Error())), nil
 	}
 	label := planName
@@ -521,8 +530,8 @@ func (m model) restartLastPlan() (tea.Model, tea.Cmd) {
 	}
 	m = m.appendPlansNotice(planControlNotice("info", fmt.Sprintf(
 		"Restarting %s from the beginning (%d tasks). Staged as %q — /plans show %s to read it first.",
-		label, plan.TaskCount(), restartPlanName, restartPlanName)))
-	encoded, err := json.Marshal(restartPlanName)
+		label, plan.TaskCount(), stagedName, stagedName)))
+	encoded, err := json.Marshal(stagedName)
 	if err != nil {
 		return m.appendPlansNotice(planControlNotice("warning", "Could not reference that plan: "+err.Error())), nil
 	}
@@ -532,11 +541,145 @@ func (m model) restartLastPlan() (tea.Model, tea.Cmd) {
 	})
 }
 
-// restartPlanName is where a restart stages the last plan; resumePlanName is
-// where a resume-from-stop stages the remainder. These names are never allowed
-// to replace an existing saved plan.
+// restartPlanName is where a restart prefers to stage the last plan;
+// resumePlanName is where a resume-from-stop prefers to stage the remainder.
+// They are preferences, not reservations: stagePlan falls back to a free
+// variant rather than replace a plan that already owns the name.
 const restartPlanName = "last_run"
 const resumePlanName = "last_run_resume"
+
+// maxStagingCandidates bounds the free-name search: base, base_2 … base_N.
+const maxStagingCandidates = 100
+
+// planStaging owns the plans restart and resume generate in the user's plan
+// storage. Generated plans share that namespace because the model runs them
+// through the ordinary `saved` lookup, so ownership is carried here instead of
+// by the name: a staged plan is published only under a name nothing else
+// holds, and is removed once its plan has been admitted, if it still holds
+// exactly the bytes that were staged.
+type planStaging struct {
+	mu     sync.Mutex
+	staged []stagedPlan
+}
+
+type stagedPlan struct {
+	root, dir string
+	name      string // the saved-plan name it was published under
+	planName  string // the plan's own name, which admission reports
+	body      []byte
+}
+
+func newPlanStaging() *planStaging { return &planStaging{} }
+
+// stagePlan publishes plan under base, or under the first free base_N when
+// base is taken, and records it for removal after admission. A name is taken
+// when any scope resolves it (so staging never shadows another plan) or a file
+// of that name exists in dir; publication is exclusive, so a name claimed
+// between the check and the write is skipped, never replaced.
+func (m model) stagePlan(root, dir, base string, plan specialist.Plan) (string, error) {
+	taken := map[string]bool{}
+	loaded, _ := specialist.LoadPlans(m.planPaths)
+	for _, existing := range loaded {
+		taken[existing.Name] = true
+	}
+	for attempt := 1; attempt <= maxStagingCandidates; attempt++ {
+		name := stagingCandidate(base, attempt)
+		if taken[name] || planFileExists(root, dir, name) {
+			continue
+		}
+		path, err := specialist.SavePlanExclusive(root, dir, name, plan)
+		if err != nil {
+			if planFileExists(root, dir, name) {
+				continue // claimed concurrently; try the next variant
+			}
+			return "", err
+		}
+		m.planStaging.track(root, dir, name, plan.Name(), path)
+		return name, nil
+	}
+	return "", fmt.Errorf("every staging name from %q to %q is already taken; remove stale staged plans and try again",
+		stagingCandidate(base, 1), stagingCandidate(base, maxStagingCandidates))
+}
+
+// stagingCandidate returns base for the first attempt and base_N after it,
+// trimming base so the result stays within the saved-plan name limit.
+func stagingCandidate(base string, attempt int) string {
+	const maxPlanName = 64
+	suffix := ""
+	if attempt > 1 {
+		suffix = "_" + strconv.Itoa(attempt)
+	}
+	if len(base)+len(suffix) > maxPlanName {
+		base = base[:maxPlanName-len(suffix)]
+	}
+	return base + suffix
+}
+
+func planFileExists(root, dir, name string) bool {
+	handle, relative, err := pathjail.OpenExisting(root, dir)
+	if err != nil {
+		return false
+	}
+	defer handle.Close()
+	_, err = handle.Lstat(filepath.Join(relative, name+".json"))
+	return err == nil || !errors.Is(err, fs.ErrNotExist)
+}
+
+func (staging *planStaging) track(root, dir, name, planName, path string) {
+	if staging == nil {
+		return
+	}
+	handle, relative, err := pathjail.OpenExisting(root, dir)
+	if err != nil {
+		return
+	}
+	defer handle.Close()
+	body, err := handle.ReadFile(filepath.Join(relative, filepath.Base(path)))
+	if err != nil {
+		return
+	}
+	staging.mu.Lock()
+	defer staging.mu.Unlock()
+	staging.staged = append(staging.staged, stagedPlan{root: root, dir: dir, name: name, planName: planName, body: body})
+}
+
+// releaseAdmitted removes every staged plan whose plan was just admitted. The
+// tool read the file before admission, so it is no longer needed. A file whose
+// bytes changed since staging was edited by someone else and is left alone.
+func (staging *planStaging) releaseAdmitted(planName string) {
+	if staging == nil {
+		return
+	}
+	staging.mu.Lock()
+	var release []stagedPlan
+	kept := staging.staged[:0]
+	for _, staged := range staging.staged {
+		if staged.planName == planName {
+			release = append(release, staged)
+		} else {
+			kept = append(kept, staged)
+		}
+	}
+	staging.staged = kept
+	staging.mu.Unlock()
+	for _, staged := range release {
+		staged.remove()
+	}
+}
+
+func (staged stagedPlan) remove() {
+	handle, relative, err := pathjail.OpenExisting(staged.root, staged.dir)
+	if err != nil {
+		return
+	}
+	defer handle.Close()
+	path := filepath.Join(relative, staged.name+".json")
+	current, err := handle.ReadFile(path)
+	if err != nil || !bytes.Equal(current, staged.body) {
+		return
+	}
+	_ = handle.Remove(path)
+}
 
 // resumeSavedPlan narrows a stored plan by the CURRENT session's plan events and
 // saves the remainder under its own name.
@@ -583,10 +726,10 @@ func (m model) resumeSavedPlan(stored specialist.SavedPlan) (name string, notice
 	}
 
 	root, dir := m.planWriteTarget()
-	// A fixed, inspectable name. Exclusive publication below refuses rather than
-	// replacing a user-authored plan that already owns it.
-	resumeName := stored.Name + "_resume"
-	if _, err := specialist.SavePlanExclusive(root, dir, resumeName, remaining); err != nil {
+	// <name>_resume when that name is free, otherwise the next free variant:
+	// stagePlan never replaces a plan it did not stage itself.
+	resumeName, err := m.stagePlan(root, dir, stored.Name+"_resume", remaining)
+	if err != nil {
 		return "", planControlNotice("warning", "Could not stage the remaining plan: "+err.Error()), false
 	}
 	// WHY there is work left, not just how much. A plan that RAN TO THE END with
