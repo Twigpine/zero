@@ -432,6 +432,20 @@ func refuseUnreachablePerTaskCap(budget Budget, taskCount int) error {
 	if budget.MaxTokens <= 0 || budget.MaxTokensPerTask <= 0 || taskCount <= 0 {
 		return nil
 	}
+	// OVERFLOW FAILS OPEN, so it is ruled on first — the same hazard
+	// refuseUnrepresentableSeconds closes for timeouts. taskCount * cap past
+	// math.MaxInt wraps NEGATIVE, and every max_tokens is >= a negative number,
+	// so the plan that needed the most was the one waved through. A product
+	// that does not fit in an int exceeds every representable max_tokens, so it
+	// is the unreachable case by definition.
+	if budget.MaxTokensPerTask > math.MaxInt/taskCount {
+		return fmt.Errorf(
+			"budget.max_tokens is %d but max_tokens_per_task is %d across %d tasks, which needs more than %d — "+
+				"every task would be stopped by its share of the total long before its own cap applied, "+
+				"so the cap would do nothing. Lower max_tokens_per_task, or OMIT max_tokens and let "+
+				"max_tokens_per_task bound each task on its own",
+			budget.MaxTokens, budget.MaxTokensPerTask, taskCount, math.MaxInt)
+	}
 	needed := taskCount * budget.MaxTokensPerTask
 	if budget.MaxTokens >= needed {
 		return nil

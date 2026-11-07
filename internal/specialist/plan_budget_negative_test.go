@@ -1,6 +1,7 @@
 package specialist
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -108,5 +109,29 @@ func TestTheLargestRepresentableWallBudgetIsStillAccepted(t *testing.T) {
 	}
 	if got := plan.Budget().MaxWall; got <= 0 {
 		t.Fatalf("MaxWall = %v; a value that fits must stay positive", got)
+	}
+}
+
+// A PER-TASK CAP WHOSE TOTAL OVERFLOWS IS STILL UNREACHABLE. taskCount × cap
+// past math.MaxInt wrapped negative, every max_tokens is >= a negative number,
+// and the check waved through exactly the plan that needed the most. Driven
+// through ParsePlan with values that pass every earlier rule (cap <= max_tokens,
+// above the floor), so the only thing left that can refuse is this check.
+func TestAPerTaskCapWhoseTotalOverflowsIsRefused(t *testing.T) {
+	perTask := math.MaxInt/2 + 1
+	_, err := ParsePlan(planArgs([]any{task("a", "x"), task("b", "y")}, map[string]any{
+		"max_workers":         float64(1),
+		"max_tokens":          math.MaxInt,
+		"max_tokens_per_task": perTask,
+	}), readOnlyLimits())
+	if err == nil {
+		t.Fatalf("2 x %d tokens wrapped negative and the unreachable cap was admitted", perTask)
+	}
+	if !strings.Contains(err.Error(), "max_tokens_per_task") {
+		t.Errorf("refused for the wrong reason: %v", err)
+	}
+	// The boundary: a product that fits is judged on its value as before.
+	if err := refuseUnreachablePerTaskCap(Budget{MaxTokens: math.MaxInt - 1, MaxTokensPerTask: math.MaxInt / 2}, 2); err != nil {
+		t.Errorf("a representable, covered total was refused: %v", err)
 	}
 }
