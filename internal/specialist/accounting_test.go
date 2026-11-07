@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -747,6 +748,160 @@ func TestRunBackgroundDefersExitUntilStartDecisionCompletes(t *testing.T) {
 	// The deferred stop must observe the task after SetPID; a stop recorded
 	// before the start decision completes would omit the pid.
 	requirePayloadInt(t, eventPayload(t, stopEvents[0]), "pid", 1234)
+}
+
+// When SetPID fails after the child started, Run kills the unrecorded child. Only
+// a successful kill is a terminal stop. A failed kill may leave the child
+// running, so Run must keep the task running (no reaper may claim it) and must
+// not record the stop or take the one-shot specialistStop claim; the launcher's
+// exit callback does both when the child really ends.
+func TestRunBackgroundSetPIDFailureRecordsStopOnlyAfterTermination(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		killErr error
+	}{
+		{name: "kill succeeds"},
+		{name: "kill fails", killErr: errors.New("operation not permitted")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+			parent, err := store.Create(sessions.CreateInput{SessionID: "parent_session"})
+			if err != nil {
+				t.Fatalf("Create parent returned error: %v", err)
+			}
+			manager, err := background.NewManager(t.TempDir())
+			if err != nil {
+				t.Fatalf("NewManager returned error: %v", err)
+			}
+			var killed []int
+			originalTerminate := terminateOrphanedProcess
+			terminateOrphanedProcess = func(pid int) error {
+				killed = append(killed, pid)
+				return tc.killErr
+			}
+			t.Cleanup(func() { terminateOrphanedProcess = originalTerminate })
+
+			var hookMu sync.Mutex
+			var hookEvents []string
+			hooksSoFar := func() string {
+				hookMu.Lock()
+				defer hookMu.Unlock()
+				return strings.Join(hookEvents, ",")
+			}
+			stopDispatched := make(chan struct{}, 1)
+			metadataFile := filepath.Join(manager.RootDir(), "child_task.json")
+			var onExitChild func(exitCode int)
+			executor := Executor{
+				BinaryPath:        "/usr/local/bin/zero",
+				SessionStore:      store,
+				BackgroundManager: manager,
+				NewSessionID:      func() (string, error) { return "child_task", nil },
+				LifecycleHooks: &LifecycleHooks{
+					Dispatch: func(_ context.Context, event string, _ string, _ map[string]any) {
+						hookMu.Lock()
+						hookEvents = append(hookEvents, event)
+						hookMu.Unlock()
+						if event == "specialistStop" {
+							select {
+							case stopDispatched <- struct{}{}:
+							default:
+							}
+						}
+					},
+				},
+				Load: func(LoadOptions) (LoadResult, error) {
+					return LoadResult{Specialists: []Manifest{{
+						Metadata:      Metadata{Name: "worker", Description: "Does focused work"},
+						SystemPrompt:  "Work carefully.",
+						ResolvedTools: []string{"read_file"},
+					}}}, nil
+				},
+				LaunchBackground: func(_ string, _ []string, _ string, onExit func(exitCode int)) (int, error) {
+					onExitChild = onExit
+					// The child has started. Put a non-empty directory where the
+					// task metadata lives so SetPID's atomic replace fails.
+					if err := os.Remove(metadataFile); err != nil {
+						return 0, err
+					}
+					if err := os.MkdirAll(filepath.Join(metadataFile, "blocker"), 0o700); err != nil {
+						return 0, err
+					}
+					return 1234, nil
+				},
+			}
+
+			_, runErr := executor.Run(context.Background(), TaskParameters{
+				Name:            "worker",
+				Prompt:          "inspect auth",
+				RunInBackground: true,
+			}, TaskRunOptions{ParentSessionID: parent.SessionID})
+			if runErr == nil {
+				t.Fatal("Run returned nil error after SetPID failed")
+			}
+			if !reflect.DeepEqual(killed, []int{1234}) {
+				t.Fatalf("terminated pids = %v, want [1234]", killed)
+			}
+			readStops := func() ([]sessions.Event, []sessions.Event) {
+				t.Helper()
+				events, err := store.ReadEvents(parent.SessionID)
+				if err != nil {
+					t.Fatalf("ReadEvents returned error: %v", err)
+				}
+				return eventsOfType(events, sessions.EventSpecialistStop), eventsOfType(events, specialistStopHookEvent)
+			}
+
+			if tc.killErr == nil {
+				// The child is gone, so the stop is terminal and recorded now.
+				stops, claims := readStops()
+				if len(stops) != 1 || len(claims) != 1 {
+					t.Fatalf("after successful kill: stop events = %d, claims = %d, want 1 and 1", len(stops), len(claims))
+				}
+				if got := hooksSoFar(); got != "specialistStart,specialistStop" {
+					t.Fatalf("lifecycle hooks = %q, want specialistStart,specialistStop", got)
+				}
+				return
+			}
+
+			if !strings.Contains(runErr.Error(), "terminate orphaned pid 1234") {
+				t.Fatalf("Run error = %v, want the failed kill surfaced", runErr)
+			}
+			if got := hooksSoFar(); got != "specialistStart" {
+				t.Fatalf("lifecycle hooks after failed kill = %q, want only specialistStart", got)
+			}
+			if stops, claims := readStops(); len(stops) != 0 || len(claims) != 0 {
+				t.Fatalf("after failed kill: stop events = %d, claims = %d, want none while the child may run", len(stops), len(claims))
+			}
+			task, ok := manager.Get("child_task")
+			if !ok || task.Status != background.StatusRunning {
+				t.Fatalf("task after failed kill = %#v (found %v), want still running", task, ok)
+			}
+			// A TaskOutput or TaskStop reap in the meantime must not claim it.
+			executor.recordBackgroundTaskAccounting(task, taskStreamSummary(task))
+			if stops, claims := readStops(); len(stops) != 0 || len(claims) != 0 {
+				t.Fatalf("reap of running task recorded stop events = %d, claims = %d", len(stops), len(claims))
+			}
+
+			// The surviving child finally exits: its exit callback records the stop
+			// and fires the hook exactly once.
+			if err := os.RemoveAll(metadataFile); err != nil {
+				t.Fatalf("RemoveAll metadata blocker returned error: %v", err)
+			}
+			onExitChild(1)
+			select {
+			case <-stopDispatched:
+			case <-time.After(10 * time.Second):
+				t.Fatal("exit callback never dispatched specialistStop")
+			}
+			if got := hooksSoFar(); got != "specialistStart,specialistStop" {
+				t.Fatalf("lifecycle hooks = %q, want specialistStart,specialistStop", got)
+			}
+			stops, claims := readStops()
+			if len(stops) != 1 || len(claims) != 1 {
+				t.Fatalf("after child exit: stop events = %d, claims = %d, want 1 and 1", len(stops), len(claims))
+			}
+			requirePayloadInt(t, eventPayload(t, stops[0]), "exitCode", 1)
+		})
+	}
 }
 
 // A recovered task stopped explicitly (launcher process gone) must record the

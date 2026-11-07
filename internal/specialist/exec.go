@@ -32,6 +32,10 @@ const (
 
 const SessionTagSpecialist = sessionTagSpecialist
 
+// terminateOrphanedProcess stops a launched background child whose PID could not
+// be recorded. Tests replace it to drive the failed-kill path.
+var terminateOrphanedProcess = background.TerminateProcess
+
 type NewSessionIDFunc func() (string, error)
 type WritePromptFileFunc func(prompt string) (string, error)
 type LoadFunc func(LoadOptions) (LoadResult, error)
@@ -615,13 +619,18 @@ func (executor Executor) runBackground(ctx context.Context, built BuildArgsResul
 			// The child is running but its PID was never recorded, so nothing can
 			// track or stop it later. Kill it (and its process group) now, mark the
 			// task errored, and record the stop so it cannot become an untracked
-			// orphan. The child started, so the stop is a real terminal transition:
+			// orphan. Once the kill succeeds the stop is a real terminal transition:
 			// both the accounting dedup and the shared stop-hook claim make the
 			// later onExit accounting a no-op.
-			if killErr := background.TerminateProcess(pid); killErr != nil {
+			if killErr := terminateOrphanedProcess(pid); killErr != nil {
 				// Don't mask a failed kill: a surviving orphan is worse than the
-				// SetPID error alone, so surface both to the caller.
+				// SetPID error alone, so surface both to the caller. The child may
+				// still be running, so this is not a terminal stop: leave the task
+				// running and let the launcher's exit callback mark it exited and
+				// record the stop (and claim specialistStop) when it really ends.
 				err = errors.Join(err, fmt.Errorf("terminate orphaned pid %d: %w", pid, killErr))
+				executor.cleanupBackgroundPromptFile(built.SessionID, built.PromptFile)
+				return ExecResult{}, err
 			}
 			_ = manager.UpdateStatus(built.SessionID, background.StatusError, -1)
 			executor.cleanupBackgroundPromptFile(built.SessionID, built.PromptFile)
