@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/trace"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/trace"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 // keepAliveClient returns a client whose transport retains idle connections on

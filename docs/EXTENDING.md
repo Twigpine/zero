@@ -110,6 +110,8 @@ Discovery roots (earlier wins on name collisions):
 
 A missing directory is fine — Zero just omits it. Management commands (`zero skill add` / `zero skill remove`) always write to the primary Zero dir only; `list` / `info` search primary + `~/.agents/skills`. `skill info` reports lock source/hash when present and whether the on-disk `SKILL.md` has drifted from the recorded hash.
 
+For a skill installed since Zero started installing bundled files, `skill info` also reports drift in any file installed with it.
+
 ```text
 ~/.local/share/zero/skills/          # primary (install/remove target)
   run-benchmarks/
@@ -139,6 +141,15 @@ description: Run the project's benchmark suite and summarize the deltas.
 Only `name` and `description` are recognized in the frontmatter today. The `name` defaults to the directory name. Within a single skills root, duplicate names are resolved by lexicographic directory order. Across roots, Zero loads the primary directory first, then `~/.agents/skills`, then plugin skill roots; earlier roots win name collisions. Plugin-declared skills (section 6) are merged into the active agent run at plugin activation time, so bundled skills appear in the available skills list and can be loaded with the `skill` tool.
 
 The `skill` tool lets the agent load any discovered skill by name (primary, agents, or plugin).
+
+A skill can ship files beside its `SKILL.md`, in the [agentskills.io](https://agentskills.io/specification) layout: `scripts/`, `references/`, `assets/` or anything else the instructions refer to. `zero skill add` installs the whole skill directory, leaving out hidden entries such as `.git` and not following or copying symlinks (it lists any it skipped). A skill larger than 1,000 files or 32 MiB is refused. When the `skill` tool loads a skill that has such files, its output ends with the skill's directory and a list of the files, so instructions like "run `scripts/fill.py`" can be followed. Running a bundled script goes through the normal tool permissions; installing or loading a skill never runs anything.
+
+```text
+pdf/
+  SKILL.md
+  scripts/fill.py
+  references/form-fields.md
+```
 
 ## 4. Hooks
 
@@ -245,6 +256,52 @@ inherit user credentials. Clear or replace `headers`, `env`, or `oauth` explicit
 or use a new server name. OAuth tokens are bound to the resolved server identity,
 so changing a server target can require `zero mcp oauth login <server>` again.
 OAuth server names ending in `.<32 hex chars>` are reserved for token storage.
+
+#### Built-in servers
+
+Zero seeds two MCP servers before your config is merged. Both show up in
+`zero mcp list`, and any field can be overridden in your user config.
+
+- `exa` (`https://mcp.exa.ai/mcp`) is on by default for keyless web search.
+  `zero mcp disable exa` turns it off.
+- `aimlapi` (`https://mcp.aimlapi.com/mcp`, the AI/ML API Toolbox, model
+  discovery, image/video/audio generation, chat, embeddings and balance tools)
+  is **off by default**, because its tool runs and generations are billed to
+  your AI/ML API balance. Turn it on with `zero mcp enable aimlapi`, which
+  writes only `"disabled": false` to your user config, and off again with
+  `zero mcp disable aimlapi`. A project config cannot turn it on.
+
+When `aimlapi` connects, Zero sends your AI/ML API key as
+`Authorization: Bearer <key>`. The key is resolved again on every request and
+is never written to `config.json`. With an aimlapi.com provider profile
+(`zero providers setup aimlapi`), the key is chosen in this order:
+
+1. An inline key on the profile (if set in config).
+2. Otherwise the environment variable named by the profile's `apiKeyEnv`
+   (the catalog default is `AIMLAPI_API_KEY`).
+3. Otherwise the key held in the credential store when the profile uses
+   `apiKeyStored`.
+
+When there is no aimlapi profile, Zero uses `AIMLAPI_API_KEY` alone. If both
+`AIMLAPI_API_KEY` and a stored profile key exist, step 2 wins over the store
+whenever the inline key is empty — MCP requests may bill the environment key's
+account, not the stored key.
+
+No automatic key is sent when an aimlapi profile, or any profile reading
+`AIMLAPI_API_KEY`, uses a base URL other than `https://api.aimlapi.com/v1`, or
+when `AIMLAPI_INFERENCE_URL` is overridden, because that credential may belong
+to a proxy. No key is sent when the resolved value is not a single token (for
+example a comma- or newline-separated pool), when you set your own
+non-empty `Authorization` header, when the server uses `"auth": "oauth"`, or
+when project config touched the server. Without a key the server answers 401.
+To sign in with your aimlapi.com account instead, set `"auth": "oauth"` on the
+server and run `zero mcp oauth login aimlapi`.
+
+Every request to exactly `https://mcp.aimlapi.com` (https, default port,
+whatever the server is named, including one you add by hand) also carries the
+attribution headers `X-AIMLAPI-Source: agent/zero` and `X-AIMLAPI-Partner-ID`,
+and gets the key under the rules above. Other MCP servers never receive these
+headers or the key.
 
 ### As a server — expose Zero's tools to another agent
 

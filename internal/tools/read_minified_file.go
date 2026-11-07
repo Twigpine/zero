@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/minify"
+	"github.com/Twigpine/zero/internal/minify"
 )
 
 type readMinifiedFileTool struct {

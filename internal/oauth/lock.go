@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/lockutil"
+	"github.com/Twigpine/zero/internal/lockutil"
 )
 
 const fileLockTimeout = 5 * time.Second

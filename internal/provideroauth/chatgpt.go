@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/oauth"
+	"github.com/Twigpine/zero/internal/oauth"
 )
 
 // chatgptAccountClaim is the ID-token claim the ChatGPT backend requires as the

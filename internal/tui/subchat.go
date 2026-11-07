@@ -1,7 +1,7 @@
 package tui
 
 import (
-	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/sessions"
 )
 
 // subchatState manages the drill-in view for a specialist's child session.

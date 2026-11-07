@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/providers/openai"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/providers/openai"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 func openaiEligibleProfile() config.ProviderProfile {

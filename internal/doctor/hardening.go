@@ -6,9 +6,9 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/lsp"
-	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/lsp"
+	"github.com/Twigpine/zero/internal/sandbox"
 )
 
 // sandboxBackendCheck reports whether the selected platform has a native

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/perfbench"
+	"github.com/Twigpine/zero/internal/perfbench"
 )
 
 func TestParseArgsUsesCliAndEnvOverrides(t *testing.T) {

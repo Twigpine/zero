@@ -3,7 +3,7 @@ package providermodelcatalog
 import (
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/providercatalog"
+	"github.com/Twigpine/zero/internal/providercatalog"
 )
 
 func TestModelIDAllowedForProvider(t *testing.T) {

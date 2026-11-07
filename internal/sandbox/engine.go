@@ -80,6 +80,33 @@ func (engine *Engine) CanPersistGrants() bool {
 	return engine != nil && engine.store != nil
 }
 
+// DegradedNotice is the line a session shows when this engine's sandbox cannot
+// enforce what its policy asks for, or "" when it can or the sandbox is off.
+//
+// Built from the engine's own backend and policy through the same plan `zero
+// sandbox policy` prints, so the notice and the command that explains it cannot
+// describe two different sandboxes.
+//
+// EXCEPT WHERE THE RUNNER TAKES A DIFFERENT PATH. With the nesting markers set,
+// BuildCommandPlan passes every command through unwrapped, trusting an outer
+// sandbox to contain it, and the markers are ambient environment that nothing
+// authenticates (#727). The plan above does not model that, so a session started
+// with them ran every command unwrapped and said nothing. Reported by CodeRabbit.
+func (engine *Engine) DegradedNotice() string {
+	if engine == nil || engine.policy.Mode == ModeDisabled {
+		return ""
+	}
+	if IsAlreadySandboxed() {
+		return nestedSandboxNotice
+	}
+	return engine.backend.BuildPlan(engine.workspaceRoot, engine.policy).DegradedNotice()
+}
+
+// nestedSandboxNotice says why a session with the nesting markers set does not
+// wrap its commands, and that the outer sandbox it relies on is unverified.
+const nestedSandboxNotice = "Sandbox enforcement is degraded: " + EnvSandboxed + " and " + EnvSandboxBackend +
+	" say this session already runs inside a sandbox, so it does not wrap commands again, and Zero cannot verify that outer sandbox."
+
 func (engine *Engine) ConsumeGrantMigrationNotice() (string, error) {
 	if engine == nil || engine.store == nil {
 		return "", nil

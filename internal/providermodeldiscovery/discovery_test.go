@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/providercatalog"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/providercatalog"
 )
 
 func TestDiscoverOpenAICompatibleModelsFetchesModelsEndpoint(t *testing.T) {
@@ -106,6 +106,49 @@ func TestParseModelsResponseSupportsChatGPTCatalog(t *testing.T) {
 	}
 	if got := strings.Join(models[0].ServiceTiers, ","); got != "priority" || models[0].DefaultServiceTier != "standard" {
 		t.Fatalf("service tier metadata = %#v", models[0])
+	}
+}
+
+func TestParseModelsResponseCapturesModalities(t *testing.T) {
+	models, err := parseModelsResponse([]byte(`{
+		"data": [
+			{
+				"id": "openrouter/custom-multimodal",
+				"architecture": {
+					"input_modalities": ["text", "image"],
+					"output_modalities": ["text"]
+				}
+			},
+			{
+				"id": "opengateway/flat-multimodal",
+				"modalities": {
+					"input": ["text", "image"],
+					"output": ["text", "image"]
+				}
+			},
+			{
+				"id": "text-only",
+				"architecture": {
+					"input_modalities": ["text"]
+				}
+			}
+		]
+	}`))
+	if err != nil {
+		t.Fatalf("parseModelsResponse: %v", err)
+	}
+	byID := map[string]Model{}
+	for _, m := range models {
+		byID[m.ID] = m
+	}
+	if got := strings.Join(byID["openrouter/custom-multimodal"].InputModalities, ","); got != "text,image" {
+		t.Fatalf("openrouter input modalities = %q, want text,image", got)
+	}
+	if got := strings.Join(byID["opengateway/flat-multimodal"].InputModalities, ","); got != "text,image" {
+		t.Fatalf("opengateway input modalities = %q, want text,image", got)
+	}
+	if got := strings.Join(byID["text-only"].InputModalities, ","); got != "text" {
+		t.Fatalf("text-only input modalities = %q, want text", got)
 	}
 }
 

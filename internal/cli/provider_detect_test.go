@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/provideronboarding"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/provideronboarding"
 )
 
 func TestRunProvidersDetectSurfacesLocalRuntimeAndProviderActions(t *testing.T) {

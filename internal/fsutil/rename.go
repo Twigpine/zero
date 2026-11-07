@@ -75,6 +75,14 @@ func RenameWithRetry(src, dst string, rename func(src, dst string) error) error 
 	return err
 }
 
+// IsSharingOrLockViolation reports whether err is a Windows sharing or lock
+// violation: another open handle on the file denies the requested access. It
+// is always false on other platforms, where the same errno values mean
+// unrelated errors.
+func IsSharingOrLockViolation(err error) bool {
+	return runtime.GOOS == "windows" && isWindowsSharingOrLockViolation(err)
+}
+
 func isWindowsSharingOrLockViolation(err error) bool {
 	var errno syscall.Errno
 	if errors.As(err, &errno) {

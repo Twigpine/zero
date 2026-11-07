@@ -8,8 +8,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/Gitlawb/zero/internal/testutil"
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/testutil"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 func TestSpawnAndHandoffAgentTypeEnumReflectsRoster(t *testing.T) {

@@ -7,8 +7,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/Gitlawb/zero/internal/agent"
-	"github.com/Gitlawb/zero/internal/skills"
+	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/skills"
 )
 
 // newSkillTestModel builds a model with an injected skills loader (and the

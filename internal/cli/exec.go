@@ -10,27 +10,27 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/agent"
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/errhint"
-	"github.com/Gitlawb/zero/internal/execprofile"
-	"github.com/Gitlawb/zero/internal/execution"
-	"github.com/Gitlawb/zero/internal/imageinput"
-	"github.com/Gitlawb/zero/internal/lsp"
-	"github.com/Gitlawb/zero/internal/modelregistry"
-	"github.com/Gitlawb/zero/internal/notify"
-	"github.com/Gitlawb/zero/internal/providercatalog"
-	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
-	"github.com/Gitlawb/zero/internal/providers"
-	"github.com/Gitlawb/zero/internal/sandbox"
-	"github.com/Gitlawb/zero/internal/sessions"
-	"github.com/Gitlawb/zero/internal/specmode"
-	"github.com/Gitlawb/zero/internal/streamjson"
-	"github.com/Gitlawb/zero/internal/tools"
-	"github.com/Gitlawb/zero/internal/trace"
-	"github.com/Gitlawb/zero/internal/usage"
-	"github.com/Gitlawb/zero/internal/worktrees"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/errhint"
+	"github.com/Twigpine/zero/internal/execprofile"
+	"github.com/Twigpine/zero/internal/execution"
+	"github.com/Twigpine/zero/internal/imageinput"
+	"github.com/Twigpine/zero/internal/lsp"
+	"github.com/Twigpine/zero/internal/modelregistry"
+	"github.com/Twigpine/zero/internal/notify"
+	"github.com/Twigpine/zero/internal/providercatalog"
+	"github.com/Twigpine/zero/internal/providermodeldiscovery"
+	"github.com/Twigpine/zero/internal/providers"
+	"github.com/Twigpine/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/specmode"
+	"github.com/Twigpine/zero/internal/streamjson"
+	"github.com/Twigpine/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/trace"
+	"github.com/Twigpine/zero/internal/usage"
+	"github.com/Twigpine/zero/internal/worktrees"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 const (
@@ -181,7 +181,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// Refresh the models.dev pricing/limits cache in the background when stale;
 	// the overlay is read at registry construction from the cache file, so this
 	// benefits the next run and never blocks or fails this one.
-	go func() { _ = modelregistry.RefreshModelsDevCache(context.Background()) }()
+	modelregistry.StartModelsDevRefresh()
 
 	// A mode seeds model/effort/max-turns/tool filters as a preset. Expand it up
 	// front — before tool-filter validation and the --list-tools branch — so a
@@ -347,6 +347,17 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	} else if notice != "" {
 		_, _ = fmt.Fprintln(stderr, "[zero] "+notice)
 	}
+	// Before any tool runs, and before the MCP servers and plugins below start
+	// through the same sandbox, so a run that goes ahead with reduced isolation
+	// says so where its output starts, not only when someone runs `zero doctor`.
+	// A notice that cannot be written stops the run, as the image and effort
+	// notices further down do: going ahead would mean reduced isolation and no
+	// warning delivered.
+	if notice := sandboxEngine.DegradedNotice(); notice != "" {
+		if _, err := fmt.Fprintln(stderr, "[zero] "+notice); err != nil {
+			return exitCrash
+		}
+	}
 	executionRunner.SetPreparer(sandboxEngine)
 	if permissionMode != agent.PermissionModePlan {
 		mcpRuntime, mcpSkip, err = registerMCPToolsForWorkspace(context.Background(), workspaceRoot, registry, deps, execMCPAutonomy(options), trustRoot, executionRunner)
@@ -423,6 +434,8 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		}
 		images = nil
 	}
+	// Match the TUI: only images actually sent to the model enter history.
+	attachments := sessions.MessageAttachments{Images: len(images)}
 	runReasoningEffort := options.reasoningEffort
 	if options.useSpec && options.specReasoningEffort != "" {
 		runReasoningEffort = options.specReasoningEffort
@@ -452,20 +465,20 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// escalation so post-switch turns are attributed to the escalated model.
 	currentModel := resolved.Provider.Model
 	// Optimized OpenAI turn sessions (ZERO_OPENAI_TURN_SESSION, default off). nil
-	// when gated off or the profile is ineligible: agent.Run then wraps the
-	// provider in its default adapter. This is the run's STARTING session provider
-	// and is used whether or not escalation is enabled.
-	turnSessions, _ := providers.OptimizedTurnSessions(resolved.Provider, provider, providers.Options{})
+	// when gated off or ineligible, unless a configured RPM limiter needs to
+	// wrap the default adapter. The limiter is shared across model switches.
+	sessionOptions := providers.Options{ModelRPM: zeroruntime.NewModelRPMLimiter(resolved.ModelRPM)}
+	turnSessions, _ := providers.ConfiguredTurnSessions(resolved.Provider, provider, sessionOptions)
 	// Both switchers come from one shared builder so exec and the interactive TUI
 	// cannot drift on the nil contracts the agent loop depends on. The session
-	// switcher is nil unless this run STARTED optimized, which is what keeps a
-	// default-adapter run on the default adapter.
+	// switcher preserves the starting transport and shares the RPM limiter.
 	var modelSwitcher func(context.Context, string) (agent.Provider, error)
 	var modelSessionSwitcher func(context.Context, string) (zeroruntime.TurnSessionProvider, error)
 	if options.allowEscalation {
 		modelSwitcher, modelSessionSwitcher = providers.EscalationSwitchers(
 			resolved.Provider, provider, deps.newProvider,
 			func(modelID string) { currentModel = modelID },
+			sessionOptions,
 		)
 	}
 
@@ -603,10 +616,14 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	sessionRecorder := execSessionRecorder{prepared: preparedSession}
 	// Surface a best-effort session-recording failure once, on every exit path.
 	defer sessionRecorder.warnIfRecordingFailed(stderr)
-	sessionRecorder.append(sessions.EventMessage, map[string]any{
+	userPayload := map[string]any{
 		"role":    "user",
 		"content": prompt,
-	})
+	}
+	if attachments.Images > 0 {
+		userPayload["attachments"] = attachments
+	}
+	sessionRecorder.append(sessions.EventMessage, userPayload)
 
 	// OnAskUser is intentionally left unset: headless runs have no interactive
 	// user, so ask_user degrades to a "proceed with your best assumption" result
@@ -660,6 +677,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		ContextWindowFor: func(modelID string) int {
 			return modelregistry.AgentContextWindow(modelContextWindow(modelRegistry, modelID))
 		},
+		SupportsVision: func(modelID string) bool {
+			return modelregistry.SupportsVision(modelRegistry, modelID)
+		},
 		ReasoningEffort: forwardEffort,
 		Trace:           traceRecorder,
 		Cwd:             workspaceRoot,
@@ -692,7 +712,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 				"arguments": call.Arguments,
 			})
 			// Snapshot before-state of files this call will mutate (safe rewind).
-			if checkpoint, ok := sessionRecorder.captureCheckpoint(workspaceRoot, call); ok {
+			if checkpoint, ok := sessionRecorder.captureCheckpoint(workspaceRoot, registry, call); ok {
 				writer.checkpoint(checkpoint)
 			}
 		},

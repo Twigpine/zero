@@ -16,11 +16,11 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/Gitlawb/zero/internal/aimlapi"
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/providercatalog"
-	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/aimlapi"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/providercatalog"
+	"github.com/Twigpine/zero/internal/providermodeldiscovery"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 func TestProviderCommandOpensOnboardingWizard(t *testing.T) {
@@ -562,7 +562,7 @@ func TestProviderWizardCustomCompatibleProviderDerivesIPName(t *testing.T) {
 }
 
 func TestProviderWizardSkipsAPIKeyForLocalProvidersAndEscCloses(t *testing.T) {
-	m := newModel(context.Background(), Options{})
+	m := newViewTestModel(t, Options{})
 	m = openProviderWizardForTest(t, m)
 	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "ollama")
 
@@ -773,7 +773,7 @@ func TestProviderWizardUsesAPIKeyEnvForCurrentSessionWithoutPersistingSecret(t *
 
 func TestProviderWizardUsesLiveDiscoveredModels(t *testing.T) {
 	var captured config.ProviderProfile
-	m := newModel(context.Background(), Options{
+	m := newViewTestModel(t, Options{
 		DiscoverProviderModels: func(ctx context.Context, profile config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
 			captured = profile
 			return []providermodeldiscovery.Model{{ID: "live-b"}, {ID: "live-a"}}, nil
@@ -874,7 +874,7 @@ func TestProviderWizardIgnoresStaleDiscoveryForSameProvider(t *testing.T) {
 }
 
 func TestProviderWizardKeepsFallbackModelsWhenLiveDiscoveryFails(t *testing.T) {
-	m := newModel(context.Background(), Options{
+	m := newViewTestModel(t, Options{
 		DiscoverProviderModels: func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
 			return nil, errors.New("offline")
 		},

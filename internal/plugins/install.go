@@ -20,7 +20,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/installtxn"
+	"github.com/Twigpine/zero/internal/installtxn"
 )
 
 // manifestFileName is the plugin manifest filename, matching the loader.

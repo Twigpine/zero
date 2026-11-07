@@ -3,7 +3,7 @@ package acp
 import (
 	"encoding/json"
 
-	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/agent"
 )
 
 // permission.go maps ZERO's permission prompt model onto ACP's

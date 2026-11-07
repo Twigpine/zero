@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/lockutil"
+	"github.com/Twigpine/zero/internal/lockutil"
 )
 
 // Cross-process lock tuning. The lock is held only for a single metadata

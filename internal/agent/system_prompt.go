@@ -9,10 +9,10 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/repomap"
-	"github.com/Gitlawb/zero/internal/tools"
-	"github.com/Gitlawb/zero/internal/workspaceseed"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/repomap"
+	"github.com/Twigpine/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/workspaceseed"
 )
 
 // coreSystemPrompt is the de-branded coding-craft instruction set: identity,

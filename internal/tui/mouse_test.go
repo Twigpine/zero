@@ -8,10 +8,10 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/terminalpet"
-	"github.com/Gitlawb/zero/internal/tools"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/terminalpet"
+	"github.com/Twigpine/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 func TestMouseClickSelectsThenAppliesCommandSuggestionRow(t *testing.T) {
@@ -1012,6 +1012,56 @@ func composerMousePoint(t *testing.T, m model, column int) (int, int) {
 	x := frame.composerRect.x + 2 + lipgloss.Width(composerVisualLinePrefix(m.input, true)) + column
 	y := frame.composerRect.y + contentY
 	return x, y
+}
+
+func TestModelPickerMouseUsesRenderedRowBoundaries(t *testing.T) {
+	for _, line := range []int{6, 7} {
+		m := mouseTestModel()
+		m.width, m.height = 30, 40
+		m.picker = &commandPicker{kind: pickerModel, items: []pickerItem{
+			{Group: "Recent", Label: "model-subscription-one", Value: "one", OwnerLabel: "subscription-profile"},
+			{Group: "Recent", Label: "model-subscription-two", Value: "two", OwnerLabel: "subscription-profile"},
+		}}
+		overlay := m.modelPickerOverlay(30)
+		rect := m.overlayMouseRect(len(viewLines(overlay)), 30)
+		// Border/search/rule/header occupy lines 0–3; each model has two lines.
+		target, ok := m.selectModelPickerAtMouse(testMouseClick(tea.MouseLeft, 15, rect.y+line))
+		if !ok || target.Value != "two" {
+			t.Fatalf("line %d selected %#v, ok=%v; want second model", line, target, ok)
+		}
+		if _, ok := m.selectModelPickerAtMouse(testMouseClick(tea.MouseLeft, 15, rect.y+3)); ok {
+			t.Fatal("group header must not select a model")
+		}
+	}
+}
+
+func TestModelPickerFitsMultilineRowsToViewport(t *testing.T) {
+	for _, selected := range []int{0, 5, 9} {
+		m := mouseTestModel()
+		m.width, m.height = 30, 24
+		m.picker = &commandPicker{kind: pickerModel, selected: selected}
+		for i := 0; i < 10; i++ {
+			m.picker.items = append(m.picker.items, pickerItem{Group: "Recent", Label: "model-subscription-" + string(rune('a'+i)), OwnerLabel: "work-subscription-provider-east", OwnerNumber: 1})
+		}
+		overlay := m.modelPickerOverlay(30)
+		frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(30), m.footerView(30))
+		if got := len(viewLines(overlay)); got > frame.bodyHeight {
+			t.Fatalf("selected=%d: overlay height %d exceeds body %d", selected, got, frame.bodyHeight)
+		}
+		plain := plainRender(t, overlay)
+		assertContains(t, plain, "❯ "+m.picker.items[selected].Label)
+		assertContains(t, plain, "Enter select")
+		rect := m.overlayMouseRect(len(viewLines(overlay)), 30)
+		for line, text := range strings.Split(plain, "\n") {
+			if !strings.Contains(text, "❯ ") {
+				continue
+			}
+			target, ok := m.selectModelPickerAtMouse(testMouseClick(tea.MouseLeft, 15, rect.y+line+1))
+			if !ok || target.Index != selected {
+				t.Fatalf("scrolled owner-line click selected %#v, ok=%v; want %d", target, ok, selected)
+			}
+		}
+	}
 }
 
 func mouseTestModel() model {

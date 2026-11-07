@@ -3,7 +3,7 @@ package specialist
 import (
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 func executorWithReadOnlyAndWriteSpecialists() Executor {

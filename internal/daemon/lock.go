@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/lockutil"
+	"github.com/Twigpine/zero/internal/lockutil"
 )
 
 // Single-instance lock. The stable PID file carries a kernel advisory lock for

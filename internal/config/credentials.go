@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/credstore"
-	"github.com/Gitlawb/zero/internal/providercatalog"
+	"github.com/Twigpine/zero/internal/credstore"
+	"github.com/Twigpine/zero/internal/providercatalog"
 )
 
 // ProviderKeyStoreAt opens the encrypted credential store whose file backend lives

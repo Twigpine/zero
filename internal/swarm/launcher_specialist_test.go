@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/specialist"
-	"github.com/Gitlawb/zero/internal/streamjson"
+	"github.com/Twigpine/zero/internal/specialist"
+	"github.com/Twigpine/zero/internal/streamjson"
 )
 
 // TestSpecialistLauncherRunsUnregisteredSwarmAgent guards the fix for the swarm

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/repoinfo"
+	"github.com/Twigpine/zero/internal/repoinfo"
 )
 
 type repoInfoOptions struct {

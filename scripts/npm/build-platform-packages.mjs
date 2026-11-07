@@ -2,21 +2,22 @@
 // build-platform-packages.mjs: assemble the npm publish payloads for a release
 // from the per-platform archives built by `zero-release package`.
 //
-// Layout written under --out-dir (default dist/npm):
-//   wrapper/                        @gitlawb/zero@X.Y.Z — bin/zero.js, the
+// Layout written under --out-dir (default dist/npm), where <name> is the
+// package.json name, or --package-name when given:
+//   wrapper/                        <name>@X.Y.Z — bin/zero.js, the
 //                                   first-run fallback downloader, and a
 //                                   package.json with NO scripts and NO
 //                                   dependencies, only optionalDependencies
 //                                   aliasing the platform versions below.
 //   platforms/zero-<platform>-<arch>/
-//                                   @gitlawb/zero@X.Y.Z-<platform>-<arch> —
+//                                   <name>@X.Y.Z-<platform>-<arch> —
 //                                   the zero binary, sandbox helpers, and the
 //                                   vendored local-control helpers/ tree,
 //                                   copied straight out of the release archive.
 //
-// The platform "packages" are versions of the SAME @gitlawb/zero package at
-// suffixed (semver-prerelease) versions, referenced from the wrapper through
-// npm: aliases. One package name keeps a single npm trusted-publisher config.
+// The platform "packages" are versions of the SAME package at suffixed
+// (semver-prerelease) versions, referenced from the wrapper through npm:
+// aliases. One package name keeps a single npm trusted-publisher config.
 // See docs/NPM_PACKAGING.md for the publishing rules this feeds.
 //
 // Archives are verified against their .sha256 files before extraction. All
@@ -24,9 +25,16 @@
 // CI must always assemble the full matrix, and the wrapper's
 // optionalDependencies always reference the full matrix regardless).
 //
+// --package-name assembles the same artifacts under another name. It was
+// added for the one release (0.10.0) also published under the pre-rename name
+// @gitlawb/zero (see docs/NPM_PACKAGING.md); everything in the payloads that
+// names the package follows it, so the binary and wrapper know which name they
+// were installed as.
+//
 // Usage:
 //   node scripts/npm/build-platform-packages.mjs \
-//     --artifacts-dir dist/artifacts [--out-dir dist/npm] [--only linux-x64,...]
+//     --artifacts-dir dist/artifacts [--out-dir dist/npm] [--only linux-x64,...] \
+//     [--package-name @scope/name]
 
 import {
   chmodSync,
@@ -71,7 +79,7 @@ function fail(message) {
 }
 
 function parseArgs(argv) {
-  const args = { artifactsDir: '', outDir: join(repoRoot, 'dist', 'npm'), only: null };
+  const args = { artifactsDir: '', outDir: join(repoRoot, 'dist', 'npm'), only: null, packageName: '' };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     const next = () => {
@@ -89,6 +97,14 @@ function parseArgs(argv) {
       case '--only':
         args.only = new Set(next().split(',').map((entry) => entry.trim()).filter(Boolean));
         break;
+      case '--package-name':
+        args.packageName = next();
+        // A scoped or unscoped npm name; anything else would also become a
+        // path segment in the alias npm installs.
+        if (!/^(@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/.test(args.packageName)) {
+          fail(`--package-name ${JSON.stringify(args.packageName)} is not an npm package name`);
+        }
+        break;
       default:
         fail(`unknown argument ${arg}`);
     }
@@ -99,6 +115,7 @@ function parseArgs(argv) {
 
 function readWrapperPackage() {
   const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
+  if (!pkg.name) fail('package.json name is empty');
   if (!pkg.version) fail('package.json version is empty');
   return pkg;
 }
@@ -107,14 +124,17 @@ function platformVersion(version, entry) {
   return `${version}-${entry.platform}-${entry.arch}`;
 }
 
-function aliasName(entry) {
-  return `@gitlawb/zero-${entry.platform}-${entry.arch}`;
+// bin/zero.js derives the same alias from its own package name at runtime, so
+// the wrapper name, the alias names, and the alias targets must all come from
+// one value.
+function aliasName(packageName, entry) {
+  return `${packageName}-${entry.platform}-${entry.arch}`;
 }
 
-function optionalDependencies(version) {
+function optionalDependencies(packageName, version) {
   const aliases = {};
   for (const entry of MATRIX) {
-    aliases[aliasName(entry)] = `npm:@gitlawb/zero@${platformVersion(version, entry)}`;
+    aliases[aliasName(packageName, entry)] = `npm:${packageName}@${platformVersion(version, entry)}`;
   }
   return aliases;
 }
@@ -260,7 +280,7 @@ function verifyHelperShims(packageDir, entry, assetName) {
   }
 }
 
-function buildPlatformPackage(entry, version, artifactsDir, outDir) {
+function buildPlatformPackage(entry, packageName, version, artifactsDir, outDir) {
   const assetName = `zero-v${version}-${entry.release}.${entry.ext}`;
   const archivePath = join(artifactsDir, assetName);
   if (!existsSync(archivePath)) fail(`missing release archive ${archivePath}`);
@@ -295,9 +315,9 @@ function buildPlatformPackage(entry, version, artifactsDir, outDir) {
 
     const wrapperPkg = readWrapperPackage();
     const manifest = {
-      name: '@gitlawb/zero',
+      name: packageName,
       version: platformVersion(version, entry),
-      description: `zero native binary for ${entry.platform}-${entry.arch} (installed via @gitlawb/zero@${version})`,
+      description: `zero native binary for ${entry.platform}-${entry.arch} (installed via ${packageName}@${version})`,
       os: [entry.platform],
       cpu: [entry.arch],
       license: wrapperPkg.license,
@@ -312,7 +332,7 @@ function buildPlatformPackage(entry, version, artifactsDir, outDir) {
   }
 }
 
-function buildWrapperPackage(version, outDir) {
+function buildWrapperPackage(packageName, version, outDir) {
   const wrapperDir = join(outDir, 'wrapper');
   rmSync(wrapperDir, { recursive: true, force: true });
   mkdirSync(join(wrapperDir, 'bin'), { recursive: true });
@@ -333,14 +353,17 @@ function buildWrapperPackage(version, outDir) {
   // stages into the platform payloads — see internal/release/release.go).
   delete pkg.scripts;
   delete pkg.dependencies;
-  pkg.optionalDependencies = optionalDependencies(version);
+  pkg.name = packageName;
+  pkg.optionalDependencies = optionalDependencies(packageName, version);
   writeFileSync(join(wrapperDir, 'package.json'), JSON.stringify(pkg, null, 2) + '\n');
   return wrapperDir;
 }
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
-  const version = readWrapperPackage().version;
+  const wrapperPkg = readWrapperPackage();
+  const packageName = args.packageName || wrapperPkg.name;
+  const { version } = wrapperPkg;
 
   const selected = MATRIX.filter(
     (entry) => !args.only || args.only.has(`${entry.platform}-${entry.arch}`),
@@ -356,13 +379,14 @@ function main() {
 
   const built = [];
   for (const entry of selected) {
-    built.push(buildPlatformPackage(entry, version, args.artifactsDir, args.outDir));
+    built.push(buildPlatformPackage(entry, packageName, version, args.artifactsDir, args.outDir));
   }
-  const wrapperDir = buildWrapperPackage(version, args.outDir);
+  const wrapperDir = buildWrapperPackage(packageName, version, args.outDir);
 
   process.stdout.write(
     JSON.stringify(
       {
+        name: packageName,
         version,
         wrapperDir,
         platformDirs: built,

@@ -14,7 +14,7 @@ import (
 
 	xdraw "golang.org/x/image/draw"
 
-	"github.com/Gitlawb/zero/internal/installtxn"
+	"github.com/Twigpine/zero/internal/installtxn"
 )
 
 const kittyChunkSize = 4096

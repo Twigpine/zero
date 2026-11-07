@@ -5,8 +5,8 @@ import (
 	"io"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/provideronboarding"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/provideronboarding"
 )
 
 type providerDetectOptions struct {

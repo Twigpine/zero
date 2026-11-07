@@ -353,9 +353,6 @@ func TestCaptureAndPruneConcurrent(t *testing.T) {
 // separate Store instances on the same RootDir (e.g. CLI rewind vs TUI). While
 // one Store holds the session lock, another Store's AppendEvent must block.
 func TestSessionFileLockSerializesAcrossStores(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("flock semantics differ on windows")
-	}
 	root := t.TempDir()
 	storeA := NewStore(StoreOptions{RootDir: root})
 	if _, err := storeA.Create(CreateInput{SessionID: "s"}); err != nil {

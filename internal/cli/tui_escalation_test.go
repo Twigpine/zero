@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/tui"
+	"github.com/Twigpine/zero/internal/tui"
 )
 
 // captureTUIOptions runs the root command with the TUI launch intercepted, and

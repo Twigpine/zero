@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/update"
+	"github.com/Twigpine/zero/internal/update"
 )
 
 type updateOptions struct {

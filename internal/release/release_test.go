@@ -213,7 +213,7 @@ func TestBuildHelpersMatchScriptContracts(t *testing.T) {
 	if got := WindowsSandboxSetupArtifactName("windows"); got != "zero-windows-sandbox-setup.exe" {
 		t.Fatalf("WindowsSandboxSetupArtifactName(windows) = %q", got)
 	}
-	if got := BuildLdflags(version); !strings.Contains(got, "-X github.com/Gitlawb/zero/internal/cli.version=0.1.0") {
+	if got := BuildLdflags(version); !strings.Contains(got, "-X github.com/Twigpine/zero/internal/cli.version=0.1.0") {
 		t.Fatalf("BuildLdflags = %q", got)
 	}
 }

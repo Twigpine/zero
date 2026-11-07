@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/peermsg"
+	"github.com/Twigpine/zero/internal/peermsg"
 )
 
 type fakePeerSessionService struct {

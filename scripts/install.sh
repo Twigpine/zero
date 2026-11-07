@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ZERO_REPO="${ZERO_REPO:-Gitlawb/zero}"
+ZERO_REPO="${ZERO_REPO:-Twigpine/zero}"
 ZERO_VERSION="${ZERO_VERSION:-latest}"
 ZERO_INSTALL_DIR="${ZERO_INSTALL_DIR:-$HOME/.local/bin}"
 ZERO_GITHUB_API="${ZERO_GITHUB_API:-https://api.github.com}"
@@ -16,7 +16,7 @@ Usage:
 
 Environment:
   ZERO_VERSION          Release version or tag. Defaults to latest.
-  ZERO_REPO             GitHub repository. Defaults to Gitlawb/zero.
+  ZERO_REPO             GitHub repository. Defaults to Twigpine/zero.
   ZERO_INSTALL_DIR      Directory for the zero binary. Defaults to ~/.local/bin.
   ZERO_GITHUB_API       GitHub API base URL. Defaults to https://api.github.com.
   ZERO_GITHUB_BASE_URL  GitHub web base URL. Defaults to https://github.com.

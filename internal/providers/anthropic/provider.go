@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/providers/providerio"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/providers/providerio"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 const defaultBaseURL = "https://api.anthropic.com"
@@ -46,6 +46,19 @@ func thinkingBudgetForEffort(effort string) int {
 		return 24000
 	default:
 		return 0
+	}
+}
+
+func miniMaxM31FlashEffort(model, effort string) string {
+	if !strings.EqualFold(strings.TrimSpace(model), "MiniMax-M3.1-Flash") {
+		return ""
+	}
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	switch effort {
+	case "low", "medium", "high", "xhigh", "max":
+		return effort
+	default:
+		return ""
 	}
 }
 
@@ -377,11 +390,15 @@ func (provider *Provider) anthropicRequest(request zeroruntime.CompletionRequest
 		Messages:  messages,
 		Stream:    true,
 	}
-	// Extended thinking: enable when a reasoning effort was requested. The budget
-	// is counted against max_tokens, so raise max_tokens to leave room for the
-	// response. Temperature is intentionally left unset (Anthropic requires the
-	// default when thinking is on).
-	if budget, effectiveMax, enabled := resolveThinking(request.ReasoningEffort, provider.maxTokens); enabled {
+	// MiniMax-M3.1-Flash uses adaptive thinking with output_config.effort instead
+	// of Anthropic's token budget. For other models, the budget is counted against
+	// max_tokens, so raise max_tokens to leave room for the response. Temperature
+	// is intentionally left unset (Anthropic requires the default when thinking
+	// is on).
+	if effort := miniMaxM31FlashEffort(provider.model, request.ReasoningEffort); effort != "" {
+		mapped.Thinking = &thinkingConfig{Type: "adaptive"}
+		mapped.OutputConfig = &outputConfig{Effort: effort}
+	} else if budget, effectiveMax, enabled := resolveThinking(request.ReasoningEffort, provider.maxTokens); enabled {
 		mapped.MaxTokens = effectiveMax
 		mapped.Thinking = &thinkingConfig{Type: "enabled", BudgetTokens: budget}
 	}

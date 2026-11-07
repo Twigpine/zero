@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/testrunner"
+	"github.com/Twigpine/zero/internal/testrunner"
 )
 
 func TestDetectPlanFindsBunAndGoChecks(t *testing.T) {

@@ -129,3 +129,38 @@ func TestUpdateModel(t *testing.T) {
 		t.Fatalf("persisted model: metadata=%+v err=%v", persisted, err)
 	}
 }
+
+func TestUpdateMode(t *testing.T) {
+	store := newTitleTestStore(t)
+	session, err := store.Create(CreateInput{})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := store.AppendEvent(session.SessionID, AppendEventInput{Type: EventMessage, Payload: map[string]any{"role": "user"}}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	before, err := store.Get(session.SessionID)
+	if err != nil || before == nil {
+		t.Fatalf("get before: %v", err)
+	}
+
+	updated, err := store.UpdateMode(session.SessionID, "  plan  ")
+	if err != nil {
+		t.Fatalf("update mode: %v", err)
+	}
+	if updated.PermissionMode != "plan" {
+		t.Fatalf("mode = %q, want plan", updated.PermissionMode)
+	}
+	if updated.UpdatedAt != before.UpdatedAt || updated.EventCount != before.EventCount {
+		t.Fatalf("mode update changed activity metadata: before=%+v after=%+v", before, updated)
+	}
+	persisted, err := store.Get(session.SessionID)
+	if err != nil || persisted == nil || persisted.PermissionMode != "plan" {
+		t.Fatalf("persisted mode: metadata=%+v err=%v", persisted, err)
+	}
+
+	cleared, err := store.UpdateMode(session.SessionID, "")
+	if err != nil || cleared.PermissionMode != "" {
+		t.Fatalf("clearing mode: metadata=%+v err=%v", cleared, err)
+	}
+}

@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/daemon"
+	"github.com/Twigpine/zero/internal/daemon"
 )
 
 // gitTimeout bounds a single git invocation (bundle create/verify, clone) so a

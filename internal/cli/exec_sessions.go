@@ -1,14 +1,13 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/agent"
-	"github.com/Gitlawb/zero/internal/sessions"
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 type execSessionRecorder struct {
@@ -19,15 +18,11 @@ type execSessionRecorder struct {
 // captureCheckpoint snapshots the before-state of files a tool call will mutate.
 // Best-effort: failures never affect the run. Returns the checkpoint event and
 // true when one was recorded.
-func (recorder *execSessionRecorder) captureCheckpoint(workspaceRoot string, call agent.ToolCall) (sessions.Event, bool) {
+func (recorder *execSessionRecorder) captureCheckpoint(workspaceRoot string, registry *tools.Registry, call agent.ToolCall) (sessions.Event, bool) {
 	if recorder.prepared.Store == nil || recorder.prepared.Session.SessionID == "" {
 		return sessions.Event{}, false
 	}
-	var args map[string]any
-	if call.Arguments != "" {
-		_ = json.Unmarshal([]byte(call.Arguments), &args)
-	}
-	targets := tools.MutationTargets(workspaceRoot, call.Name, args)
+	targets := agent.CheckpointTargets(workspaceRoot, registry, call)
 	if len(targets) == 0 {
 		return sessions.Event{}, false
 	}

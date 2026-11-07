@@ -238,7 +238,7 @@ func TestStoreAppendRun(t *testing.T) {
 			t.Fatalf("AppendRun: %v", err)
 		}
 	}
-	runs, err := s.Runs(job.ID)
+	runs, err := s.Runs(job.ID, 0)
 	if err != nil || len(runs) != 3 || runs[2].ExitCode != 2 {
 		t.Fatalf("Runs=%v err=%v", runs, err)
 	}
@@ -280,7 +280,7 @@ func TestStoreRejectsUnsafeID(t *testing.T) {
 		if _, err := s.Get(id); err == nil {
 			t.Fatalf("Get(%q) must be rejected", id)
 		}
-		if _, err := s.Runs(id); err == nil {
+		if _, err := s.Runs(id, 0); err == nil {
 			t.Fatalf("Runs(%q) must be rejected", id)
 		}
 	}

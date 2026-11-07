@@ -4,7 +4,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/sandbox"
 )
 
 // SandboxPolicySnapshot is the typed view of the live sandbox policy

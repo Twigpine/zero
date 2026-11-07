@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/daemon"
+	"github.com/Twigpine/zero/internal/daemon"
 )
 
 const (

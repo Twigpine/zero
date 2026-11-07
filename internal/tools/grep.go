@@ -12,7 +12,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/sandbox"
 )
 
 type grepTool struct {
@@ -387,24 +387,24 @@ func scanGrepFile(ctx context.Context, resolvedRoot string, absolutePaths bool, 
 
 	reader := bufio.NewReader(handle)
 	lineNumber := 1
-	sawLine := false
-	lastEnded := false
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		raw, ended, err := readRawLine(reader)
+		// At EOF the scan stops where the line breaks stopped. A trailing
+		// line break is the boundary that CLOSED the line it ends — the rule
+		// the file tracker's countLines states for everything a reader
+		// reports, and an empty file has no lines at all. Emitting at EOF
+		// anyway handed every pattern that matches an empty string (anchors
+		// among them: ^$, \b, x*) a phantom match on a line that does not
+		// exist, numbered one past the real content.
 		if err == io.EOF {
-			if !sawLine || lastEnded {
-				return emitGrepLine(matcher, fileLabel, lineNumber, nil, emit)
-			}
 			return nil
 		}
 		if err != nil {
 			return nil
 		}
-		sawLine = true
-		lastEnded = ended
 		line := trimTrailingCarriageReturns(trimLineBreak(raw, ended))
 		if err := emitGrepLine(matcher, fileLabel, lineNumber, line, emit); err != nil {
 			return err

@@ -27,6 +27,8 @@ var expectedCatalogIDs = []string{
 	"dashscope",
 	"moonshot",
 	"atlascloud",
+	"gmicloud",
+	"concentrate",
 	"longcat",
 	"nvidia-nim",
 	"minimax",
@@ -201,6 +203,56 @@ func TestAtlasCloudDescriptor(t *testing.T) {
 	}
 }
 
+func TestGMICloudDescriptor(t *testing.T) {
+	descriptor, err := Require("gmicloud")
+	if err != nil {
+		t.Fatalf("Require(gmicloud) error = %v", err)
+	}
+	if descriptor.Name != "GMI Cloud" {
+		t.Fatalf("Name = %q, want GMI Cloud", descriptor.Name)
+	}
+	if descriptor.DefaultBaseURL != "https://api.gmi-serving.com/v1" {
+		t.Fatalf("DefaultBaseURL = %q, want GMI Cloud OpenAI-compatible endpoint", descriptor.DefaultBaseURL)
+	}
+	if descriptor.DefaultModel != "Qwen/Qwen3.8-Max" {
+		t.Fatalf("DefaultModel = %q, want Qwen/Qwen3.8-Max", descriptor.DefaultModel)
+	}
+	if descriptor.Transport != TransportOpenAICompatible {
+		t.Fatalf("Transport = %q, want %q", descriptor.Transport, TransportOpenAICompatible)
+	}
+	if !descriptor.RequiresAuth {
+		t.Fatal("RequiresAuth = false, want true")
+	}
+	if !reflect.DeepEqual(descriptor.AuthEnvVars, []string{"GMI_API_KEY", "GMICLOUD_API_KEY"}) {
+		t.Fatalf("AuthEnvVars = %#v, want GMI_API_KEY then GMICLOUD_API_KEY", descriptor.AuthEnvVars)
+	}
+}
+
+func TestConcentrateDescriptor(t *testing.T) {
+	descriptor, err := Require("concentrate")
+	if err != nil {
+		t.Fatalf("Require(concentrate) error = %v", err)
+	}
+	if descriptor.Name != "Concentrate" {
+		t.Fatalf("Name = %q, want Concentrate", descriptor.Name)
+	}
+	if descriptor.DefaultBaseURL != "https://api.concentrate.ai/v1" {
+		t.Fatalf("DefaultBaseURL = %q, want Concentrate OpenAI-compatible endpoint", descriptor.DefaultBaseURL)
+	}
+	if descriptor.DefaultModel != "deepseek-v4-flash-0731" {
+		t.Fatalf("DefaultModel = %q, want deepseek-v4-flash-0731", descriptor.DefaultModel)
+	}
+	if descriptor.Transport != TransportOpenAICompatible {
+		t.Fatalf("Transport = %q, want %q", descriptor.Transport, TransportOpenAICompatible)
+	}
+	if !descriptor.RequiresAuth {
+		t.Fatal("RequiresAuth = false, want true")
+	}
+	if !reflect.DeepEqual(descriptor.AuthEnvVars, []string{"CONCENTRATE_API_KEY"}) {
+		t.Fatalf("AuthEnvVars = %#v, want CONCENTRATE_API_KEY", descriptor.AuthEnvVars)
+	}
+}
+
 func TestCatalogDescriptorsExposeRequiredDefaults(t *testing.T) {
 	for _, descriptor := range All() {
 		if descriptor.ID == "" {
@@ -321,6 +373,13 @@ func TestLookupNormalizesIDsAndAliases(t *testing.T) {
 		"mini_max":                     "minimax",
 		"Moonshot":                     "moonshot",
 		"Atlas Cloud":                  "atlascloud",
+		"GMI Cloud":                    "gmicloud",
+		"gmi-cloud":                    "gmicloud",
+		"gmi":                          "gmicloud",
+		"Concentrate":                  "concentrate",
+		"concentrate ai":               "concentrate",
+		"concentrate.ai":               "concentrate",
+		"concentrate-ai":               "concentrate",
 		"nvidia nim":                   "nvidia-nim",
 		"xiaomi mimo":                  "xiaomi-mimo",
 		"custom_openai_compatible":     "custom-openai-compatible",
@@ -371,7 +430,7 @@ func TestListByTransportPreservesCatalogOrder(t *testing.T) {
 		TransportBedrock:         {"bedrock"},
 		TransportVertex:          {"vertex"},
 		TransportAnthropicCompat: {"minimax", "minimaxi-cn", "opencode-go-anthropic-compatible", "custom-anthropic-compatible"},
-		TransportOpenAICompat:    {"gitlawb-opengateway", "aimlapi", "ollama-cloud", "ollama", "lmstudio", "atomic-chat-local", "openrouter", "huggingface", "chatgpt", "groq", "deepseek", "together", "fireworks", "dashscope", "moonshot", "atlascloud", "longcat", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "zai-cn", "kilocode", "opencode", "opencode-go", "atomic-chat", "chatgpt-proxy", "custom-openai-compatible"},
+		TransportOpenAICompat:    {"gitlawb-opengateway", "aimlapi", "ollama-cloud", "ollama", "lmstudio", "atomic-chat-local", "openrouter", "huggingface", "chatgpt", "groq", "deepseek", "together", "fireworks", "dashscope", "moonshot", "atlascloud", "gmicloud", "concentrate", "longcat", "nvidia-nim", "mistral", "github", "xai", "venice", "xiaomi-mimo", "bankr", "zai", "zai-cn", "kilocode", "opencode", "opencode-go", "atomic-chat", "chatgpt-proxy", "custom-openai-compatible"},
 	}
 
 	for transport, wantIDs := range cases {

@@ -244,6 +244,86 @@ func petJSONObject(encodedPet []byte) []byte {
 	return append(result, '}')
 }
 
+// setNotifyJSONObject replaces only the notify member's value, keeping the
+// original bytes of every unrelated member so a notification save cannot
+// reorder, reformat, or drop the user's other settings — including values whose
+// EXPLICIT presence matters (tools.deferThreshold: 0, mcp servers'
+// disabled: false) and keys the typed FileConfig does not model at all. The
+// typed serializer cannot round-trip explicit zeros (omitempty drops them), so
+// notification writes go through this byte-preserving editor instead
+// (maintainer review, PR #1001). An empty notify block removes the member
+// entirely so a reset leaves no `"notify": {}` husk behind.
+//
+// A hand-edited file may contain DUPLICATE notify members. Go's decoder
+// MERGES the fields of duplicate object members into the same struct, so an
+// earlier duplicate's field survives a replacement that omits it — e.g.
+// {"notify":{"mode":"off"},"notify":{"focusMode":"focused"}} + a
+// replacement {"focusMode":"always"} would leave mode "off" effective.
+// The nonempty path therefore removes EVERY duplicate and inserts the
+// replacement fresh (full-replace semantics: nothing inherited), and the
+// reset path removes every member the same way. UpdateNotify's partial
+// merge is unaffected: it seeds omitted fields from the stored value BEFORE
+// calling this editor, so the value it passes is already complete.
+// Mirrors setPetPreferenceJSON's duplicate handling.
+func setNotifyJSONObject(data []byte, notify NotifyConfig) ([]byte, error) {
+	encoded, err := json.Marshal(notify)
+	if err != nil {
+		return nil, fmt.Errorf("encode notify preference: %w", err)
+	}
+
+	rootStart := skipJSONSpace(data, 0)
+	root, err := parseJSONObject(data, rootStart)
+	if err != nil {
+		return nil, err
+	}
+	notifyIndex := lastJSONMember(root.members, "notify")
+	// Count duplicates: the ordinary file has exactly one notify member, and
+	// for it a positional replace keeps the key where the user put it and
+	// preserves their formatting (byte-preserving contract). The
+	// remove-all-and-reinsert path below is ONLY for files that actually
+	// contain duplicates, where Go's field-merging decode would otherwise let
+	// an earlier block's fields leak into the replacement.
+	duplicates := 0
+	for _, member := range root.members {
+		if member.key == "notify" {
+			duplicates++
+		}
+	}
+	if string(encoded) == "{}" {
+		for notifyIndex >= 0 {
+			data = removeJSONMember(data, root, notifyIndex)
+			rootStart = skipJSONSpace(data, 0)
+			root, err = parseJSONObject(data, rootStart)
+			if err != nil {
+				return nil, err
+			}
+			notifyIndex = lastJSONMember(root.members, "notify")
+		}
+		return data, nil
+	}
+	if duplicates <= 1 {
+		if notifyIndex < 0 {
+			return insertJSONMember(data, root, "notify", encoded), nil
+		}
+		// Single member: replace its value in place — no key movement, no
+		// reformatting of the surrounding bytes.
+		return replaceJSONRange(data, root.members[notifyIndex].valueStart, root.members[notifyIndex].valueEnd, encoded), nil
+	}
+	// Multiple duplicates: Go merges their fields at decode time, so the
+	// replacement must not inherit anything — remove every duplicate and
+	// insert the complete value fresh.
+	for notifyIndex >= 0 {
+		data = removeJSONMember(data, root, notifyIndex)
+		rootStart = skipJSONSpace(data, 0)
+		root, err = parseJSONObject(data, rootStart)
+		if err != nil {
+			return nil, err
+		}
+		notifyIndex = lastJSONMember(root.members, "notify")
+	}
+	return insertJSONMember(data, root, "notify", encoded), nil
+}
+
 func replaceJSONRange(data []byte, start, end int, replacement []byte) []byte {
 	result := make([]byte, 0, len(data)-(end-start)+len(replacement))
 	result = append(result, data[:start]...)

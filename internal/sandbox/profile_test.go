@@ -6,9 +6,9 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/mcp"
-	"github.com/Gitlawb/zero/internal/oauth"
-	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/mcp"
+	"github.com/Twigpine/zero/internal/oauth"
+	"github.com/Twigpine/zero/internal/sandbox"
 )
 
 func TestCredentialDeniesMatchTokenStoreFallbacks(t *testing.T) {

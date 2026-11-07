@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/providers/openai"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/providers/openai"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 // TestRunExecOptimizedSessionUnderGate proves the end-to-end wiring: with

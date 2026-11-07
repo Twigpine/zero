@@ -5,11 +5,11 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/hooks"
-	"github.com/Gitlawb/zero/internal/mcp"
-	"github.com/Gitlawb/zero/internal/plugins"
-	"github.com/Gitlawb/zero/internal/redaction"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/hooks"
+	"github.com/Twigpine/zero/internal/mcp"
+	"github.com/Twigpine/zero/internal/plugins"
+	"github.com/Twigpine/zero/internal/redaction"
 )
 
 type BackendDoctorStatus string
@@ -84,6 +84,19 @@ func mcpDoctorChecks(cfg config.MCPConfig) []BackendDoctorCheck {
 	for _, name := range names {
 		raw := cfg.Servers[name]
 		target := redactSnapshotString(name)
+		if raw.Disabled && config.IsUnconfiguredDefault(name, raw) {
+			// A built-in default that ships off (aimlapi) is not a problem to
+			// warn about; it only says how to turn it on.
+			checks = append(checks, BackendDoctorCheck{
+				ID:      "backend.mcp.disabled",
+				Surface: "mcp",
+				Target:  target,
+				Status:  BackendDoctorStatusPass,
+				Message: fmt.Sprintf("MCP server %s is off by default.", target),
+				Action:  "zero mcp enable " + target,
+			})
+			continue
+		}
 		if raw.Disabled {
 			checks = append(checks, BackendDoctorCheck{
 				ID:      "backend.mcp.disabled",

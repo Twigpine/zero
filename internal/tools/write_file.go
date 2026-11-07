@@ -8,11 +8,20 @@ import (
 	"strings"
 )
 
+// writePreimageBeforeObserve is a deterministic test hook. Production leaves
+// it nil. Tests substitute the pathname after the write root is open and
+// before existence or bytes are read, so a dissenting absolute-path resolution
+// cannot be mistaken for the rooted object.
+var writePreimageBeforeObserve func(absolutePath string)
+
 type writeFileTool struct {
 	baseTool
 	workspaceRoot string
 	scope         PathScope
-	readFile      func(string) ([]byte, error)
+	// readRooted reads an existing file through the granted write root. Tests
+	// replace it to simulate an unreadable preimage; production uses
+	// readRootedFile so bytes and identity come from the same descriptor.
+	readRooted func(*os.Root, string) ([]byte, os.FileInfo, error)
 }
 
 func NewScopedWriteFileTool(workspaceRoot string, scope PathScope) Tool {
@@ -35,7 +44,7 @@ func NewScopedWriteFileTool(workspaceRoot string, scope PathScope) Tool {
 		},
 		workspaceRoot: normalizeWorkspaceRoot(workspaceRoot),
 		scope:         scope,
-		readFile:      os.ReadFile,
+		readRooted:    readRootedFile,
 	}
 }
 
@@ -61,10 +70,25 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	if err != nil {
 		return errorResult("Error writing file " + requestedPath + ": " + err.Error())
 	}
+	// Anchor observation and mutation on the granted write root. The pathname
+	// checks above say what was REQUESTED; this handle enforces what actually
+	// happens, so a parent directory swapped for an escaping symlink after
+	// validation cannot redirect the create or overwrite. Existence and prior
+	// bytes must come from the same handle: os.Stat on the absolute path stores
+	// a pathname and, on Windows, fills volume and file index only when
+	// os.SameFile re-opens that path, so a same-name substitution compares equal.
+	root, rootedRelative, err := openScopedWriteRoot(tool.workspaceRoot, tool.scope, absolutePath)
+	if err != nil {
+		return errorResult("Error writing file " + relativePath + ": " + err.Error())
+	}
+	defer root.Close()
+	if writePreimageBeforeObserve != nil {
+		writePreimageBeforeObserve(absolutePath)
+	}
 
 	existed := false
 	var priorInfo os.FileInfo
-	if info, err := os.Stat(absolutePath); err == nil {
+	if info, err := root.Stat(rootedRelative); err == nil {
 		existed = true
 		priorInfo = info
 		if !overwrite {
@@ -76,17 +100,23 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 
 	// On overwrite, refuse to clobber a tracked file that changed on disk outside
 	// Zero since it was last read — the new content was likely composed against a
-	// stale view. Only read current bytes when there is a baseline to compare,
-	// so a first-touch create/overwrite stays a single write with no extra read.
+	// stale view. The rooted read below is also the preimage: one descriptor-bound
+	// snapshot supplies both the conflict check and the bytes passed to commit.
+	readRooted := tool.readRooted
+	if readRooted == nil {
+		readRooted = readRootedFile
+	}
+	priorContent := ""
+	priorContentKnown := !existed
 	if existed {
 		if options.FileTracker != nil && !options.FileTracker.SeenWhole(absolutePath) {
 			return errorResult(fileUnseenMessage(relativePath))
 		}
+		current, info, rerr := readRooted(root, rootedRelative)
 		if _, tracked := options.FileTracker.Version(absolutePath); tracked {
 			// Fail CLOSED: if the tracked file can't be re-read to verify it, refuse
 			// the overwrite rather than clobbering a file whose current state is
 			// unknown (it may have been replaced or removed out from under us).
-			current, rerr := tool.readFile(absolutePath)
 			if rerr != nil {
 				return errorResult(fileConflictMessage(relativePath))
 			}
@@ -94,21 +124,20 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 				return errorResult(fileConflictMessage(relativePath))
 			}
 		}
-	}
-
-	// Capture the prior content (before we replace it) so an overwrite can show a
-	// real diff; a fresh create stays "" and previews as all-additions.
-	priorContent := ""
-	priorContentKnown := !existed
-	if existed {
-		if prev, rerr := tool.readFile(absolutePath); rerr == nil {
-			priorContent = string(prev)
+		if rerr == nil {
+			// Prefer the identity from the opened object over root.Stat. Both
+			// capture it at observation time; the opened object is the one whose
+			// bytes were just read.
+			priorInfo = info
+			priorContent = string(current)
 			priorContentKnown = true
 		}
 	}
 
-	if err := os.MkdirAll(filepath.Dir(absolutePath), 0o755); err != nil {
-		return errorResult("Error writing file " + relativePath + ": " + err.Error())
+	if dir := filepath.Dir(rootedRelative); dir != "." {
+		if err := root.MkdirAll(dir, 0o755); err != nil {
+			return errorResult("Error writing file " + relativePath + ": " + err.Error())
+		}
 	}
 	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
@@ -117,7 +146,7 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	if priorContentKnown {
 		expectedContent = &priorContent
 	}
-	if err := commitFileContents(absolutePath, priorInfo, expectedContent, content); err != nil {
+	if err := commitRootedFileContents(root, absolutePath, rootedRelative, priorInfo, expectedContent, content); err != nil {
 		return errorResult("Error writing file " + relativePath + ": " + err.Error())
 	}
 	modelKnownContent := content
@@ -135,7 +164,7 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	// session compares against what is now on disk.
 	newInfo := formatting.Info
 	if newInfo == nil {
-		newInfo, _ = os.Stat(absolutePath)
+		newInfo, _ = root.Stat(rootedRelative)
 	}
 	if finalContentKnown {
 		options.FileTracker.Record(absolutePath, []byte(content), newInfo)

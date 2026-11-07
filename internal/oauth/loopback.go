@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 )
 
 // LoopbackListener is a single-use loopback HTTP server that captures an OAuth
@@ -19,8 +18,7 @@ type LoopbackListener struct {
 	listener net.Listener
 	state    string
 	result   chan callbackResult
-	server   *http.Server
-	done     chan struct{}
+	server   *CallbackServer
 }
 
 type callbackResult struct {
@@ -58,20 +56,8 @@ func newLoopbackListener(state string, port int, connState func(net.Conn, http.C
 		listener: ln,
 		state:    state,
 		result:   make(chan callbackResult, 1),
-		done:     make(chan struct{}),
 	}
-	l.server = &http.Server{
-		Handler: http.HandlerFunc(l.handle),
-		// This is a single-use, loopback-only callback server: a client that
-		// never finishes sending its request header must not be able to hold
-		// the accepted connection (and Close, below) open indefinitely.
-		ReadHeaderTimeout: 5 * time.Second,
-		ConnState:         connState,
-	}
-	go func() {
-		_ = l.server.Serve(ln)
-		close(l.done)
-	}()
+	l.server = startCallbackServer(ln, http.HandlerFunc(l.handle), connState)
 	return l, nil
 }
 
@@ -122,14 +108,10 @@ func (l *LoopbackListener) Wait(ctx context.Context) (string, error) {
 // Close shuts the listener down (bounded), idempotent. If a client leaves a
 // connection open past the shutdown deadline (e.g. a stalled request header),
 // Close forcibly closes it rather than leaking it past the end of the flow,
-// and waits for the Serve goroutine to finish before returning.
+// and waits for the Serve goroutine to finish before returning. See
+// CallbackServer.Close.
 func (l *LoopbackListener) Close() {
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := l.server.Shutdown(shutdownCtx); err != nil {
-		_ = l.server.Close()
-	}
-	<-l.done
+	l.server.Close()
 }
 
 // parseCallback validates the redirect query and returns the authorization code,

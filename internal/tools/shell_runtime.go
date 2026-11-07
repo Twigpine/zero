@@ -12,7 +12,7 @@ import (
 	"time"
 	"unicode"
 
-	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
+	zeroSandbox "github.com/Twigpine/zero/internal/sandbox"
 )
 
 type shellKind string

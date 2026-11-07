@@ -16,6 +16,8 @@ import (
 
 const LinuxSandboxHelperName = "zero-linux-sandbox"
 
+const LinuxSandboxHelperSubcommand = "__sandbox-helper"
+
 const linuxSandboxBackendEnv = BackendLinuxBwrap
 
 type LinuxSandboxCommandArgsOptions struct {
@@ -51,6 +53,7 @@ type LinuxSandboxHelperCommand struct {
 type LinuxSandboxBwrapOptions struct {
 	Config     LinuxSandboxHelperConfig
 	HelperPath string
+	SelfExec   bool
 }
 
 type linuxSandboxBwrapPlan struct {
@@ -213,6 +216,9 @@ func buildLinuxSandboxBwrapPlan(options LinuxSandboxBwrapOptions) (linuxSandboxB
 		}
 	}
 	args = append(args, "--", helperPath)
+	if options.SelfExec {
+		args = append(args, LinuxSandboxHelperSubcommand)
+	}
 	args = append(args, innerArgs...)
 	return linuxSandboxBwrapPlan{
 		Args:                   args,
@@ -471,15 +477,12 @@ func pathExists(path string) bool {
 	return err == nil
 }
 
+// findLinuxSandboxHelperCommand locates the Linux sandbox helper. Resolution
+// order is sibling zero-linux-sandbox, then PATH, then self-exec of the main
+// binary; a source checkout may also fall back to go run.
 func findLinuxSandboxHelperCommand() (LinuxSandboxHelperCommand, error) {
-	if exe, err := os.Executable(); err == nil {
-		candidate := filepath.Join(filepath.Dir(exe), LinuxSandboxHelperName)
-		if executableRegularFile(candidate) {
-			return LinuxSandboxHelperCommand{Name: candidate}, nil
-		}
-	}
-	if path, err := exec.LookPath(LinuxSandboxHelperName); err == nil && path != "" {
-		return LinuxSandboxHelperCommand{Name: path}, nil
+	if cmd := resolveLinuxSandboxHelper(lookupExecutable); cmd.Name != "" {
+		return cmd, nil
 	}
 	if root := linuxSandboxRepoRoot(); root != "" {
 		mainPath := filepath.Join(root, "cmd", LinuxSandboxHelperName, "main.go")
@@ -495,6 +498,43 @@ func findLinuxSandboxHelperCommand() (LinuxSandboxHelperCommand, error) {
 	}
 	return LinuxSandboxHelperCommand{}, errors.New("zero-linux-sandbox helper is not available")
 }
+
+var linuxSandboxExecutable = os.Executable
+
+// resolveLinuxSandboxHelper returns the helper in sibling, PATH, then
+// self-exec order. An empty Name means none of those candidates is available.
+func resolveLinuxSandboxHelper(lookup func(string) (string, error)) LinuxSandboxHelperCommand {
+	if lookup == nil {
+		lookup = lookupExecutable
+	}
+	if exe, err := linuxSandboxExecutable(); err == nil {
+		candidate := filepath.Join(filepath.Dir(exe), LinuxSandboxHelperName)
+		if linuxFileIsExecutable(candidate) {
+			return LinuxSandboxHelperCommand{Name: candidate}
+		}
+	}
+	if path, err := lookup(LinuxSandboxHelperName); err == nil && strings.TrimSpace(path) != "" {
+		return LinuxSandboxHelperCommand{Name: path}
+	}
+	if exe, err := linuxSandboxExecutable(); err == nil && linuxFileIsExecutable(exe) && linuxMainBinaryName(exe) {
+		return LinuxSandboxHelperCommand{
+			Name:       exe,
+			ArgsPrefix: []string{LinuxSandboxHelperSubcommand},
+		}
+	}
+	return LinuxSandboxHelperCommand{}
+}
+
+func linuxMainBinaryName(path string) bool {
+	switch filepath.Base(path) {
+	case "zero", "zero.exe":
+		return true
+	default:
+		return false
+	}
+}
+
+var linuxFileIsExecutable = executableRegularFile
 
 func executableRegularFile(path string) bool {
 	info, err := os.Stat(path)

@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 // simulateBrowser returns an OpenBrowser func that authorizes by GETting the
@@ -127,5 +130,64 @@ func TestOpenRouterLoginBrowserErrorPropagates(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("a browser-open failure should propagate")
+	}
+}
+
+// A CLIENT STALLED MID-HEADER MUST NOT OUTLIVE THE LOGIN (#1028). Same defect
+// as MCP's Login: a bare http.Server ended by Shutdown alone, which leaves a
+// connection that has sent part of a request header open after the flow ends.
+// The stalled client is dialled before the real callback, so Serve has
+// accepted it by the time the login can complete; no sleep is involved.
+func TestOpenRouterLoginDoesNotLeaveAStalledCallbackClientOpen(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"key": "sk-or-mock-123"})
+	}))
+	defer srv.Close()
+
+	var stalled net.Conn
+	open := func(authURL string) error {
+		u, err := url.Parse(authURL)
+		if err != nil {
+			return err
+		}
+		cb, err := url.Parse(u.Query().Get("callback_url"))
+		if err != nil {
+			return err
+		}
+		stalled, err = net.Dial("tcp", cb.Host)
+		if err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(stalled, "GET /callback HTTP/1.1\r\nHost: %s\r\nX-Stall:", cb.Host); err != nil {
+			return err
+		}
+		resp, err := http.Get(cb.String() + "?code=TESTCODE") //nolint:noctx // test loopback
+		if err != nil {
+			return err
+		}
+		_ = resp.Body.Close()
+		return nil
+	}
+
+	if _, err := OpenRouterLogin(context.Background(), OpenRouterOptions{
+		BaseURL: srv.URL, HTTPClient: srv.Client(), OpenBrowser: open,
+	}); err != nil {
+		t.Fatalf("OpenRouterLogin: %v", err)
+	}
+	if stalled == nil {
+		t.Fatal("SETUP INVALID: the stalled client never connected, so this proves nothing")
+	}
+	defer stalled.Close()
+
+	_ = stalled.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var one [1]byte
+	_, err := stalled.Read(one[:])
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		t.Fatal("the stalled callback client was still connected after OpenRouterLogin returned")
+	}
+	if err == nil {
+		t.Fatal("the stalled callback client received data instead of being closed")
 	}
 }

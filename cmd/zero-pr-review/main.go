@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/review"
+	"github.com/Twigpine/zero/internal/review"
 )
 
 func main() {

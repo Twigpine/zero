@@ -32,6 +32,9 @@ const (
 // ErrSessionExists is returned when starting a session ID already in use.
 var ErrSessionExists = errors.New("daemon: session already exists")
 
+// ErrSessionOverloaded means the manager's unfinished-session limit is reached.
+var ErrSessionOverloaded = errors.New("daemon: pending session limit reached")
+
 // ErrSessionNotFound is returned by Get/Attach for an unknown session ID.
 var ErrSessionNotFound = errors.New("daemon: session not found")
 
@@ -219,6 +222,9 @@ func (s *Session) isFinished() bool {
 // daemon does not accumulate finished sessions without limit.
 const defaultMaxSessions = 256
 
+// defaultMaxPending bounds queued and running sessions independently of history.
+const defaultMaxPending = 256
+
 // SessionManager owns the live session registry and routes each session to a
 // pool worker. Mirrors session-manager.js + roster.js. Finished sessions are
 // retained (so a late `attach` sees history) up to MaxSessions, past which the
@@ -227,8 +233,10 @@ type SessionManager struct {
 	pool        *Pool
 	maxBuffer   int
 	maxSessions int
+	maxPending  int
 
 	mu       sync.Mutex
+	pending  int // queued + running; protected by mu
 	sessions map[string]*Session
 	order    []string // creation order, for FIFO eviction of finished sessions
 }
@@ -240,6 +248,9 @@ type SessionManagerOptions struct {
 	// MaxSessions caps the retained session registry; 0 => default. The oldest
 	// FINISHED sessions are evicted once the cap is exceeded.
 	MaxSessions int
+	// MaxPending caps unfinished sessions (queued plus running), independently
+	// of retained history. Non-positive values use the default of 256.
+	MaxPending int
 }
 
 // NewSessionManager builds a manager over pool.
@@ -251,10 +262,15 @@ func NewSessionManager(opts SessionManagerOptions) (*SessionManager, error) {
 	if maxSessions <= 0 {
 		maxSessions = defaultMaxSessions
 	}
+	maxPending := opts.MaxPending
+	if maxPending <= 0 {
+		maxPending = defaultMaxPending
+	}
 	return &SessionManager{
 		pool:        opts.Pool,
 		maxBuffer:   opts.MaxBuffer,
 		maxSessions: maxSessions,
+		maxPending:  maxPending,
 		sessions:    map[string]*Session{},
 	}, nil
 }
@@ -262,13 +278,23 @@ func NewSessionManager(opts SessionManagerOptions) (*SessionManager, error) {
 // Start creates a session for spec and dispatches it to the pool. It returns the
 // Session immediately (non-blocking); the run proceeds in the background and the
 // session transitions queued -> running -> done/failed. A duplicate ID is
-// rejected with ErrSessionExists.
+// rejected with ErrSessionExists; a full admission limit returns
+// ErrSessionOverloaded without creating a session or background goroutine.
 func (m *SessionManager) Start(ctx context.Context, spec WorkerSpec) (*Session, error) {
 	m.mu.Lock()
 	if _, exists := m.sessions[spec.Session]; exists {
 		m.mu.Unlock()
 		return nil, ErrSessionExists
 	}
+	if err := ctx.Err(); err != nil {
+		m.mu.Unlock()
+		return nil, err
+	}
+	if m.pending >= m.maxPending {
+		m.mu.Unlock()
+		return nil, ErrSessionOverloaded
+	}
+	m.pending++
 	sess := newSession(spec.Session, spec.Cwd, m.maxBuffer)
 	m.sessions[spec.Session] = sess
 	m.order = append(m.order, spec.Session)
@@ -277,7 +303,11 @@ func (m *SessionManager) Start(ctx context.Context, spec WorkerSpec) (*Session, 
 
 	go func() {
 		code, err := m.pool.Run(ctx, spec, sess)
+		m.mu.Lock()
 		sess.finish(code, err)
+		m.pending--
+		m.pruneLocked()
+		m.mu.Unlock()
 	}()
 	return sess, nil
 }

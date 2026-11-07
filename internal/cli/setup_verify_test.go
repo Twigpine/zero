@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/providerhealth"
-	"github.com/Gitlawb/zero/internal/tui"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/providerhealth"
+	"github.com/Twigpine/zero/internal/tui"
 )
 
 func TestFormatSetupCompleteIncludesTryThisExample(t *testing.T) {

@@ -5,7 +5,7 @@ package main
 import (
 	"os"
 
-	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/sandbox"
 )
 
 func main() {

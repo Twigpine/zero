@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/daemon"
+	"github.com/Twigpine/zero/internal/daemon"
 )
 
 // ---- fake daemon worker (the daemon's test fakes are unexported) -------------
