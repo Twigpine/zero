@@ -23,7 +23,18 @@ func profileSwitchModel(t *testing.T) model {
 		Provider:        &fakeProvider{},
 		ProviderProfile: config.ProviderProfile{Name: "anthropic", CatalogID: "anthropic", Model: "claude-sonnet-4.5", APIKey: "k"},
 		SavedProviders: []config.ProviderProfile{
+			// Three destinations, one per ring case the effort rule
+			// distinguishes:
+			//   anthropic — catalogued, ring [low medium high]: supports the level.
+			//   openai    — catalogued, ring []: the catalog VOUCHES that it has
+			//               no reasoning controls, so a fill genuinely must not
+			//               apply. This is the drop case.
+			//   ollama    — NOT catalogued: the catalog cannot vouch either way,
+			//               so the fill applies exactly as it would if the
+			//               profile were selected while already on this model.
+			//               Conflating this with the drop case was the defect.
 			{Name: "anthropic", CatalogID: "anthropic", Model: "claude-sonnet-4.5", APIKey: "k"},
+			{Name: "openai", CatalogID: "openai", Model: "gpt-4o", APIKey: "k"},
 			{Name: "ollama", CatalogID: "ollama", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: "http://localhost:11434/v1", Model: "kimi-k2.7-code:cloud"},
 		},
 		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
@@ -45,10 +56,11 @@ func TestProfileEffortReconciledOnModelSwitch(t *testing.T) {
 	}
 
 	// Supported -> unsupported: the profile-applied level must not survive
-	// onto a model with no effort ring.
-	m, text, ok, _, _ := m.switchProviderModel("ollama", "kimi-k2.7-code:cloud")
+	// onto a model the CATALOG VOUCHES has no effort ring. An uncatalogued
+	// destination is not this case — see TestProfileEffortDoorsAgree.
+	m, text, ok, _, _ := m.switchProviderModel("openai", "gpt-4o")
 	if !ok {
-		t.Fatalf("switch to ollama failed: %q", text)
+		t.Fatalf("switch to openai failed: %q", text)
 	}
 	if m.reasoningEffort != "" || m.execProfileAppliedEffort != "" {
 		t.Fatalf("effort = %q applied = %q, want both cleared on an unsupported destination", m.reasoningEffort, m.execProfileAppliedEffort)
@@ -145,8 +157,8 @@ func TestProfileEffortTouchedSurvivesSupportedModelSwitch(t *testing.T) {
 
 // An UNKNOWN ring (live-discovered/custom target with no catalog entry) is
 // not evidence of unsupported: an explicit preference survives, exactly as it
-// does on the cross-provider picker path, while the profile's own fill still
-// retreats to models where support is known.
+// does on the cross-provider picker path — and so does the profile's own fill,
+// because selecting the profile on that same model would apply it.
 func TestProfileEffortUnknownRingPreservesExplicitChoice(t *testing.T) {
 	m := profileSwitchModel(t)
 
@@ -160,19 +172,25 @@ func TestProfileEffortUnknownRingPreservesExplicitChoice(t *testing.T) {
 		t.Fatalf("effort = %q touched %v, an explicit choice must survive an unknown ring", m.reasoningEffort, m.execProfileEffortTouched)
 	}
 
-	// Untouched profile fill on an unknown ring: the fill retreats (the
-	// profile only governs where support is known), with clean bookkeeping.
+	// Untouched profile fill on an unknown ring: the fill SURVIVES. The
+	// catalog cannot vouch either way, the headless path forwards the level in
+	// exactly this case, and selecting the profile here would fill it — so a
+	// switch that dropped it would make the two doors disagree about the same
+	// model.
 	m2 := profileSwitchModel(t)
 	m2, _ = m2.handleProfileCommand("fast")
 	m2, reset = m2.reconcileEffortForModelSwitch(nil, false)
 	if reset {
-		t.Fatal("a profile-fill retreat is not an unsupported-preference reset")
+		t.Fatal("a profile fill on an unknown ring is not an unsupported-preference reset")
 	}
-	if m2.reasoningEffort != "" || m2.execProfileAppliedEffort != "" {
-		t.Fatalf("effort = %q applied = %q, the profile fill must retreat on an unknown ring", m2.reasoningEffort, m2.execProfileAppliedEffort)
+	if m2.reasoningEffort != "low" || m2.execProfileAppliedEffort != "low" {
+		t.Fatalf("effort = %q applied = %q, the profile fill must survive an unknown ring", m2.reasoningEffort, m2.execProfileAppliedEffort)
 	}
-	if m2.agentOptions.Profile.Escalate.RestoreDefaultEffort {
-		t.Fatal("no profile-governed effort, so the restore must be disarmed")
+	if !m2.agentOptions.Profile.Escalate.RestoreDefaultEffort {
+		t.Fatal("the profile still governs the effort, so the restore must stay armed")
+	}
+	if m2.execProfileEffortUnraised != "" {
+		t.Fatalf("nothing was skipped, so nothing may be recorded as unraised: %q", m2.execProfileEffortUnraised)
 	}
 }
 

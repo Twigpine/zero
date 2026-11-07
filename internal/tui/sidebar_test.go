@@ -2,6 +2,8 @@ package tui
 
 import (
 	"context"
+	"fmt"
+	"path"
 	"strings"
 	"testing"
 	"time"
@@ -318,11 +320,13 @@ func TestSidebarShowsSpawnedAgents(t *testing.T) {
 
 	width := sidebarWidth(m.width)
 	plain := stripSidebar(m.sidebarAgentLines(width))
-	if !strings.Contains(plain, "explorer") {
-		t.Fatalf("running subagent name missing:\n%s", plain)
+	// The row shows the assigned JOB (condensed description), not the specialist
+	// type — see specialistJobName. "map the codebase" -> "map codebase".
+	if !strings.Contains(plain, "map codebase") {
+		t.Fatalf("running subagent job name missing:\n%s", plain)
 	}
-	if !strings.Contains(plain, "reviewer") {
-		t.Fatalf("completed subagent name missing:\n%s", plain)
+	if !strings.Contains(plain, "review diff") {
+		t.Fatalf("completed subagent job name missing:\n%s", plain)
 	}
 	// The running subagent surfaces its live working detail (current tool).
 	if !strings.Contains(plain, "grep") {
@@ -552,10 +556,12 @@ func TestSidebarHidesNotFoundSpecialistMisroutes(t *testing.T) {
 		t.Fatalf("not-found misroute should be filtered; want only worker, got %+v", got)
 	}
 	plain := stripSidebar(m.sidebarAgentLines(sidebarWidth(m.width)))
-	if strings.Contains(plain, "swarm_send") {
+	if strings.Contains(plain, "coordinate") {
 		t.Fatalf("bogus swarm_send specialist should not appear:\n%s", plain)
 	}
-	if !strings.Contains(plain, "worker") {
+	// The row shows the job ("build frontend"), not the specialist type; the
+	// data-level name assertion above still pins the filtering.
+	if !strings.Contains(plain, "build frontend") {
 		t.Fatalf("real worker specialist should still appear:\n%s", plain)
 	}
 }
@@ -668,5 +674,381 @@ func TestCommandPaletteKeepsConversationWidth(t *testing.T) {
 		if w := lipgloss.Width(line); w > chatW {
 			t.Errorf("palette line is %d wide, wider than the chat column %d — it would overlap the sidebar", w, chatW)
 		}
+	}
+}
+
+// specialistSidebarModel is a sidebar-active model with one running plan task in
+// AGENTS, an update_plan step list in PLAN, and a touched file in FILES — so the
+// sections BELOW the agent rows are present and their click offsets are real.
+func specialistSidebarModel(t *testing.T, now time.Time) model {
+	t.Helper()
+	m := sidebarTestModel()
+	m.now = func() time.Time { return now }
+	m.specialists.start("cfg", "read the config resolver and report how the profile tier merges", "plantask_1", now.Add(-70*time.Second))
+	m.specialists.incrementToolCount("plantask_1")
+	m.specialists.setTokens("plantask_1", 3400)
+	m.transcript = append(m.transcript,
+		transcriptRow{kind: rowToolResult, tool: "write_file", detail: "internal/tui/sidebar.go"})
+	if !m.sidebarActive() {
+		t.Fatal("sanity check failed: the sidebar must be up for this test")
+	}
+	return m
+}
+
+// A RUNNING agent row is clickable. It is keyed by its card, and a plan task's
+// card key is not a session id until the task finishes — so the drill-in has
+// nothing to open at the one moment the detail is most wanted.
+func TestAnExpandedRunningAgentRowShowsItsDetail(t *testing.T) {
+	now := time.Unix(20000, 0)
+	m := specialistSidebarModel(t, now)
+	m.expandedAgent = "plantask_1"
+
+	expanded := plainRender(t, strings.Join(m.sidebarAgentLines(sidebarWidth(m.width)), "\n"))
+	for _, want := range []string{"read the config", "1m10s", "3.4K tok"} {
+		if !strings.Contains(expanded, want) {
+			t.Errorf("expansion is missing %q:\n%s", want, expanded)
+		}
+	}
+}
+
+// THE OFFSET CONSTRAINT. sidebarPlanSelectables and sidebarFileSelectables both
+// derive their base from len(sidebarAgentLines), so an expansion that adds rows
+// must move every click target below it. Getting this wrong sends a click to a
+// different file than the one under the cursor, with nothing to indicate it.
+func TestExpandingAnAgentMovesTheClickTargetsBelowIt(t *testing.T) {
+	now := time.Unix(20000, 0)
+	m := specialistSidebarModel(t, now)
+	width := sidebarWidth(m.width)
+
+	// The rendered sidebar is the oracle: whatever a hit points at must be the
+	// row it claims, in both states.
+	check := func(t *testing.T, m model, label string) {
+		t.Helper()
+		lines := m.renderContextSidebar(width, m.height)
+		for _, hit := range m.sidebarPlanSelectables(width) {
+			line := plainRender(t, lines[hit.lineOffset])
+			if !strings.Contains(line, m.plan.steps[hit.stepIndex].content) {
+				t.Errorf("%s: plan step %d points at %q", label, hit.stepIndex, line)
+			}
+		}
+		for _, hit := range m.sidebarFileSelectables(width) {
+			line := plainRender(t, lines[hit.lineOffset])
+			if !strings.Contains(line, path.Base(hit.path)) {
+				t.Errorf("%s: file hit %q points at %q", label, hit.path, line)
+			}
+		}
+	}
+
+	check(t, m, "collapsed")
+	m.expandedAgent = "plantask_1"
+	check(t, m, "expanded")
+}
+
+// Finishing a task swaps its card id for the child's real session id. A row the
+// user had open must not collapse at the exact moment it gains a result.
+func TestAnOpenAgentRowSurvivesTheSessionRename(t *testing.T) {
+	now := time.Unix(20000, 0)
+	m := specialistSidebarModel(t, now)
+	m.activeRunID = 1
+	m.expandedAgent = "plantask_1"
+
+	updated, _ := m.Update(planTaskDoneMsg{
+		runID: 1, taskID: "cfg", cardKey: "plantask_1", dispatched: true,
+		sessionID: "specialist_real", status: specialistCompleted, outcome: "succeeded",
+	})
+	got := updated.(model)
+	if got.expandedAgent != "specialist_real" {
+		t.Errorf("expandedAgent = %q, want it to follow the rename to the real session", got.expandedAgent)
+	}
+}
+
+// A cancelled task explains itself, and NOT in red: the user stopped it, and
+// colouring their own decision as a fault is what the ⊘ glyph already avoids.
+func TestACancelledAgentShowsItsReason(t *testing.T) {
+	now := time.Unix(20000, 0)
+	m := specialistSidebarModel(t, now)
+	m.specialists.complete("plantask_1", specialistCancelled, 0, "cancelled: the run was stopped while this task was running", now)
+	m.expandedAgent = "plantask_1"
+
+	rendered := strings.Join(m.sidebarAgentExpansion(m.sidebarSpecialists()[0], 30), "\n")
+	if !strings.Contains(plainRender(t, rendered), "cancelled") {
+		t.Errorf("a cancelled task must say why:\n%s", rendered)
+	}
+	if strings.Contains(rendered, zeroTheme.red.Render("cancelled")) {
+		t.Error("a cancelled task is not an error and must not be red")
+	}
+}
+
+// A FIGURE THAT DOES NOT FIT IS DROPPED, NOT TRUNCATED. Prose ending in an
+// ellipsis still reads as prose; a number ending in one reads as a different
+// number, and this line exists to report a spend.
+func TestSpendSegmentsDropRatherThanTruncate(t *testing.T) {
+	segments := []string{"1m10s", "3.4K tok", "12 tools"}
+	for name, tc := range map[string]struct {
+		width int
+		want  string
+	}{
+		"everything fits":       {40, "1m10s · 3.4K tok · 12 tools"},
+		"the last one does not": {23, "1m10s · 3.4K tok"},
+		"only the first does":   {10, "1m10s"},
+		"not even the first":    {3, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := fitSegments(segments, tc.width)
+			if got != tc.want {
+				t.Errorf("fitSegments(%d) = %q, want %q", tc.width, got, tc.want)
+			}
+			if lipgloss.Width(got) > tc.width {
+				t.Errorf("%q overflows %d cells", got, tc.width)
+			}
+			if strings.Contains(got, "…") {
+				t.Errorf("%q truncated a figure instead of dropping it", got)
+			}
+		})
+	}
+}
+
+// "" is the zero value on BOTH sides of the expansion test: expandedAgent when
+// nothing is open, and childSessionID for a specialist keyed by a tool-call id
+// the provider left blank. Compared bare, such a row is permanently expanded —
+// and because the sidebar clips to its height, the uninvited lines push PLAN,
+// FILES and ACTIVITY off the bottom of the column.
+func TestAnAgentWithNoCardKeyNeverExpandsItself(t *testing.T) {
+	now := time.Unix(20000, 0)
+	m := sidebarTestModel()
+	m.now = func() time.Time { return now }
+	m.specialists.start("mystery", "a brief nobody asked to see", "", now.Add(-30*time.Second))
+	if m.expandedAgent != "" {
+		t.Fatal("sanity check failed: nothing should be expanded")
+	}
+
+	width := sidebarWidth(m.width)
+	rendered := plainRender(t, strings.Join(m.sidebarAgentLines(width), "\n"))
+	if strings.Contains(rendered, "nobody asked to see") {
+		t.Errorf("a row with no card key expanded itself against the zero value:\n%s", rendered)
+	}
+	if hits := m.sidebarAgentSelectables(width); len(hits) != 0 {
+		t.Errorf("a row with no card key is not clickable, so it has no way to be opened: %+v", hits)
+	}
+
+	// And the sections below it keep their place.
+	lines := m.renderContextSidebar(width, m.height)
+	var planHeader int
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(plainRender(t, line)), "PLAN") {
+			planHeader = i
+			break
+		}
+	}
+	if planHeader == 0 || planHeader > 4 {
+		t.Errorf("PLAN should sit just below a single-row AGENTS section, found it at line %d", planHeader)
+	}
+}
+
+// doneAgentsModel: two finished specialists past their linger, one still
+// running — the state a plan is in for most of its life.
+func doneAgentsModel(t *testing.T, now time.Time) model {
+	t.Helper()
+	m := sidebarTestModel()
+	m.now = func() time.Time { return now }
+	for i, name := range []string{"a-reltime", "a-fsutil"} {
+		key := fmt.Sprintf("plantask_%d", i+1)
+		m.specialists.start(name, "You are auditing package "+name, key, now.Add(-40*time.Second))
+		m.specialists.complete(key, specialistCompleted, 0, "", now.Add(-30*time.Second))
+		m.specialists.setResult(key, "pkg: 3 findings.\nreltime.go:41 — Parse ignores the tz suffix")
+	}
+	m.specialists.start("d-report", "producing the report", "plantask_3", now.Add(-9*time.Second))
+	return m
+}
+
+// A plan's finished tasks ARE its result. They used to vanish a second and a
+// half after each one landed, so a nine-task run that succeeded showed an empty
+// AGENTS section and no way to ask what any of them did.
+func TestShowDoneAgentsRevealsFinishedAgents(t *testing.T) {
+	now := time.Unix(50000, 0)
+	m := doneAgentsModel(t, now)
+	width := sidebarWidth(m.width)
+
+	if got := m.doneAgentCount(); got != 2 {
+		t.Fatalf("doneAgentCount = %d, want 2", got)
+	}
+	collapsed := plainRender(t, strings.Join(m.sidebarAgentLines(width), "\n"))
+	if strings.Contains(collapsed, "a-reltime") {
+		t.Errorf("finished agents stay hidden until asked for:\n%s", collapsed)
+	}
+	if header := plainRender(t, m.sidebarAgentHeader(width)); !strings.Contains(header, "2 done") {
+		t.Errorf("the header must advertise what the toggle would reveal: %q", header)
+	}
+
+	m.showDoneAgents = true
+	shown := plainRender(t, strings.Join(m.sidebarAgentLines(width), "\n"))
+	// The two finished agents have sentence descriptions ("You are auditing
+	// package X"), so they fall back to their names; the running one has a label
+	// description ("producing the report") and shows the job.
+	for _, want := range []string{"a-reltime", "a-fsutil", "producing report"} {
+		if !strings.Contains(shown, want) {
+			t.Errorf("expected %q in the opened list:\n%s", want, shown)
+		}
+	}
+}
+
+// THE STATE THE TOGGLE EXISTS FOR. When every agent has finished there are no
+// rows left, so a control hung off the rows would be unclickable in precisely
+// the case it is needed.
+func TestShowDoneAgentsWorksWithNoLiveAgents(t *testing.T) {
+	now := time.Unix(50000, 0)
+	m := doneAgentsModel(t, now)
+	m.specialists.complete("plantask_3", specialistCompleted, 0, "", now.Add(-30*time.Second))
+	width := sidebarWidth(m.width)
+
+	if len(m.sidebarAgentLines(width)) != 0 {
+		t.Fatal("sanity check failed: every agent has finished, so no rows remain")
+	}
+	m.showDoneAgents = true
+	if got := len(m.sidebarAgentLines(width)); got != 3 {
+		t.Errorf("expected all three finished agents, got %d rows", got)
+	}
+}
+
+// WHAT IT PRODUCED, which is the thing the agent was run for. Every other line
+// of the expansion says how the work went; this is the work.
+func TestAnExpandedFinishedAgentShowsWhatItProduced(t *testing.T) {
+	now := time.Unix(50000, 0)
+	m := doneAgentsModel(t, now)
+	m.showDoneAgents = true
+	width := sidebarWidth(m.width)
+
+	m.expandedAgent = "plantask_1"
+	shown := plainRender(t, strings.Join(m.sidebarAgentLines(width), "\n"))
+	// Checked against what a 30-cell column actually renders: the result wraps
+	// nothing and truncates per line, so assert on the head of each.
+	for _, want := range []string{"3 findings", "reltime.go:41"} {
+		if !strings.Contains(shown, want) {
+			t.Errorf("the expansion must show what the agent produced (missing %q):\n%s", want, shown)
+		}
+	}
+}
+
+// A ROW THAT WAS NEVER DRAWN CANNOT BE CLICKED. renderContextSidebar clips the
+// column to height-1 and pins the token readout at that last row, but the
+// selectable tables are built from the full section heights. Only fileRowAtMouse
+// checked this, inline; the plan, orchestrate and agent tables did not — so a
+// click on the token readout opened whichever row had been pushed under it.
+//
+// Expanding an agent is what makes it reachable in one click: the AGENTS body
+// grows by up to four rows and shoves the bottom of PLAN off the column.
+func TestAClickOnTheTokenReadoutSelectsNothing(t *testing.T) {
+	now := time.Unix(50000, 0)
+	m := sidebarTestModel()
+	m.height = 11
+	m.now = func() time.Time { return now }
+	m.plan.steps = []planStep{
+		{content: "alpha", status: "completed"},
+		{content: "bravo", status: "completed"},
+		{content: "charlie", status: "in_progress"},
+		{content: "delta", status: "pending"},
+	}
+	m.specialists.start("worker", "a brief long enough to wrap over two lines in the column", "plantask_1", now.Add(-30*time.Second))
+	m.expandedAgent = "plantask_1" // one click on the agent row
+
+	width := sidebarWidth(m.width)
+	lines := m.renderContextSidebar(width, m.height)
+	last := m.height - 1
+	if got := plainRender(t, lines[last]); !strings.Contains(got, "tokens") {
+		t.Fatalf("sanity check failed: the last row should be the token readout, got %q", got)
+	}
+	// The expansion must actually have pushed a step off, or this proves nothing.
+	if len(m.plan.steps) <= len(m.sidebarPlanSelectables(width)) {
+		t.Fatalf("sanity check failed: no step was pushed off the column")
+	}
+
+	x := m.chatColumnWidth() + 3 + 2
+	if index, ok := m.planStepAtMouse(testMouseClick(tea.MouseLeft, x, last)); ok {
+		t.Errorf("clicking the token readout selected plan step %d, which is not drawn anywhere", index)
+	}
+	for _, hit := range m.sidebarPlanSelectables(width) {
+		if hit.lineOffset >= last {
+			t.Errorf("step %d is offered at offset %d, at or past the clip", hit.stepIndex, hit.lineOffset)
+		}
+	}
+	for _, hit := range m.sidebarAgentSelectables(width) {
+		if hit.lineOffset >= last {
+			t.Errorf("agent hit %q is offered at offset %d, at or past the clip", hit.title, hit.lineOffset)
+		}
+	}
+}
+
+// The running plan's task rows are clickable when update_plan shares the
+// section — and land on the task under the cursor. The offset table used to
+// give up entirely whenever update_plan had steps, and its base did not account
+// for the checklist, the naming line or the bar sitting above the first task.
+func TestOrchestrateTaskClicksLandWithBothPlansInTheSection(t *testing.T) {
+	now := time.Unix(50000, 0)
+	m := sidebarTestModel()
+	m.now = func() time.Time { return now }
+	m.plan.steps = []planStep{
+		{content: "set up the lab", status: "completed"},
+		{content: "run the plan", status: "in_progress"},
+	}
+	m.orchestrate.admit(diamondAdmitted(), now)
+
+	width := sidebarWidth(m.width)
+	hits := m.sidebarOrchestrateSelectables(width)
+	if len(hits) == 0 {
+		t.Fatal("the running plan's rows must stay clickable when update_plan shares the section")
+	}
+	lines := m.renderContextSidebar(width, m.height)
+	for _, hit := range hits {
+		row := plainRender(t, lines[hit.lineOffset])
+		want := m.orchestrate.tasks[hit.taskIndex].id
+		if !strings.Contains(row, want) {
+			t.Errorf("task %q is offered at offset %d, where the column reads %q", want, hit.lineOffset, row)
+		}
+	}
+}
+
+// WHICH MODEL RAN THIS TASK, on screen rather than only in the tool result.
+//
+// The report said "on <model>" from the start; the terminal did not, so a
+// mixed-model plan looked identical to a single-model one while it ran. Driven
+// through the real message handler, because the model is carried on the START
+// message and a test that set the field directly would pass with the bridge
+// sending nothing.
+func TestTheModelATaskRunsOnIsVisibleInTheTerminal(t *testing.T) {
+	now := time.Unix(50000, 0)
+	m := sidebarTestModel()
+	m.plan = planPanelState{}
+	m.now = func() time.Time { return now }
+	m.activeRunID = 1
+	m.orchestrate.admit(planAdmittedMsg{runID: 1, name: "auto", taskCount: 2,
+		tasks: []planGraphTask{{id: "s"}, {id: "plain"}}}, now)
+
+	updated, _ := m.Update(planTaskStartMsg{runID: 1, taskID: "s",
+		summary: "scan", cardKey: "plantask_1", model: "grok-4.3"})
+	m = updated.(model)
+	updated, _ = m.Update(planTaskStartMsg{runID: 1, taskID: "plain",
+		summary: "inherits", cardKey: "plantask_2"})
+	m = updated.(model)
+
+	width := sidebarWidth(m.width)
+
+	// The TASK detail pane names it.
+	m.orchestrateSelected = 0
+	detail := plainRender(t, strings.Join(m.sidebarPlanDetailLines(width, 14), "\n"))
+	if !strings.Contains(detail, "on grok-4.3") {
+		t.Errorf("the TASK pane must say which model ran it:\n%s", detail)
+	}
+	// A task that inherited says nothing, or every task carries a line naming
+	// the model already on screen and the one that differs is buried.
+	m.orchestrateSelected = 1
+	if plain := plainRender(t, strings.Join(m.sidebarPlanDetailLines(width, 14), "\n")); strings.Contains(plain, " on ") {
+		t.Errorf("an inheriting task must not claim a model:\n%s", plain)
+	}
+
+	// And the expanded agent row names it too.
+	m.expandedAgent = "plantask_1"
+	agents := plainRender(t, strings.Join(m.sidebarAgentLines(width), "\n"))
+	if !strings.Contains(agents, "on grok-4.3") {
+		t.Errorf("the expanded agent row must say which model it ran on:\n%s", agents)
 	}
 }

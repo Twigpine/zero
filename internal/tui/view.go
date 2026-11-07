@@ -181,15 +181,18 @@ func (m model) composerDividerLine(width int) string {
 	reserved := m.petComposerReservedColumns(width)
 	availableWidth := width - reserved
 	if width < 8 {
-		return zeroTheme.lineStrong.Render(strings.Repeat("─", width))
+		return m.postureBoxRule(strings.Repeat("─", width), 0, width)
 	}
+	// Both the pet's reserved columns (#887) and the posture gradient survive: the
+	// box is drawn within availableWidth and painted by postureBoxRule, then the
+	// reserved columns are padded on the right for the pet.
 	if availableWidth < metaWidth+4 {
-		line := zeroTheme.lineStrong.Render("╰" + strings.Repeat("─", availableWidth-2) + "╯")
-		return line + strings.Repeat(" ", reserved)
+		return m.postureBoxRule("╰"+strings.Repeat("─", availableWidth-2)+"╯", 0, availableWidth) + strings.Repeat(" ", reserved)
 	}
+	// The rule is painted in two column-accurate segments around the model
+	// label, so the gradient continues through the gap rather than restarting.
 	rule := strings.Repeat("─", availableWidth-metaWidth-4)
-	line := zeroTheme.lineStrong.Render("╰"+rule+" ") + meta + zeroTheme.lineStrong.Render(" ╯")
-	return line + strings.Repeat(" ", reserved)
+	return m.postureBoxRule("╰"+rule+" ", 0, availableWidth) + meta + m.postureBoxRule(" ╯", availableWidth-2, availableWidth) + strings.Repeat(" ", reserved)
 }
 
 // statusLine renders the bottom readout as ` │ `-separated groups: the run-state
@@ -233,6 +236,16 @@ func (m model) statusLine(width int) string {
 	}
 	if m.activeServiceTier() == "priority" {
 		left += zeroTheme.muted.Render(" · ") + zeroTheme.accent.Render("fast")
+	}
+	// The zeromaxing posture sits beside the effort chip: both describe how hard
+	// this session tries, and it raises a cost multiplier, so it stays visible
+	// for as long as it is on rather than only appearing in a status card.
+	//
+	// A separate condition from the fast chip above, not a branch of it: that one
+	// says which service tier the request goes out on, this one how hard the
+	// session tries, and a session can be either, both or neither.
+	if chip := m.zeromaxingGlowChip(); chip != "" {
+		left += zeroTheme.muted.Render(" · ") + chip
 	}
 	if m.exitConfirmActive {
 		left = prefix + btwChip + zeroTheme.amber.Render("●") + " " + zeroTheme.amber.Render(ctrlCExitConfirmText)

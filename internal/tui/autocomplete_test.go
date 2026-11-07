@@ -395,7 +395,11 @@ func TestSuggestionOverlayCapsRowsWithoutMoreText(t *testing.T) {
 	if strings.Contains(plain, "more") {
 		t.Fatalf("bare slash palette should not render a more-count row, got %q", plain)
 	}
-	if !strings.Contains(plain, "│ ❯ provider") || !strings.Contains(plain, "│   ps") {
+	// First and last entries of the first visible window. The tail anchor moves
+	// whenever a command is inserted above it — /plans pushed /ps out, then
+	// /workers pushed /permissions out — so what this pins is the window's start
+	// and size, not those two names.
+	if !strings.Contains(plain, "│ ❯ provider") || !strings.Contains(plain, "│   workers") {
 		t.Fatalf("top of palette should render first visible command window, got %q", plain)
 	}
 	if strings.Contains(plain, "compact") {

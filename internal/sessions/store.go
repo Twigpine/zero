@@ -42,12 +42,20 @@ const (
 	EventSessionChild       EventType = "session_child"
 	EventSpecialistStart    EventType = "specialist_start"
 	EventSpecialistStop     EventType = "specialist_stop"
-	EventSpecDraft          EventType = "spec_draft"
-	EventSpecApproved       EventType = "spec_approved"
-	EventSpecRejected       EventType = "spec_rejected"
-	EventGoalCreated        EventType = "goal_created"
-	EventGoalUpdated        EventType = "goal_updated"
-	EventGoalCleared        EventType = "goal_cleared"
+	// Plan lifecycle (ZeroMaxing Phase 2). Recorded as ordinary session events
+	// rather than a new store: the event log already is the durable record, and
+	// the prototype built a journal and a snapshot file beside one.
+	EventPlanAdmitted   EventType = "plan_admitted"
+	EventTaskDispatched EventType = "task_dispatched"
+	EventTaskCompleted  EventType = "task_completed"
+	EventTaskFailed     EventType = "task_failed"
+	EventPlanCompleted  EventType = "plan_completed"
+	EventSpecDraft      EventType = "spec_draft"
+	EventSpecApproved   EventType = "spec_approved"
+	EventSpecRejected   EventType = "spec_rejected"
+	EventGoalCreated    EventType = "goal_created"
+	EventGoalUpdated    EventType = "goal_updated"
+	EventGoalCleared    EventType = "goal_cleared"
 )
 
 type SessionKind string

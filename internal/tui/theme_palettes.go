@@ -73,17 +73,33 @@ var darkPalette = palette{
 // draculaPalette — the Dracula scheme (dracula.com): muted-violet surface, purple
 // accent, high-chroma pink/green/cyan signals.
 var draculaPalette = palette{
-	panel:     "#282a36",
-	promptBg:  "#383c4d",
-	line:      "#363a4b",
-	line2:     "#484c62",
-	ink:       "#f8f8f2",
-	muted:     "#b9bccb",
-	faint:     "#a2a5b8",
-	faintest:  "#9195ac",
-	accent:    "#bd93f9",
-	green:     "#50fa7b",
-	red:       "#ff5555",
+	panel:    "#282a36",
+	promptBg: "#383c4d",
+	line:     "#363a4b",
+	line2:    "#484c62",
+	ink:      "#f8f8f2",
+	muted:    "#b9bccb",
+	faint:    "#a2a5b8",
+	faintest: "#9195ac",
+	accent:   "#bd93f9",
+	// green/red HOLD DRACULA'S OWN CYAN/PINK, not green and red. The stock
+	// #50fa7b / #ff5555 are the highest-chroma signals in the registry, and in
+	// a zeromaxing session — success ticks and error rows arriving constantly —
+	// they read as alarms, not status. The token NAMES stay green/red because
+	// every consumer binds to them as "success" and "failure"; on this palette
+	// those roles are carried by the scheme's signature cyan (✓, success) and
+	// pink (✗, errors), which sit naturally beside the purple accent and stay
+	// clear of amber's permission/warning meaning. Diff colours (gitAdd/addBg…)
+	// keep their conventional green/red — a diff is a diff on every theme.
+	// Contrast stays above the registry's asserted floors.
+	//
+	// SUCCESS IS A TEAL, NOT THE CYAN ITSELF. The first version set green to
+	// #8be9fd — byte-identical to this palette's blue — which collapsed two of
+	// the four series colours modelMixPalette cycles through, so two models in
+	// the MODELS bar could render indistinguishably. This sits in the same cool
+	// family without colliding with blue, amber or pink.
+	green:     "#5ad1b0",
+	red:       "#ff79c6",
 	amber:     "#ffb86c",
 	blue:      "#8be9fd",
 	gitAdd:    "#77c58c",

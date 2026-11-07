@@ -42,6 +42,11 @@ func (tool *TaskTool) Parameters() tools.Schema {
 				Type:        "string",
 				Description: "Short label for the child session.",
 			},
+			"model": {
+				Type: "string",
+				Description: "Run THIS sub-agent on a specific model instead of inheriting yours — e.g. a cheap model " +
+					"for a scan and a strong one for a judgement. Omit to inherit. The model must be one this provider serves.",
+			},
 			"run_in_background": {
 				Type:        "boolean",
 				Description: "Run the specialist in the background and return a task_id immediately.",
@@ -56,6 +61,12 @@ func (tool *TaskTool) Parameters() tools.Schema {
 		AdditionalProperties: false,
 	}
 }
+
+// StreamsChildProgress declares that this tool spawns a child agent run whose
+// stream-json events should reach the parent's UI. Previously the agent loop
+// inferred this from the tool's NAME; the declaration moves the knowledge to
+// the tool that has it.
+func (tool *TaskTool) StreamsChildProgress() bool { return true }
 
 func (tool *TaskTool) Safety() tools.Safety {
 	return tools.Safety{
@@ -118,6 +129,28 @@ func (tool *TaskTool) RunWithOptions(ctx context.Context, args map[string]any, o
 	if result.SessionID != "" {
 		result.Result.Meta["session_id"] = result.SessionID
 	}
+	// A BACKGROUND SPAWN HAS NOT FINISHED, and the caller has to be able to tell.
+	//
+	// Run returns as soon as the child is launched, with a task_id to poll — so a
+	// caller that treats "the Task tool returned" as "the sub-agent is done"
+	// reports work as complete that has not started producing any. The TUI did
+	// exactly that: four background workers rendered "✓ completed · 0 tool calls
+	// · 1s" and the AGENTS panel said "4 finished" while all four were still
+	// running, with no specialist_stop recorded for any of them.
+	//
+	// STRUCTURAL, not inferred from the output prose — the same rule the rest of
+	// this package follows for Stalled, ModelRejected and Signal.
+	if params.RunInBackground {
+		result.Result.Meta["background"] = "true"
+	}
+	// WHICH MODEL IT ACTUALLY RAN ON. The AGENTS sidebar already renders
+	// "on <model>" — sidebar.go — and showed it for plan tasks only, because
+	// setModel was called from the plan path alone. A Task sub-agent inherits
+	// the parent's model unless its manifest names one, and only the executor
+	// knows which of those applied.
+	if model := strings.TrimSpace(result.Model); model != "" {
+		result.Result.Meta["model"] = model
+	}
 	return result.Result
 }
 
@@ -142,12 +175,17 @@ func parseTaskParameters(args map[string]any) (TaskParameters, error) {
 	if err != nil {
 		return TaskParameters{}, err
 	}
+	model, err := optionalTaskString(args, "model")
+	if err != nil {
+		return TaskParameters{}, err
+	}
 	params := TaskParameters{
 		Name:            strings.TrimSpace(name),
 		Prompt:          strings.TrimSpace(prompt),
 		Description:     strings.TrimSpace(description),
 		RunInBackground: runInBackground,
 		Resume:          strings.TrimSpace(resume),
+		Model:           strings.TrimSpace(model),
 	}
 	if params.Name == "" && params.Resume == "" {
 		return TaskParameters{}, fmt.Errorf("task requires name or resume")

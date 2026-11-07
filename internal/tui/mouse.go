@@ -159,6 +159,19 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m.selectFile(path)
 		}
 	}
+	// The zeromaxing footer chip remains actionable on main's compact layout.
+	// Check it before the surface switch because it sits outside the transcript;
+	// never replace an existing modal or open a picker mid-run.
+	if mouseLeftPress(msg) && m.zeromaxingChipAtMouse(msg) {
+		if m.setup.visible || m.providerWizard != nil || m.mcpAddWizard != nil ||
+			m.mcpManager != nil || m.picker != nil || m.suggestionsActive() {
+			return m, nil
+		}
+		if !m.pending {
+			m.picker = m.newEffortPicker()
+		}
+		return m, nil
+	}
 	if mouseLeftPress(msg) {
 		switch {
 		case m.providerWizard != nil:

@@ -1595,6 +1595,106 @@ func TestOpenAIRequestPreservesCacheablePrefixAcrossTurns(t *testing.T) {
 	}
 }
 
+// (h) sibling: the same cacheable-prefix contract asserted at the WIRE level
+// with posture reminders interleaved in the conversation.
+//
+// The agent-level test proves the loop appends rather than rewrites; this
+// proves the openai mapper serializes that into a wire body whose prefix is
+// still byte-identical. Both halves are needed: a mapper that reordered or
+// re-encoded earlier messages would break the cache even with a perfect loop.
+func TestOpenAIRequestPreservesCacheablePrefixWithPostureReminders(t *testing.T) {
+	provider, err := New(Options{Model: "gpt-test"})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	toolDefs := []zeroruntime.ToolDefinition{{
+		Name:        "read_file",
+		Description: "Read a file.",
+		Parameters: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"path": map[string]any{"type": "string"}},
+		},
+	}}
+	firstMessages := []zeroruntime.Message{
+		{Role: zeroruntime.MessageRoleSystem, Content: "stable system prompt"},
+		{Role: zeroruntime.MessageRoleUser, Content: "first turn"},
+		{Role: zeroruntime.MessageRoleUser, Content: "The zeromaxing execution posture is now active for this session."},
+		{Role: zeroruntime.MessageRoleUser, Content: "Budget guideline under zeromaxing: depth, not scope."},
+	}
+	secondMessages := append([]zeroruntime.Message(nil), firstMessages...)
+	secondMessages = append(secondMessages,
+		zeroruntime.Message{Role: zeroruntime.MessageRoleAssistant, Content: "first response"},
+		zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: "The zeromaxing execution posture is still active."},
+	)
+	// Turn 3 appends the SAME still-on text again — the repetition is the point.
+	thirdMessages := append([]zeroruntime.Message(nil), secondMessages...)
+	thirdMessages = append(thirdMessages,
+		zeroruntime.Message{Role: zeroruntime.MessageRoleAssistant, Content: "second response"},
+		zeroruntime.Message{Role: zeroruntime.MessageRoleUser, Content: "The zeromaxing execution posture is still active."},
+	)
+
+	marshalBody := func(messages []zeroruntime.Message) map[string]any {
+		t.Helper()
+		mapped := provider.openAIRequest(zeroruntime.CompletionRequest{
+			Messages:       messages,
+			Tools:          toolDefs,
+			PromptCacheKey: "session-stable-prefix-zeromaxing",
+		})
+		data, marshalErr := json.Marshal(mapped)
+		if marshalErr != nil {
+			t.Fatalf("marshal request: %v", marshalErr)
+		}
+		var body map[string]any
+		if unmarshalErr := json.Unmarshal(data, &body); unmarshalErr != nil {
+			t.Fatalf("unmarshal request: %v", unmarshalErr)
+		}
+		return body
+	}
+
+	bodies := []map[string]any{marshalBody(firstMessages), marshalBody(secondMessages), marshalBody(thirdMessages)}
+	for i := 1; i < len(bodies); i++ {
+		prev := bodies[i-1]["messages"].([]any)
+		cur := bodies[i]["messages"].([]any)
+		if len(cur) < len(prev) || !reflect.DeepEqual(cur[:len(prev)], prev) {
+			t.Fatalf("wire messages for turn %d are not an exact prefix-extension of turn %d:\nprev=%#v\ncur=%#v",
+				i+1, i, prev, cur)
+		}
+		if !reflect.DeepEqual(bodies[i-1]["tools"], bodies[i]["tools"]) {
+			t.Fatalf("wire tool definitions drifted between turns %d and %d", i, i+1)
+		}
+		if bodies[i-1]["prompt_cache_key"] != bodies[i]["prompt_cache_key"] {
+			t.Fatalf("wire prompt cache key drifted between turns %d and %d", i, i+1)
+		}
+	}
+	systemBlock := bodies[0]["messages"].([]any)[0]
+	for i, body := range bodies {
+		if !reflect.DeepEqual(body["messages"].([]any)[0], systemBlock) {
+			t.Fatalf("wire system message changed on turn %d — the cached prefix is broken", i+1)
+		}
+	}
+}
+
+// (e) The posture name must NEVER become a provider parameter. This asserts it
+// at the wire boundary: whatever upstream does, a request body carrying
+// reasoning_effort="zeromaxing" would be sending a value no provider defines.
+func TestZeromaxingIsNeverAValidWireEffort(t *testing.T) {
+	provider, err := New(Options{Model: "gpt-test"})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	mapped := provider.openAIRequest(zeroruntime.CompletionRequest{
+		Messages:        []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+		ReasoningEffort: "zeromaxing",
+	})
+	data, err := json.Marshal(mapped)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(data), "zeromaxing") {
+		t.Fatalf("the posture name reached the wire: %s", data)
+	}
+}
+
 // TestStreamCompletionSerializesNonMapPropertiesAsEmptyObject locks in the
 // normalizeToolParameters type-assert branch: when a tool's parameters carry a
 // `properties` field whose value is a non-map (e.g., an empty slice), it must

@@ -72,7 +72,15 @@ type tuiTheme struct {
 	delText     lipgloss.Style // delInk as bare foreground (stderr-ish output)
 
 	// Permission surfaces.
-	permBadge  lipgloss.Style // PERMISSION chip: onAccent on amber, bold
+	permBadge lipgloss.Style // PERMISSION chip: onAccent on amber, bold
+	// spectrum is a hue ramp drawn from THIS palette, for the posture chip's
+	// animated word. Palette colours rather than fixed hex, so the effect stays
+	// coherent on dracula, on a light theme, and on anything added later.
+	//
+	// The posture chip has NO fill of its own: it went from an amber badge to a
+	// live word, so there is no postureBadge style here — the letters carry the
+	// whole signal and a style nothing renders would be a knob someone trusts.
+	spectrum   []lipgloss.Style
 	permBg     lipgloss.Style // permission card body tint
 	permBorder lipgloss.Style // permission card border (amber-mixed line)
 
@@ -187,7 +195,10 @@ func buildTheme(p palette) tuiTheme {
 		delSign:     lipgloss.NewStyle().Foreground(col(p.red)).Background(col(p.delBg)),
 		delText:     fg(p.delInk),
 
-		permBadge:  lipgloss.NewStyle().Background(col(p.amber)).Foreground(col(p.onAccent)).Bold(true),
+		permBadge: lipgloss.NewStyle().Background(col(p.amber)).Foreground(col(p.onAccent)).Bold(true),
+		spectrum: []lipgloss.Style{
+			fg(p.accent), fg(p.green), fg(p.blue), fg(p.amber), fg(p.red), fg(p.gitAdd),
+		},
 		permBg:     lipgloss.NewStyle().Background(col(p.permBg)),
 		permBorder: fg(p.cardPerm),
 

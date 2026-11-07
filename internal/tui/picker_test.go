@@ -1508,10 +1508,12 @@ func readTUIConfigFixture(t *testing.T, path string) config.FileConfig {
 	return cfg
 }
 
-func TestEffortPickerOpensForModelWithoutEffortControls(t *testing.T) {
-	// glm-5.1 is not in the hard-coded registry, so availableReasoningEfforts is
-	// empty. /effort should still open a picker (offering auto only) instead of
-	// rendering a static "Effort / available: none for active model" status card.
+func TestEffortPickerOffersSettableLevelsOnAnUncataloguedModel(t *testing.T) {
+	// glm-5.1 has no catalog entry, so availableReasoningEfforts is empty. That
+	// means Zero CANNOT VOUCH either way — not that the model has no controls.
+	// The levels are settable there and are forwarded, so the picker offers
+	// them; it used to offer "auto" alone, which left a user on a custom
+	// endpoint with a popup containing one useless row.
 	m := newModel(context.Background(), Options{ModelName: "glm-5.1"})
 	m.input.SetValue("/effort")
 
@@ -1520,8 +1522,12 @@ func TestEffortPickerOpensForModelWithoutEffortControls(t *testing.T) {
 	if m.picker == nil || m.picker.kind != pickerEffort {
 		t.Fatalf("expected an open effort picker, got %#v", m.picker)
 	}
-	if len(m.picker.items) != 1 || m.picker.items[0].Value != "auto" {
-		t.Fatalf("expected [auto] as the only effort option on an unsupported model, got %#v", m.picker.items)
+	var values []string
+	for _, item := range m.picker.items {
+		values = append(values, item.Value)
+	}
+	if strings.Join(values, ",") != "auto,low,medium,high,zeromaxing" {
+		t.Fatalf("picker = %v, want auto plus the settable levels and the posture", values)
 	}
 	if m.picker.title != "select reasoning effort" {
 		t.Fatalf("picker title = %q, want %q", m.picker.title, "select reasoning effort")
@@ -1576,6 +1582,14 @@ func TestEffortPickerAutoSelectionKeepsEffortUnset(t *testing.T) {
 	if m.picker == nil {
 		t.Fatal("expected the effort picker to open")
 	}
+	// The picker preselects the ACTIVE effort, so "auto" has to be chosen
+	// deliberately rather than by pressing enter on whatever happened to be
+	// first. That preselection is the point: opening the picker should show you
+	// where you are.
+	if got := m.picker.items[m.picker.selected].Value; got != "high" {
+		t.Fatalf("the picker preselected %q, want the active effort %q", got, "high")
+	}
+	m.selectPickerValue("auto")
 
 	updated, _ = m.Update(testKey(tea.KeyEnter))
 	m = updated.(model)

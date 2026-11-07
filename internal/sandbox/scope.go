@@ -58,6 +58,15 @@ func (s *Scope) WorkspaceRoot() string {
 	return s.workspaceRoot
 }
 
+// ExtraRoots returns only the write roots granted beyond the workspace. Child
+// agents run in an isolated worktree and must inherit explicitly granted roots
+// without reopening the parent's workspace.
+func (s *Scope) ExtraRoots() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]string(nil), s.extraRoots...)
+}
+
 // Roots returns the workspace root first, then the extra roots, as a copy.
 func (s *Scope) Roots() []string {
 	s.mu.RLock()
@@ -76,6 +85,19 @@ func (s *Scope) ReadRoots() []string {
 	defer s.mu.RUnlock()
 	roots := make([]string, 0, 1+len(s.extraRoots)+len(s.readRoots))
 	roots = append(roots, s.workspaceRoot)
+	roots = append(roots, s.extraRoots...)
+	roots = append(roots, s.readRoots...)
+	return dedupeScopeRoots(roots)
+}
+
+// ExtraReadRoots returns every path readable beyond the workspace. Write roots
+// are included because write authority also confers read authority. Like
+// ExtraRoots, this deliberately omits the parent workspace when propagating a
+// request_permissions grant to an isolated child.
+func (s *Scope) ExtraReadRoots() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	roots := make([]string, 0, len(s.extraRoots)+len(s.readRoots))
 	roots = append(roots, s.extraRoots...)
 	roots = append(roots, s.readRoots...)
 	return dedupeScopeRoots(roots)

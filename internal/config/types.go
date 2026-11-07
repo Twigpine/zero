@@ -120,6 +120,17 @@ type PreferencesConfig struct {
 	// the user turned idle recaps off. A *bool is its own tri-state, so no
 	// custom unmarshal is needed (unlike ToolsConfig.DeferThreshold's int).
 	Recaps *bool `json:"recaps,omitempty"`
+	// KeepFinishedAgents makes the AGENTS panel KEEP finished sub-agents instead
+	// of dropping them 1.5s after they complete.
+	//
+	// The drop is the default (PR #345, "agents never disappear"), and the panel
+	// has a click-to-toggle to override it per session — but the toggle resets
+	// every session. This is the standing preference: set true and finished
+	// agents stay for the whole session, every session, without clicking.
+	//
+	// A *bool tri-state like Recaps: nil is unset (the drop-after-linger
+	// default), true keeps them, false is the explicit drop.
+	KeepFinishedAgents *bool `json:"keepFinishedAgents,omitempty"`
 	// CompactionModel routes compaction summarization calls to this model
 	// instead of the session's main model (summaries at main-model prices are
 	// the most expensive recurring event in long runs). Empty = automatic: a
@@ -143,6 +154,15 @@ const MaxRecentModels = 5
 // RecapsEnabled reports whether idle recaps are on. Unset defaults to ON.
 func (p PreferencesConfig) RecapsEnabled() bool {
 	return p.Recaps == nil || *p.Recaps
+}
+
+// KeepsFinishedAgents reports the standing preference for the AGENTS panel.
+//
+// Defaults FALSE, unlike RecapsEnabled which defaults true: dropping finished
+// agents after a linger is the established product default (PR #345), so an
+// unset preference keeps it. Only an explicit true makes them stay.
+func (p PreferencesConfig) KeepsFinishedAgents() bool {
+	return p.KeepFinishedAgents != nil && *p.KeepFinishedAgents
 }
 
 // KeyBindingDef defines one key binding string (e.g. "ctrl+o") that the TUI
@@ -346,6 +366,129 @@ type SwarmConfig struct {
 	MaxTeamSize int `json:"maxTeamSize,omitempty"`
 }
 
+// ProfilesConfig gates the execution-profile catalog.
+// PlanModelsConfig pins or forbids models for a plan's tasks. Every field is
+// optional; an empty config leaves the automatic choice untouched.
+type PlanModelsConfig struct {
+	// Scan / Implement / Verify pin a model per task role. A pinned role skips
+	// discovery entirely, so it works on a provider that reports no prices —
+	// which is most of them.
+	Scan      string `json:"scan,omitempty"`
+	Implement string `json:"implement,omitempty"`
+	Verify    string `json:"verify,omitempty"`
+	// Router names the model that DECIDES which model runs each task, by reading
+	// the task text instead of matching verbs. Empty uses the strongest model
+	// discovery found. It costs one extra call on that model before the plan
+	// starts, which is why a plan too small to benefit skips it and why every
+	// way it can fail falls back to the keyword classifier.
+	Router string `json:"router,omitempty"`
+	// RouterGuidance is your own advice to the router, in plain words, added to
+	// the built-in guidance rather than replacing it.
+	//
+	// It exists because the code cannot know your models. Price is the only
+	// ordering discovery gives, and on real accounts it lies in both directions:
+	// one provider's most expensive model was a build preview that failed every
+	// task it touched, another reports no prices at all so the ranking collapses
+	// to alphabetical. You know which model reasons well and which is quick and
+	// shallow; this is where you say so, once, instead of per prompt.
+	//
+	// Example: "kimi-k2.6 is the best reasoner here — prefer it for judgements.
+	// qwen3.5:397b is slow; use it only when correctness really matters."
+	RouterGuidance string `json:"routerGuidance,omitempty"`
+	// AutoAssign turns per-task model selection on for EVERY plan, so it does not
+	// have to be asked for in each prompt.
+	//
+	// The tool argument still wins when a plan supplies one, so a plan can say
+	// auto_assign:false and be believed. Absent from config it stays off: turning
+	// it on changes which model does the work and what a plan costs, and that is
+	// a decision for the person paying, made once here rather than inferred.
+	AutoAssign bool `json:"autoAssign,omitempty"`
+	// Exclude removes models from every tier by exact id. For the ones that are
+	// eligible on paper and wrong in practice: an image model that ranks highest
+	// on price, or a preview build that should not be judging anything.
+	Exclude []string `json:"exclude,omitempty"`
+	// MinSize is the smallest model, in BILLIONS of parameters, worth routing a
+	// task to. A provider that lists tiny models (a 135M or 1B toy) alongside
+	// decent ones would otherwise see the toy chosen as the "cheapest" tier for a
+	// scan; this floor drops any model KNOWN to be smaller, so a task lands on a
+	// decent model instead. Size is read from the model id ("qwen3-coder:480b").
+	//
+	// A model whose id names no size is NOT dropped — an unknown size is not
+	// evidence of a small one, and most cloud ids carry none. And if the floor
+	// would leave a provider with no models at all, it is ignored: a plan running
+	// on a small model beats a plan that cannot run. 0 means no floor.
+	MinSize float64 `json:"minSize,omitempty"`
+	// TopModels caps how many of the most capable discovered models a plan may
+	// route to, after exclusions and the size floor. A provider listing twenty
+	// models otherwise puts its SMALLEST on the cheap tier and hands the router
+	// twenty candidates; keeping the best ten narrows both to models worth a
+	// sub-agent. Unset (0) is the built-in default of 10; raise it to widen the
+	// field. A pin outside the list still applies — pins are validated against
+	// what the provider serves, not against this shortlist.
+	TopModels int `json:"topModels,omitempty"`
+}
+
+type ProfilesConfig struct {
+	// DisableZeromaxing turns the zeromaxing posture off for this workspace, so
+	// /effort zeromaxing, /profile zeromaxing and --exec-profile zeromaxing are
+	// refused with a reason.
+	//
+	// Deliberately a DISABLE-only boolean, mirroring Sandbox.BlockUnixSockets
+	// and the tighten-only Sandbox.Network rule: a project .zero/config.json may
+	// set it true, but can never set it back to false, so a cloned repo cannot
+	// switch a cost multiplier ON for whoever opens it. Only global user config
+	// may leave it off. See mergeProjectConfig.
+	DisableZeromaxing bool `json:"disableZeromaxing,omitempty"`
+	// PlanSize is the zeromaxing plan-size tier: how many tasks one plan may
+	// contain. One of small, medium (the default), large, unrestricted — see
+	// plan_size.go for the numbers and for why this stays a hard cap rather than
+	// an advisory warning.
+	//
+	// Project config may only TIGHTEN it, for the same reason DisableZeromaxing
+	// is disable-only: a cloned repo must not be able to raise a cost ceiling for
+	// whoever opens it. See mergeProjectConfig.
+	PlanSize string `json:"planSize,omitempty"`
+	// RequirePlanKeyword makes the orchestrate tool refuse a plan unless the
+	// turn's own user text asks for one ("run a plan for ...", "fan out ...").
+	//
+	// Off by default, and that is a real trade. Once the posture is on the tool
+	// exists for the rest of the session, and everything the model reads shares
+	// context with the user's instructions — file contents, PR comments, MCP
+	// output. An imperative sentence in any of them reads like an instruction to
+	// the tool that spends the most. On by default would refuse a plan for every
+	// user whose phrasing happens not to match, which is the call this codebase
+	// already made for auto_assign.
+	//
+	// Project config may only ENABLE it, never switch it back off: turning a
+	// safety gate off is a downgrade a cloned repo must not be able to make for
+	// whoever opens it. See mergeProjectConfig.
+	RequirePlanKeyword bool `json:"requirePlanKeyword,omitempty"`
+	// Memory enables the durable note store: the `memory` and `memory_write`
+	// tools, reading and writing .zero/memory.
+	//
+	// USER CONFIG ONLY. memory_write is a write primitive pointed at the
+	// workspace, and project config is not trust-gated — a cloned repo must not
+	// be able to hand the agent a new way to write into it. mergeProjectConfig
+	// ignores this field entirely, the same answer PlanModels gets.
+	Memory bool `json:"memory,omitempty"`
+	// PlanModels states which models a plan's tasks may run on, overriding the
+	// automatic choice auto_assign would make from provider discovery.
+	//
+	// It exists because the automatic choice ranks by PRICE, and price is a proxy
+	// that fails in both directions on real accounts: an xAI account put a build
+	// preview on the verify tier because it was the most expensive thing there,
+	// and an Ollama account reports no prices at all, so the ranking collapses to
+	// alphabetical order. Neither is fixable with a better heuristic — the person
+	// with the account knows which model is strongest and the code does not.
+	//
+	// PROJECT CONFIG MAY ONLY EXCLUDE, never pin — see mergeProjectConfig. An
+	// exclusion removes a candidate and can only lower what a plan spends; a pin
+	// is the opposite, and a cloned repo pinning all three roles to the priciest
+	// model on the account would raise cost for whoever opened it. That is the
+	// same hazard PlanSize and DisableZeromaxing guard against.
+	PlanModels PlanModelsConfig `json:"planModels,omitempty"`
+}
+
 func (cfg *ToolsConfig) UnmarshalJSON(data []byte) error {
 	type rawTools struct {
 		DeferThreshold *int `json:"deferThreshold"`
@@ -373,6 +516,7 @@ type FileConfig struct {
 	Notify              NotifyConfig       `json:"notify,omitempty"`
 	Tools               ToolsConfig        `json:"tools,omitempty"`
 	Swarm               SwarmConfig        `json:"swarm,omitempty"`
+	Profiles            ProfilesConfig     `json:"profiles,omitempty"`
 	Preferences         PreferencesConfig  `json:"preferences,omitempty"`
 	KeyBindings         KeyBindingsConfig  `json:"keybindings,omitempty"`
 	LocalControl        LocalControlConfig `json:"localControl,omitempty"`
@@ -399,6 +543,7 @@ func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 		Notify              NotifyConfig        `json:"notify,omitempty"`
 		Tools               ToolsConfig         `json:"tools,omitempty"`
 		Swarm               SwarmConfig         `json:"swarm,omitempty"`
+		Profiles            ProfilesConfig      `json:"profiles,omitempty"`
 		Preferences         PreferencesConfig   `json:"preferences,omitempty"`
 		KeyBindings         KeyBindingsConfig   `json:"keybindings,omitempty"`
 		LocalControl        *LocalControlConfig `json:"localControl,omitempty"`
@@ -416,6 +561,7 @@ func (cfg FileConfig) MarshalJSON() ([]byte, error) {
 		Notify:              cfg.Notify,
 		Tools:               cfg.Tools,
 		Swarm:               cfg.Swarm,
+		Profiles:            cfg.Profiles,
 		Preferences:         cfg.Preferences,
 		KeyBindings:         cfg.KeyBindings,
 		CrossSessionInbound: cfg.CrossSessionInbound,
@@ -501,6 +647,7 @@ type ResolvedConfig struct {
 	Notify              NotifyConfig
 	Tools               ToolsConfig
 	Swarm               SwarmConfig
+	Profiles            ProfilesConfig
 	Preferences         PreferencesConfig
 	KeyBindings         KeyBindingsConfig
 	LocalControl        LocalControlConfig
@@ -564,6 +711,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 		Notify              NotifyConfig               `json:"notify"`
 		Tools               ToolsConfig                `json:"tools"`
 		Swarm               SwarmConfig                `json:"swarm"`
+		Profiles            ProfilesConfig             `json:"profiles"`
 		Preferences         PreferencesConfig          `json:"preferences"`
 		KeyBindings         KeyBindingsConfig          `json:"keybindings"`
 		LocalControl        LocalControlConfig         `json:"localControl"`
@@ -611,6 +759,7 @@ func (cfg *FileConfig) UnmarshalJSON(data []byte) error {
 	cfg.Notify = raw.Notify
 	cfg.Tools = raw.Tools
 	cfg.Swarm = raw.Swarm
+	cfg.Profiles = raw.Profiles
 	cfg.Preferences = raw.Preferences
 	cfg.KeyBindings = raw.KeyBindings
 	cfg.LocalControl = raw.LocalControl

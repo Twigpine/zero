@@ -25,6 +25,12 @@ const (
 	specialistRunning specialistStatus = iota
 	specialistCompleted
 	specialistError
+	// specialistCancelled: ended without running to completion, but nothing
+	// broke — a plan task the user stopped, or one skipped because a dependency
+	// failed. Appended AFTER the existing values so their ordinals are
+	// unchanged; a Task sub-agent never produces this, so its rendering is
+	// untouched.
+	specialistCancelled
 )
 
 // specialistInfo is the rendered view of one specialist invocation.
@@ -41,6 +47,18 @@ type specialistInfo struct {
 	tokenCount     int // total tokens consumed
 	currentTool    string
 	currentDetail  string
+	// model is what this agent runs on, empty when it inherits the session's.
+	model string
+	// background marks a child that OUTLIVES the run that launched it: a
+	// background Task spawn, or a task of a background plan. It is the one
+	// distinction cancelRun needs — a foreground child dies with the run
+	// context and must be settled, a background one keeps working and must not
+	// be reported as cancelled.
+	background bool
+	// result is what the agent PRODUCED, bounded at the bridge. The sidebar
+	// shows the head of it when its row is expanded; the whole thing lives in
+	// the child's own session, which the card's drill-in opens.
+	result string
 }
 
 // specialistTracker holds the live state for every specialist the parent agent
@@ -88,8 +106,122 @@ func (t *specialistTracker) complete(childSessionID string, status specialistSta
 	}
 }
 
+// markBackground records that a child outlives the run that launched it.
+//
+// Called from the two places that can know: a background plan's task-start
+// message carries the flag, and a specialistRebindMsg is only ever emitted for
+// a background Task spawn (backgroundSpawnRebind refuses anything else).
+func (t *specialistTracker) markBackground(childSessionID string) {
+	for index := range t.specialists {
+		if t.specialists[index].childSessionID == childSessionID {
+			t.specialists[index].background = true
+			return
+		}
+	}
+}
+
+// cancelRunning marks every still-running FOREGROUND specialist cancelled.
+//
+// Called when the USER cancels the run: those children die with the run
+// context, so a row left specialistRunning would keep its spinner, its ticking
+// clock and its "live" mark in MODELS over a process that no longer exists. The
+// current-tool line is cleared for the same reason — nothing is running it.
+//
+// BACKGROUND CHILDREN ARE SKIPPED INDIVIDUALLY, not by refusing to settle at
+// all. The first version of this guard wrapped the whole call in
+// BackgroundPlanLive, and this tracker holds foreground and background children
+// TOGETHER — so one live background plan left every foreground sub-agent
+// spinning forever, and nothing else settles them: a late completion is dropped
+// by the stale-run guard once cancelRun has zeroed activeRunID. That is the
+// exact defect TestCancelSettlesEveryRunningAgentAndTask exists to prevent,
+// reintroduced by the fix for its opposite.
+func (t *specialistTracker) cancelRunning(now time.Time) {
+	for index := range t.specialists {
+		if t.specialists[index].background {
+			continue
+		}
+		if t.specialists[index].status == specialistRunning {
+			t.specialists[index].status = specialistCancelled
+			t.specialists[index].completedAt = now
+			t.specialists[index].currentTool = ""
+			t.specialists[index].currentDetail = ""
+		}
+	}
+}
+
 // incrementToolCount bumps the tool-call counter for the specialist with
 // childSessionID. Unknown specialists are ignored.
+// setTokens records a child's token spend against its card. Plan tasks know
+// theirs (TaskResult.Tokens); the Task tool does not bridge usage yet, so its
+// cards stay at zero and the display omits the segment rather than showing one.
+// addTokens ADDS to a child's running total, for live per-turn usage events.
+// Unknown children are ignored, like every other setter here.
+func (t *specialistTracker) addTokens(childSessionID string, tokens int) {
+	if tokens <= 0 {
+		return
+	}
+	for index := range t.specialists {
+		if t.specialists[index].childSessionID == childSessionID {
+			t.specialists[index].tokenCount += tokens
+			return
+		}
+	}
+}
+
+// setToolCount sets a child's tool-call count to an absolute value, for a
+// background child whose count arrives whole from a TaskOutput poll rather than
+// one increment at a time. Never lowers it: a late poll must not undo a higher
+// live count. Unknown children ignored.
+func (t *specialistTracker) setToolCount(childSessionID string, count int) {
+	for index := range t.specialists {
+		if t.specialists[index].childSessionID == childSessionID {
+			if count > t.specialists[index].toolCount {
+				t.specialists[index].toolCount = count
+			}
+			return
+		}
+	}
+}
+
+func (t *specialistTracker) setTokens(childSessionID string, tokens int) {
+	if tokens <= 0 {
+		return
+	}
+	for index := range t.specialists {
+		if t.specialists[index].childSessionID == childSessionID {
+			t.specialists[index].tokenCount = tokens
+			return
+		}
+	}
+}
+
+// setModel records which model an agent runs on.
+//
+// Empty clears the field: that is what a model fallback produces (the task
+// finished on the session's model), and refusing to write empty left the AGENTS
+// row naming the refused model after the PLAN row had already corrected itself.
+func (t *specialistTracker) setModel(childSessionID, model string) {
+	for index := range t.specialists {
+		if t.specialists[index].childSessionID == childSessionID {
+			t.specialists[index].model = strings.TrimSpace(model)
+			return
+		}
+	}
+}
+
+// setResult records what a finished agent produced.
+func (t *specialistTracker) setResult(childSessionID, result string) {
+	if strings.TrimSpace(result) == "" {
+		return
+	}
+	for index := range t.specialists {
+		if t.specialists[index].childSessionID == childSessionID {
+			t.specialists[index].result = result
+			return
+		}
+	}
+}
+
 func (t *specialistTracker) incrementToolCount(childSessionID string) {
 	for index := range t.specialists {
 		if t.specialists[index].childSessionID == childSessionID {
@@ -159,7 +291,14 @@ func specialistStatusString(s specialistStatus) string {
 		return "completed"
 	case specialistError:
 		return "error"
+	case specialistCancelled:
+		// Cancelled and dependency/budget-skipped tasks landed in the default
+		// arm and rendered as "error", so a plan the user stopped, and every
+		// task skipped because something upstream failed, read as a defect.
+		return "cancelled"
 	default:
+		// Fail closed: an unmapped status is reported as an error rather than
+		// quietly as something benign.
 		return "error"
 	}
 }
@@ -250,12 +389,22 @@ func (m model) renderSpecialistCard(info specialistInfo, width int) string {
 
 	// Elapsed: live while running, frozen at completion once the specialist is
 	// done.
+	// A ZERO START MEANS UNKNOWN, NOT THE YEAR 1.
+	//
+	// Subtracting the zero time overflows int64 nanoseconds, and Go clamps to
+	// its largest Duration — which rendered as "153722867m16s" on every card in
+	// a resumed session, because the restore path rebuilt rows without a
+	// timestamp. sidebar.go has always guarded this; the card did not, so the
+	// same data read correctly in one panel and absurdly in the other.
 	var elapsed time.Duration
-	if info.status == specialistRunning {
+	switch {
+	case info.startedAt.IsZero():
+		elapsed = 0
+	case info.status == specialistRunning:
 		elapsed = m.now().Sub(info.startedAt)
-	} else if !info.completedAt.IsZero() {
+	case !info.completedAt.IsZero():
 		elapsed = info.completedAt.Sub(info.startedAt)
-	} else {
+	default:
 		elapsed = m.now().Sub(info.startedAt)
 	}
 	elapsedStr := formatSpecialistElapsed(elapsed)
@@ -286,7 +435,11 @@ func (m model) renderSpecialistCard(info specialistInfo, width int) string {
 	// Body line: "  status · N tool calls · M,NNN tokens".
 	toolLabel := "tool calls"
 	statusLabel := specialistStatusString(info.status)
-	if info.status == specialistError {
+	// Only claim an exit code when there IS one. A plan task's failure arrives
+	// without one, and rendering the zero value produced "error (exit code 0)"
+	// directly above a body saying "Subagent failed (exit 4)" — the card
+	// contradicting its own detail.
+	if info.status == specialistError && info.exitCode != 0 {
 		statusLabel = fmt.Sprintf("error (exit code %d)", info.exitCode)
 	}
 	// The token total is only populated when usage was bridged from the child; omit
@@ -472,7 +625,12 @@ func renderSpecialistSummary(specialists []specialistInfo, spinnerView string) s
 			summary += "s"
 		}
 	}
-	summary += " · " + formatTokenCount(totalTokens) + " tokens"
+	// Omitted at zero, matching the per-card rule (M18): nothing populated
+	// tokenCount for a Task sub-agent, so the rollup always read "0 tokens" —
+	// a number that looks measured and is not.
+	if totalTokens > 0 {
+		summary += " · " + formatTokenCount(totalTokens) + " tokens"
+	}
 	// summary is "  " + spinnerView + " N specialists ...". The spinner sits
 	// at byte offset 2 (after the 2-space indent), so the muted tail must skip
 	// both the indent and the spinner's bytes to avoid splitting a multi-byte
