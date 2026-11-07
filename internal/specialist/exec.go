@@ -346,6 +346,12 @@ type TaskRunOptions struct {
 	// Progress, when set, is called with each stream-json event emitted by the
 	// child process while it runs. nil is a no-op.
 	Progress func(streamjson.Event)
+	// OnLaunch, when set, is called once immediately before the child is
+	// launched — after every parent-side step (manifest, admission, argument
+	// and prompt-file building, start accounting). It marks where the CHILD's
+	// time begins, so a caller timing the child's silence does not charge it
+	// for the parent's preparation. Not called when a run fails before launch.
+	OnLaunch func()
 }
 
 // specialistAutonomy maps a parent permission mode to the child's "--auto"
@@ -1056,6 +1062,9 @@ func (executor Executor) runBackground(ctx context.Context, built BuildArgsResul
 	// injected launcher whose onExit runs before it returns.
 	startSettled := make(chan struct{})
 	defer close(startSettled)
+	if options.OnLaunch != nil {
+		options.OnLaunch()
+	}
 	pid, err := executor.launchBackground(binaryPath, built.Args, outputFile, func(exitCode int) {
 		go func() {
 			<-startSettled
@@ -1186,6 +1195,9 @@ func (executor Executor) runBuiltArgs(ctx context.Context, built BuildArgsResult
 		}
 		startDispatched = true
 		executor.dispatchSpecialistStartHook(accounting)
+	}
+	if options.OnLaunch != nil {
+		options.OnLaunch()
 	}
 	run, err := executor.runChild(ctx, binaryPath, built.Args, progress, onStarted)
 	started := run.Started || err == nil

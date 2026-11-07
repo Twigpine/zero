@@ -387,3 +387,62 @@ func TestAStallLeavesTheParentContextAlive(t *testing.T) {
 		t.Fatalf("the stall cancelled the caller's context: %v", parent.Err())
 	}
 }
+
+// THE PARENT'S PREPARATION IS NOT THE CHILD'S SILENCE. The watchdog was armed
+// when the runner began, before the executor resolved the manifest, built the
+// arguments and wrote the start accounting — so a slow launch was charged as
+// the child going quiet, and a task could be killed as stalled before it
+// existed. On a loaded Windows runner that is exactly how this file's chatty-
+// child test once failed with the child never having been called.
+//
+// Here the pre-launch step (minting the child's session id) takes several
+// stall windows; the child, once launched, speaks every 10ms and must run to
+// completion.
+func TestASlowLaunchIsNotChargedAsTheChildsSilence(t *testing.T) {
+	launched := false
+	executor := Executor{
+		BinaryPath: "/bin/true",
+		NewSessionID: func() (string, error) {
+			time.Sleep(250 * time.Millisecond) // parent-side, before launch
+			return "specialist_00000000000000000000000b", nil
+		},
+		Load: func(LoadOptions) (LoadResult, error) { return LoadResult{}, nil },
+		RunChild: func(ctx context.Context, _ string, _ []string, progress func(streamjson.Event)) (ChildRunResult, error) {
+			launched = true
+			ticker := time.NewTicker(10 * time.Millisecond)
+			defer ticker.Stop()
+			deadline := time.After(100 * time.Millisecond)
+			for {
+				select {
+				case <-ctx.Done():
+					return ChildRunResult{Started: true, ExitCode: -1}, ctx.Err()
+				case <-deadline:
+					return ChildRunResult{Started: true}, nil
+				case <-ticker.C:
+					if progress != nil {
+						progress(streamjson.Event{Type: streamjson.EventToolCall, Name: "read_file"})
+					}
+				}
+			}
+		},
+	}
+	runner := NewPlanRunner(PlanTaskContext{Executor: executor, Cwd: t.TempDir(), SpecialistName: "explorer"})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result, err := runner(ctx, PlanTaskRequest{
+		Task:         Task{ID: "slow-launch", Prompt: "x"},
+		Tools:        []string{"read_file"},
+		StallTimeout: 60 * time.Millisecond,
+		StallPoll:    10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("a working task must not error: %v", err)
+	}
+	if !launched {
+		t.Fatalf("the child was never launched: the watchdog fired during the parent's own preparation (%s)", result.Err)
+	}
+	if result.Outcome != TaskSucceeded {
+		t.Fatalf("outcome = %q (%s), want success", result.Outcome, result.Err)
+	}
+}

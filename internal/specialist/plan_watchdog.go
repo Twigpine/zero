@@ -75,8 +75,13 @@ type stallWatchdog struct {
 	mu       sync.Mutex
 	lastSeen time.Time
 	fired    bool
-	timeout  time.Duration
-	now      func() time.Time
+	// pendingLaunch holds the clock until the child is launched: while set,
+	// no silence accrues. The runner sets it before handing off to the
+	// executor and the executor's OnLaunch (touch) clears it, so the parent's
+	// own preparation is never charged as the child going quiet.
+	pendingLaunch bool
+	timeout       time.Duration
+	now           func() time.Time
 	// poll is how often the watcher checks. Zero means timeout/6. Injectable so
 	// a test can exercise the real goroutine in milliseconds instead of
 	// sleeping for the production interval — a watchdog whose only test is
@@ -106,6 +111,18 @@ func (w *stallWatchdog) touch() {
 	}
 	w.mu.Lock()
 	w.lastSeen = w.now()
+	w.pendingLaunch = false
+	w.mu.Unlock()
+}
+
+// holdUntilLaunch stops silence accruing until the next touch — the child's
+// launch. See pendingLaunch.
+func (w *stallWatchdog) holdUntilLaunch() {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	w.pendingLaunch = true
 	w.mu.Unlock()
 }
 
@@ -113,6 +130,9 @@ func (w *stallWatchdog) touch() {
 func (w *stallWatchdog) stalledFor() time.Duration {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.pendingLaunch {
+		return 0
+	}
 	return w.now().Sub(w.lastSeen)
 }
 

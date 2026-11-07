@@ -89,6 +89,8 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 		watchdog := newStallWatchdog(req.StallTimeout, nil)
 		// Zero leaves the production rule in place; only a test sets it.
 		watchdog.poll = req.StallPoll
+		// Held until the executor launches the child (OnLaunch below).
+		watchdog.holdUntilLaunch()
 		taskCtx, cancelTask := context.WithCancel(ctx)
 		defer cancelTask()
 		stopWatchdog := watchdog.watch(taskCtx, cancelTask)
@@ -213,6 +215,12 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 			// second construction path that does not carry what the first one
 			// did. Fixed with the tool-side half, not separately.
 			Progress: watchedProgress(watchdog, counted),
+			// THE CHILD'S SILENCE STARTS AT LAUNCH. The watchdog was armed when
+			// this runner began, so everything the executor did first —
+			// manifest, admission, args, prompt file, start accounting — was
+			// charged as the child's silence, and a slow launch could be killed
+			// as "stalled" before the child existed.
+			OnLaunch: watchdog.touch,
 			// THE RUNG MUST MATCH THE GRANT, and for a long time it did not.
 			//
 			// This said "explicitly NOT MemberAutonomy: Phase 2 tasks are
