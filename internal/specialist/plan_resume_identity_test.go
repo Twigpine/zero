@@ -158,3 +158,62 @@ func TestReduceCapturesEachTasksRecordedIdentity(t *testing.T) {
 		t.Fatal("a pre-identity completion recorded an identity — it must be absent, so resume matches it by id alone")
 	}
 }
+
+// fanInPlan builds four independent finders and a synth that depends on them in
+// the given order.
+func fanInPlan(t *testing.T, order []string) Plan {
+	t.Helper()
+	tasks := []any{}
+	for _, id := range []string{"a", "b", "c", "d"} {
+		tasks = append(tasks, map[string]any{"id": id, "prompt": "find " + id})
+	}
+	deps := make([]any, 0, len(order))
+	for _, id := range order {
+		deps = append(deps, id)
+	}
+	tasks = append(tasks, map[string]any{"id": "synth", "prompt": "combine", "depends_on": deps})
+	return mustParsePlan(t, map[string]any{
+		"name":   "fan-in",
+		"tasks":  tasks,
+		"budget": map[string]any{"max_workers": float64(1)},
+	}, chainLimits())
+}
+
+// REORDERED DEPENDENCIES ARE A DIFFERENT TASK. The briefing walks depends_on in
+// declared order and spends one shared budget, so with long dependency outputs
+// the order decides which outputs the dependent actually receives. The identity
+// once sorted depends_on, so a reordered synth matched its old fingerprint and
+// resume replayed a result built from a different briefing.
+func TestReorderedDependenciesAreADifferentTask(t *testing.T) {
+	original := fanInPlan(t, []string{"a", "b", "c", "d"})
+	reordered := fanInPlan(t, []string{"d", "c", "b", "a"})
+
+	// Setup: under a budget that fits two outputs, the two orders really do
+	// brief the synth differently — otherwise this proves nothing.
+	results := map[string]TaskResult{}
+	for _, id := range []string{"a", "b", "c", "d"} {
+		results[id] = TaskResult{ID: id, Outcome: TaskSucceeded, Output: strings.Repeat(id, 100)}
+	}
+	synthOf := func(plan Plan) Task { return taskByID(plan)["synth"] }
+	before := withDependencyBriefingBudget(synthOf(original), results, 100, 200)
+	after := withDependencyBriefingBudget(synthOf(reordered), results, 100, 200)
+	if before == after {
+		t.Fatal("SETUP INVALID: dependency order did not change the briefing under this budget")
+	}
+	if !strings.Contains(before, `"a"`) || strings.Contains(before, `"d"`) {
+		t.Fatalf("SETUP INVALID: expected the declared-first outputs to win the budget:\n%s", before)
+	}
+
+	progress := succeededProgress(original)
+	if !planDoneSet(original, progress)["synth"] {
+		t.Fatal("SETUP INVALID: the unedited synth is not recognised as done")
+	}
+	if planDoneSet(reordered, progress)["synth"] {
+		t.Fatal("resume reused synth's result although its dependency order — and so its briefing — changed")
+	}
+	for _, id := range []string{"a", "b", "c", "d"} {
+		if !planDoneSet(reordered, progress)[id] {
+			t.Fatalf("finder %s was not edited and must stay done", id)
+		}
+	}
+}

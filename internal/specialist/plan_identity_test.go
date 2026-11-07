@@ -8,11 +8,18 @@ func TestTaskIdentityIsStableAndCoversWhatVaries(t *testing.T) {
 	base := Task{ID: "a", Prompt: "do it", Model: "m1",
 		Tools: []string{"read_file", "grep"}, DependsOn: []string{"x", "y"}}
 
-	// Tool and dependency ORDER must not matter — both are sets.
+	// Tool ORDER must not matter — the grant is a set.
 	reordered := Task{ID: "a", Prompt: "do it", Model: "m1",
-		Tools: []string{"grep", "read_file"}, DependsOn: []string{"y", "x"}}
+		Tools: []string{"grep", "read_file"}, DependsOn: []string{"x", "y"}}
 	if taskIdentity(base) != taskIdentity(reordered) {
-		t.Fatal("identity changed when only tool/dep order changed — the grant is a set")
+		t.Fatal("identity changed when only tool order changed — the grant is a set")
+	}
+	// Dependency order DOES matter: the briefing spends its budget in that
+	// order (see TestReorderedDependenciesAreADifferentTask).
+	swapped := base
+	swapped.DependsOn = []string{"y", "x"}
+	if taskIdentity(base) == taskIdentity(swapped) {
+		t.Fatal("identity ignored dependency order, which decides what the briefing carries")
 	}
 
 	// Every field that changes execution changes identity.

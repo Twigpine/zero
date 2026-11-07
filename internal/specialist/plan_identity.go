@@ -21,10 +21,13 @@ import (
 //     one model's answer for another's.
 //   - Tools: the authority grant bounds what the task may do, so it bounds the
 //     result. Sorted — the grant is a set, not a sequence.
-//   - DependsOn: the edge set is part of the task's input, because it decides
+//   - DependsOn: the edges are part of the task's input, because they decide
 //     which briefings the task receives. Adding or removing a dependency changes
-//     the task even when the dependencies themselves did not re-run. Sorted, for
-//     the same reason as Tools.
+//     the task even when the dependencies themselves did not re-run. IN DECLARED
+//     ORDER, NOT SORTED: withDependencyBriefingBudget walks DependsOn in that
+//     order and spends one shared budget as it goes, so reordering decides which
+//     dependency's output is included, truncated, or dropped. Sorting here once
+//     let a reordered task resume a result built from a different briefing.
 //
 // WHAT IS OUT, AND WHY:
 //   - ID is the MATCH KEY, not part of the fingerprint: identity answers "is the
@@ -57,9 +60,7 @@ func taskIdentity(task Task) string {
 		write("tool", tool)
 	}
 
-	deps := append([]string(nil), task.DependsOn...)
-	sort.Strings(deps)
-	for _, dep := range deps {
+	for _, dep := range task.DependsOn {
 		write("dep", dep)
 	}
 	return hex.EncodeToString(hash.Sum(nil))
