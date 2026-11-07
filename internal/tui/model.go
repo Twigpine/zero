@@ -289,6 +289,9 @@ type model struct {
 	// planPaths locates saved plans, project first. Set once at startup: the
 	// workspace does not move for the life of a session.
 	planPaths specialist.PlanPaths
+	// planStaging owns the plans /plans restart and resume stage, so they are
+	// removed after admission without touching user-authored plans.
+	planStaging *planStaging
 	// orchestrateSelected is the plan task the sidebar's TASK section details.
 	// Clicking a task row in the sidebar sets it; ctrl+g cycles it.
 	orchestrateSelected int
@@ -1180,6 +1183,7 @@ func newModel(ctx context.Context, options Options) model {
 		runtimeMessageSink:          options.RuntimeMessageSink,
 		planProgress:                options.PlanProgress,
 		planPaths:                   options.PlanPaths,
+		planStaging:                 newPlanStaging(),
 		permissionMode:              permissionMode,
 		reasoningEffort:             options.ReasoningEffort,
 		responseStyle:               defaultedResponseStyle(options.ResponseStyle),
@@ -3193,6 +3197,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m, refresh = m.invalidateFileViewForUnknownMutation()
 		return m, refresh
 	case planAdmittedMsg:
+		// Before the stale-run guard: admission means the tool already read any
+		// plan staged for it, whichever run delivered the message.
+		m.planStaging.releaseAdmitted(msg.name)
 		// A BACKGROUND plan outlives the run that launched it, so the
 		// stale-run guard must not drop its progress: dropping it is
 		// right for a finished run's leftovers and wrong for a plan that

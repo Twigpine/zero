@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -23,7 +24,7 @@ func savedPlanModel(t *testing.T) (model, specialist.PlanPaths) {
 		UserRoot:    userRoot,
 		UserDir:     filepath.Join(userRoot, "zero", "plans"),
 	}
-	m := model{planProgress: NewPlanProgressBridge(), planPaths: paths}
+	m := model{planProgress: NewPlanProgressBridge(), planPaths: paths, planStaging: newPlanStaging()}
 	m.planProgress.Attach(func(tea.Msg) {}, 1, nil, "")
 	return m, paths
 }
@@ -386,72 +387,176 @@ func TestRestartStagesTheLastPlanFromTheBeginning(t *testing.T) {
 	}
 }
 
-func TestRestartRefusesToOverwriteAUserPlan(t *testing.T) {
-	m, paths, plan := resumeModel(t)
-	m.planProgress.PlanAdmitted(plan)
-	if _, err := specialist.SavePlan(paths.ProjectRoot, paths.ProjectDir, restartPlanName, plan); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(paths.ProjectDir, restartPlanName+".json")
-	before, err := os.ReadFile(path)
+// seedUserPlan writes a user-authored plan, distinct from anything a restart or
+// resume would generate, and returns its path and exact bytes.
+func seedUserPlan(t *testing.T, paths specialist.PlanPaths, name string) (string, []byte) {
+	t.Helper()
+	plan, err := specialist.ParsePlan(map[string]any{
+		"name":   "mine",
+		"tasks":  []any{map[string]any{"id": "x", "prompt": "user authored, keep me"}},
+		"budget": map[string]any{"max_workers": float64(1)},
+	}, specialist.Limits{MaxTasks: 20, ParentTools: []string{"read_file"}})
 	if err != nil {
 		t.Fatal(err)
 	}
+	path, err := specialist.SavePlan(paths.ProjectRoot, paths.ProjectDir, name, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path, body
+}
 
-	updated, cmd := m.restartLastPlan()
-	if cmd != nil {
-		t.Fatal("a colliding restart started a turn")
+// admitPlan delivers the admission message the plan tool's bridge sends once it
+// has loaded and validated a plan.
+func admitPlan(t *testing.T, m model, plan specialist.Plan) model {
+	t.Helper()
+	if m.now == nil {
+		m.now = func() time.Time { return time.Unix(1000, 0) }
 	}
-	text := transcriptText(updated.(model).transcript)
-	if !strings.Contains(text, "already exists") || !strings.Contains(text, restartPlanName) {
-		t.Fatalf("collision was not explained: %s", text)
+	updated, _ := m.Update(planAdmittedMsg{runID: m.activeRunID, name: plan.Name(), taskCount: plan.TaskCount()})
+	return updated.(model)
+}
+
+// STAGING NEVER OWNS A USER'S PLAN. Restart, bare resume and named resume each
+// prefer a fixed name a user can also choose. When the user already has a plan
+// there, the generated plan is staged under the next free name, the user's
+// bytes stay exactly as written, and admission removes only what was staged.
+func TestStagingNeverReplacesAUserPlanOfTheSameName(t *testing.T) {
+	cases := []struct {
+		name      string
+		collision string
+		stage     func(t *testing.T, m model) (model, string)
+	}{
+		{
+			name:      "restart",
+			collision: restartPlanName,
+			stage: func(t *testing.T, m model) (model, string) {
+				updated, _ := m.restartLastPlan()
+				return updated.(model), transcriptText(updated.(model).transcript)
+			},
+		},
+		{
+			name:      "bare resume",
+			collision: resumePlanName,
+			stage: func(t *testing.T, m model) (model, string) {
+				updated, _ := m.resumeLastPlan()
+				return updated.(model), transcriptText(updated.(model).transcript)
+			},
+		},
+		{
+			name:      "named resume",
+			collision: "sweep_resume",
+			stage: func(t *testing.T, m model) (model, string) {
+				stored, err := specialist.FindSavedPlan(m.planPaths, "sweep")
+				if err != nil {
+					t.Fatal(err)
+				}
+				name, notice, ok := m.resumeSavedPlan(stored)
+				if !ok {
+					t.Fatalf("named resume refused: %s", notice)
+				}
+				return m, notice + "\nstaged=" + name
+			},
+		},
 	}
-	after, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(after) != string(before) {
-		t.Fatal("restart changed the existing user plan")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, paths, plan := resumeModel(t)
+			m.planProgress.PlanAdmitted(plan)
+			m.planProgress.TaskDispatched(specialist.Task{ID: plan.Order()[0]})
+			userPath, before := seedUserPlan(t, paths, tc.collision)
+
+			m, text := tc.stage(t, m)
+			want := tc.collision + "_2"
+			if !strings.Contains(text, `"`+want+`"`) && !strings.Contains(text, "staged="+want) {
+				t.Fatalf("staging did not move to the free name %q: %s", want, text)
+			}
+			if after, err := os.ReadFile(userPath); err != nil || string(after) != string(before) {
+				t.Fatalf("staging changed the user's %s plan (err=%v):\nbefore %s\nafter  %s", tc.collision, err, before, after)
+			}
+			staged, err := specialist.FindSavedPlan(paths, want)
+			if err != nil {
+				t.Fatalf("nothing staged under %q: %v", want, err)
+			}
+			if _, err := specialist.ParsePlan(staged.Args, m.savedPlanLimits()); err != nil {
+				t.Fatalf("the staged plan does not validate: %v", err)
+			}
+
+			m = admitPlan(t, m, plan)
+			if _, err := os.Stat(staged.Path); !os.IsNotExist(err) {
+				t.Fatalf("the staged plan outlived its admission: %v", err)
+			}
+			if after, err := os.ReadFile(userPath); err != nil || string(after) != string(before) {
+				t.Fatalf("admission changed the user's %s plan (err=%v)", tc.collision, err)
+			}
+		})
 	}
 }
 
-func TestBareResumeRefusesToOverwriteAUserPlan(t *testing.T) {
+// A SECOND RESTART MUST WORK. Exclusive publication alone made the first
+// restart's own staged file block every later restart in the project, with an
+// "already exists" error about a file the user never wrote.
+func TestRepeatedRestartReusesTheStagingNameAfterAdmission(t *testing.T) {
 	m, paths, plan := resumeModel(t)
 	m.planProgress.PlanAdmitted(plan)
-	m.planProgress.TaskDispatched(specialist.Task{ID: plan.Order()[0]})
-	if _, err := specialist.SavePlan(paths.ProjectRoot, paths.ProjectDir, resumePlanName, plan); err != nil {
-		t.Fatal(err)
-	}
-
-	updated, cmd := m.resumeLastPlan()
-	if cmd != nil {
-		t.Fatal("a colliding resume started a turn")
-	}
-	text := transcriptText(updated.(model).transcript)
-	if !strings.Contains(text, "already exists") || !strings.Contains(text, resumePlanName) {
-		t.Fatalf("collision was not explained: %s", text)
+	for round := 1; round <= 2; round++ {
+		updated, _ := m.restartLastPlan()
+		m = updated.(model)
+		text := transcriptText(m.transcript)
+		if strings.Contains(text, "already exists") {
+			t.Fatalf("round %d: restart refused over its own staged plan: %s", round, text)
+		}
+		staged, err := specialist.FindSavedPlan(paths, restartPlanName)
+		if err != nil {
+			t.Fatalf("round %d: nothing staged under %q: %v", round, restartPlanName, err)
+		}
+		m = admitPlan(t, m, plan)
+		if _, err := os.Stat(staged.Path); !os.IsNotExist(err) {
+			t.Fatalf("round %d: the staged plan outlived its admission: %v", round, err)
+		}
 	}
 }
 
-func TestNamedResumeRefusesToOverwriteAUserPlan(t *testing.T) {
+// Ownership is the staged bytes, not the name: a staged file someone edited
+// before admission is theirs now and is left in place.
+func TestAdmissionLeavesAnEditedStagedPlanAlone(t *testing.T) {
 	m, paths, plan := resumeModel(t)
 	m.planProgress.PlanAdmitted(plan)
-	m.planProgress.TaskDispatched(specialist.Task{ID: plan.Order()[0]})
-	stored, err := specialist.FindSavedPlan(paths, "sweep")
+	updated, _ := m.restartLastPlan()
+	m = updated.(model)
+	if _, err := specialist.FindSavedPlan(paths, restartPlanName); err != nil {
+		t.Fatalf("nothing staged: %v", err)
+	}
+	editedPath, edited := seedUserPlan(t, paths, restartPlanName)
+
+	m = admitPlan(t, m, plan)
+	if after, err := os.ReadFile(editedPath); err != nil || string(after) != string(edited) {
+		t.Fatalf("admission removed or changed an edited staged plan (err=%v)", err)
+	}
+}
+
+// Admission of a DIFFERENT plan does not consume a staged one the model has not
+// run yet.
+func TestAdmittingAnotherPlanKeepsTheStagedOne(t *testing.T) {
+	m, paths, plan := resumeModel(t)
+	m.planProgress.PlanAdmitted(plan)
+	updated, _ := m.restartLastPlan()
+	m = updated.(model)
+	other, err := specialist.ParsePlan(map[string]any{
+		"name":   "other",
+		"tasks":  []any{map[string]any{"id": "y", "prompt": "unrelated"}},
+		"budget": map[string]any{"max_workers": float64(1)},
+	}, specialist.Limits{MaxTasks: 20, ParentTools: []string{"read_file"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	collision := stored.Name + "_resume"
-	if _, err := specialist.SavePlan(paths.ProjectRoot, paths.ProjectDir, collision, plan); err != nil {
-		t.Fatal(err)
-	}
-
-	_, notice, ok := m.resumeSavedPlan(stored)
-	if ok {
-		t.Fatal("named resume overwrote an existing user plan")
-	}
-	if !strings.Contains(notice, "already exists") || !strings.Contains(notice, collision) {
-		t.Fatalf("collision was not explained: %s", notice)
+	m = admitPlan(t, m, other)
+	if _, err := specialist.FindSavedPlan(paths, restartPlanName); err != nil {
+		t.Fatalf("an unrelated admission removed the staged plan: %v", err)
 	}
 }
 
