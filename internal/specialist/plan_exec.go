@@ -107,7 +107,8 @@ type TaskResult struct {
 	Signal string
 	// ScratchpadPath is where the executor persisted this task's FULL output, so
 	// a dependent handed a truncated excerpt can read the rest. Empty when the
-	// plan kept no scratchpad, which is the pre-existing behaviour.
+	// plan kept no scratchpad, which is the pre-existing behaviour, and for a
+	// FAILED task, whose output the briefing does not pass on either.
 	//
 	// WRITTEN BY THE EXECUTOR, never by the task. A read-only plan task has no
 	// write tool at all, and granting it one would flip RequiresIsolation() and
@@ -552,17 +553,20 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 	harvest := func(completion taskCompletion) {
 		slots.release()
 		id, result, err := completion.id, completion.result, completion.err
-		// PERSISTED HERE, at the one point every completion passes through,
-		// whatever its outcome. A cancelled task's partial findings are evidence
-		// — plan_exec already says so where it briefs dependents — so they are
-		// worth keeping for the same reason a successful task's are, and putting
-		// this at the single chokepoint means no later outcome branch can forget.
+		// PERSISTED ONLY WHERE THE BRIEFING WOULD SHOW IT: a succeeded task's
+		// answer and a cancelled task's partial findings, which are evidence. A
+		// FAILED task's output is a diagnostic or an answer already judged wrong,
+		// and the briefing deliberately refuses to pass it on — recording it to
+		// a directory every task can list would hand it on anyway. Called from
+		// each branch once the outcome is final, not before it is decided.
 		//
 		// A FAILURE TO RECORD IS NOT A FAILURE OF THE TASK. The scratchpad is an
 		// optimisation over the excerpt the dependent gets anyway; losing the
 		// disk copy must never turn a task that ran into a task that failed.
-		if path, recordErr := scratchpad.Record(id, strings.TrimSpace(result.Output)); recordErr == nil {
-			result.ScratchpadPath = path
+		keepOnPad := func(result *TaskResult) {
+			if path, recordErr := scratchpad.Record(id, strings.TrimSpace(result.Output)); recordErr == nil {
+				result.ScratchpadPath = path
+			}
 		}
 		result.ID = id
 		if result.Duration == 0 {
@@ -643,6 +647,7 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 						result.Err += " (the child was terminated by " + result.Signal + ")"
 					}
 				}
+				keepOnPad(&result)
 				results[id] = result
 				failed[id] = true
 				report.Cancelled++
@@ -672,6 +677,7 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 		// executor is built to prevent; the runner is the only thing that watched
 		// the task run, so when it names an outcome, that outcome stands.
 		if result.Outcome == TaskCancelled {
+			keepOnPad(&result)
 			results[id] = result
 			// Its dependents are blocked, exactly as for a failure: a task that
 			// was cut short did not produce what they were waiting for.
@@ -688,6 +694,7 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 		// to match against. Only a succeeded task is matched by identity; a failed
 		// one re-runs regardless, so its result carries none.
 		result.Identity = taskIdentity(tasks[id])
+		keepOnPad(&result)
 		results[id] = result
 		report.Succeeded++
 		recordCompleted(recorder, result)
