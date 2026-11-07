@@ -352,3 +352,48 @@ func TestTheHandedCancelStopsThePlanAndRecordsCancellations(t *testing.T) {
 		t.Fatalf("status = %q; one success and two cancellations is partial", report.Status)
 	}
 }
+
+// A NON-STALL RETRY DOES NOT SPEND THE STALL BUDGET. A decline has its own
+// one-shot retry; it used to be counted against max_retries through the attempt
+// number, so a decline followed by a stall got none of the documented one stall
+// retry and failed a task that a third attempt would have finished.
+func TestADeclineRetryDoesNotSpendTheStallBudget(t *testing.T) {
+	plan := mustPlan(t, []any{task("a", "x")}, retryBudget(nil), readOnlyLimits())
+	attempts := 0
+	report := ExecutePlan(context.Background(), plan, []string{"read_file"},
+		func(_ context.Context, req PlanTaskRequest) (TaskResult, error) {
+			attempts++
+			switch attempts {
+			case 1:
+				return TaskResult{ID: "a", Outcome: TaskFailed, Declined: true, Err: "could not proceed"}, nil
+			case 2:
+				return TaskResult{ID: "a", Outcome: TaskFailed, Stalled: true, Err: "no output"}, nil
+			default:
+				return TaskResult{ID: "a", Outcome: TaskSucceeded, Output: "done"}, nil
+			}
+		}, nil)
+	if attempts != 3 || report.Succeeded != 1 {
+		t.Fatalf("attempts = %d, succeeded = %d; the decline retry consumed the stall retry", attempts, report.Succeeded)
+	}
+}
+
+// AND THE EXHAUSTION MESSAGE COUNTS ONLY THE STALLS, so a declined attempt is
+// not reported as one that produced no output.
+func TestTheStallExhaustionCountsOnlyStalledAttempts(t *testing.T) {
+	plan := mustPlan(t, []any{task("a", "x")}, retryBudget(nil), readOnlyLimits())
+	attempts := 0
+	report := ExecutePlan(context.Background(), plan, []string{"read_file"},
+		func(_ context.Context, req PlanTaskRequest) (TaskResult, error) {
+			attempts++
+			if attempts == 1 {
+				return TaskResult{ID: "a", Outcome: TaskFailed, Declined: true, Err: "could not proceed"}, nil
+			}
+			return TaskResult{ID: "a", Outcome: TaskFailed, Stalled: true, Err: "no output"}, nil
+		}, nil)
+	if attempts != 3 {
+		t.Fatalf("attempts = %d; want a decline retry plus the default one stall retry", attempts)
+	}
+	if got := report.Tasks[0].Err; !strings.Contains(got, "each of 2 attempts") {
+		t.Errorf("the failure miscounts the stalled attempts: %q", got)
+	}
+}

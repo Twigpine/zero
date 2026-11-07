@@ -1024,6 +1024,12 @@ func runTaskWithRetries(ctx context.Context, policy retryPolicy, run PlanRunner)
 	// the same reason: a provider failing twice in a row is having an outage, not
 	// a bad moment, and a second retry spends another child to learn that.
 	retriedAfterProviderFailure := false
+	// stallRetries counts STALL retries only, and it is what maxRetries bounds.
+	// The attempt number cannot stand in for it: a decline, provider or model
+	// fallback retry each has its own one-shot bound, and charging them to the
+	// stall budget left a decline-then-stall with none of the stall retries the
+	// budget documents.
+	stallRetries := 0
 
 	for attempt := 1; ; attempt++ {
 		// max_tokens_per_task BOUNDS THE TASK, across every attempt. Each retry
@@ -1159,11 +1165,12 @@ func runTaskWithRetries(ctx context.Context, policy retryPolicy, run PlanRunner)
 			// Anything other than a stall is an ANSWER, including a failure. The
 			// child ran and reported; running it again buys the same report.
 			return result, err
-		case attempt > policy.maxRetries:
+		case stallRetries >= policy.maxRetries:
 			// Out of attempts. Restate the failure with the count, because
 			// "stalled" and "stalled on every one of three attempts" call for
-			// different responses.
-			result.Err = stallError(policy.task.ID, policy.stallTimeout, attempt).Error()
+			// different responses. The count is of STALLED attempts, so a
+			// declined attempt is not reported as a silent one.
+			result.Err = stallError(policy.task.ID, policy.stallTimeout, stallRetries+1).Error()
 			return result, err
 		case ctx.Err() != nil:
 			// The run was stopped. NOT retried, and not relabelled either — the
@@ -1172,9 +1179,12 @@ func runTaskWithRetries(ctx context.Context, policy retryPolicy, run PlanRunner)
 		case policy.wallClock.exhausted():
 			// The plan's wall budget is gone. Another attempt would overrun it
 			// on behalf of the task that already exhausted it.
-			result.Err = stallError(policy.task.ID, policy.stallTimeout, attempt).Error()
+			result.Err = stallError(policy.task.ID, policy.stallTimeout, stallRetries+1).Error()
 			return result, err
 		}
+		// Every case above returns or continues, so only a stall that is about
+		// to be retried reaches here.
+		stallRetries++
 	}
 }
 
