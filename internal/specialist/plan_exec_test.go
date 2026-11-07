@@ -531,3 +531,31 @@ func TestARealFailureIsNotReclassifiedAsCancelled(t *testing.T) {
 		t.Fatalf("status = %q, want %q", report.Status, PlanFailed)
 	}
 }
+
+// A PLAN WHOSE TASKS GENUINELY FAILED IS FAILED, even if the rest were then
+// cancelled. terminalStatus checked only "nothing succeeded and something was
+// cancelled", so a real failure followed by a stop reported "cancelled" — a
+// deliberate stop — in Meta["plan_status"] and the durable plan event.
+func TestAGenuineFailureIsNotReportedAsACancelledPlan(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	plan := mustPlan(t, []any{task("a", "x"), task("b", "y")}, okBudget(), readOnlyLimits())
+	report := ExecutePlan(ctx, plan, []string{"read_file"},
+		func(ctx context.Context, req PlanTaskRequest) (TaskResult, error) {
+			if req.Task.ID == "a" {
+				return TaskResult{ID: "a", Outcome: TaskFailed, Err: "compile error"}, nil
+			}
+			cancel() // the user stops the plan while b runs
+			return TaskResult{ID: "b", Outcome: TaskFailed, Err: ctx.Err().Error()}, ctx.Err()
+		}, nil)
+	if report.Failed != 1 || report.Cancelled != 1 || report.Succeeded != 0 {
+		t.Fatalf("fixture did not produce one failure and one cancellation: %+v", report)
+	}
+	if report.Status != PlanFailed {
+		t.Fatalf("status = %q, want %q: a task genuinely failed", report.Status, PlanFailed)
+	}
+	// The pure-stop case is unchanged.
+	if got := terminalStatus(PlanReport{Cancelled: 2}); got != PlanCancelled {
+		t.Errorf("a plan stopped before anything finished = %q, want %q", got, PlanCancelled)
+	}
+}

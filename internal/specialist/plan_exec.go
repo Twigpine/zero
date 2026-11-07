@@ -28,8 +28,9 @@ const (
 	PlanPartial PlanStatus = "partial"
 	// PlanFailed: no task succeeded.
 	PlanFailed PlanStatus = "failed"
-	// PlanCancelled: the run was stopped and nothing had succeeded yet. Its own
-	// status so a deliberate stop is never reported as a failure.
+	// PlanCancelled: the run was stopped, nothing had succeeded yet and nothing
+	// had failed. Its own status so a deliberate stop is never reported as a
+	// failure — and a genuine failure is never reported as a deliberate stop.
 	PlanCancelled PlanStatus = "cancelled"
 )
 
@@ -1192,8 +1193,13 @@ func runTaskWithRetries(ctx context.Context, policy retryPolicy, run PlanRunner)
 // status precisely so a mostly-failed plan can never be reported as success.
 func terminalStatus(report PlanReport) PlanStatus {
 	switch {
-	case report.Succeeded == 0 && report.Cancelled > 0:
+	case report.Succeeded == 0 && report.Cancelled > 0 && report.Failed == 0:
 		// Stopped before anything finished. Not a failure — nothing broke.
+		//
+		// NOTHING BROKE is the condition, so it is checked: a plan whose
+		// tasks genuinely failed before the stop is FAILED, not cancelled.
+		// Reporting it as a deliberate stop hid the one result worth reading
+		// from Meta["plan_status"] and the durable plan event.
 		return PlanCancelled
 	case report.Succeeded == 0:
 		return PlanFailed
