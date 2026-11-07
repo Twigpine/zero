@@ -382,6 +382,8 @@ type execOptions struct {
 	// granted external path. Empty for a run that wired none, which is every
 	// existing caller.
 	parentReadRoots []string
+	// wallTime is the time source for the wall budget; zero is the real clock.
+	wallTime wallTime
 }
 
 // ContextWindowFunc reports a model's context window in tokens, 0 when unknown.
@@ -470,7 +472,7 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 	//
 	// A CLOCK RATHER THAN context.WithTimeout, because the budget has to be able
 	// to move: a plan the user paused is not spending it. See planWallClock.
-	wallClock := newPlanWallClock(planWallBudget(plan.Budget()), nil)
+	wallClock := newPlanWallClock(planWallBudget(plan.Budget()), options.wallTime)
 	if wallClock != nil {
 		var cancelWall context.CancelFunc
 		ctx, cancelWall = context.WithCancel(ctx)
@@ -728,9 +730,14 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 		// longer than the budget meant the plan was already dead when the user
 		// resumed it — stopped, and told its wall budget elapsed, by time in
 		// which no task ran.
-		pausedAt := time.Now()
+		//
+		// HELD BEFORE BLOCKING, not credited after: the clock must know the walk
+		// is parked while it is parked, or its timer fires mid-pause on the
+		// pre-pause deadline. Only time with no task in flight is given back —
+		// see planWallClock.
+		wallClock.holdDispatch()
 		waitWhilePaused(recorder, ctx)
-		wallClock.addPaused(time.Since(pausedAt))
+		wallClock.releaseDispatch()
 
 		// Cancellation is checked FIRST and recorded as its own outcome. Once
 		// the run is cancelled every remaining task is cancelled too — they are
@@ -852,12 +859,17 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 		}
 		slots.take()
 		started := time.Now()
+		// Counted in flight HERE, on the walk's goroutine, so the very next pause
+		// gate already knows it is running; counted out BEFORE the completion is
+		// queued, because a parked walk does not harvest it.
+		finished := wallClock.taskStarted()
 		go func(id string) {
 			// Every goroutine gets recover(): a panic in one task must not take
 			// the plan with it, and the slot must be returned either way or the
 			// scheduler waits forever on a worker that will never report.
 			defer func() {
 				if panicked := recover(); panicked != nil {
+					finished()
 					slots.done <- taskCompletion{
 						id: id, started: started,
 						result: TaskResult{Outcome: TaskFailed, Err: fmt.Sprintf("task panicked: %v", panicked)},
@@ -865,6 +877,7 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 				}
 			}()
 			result, err := runTaskWithRetries(ctx, policy, run)
+			finished()
 			slots.done <- taskCompletion{id: id, result: result, err: err, started: started}
 		}(id)
 	}

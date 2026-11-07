@@ -111,15 +111,18 @@ func TestAUserStopIsNotReportedAsAWallExpiry(t *testing.T) {
 // in which no task ran.
 func TestPausedTimeIsNotChargedToTheWallBudget(t *testing.T) {
 	now := time.Unix(1000, 0)
-	clock := newPlanWallClock(30*time.Minute, func() time.Time { return now })
+	clock := newPlanWallClock(30*time.Minute, wallTime{now: func() time.Time { return now }})
 
-	// Twenty minutes pass, all of it paused.
+	// Twenty minutes pass, all of it paused with nothing in flight.
+	clock.holdDispatch()
 	now = now.Add(20 * time.Minute)
-	clock.addPaused(20 * time.Minute)
-
 	if clock.exhausted() {
 		t.Fatal("a plan paused for twenty minutes of a thirty-minute budget is out of time")
 	}
+	if got := clock.remaining(); got != 30*time.Minute {
+		t.Fatalf("remaining = %v mid-pause, want the full 30m: paused time was charged to the budget", got)
+	}
+	clock.releaseDispatch()
 	if got := clock.remaining(); got != 30*time.Minute {
 		t.Fatalf("remaining = %v, want the full 30m: paused time was charged to the budget", got)
 	}
@@ -137,6 +140,47 @@ func TestPausedTimeIsNotChargedToTheWallBudget(t *testing.T) {
 	}
 }
 
+// A PAUSE HOLDS DISPATCH, NOT WORK ALREADY IN FLIGHT. With max_workers > 1 a task
+// can keep running through a pause, and that time is real spend: only the part
+// of the pause where nothing ran is given back.
+func TestAPauseDoesNotRefundTimeATaskWasRunning(t *testing.T) {
+	now := time.Unix(1000, 0)
+	clock := newPlanWallClock(10*time.Minute, wallTime{now: func() time.Time { return now }})
+
+	finished := clock.taskStarted()
+	now = now.Add(time.Minute) // 1m running before the pause
+	clock.holdDispatch()
+	now = now.Add(3 * time.Minute) // paused, but the task is still running
+	if got := clock.remaining(); got != 6*time.Minute {
+		t.Fatalf("remaining = %v, want 6m: a pause refunded time a task spent running", got)
+	}
+	finished()
+	// Idempotent: a recover path may call it again.
+	finished()
+	// Paused AND idle: credited.
+	now = now.Add(5 * time.Minute)
+	if got := clock.remaining(); got != 6*time.Minute {
+		t.Fatalf("remaining = %v, want 6m: idle paused time was charged", got)
+	}
+	clock.releaseDispatch()
+	now = now.Add(2 * time.Minute)
+	if got := clock.remaining(); got != 4*time.Minute {
+		t.Fatalf("remaining = %v after resuming, want 4m", got)
+	}
+
+	// A task started while held (not something the walk does, but the clock
+	// must stay truthful) ends the idle stretch.
+	clock.holdDispatch()
+	now = now.Add(time.Minute)
+	finished = clock.taskStarted()
+	now = now.Add(time.Minute)
+	finished()
+	clock.releaseDispatch()
+	if got := clock.remaining(); got != 3*time.Minute {
+		t.Fatalf("remaining = %v, want 3m: the running minute inside the hold was refunded", got)
+	}
+}
+
 // An unbounded clock is nil, and every method has to survive that — the plan
 // path calls all of them without checking.
 func TestAnAbsentWallClockIsUnbounded(t *testing.T) {
@@ -150,8 +194,10 @@ func TestAnAbsentWallClockIsUnbounded(t *testing.T) {
 	if clock.remaining() <= 0 {
 		t.Error("an unbounded clock reported no time left")
 	}
-	clock.addPaused(time.Minute)
-	if newPlanWallClock(0, nil) != nil || newPlanWallClock(-time.Second, nil) != nil {
+	clock.holdDispatch()
+	clock.releaseDispatch()
+	clock.taskStarted()()
+	if newPlanWallClock(0, wallTime{}) != nil || newPlanWallClock(-time.Second, wallTime{}) != nil {
 		t.Error("a non-positive budget must produce no clock at all")
 	}
 }
