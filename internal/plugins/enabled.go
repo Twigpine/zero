@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -118,18 +119,28 @@ func SetEnabledByID(options LoadOptions, id string, enabled bool) (SetEnabledRes
 // holds the installtxn lock for the plugin's install root.
 //
 // The lock only serializes cooperating installers; it does not stop the plugin
-// directory from being swapped for a link after discovery found it. So the
-// manifest is read and published through a handle pinned to that directory
-// (openPluginDir), never by re-resolving its path.
+// directory from being swapped after discovery found it. So the whole update
+// works on one directory, pinned by openPluginDir: the manifest is read and
+// published, and the tree hashed for the lockfile, through that handle, never
+// by re-resolving the path.
 func setEnabledLocked(plugin LoadedPlugin, enabled bool) (bool, error) {
-	dir, err := openPluginDir(plugin)
+	pinned, err := openPluginDir(plugin)
 	if err != nil {
 		return false, err
 	}
-	defer dir.Close()
+	defer pinned.Close()
+	return setEnabledPinned(plugin, pinned, enabled)
+}
 
+// setEnabledPinned is setEnabledLocked on an already pinned plugin directory.
+//
+// The edit lands in the pinned directory even if the path now names another
+// one, so before refreshing the lockfile or reporting any result it confirms
+// that the directory entry still is the pinned directory. Otherwise the
+// command would report a state that the installed plugin does not have.
+func setEnabledPinned(plugin LoadedPlugin, pinned *pinnedPluginDir, enabled bool) (bool, error) {
 	manifestName := filepath.Base(plugin.ManifestPath)
-	raw, perm, err := readManifest(dir, manifestName)
+	raw, perm, err := readManifest(pinned.dir, manifestName)
 	if err != nil {
 		return false, err
 	}
@@ -138,23 +149,32 @@ func setEnabledLocked(plugin LoadedPlugin, enabled bool) (bool, error) {
 		return false, err
 	}
 	if !changed {
+		if err := pinned.verifyLive(); err != nil {
+			return false, err
+		}
 		return false, nil
 	}
 
 	// Read the lockfile before the edit so the refresh below only runs when the
 	// installed tree still matched its recorded hash; a toggle must never mask
 	// pre-existing drift.
-	lock, entry, hashClean := cleanLockEntry(plugin)
+	lock, entry, hashClean := cleanLockEntry(plugin, pinned.dir)
 
-	if err := publishManifest(dir, manifestName, data, perm); err != nil {
+	if err := publishManifest(pinned.dir, manifestName, data, perm); err != nil {
 		return false, err
 	}
 	if !hashClean {
+		if err := pinned.verifyLive(); err != nil {
+			return false, err
+		}
 		return true, nil
 	}
-	after, err := hashTree(plugin.PluginDir)
+	after, err := hashRootedTree(pinned.dir)
 	if err != nil {
 		return true, fmt.Errorf("plugin manifest updated but %s hash refresh failed: %w", LockFileName, err)
+	}
+	if err := pinned.verifyLive(); err != nil {
+		return false, err
 	}
 	entry.Hash = after
 	lock[plugin.ID] = entry
@@ -164,45 +184,80 @@ func setEnabledLocked(plugin LoadedPlugin, enabled bool) (bool, error) {
 	return true, nil
 }
 
-// openPluginDir returns a handle on the plugin directory discovery found,
-// confined to the plugin's install root.
+// errPluginDirReplaced reports that the plugin's directory entry no longer
+// names the directory the toggle pinned and edited.
+var errPluginDirReplaced = errors.New("plugin directory was replaced while it was being updated; the plugin installed there now was not changed")
+
+// pinnedPluginDir is the plugin directory discovery found, held open for the
+// length of one toggle.
+type pinnedPluginDir struct {
+	root *os.Root // the plugin's install root
+	name string   // the plugin directory's entry name in root
+	path string   // the plugin directory's path, for messages
+	dir  *os.Root // the plugin directory itself
+}
+
+// Close releases both handles.
+func (p *pinnedPluginDir) Close() {
+	_ = p.dir.Close()
+	_ = p.root.Close()
+}
+
+// verifyLive confirms that the plugin's entry in its install root is still a
+// real directory, not a symlink, junction, or other reparse point, and is the
+// very directory p.dir holds open.
+func (p *pinnedPluginDir) verifyLive() error {
+	opened, err := p.dir.Stat(".")
+	if err != nil {
+		return fmt.Errorf("inspect plugin directory: %w", err)
+	}
+	entry, err := p.root.Lstat(p.name)
+	if errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("%w: %s", errPluginDirReplaced, p.path)
+	}
+	if err != nil {
+		return fmt.Errorf("inspect plugin directory: %w", err)
+	}
+	if entry.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+		return fmt.Errorf("%w: plugin directory %s", pathjail.ErrReparse, p.path)
+	}
+	if !os.SameFile(entry, opened) {
+		return fmt.Errorf("%w: %s", errPluginDirReplaced, p.path)
+	}
+	return nil
+}
+
+// openPluginDir pins the plugin directory discovery found, confined to the
+// plugin's install root.
 //
-// The directory entry must be a real directory, not a symlink, junction, or
-// other reparse point, and it must be the very directory the handle opened: a
-// link swapped in before the open is refused here, and one swapped in after it
-// cannot redirect anything, because every later read and write is relative to
-// the returned handle rather than to a path.
-func openPluginDir(plugin LoadedPlugin) (*os.Root, error) {
+// A link swapped in before the open is refused here. One swapped in after it
+// cannot redirect anything, because every later read, write, and hash is
+// relative to the returned handle rather than to a path; verifyLive then
+// detects that the path no longer names the edited directory.
+func openPluginDir(plugin LoadedPlugin) (*pinnedPluginDir, error) {
 	root, name, err := pathjail.Open(plugin.Root, plugin.PluginDir)
 	if err != nil {
 		return nil, fmt.Errorf("open plugin directory: %w", err)
 	}
-	defer root.Close()
 	if name == "." || filepath.Base(name) != name {
+		_ = root.Close()
 		return nil, fmt.Errorf("%w: plugin directory %s is not an entry of %s", pathjail.ErrEscapes, plugin.PluginDir, plugin.Root)
 	}
 	if err := pathjail.RefuseReparse(root, name); err != nil {
+		_ = root.Close()
 		return nil, fmt.Errorf("open plugin directory: %w", err)
 	}
 	dir, err := root.OpenRoot(name)
 	if err != nil {
+		_ = root.Close()
 		return nil, fmt.Errorf("open plugin directory: %w", err)
 	}
-	opened, err := dir.Stat(".")
-	if err != nil {
-		_ = dir.Close()
-		return nil, fmt.Errorf("inspect plugin directory: %w", err)
+	pinned := &pinnedPluginDir{root: root, name: name, path: plugin.PluginDir, dir: dir}
+	if err := pinned.verifyLive(); err != nil {
+		pinned.Close()
+		return nil, err
 	}
-	entry, err := root.Lstat(name)
-	if err != nil {
-		_ = dir.Close()
-		return nil, fmt.Errorf("inspect plugin directory: %w", err)
-	}
-	if entry.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 || !os.SameFile(entry, opened) {
-		_ = dir.Close()
-		return nil, fmt.Errorf("%w: plugin directory %s changed while it was being opened", pathjail.ErrReparse, plugin.PluginDir)
-	}
-	return dir, nil
+	return pinned, nil
 }
 
 // readManifest reads name from dir and returns its bytes and permission bits.
@@ -254,9 +309,9 @@ func publishManifest(dir *os.Root, name string, data []byte, perm os.FileMode) e
 	return nil
 }
 
-// cleanLockEntry reports whether the tree on disk still matches the lockfile
-// entry recorded for the plugin and returns both for a refresh.
-func cleanLockEntry(plugin LoadedPlugin) (map[string]LockEntry, LockEntry, bool) {
+// cleanLockEntry reports whether the pinned plugin directory dir still matches
+// the lockfile entry recorded for the plugin and returns both for a refresh.
+func cleanLockEntry(plugin LoadedPlugin, dir *os.Root) (map[string]LockEntry, LockEntry, bool) {
 	lock, err := ReadLock(plugin.Root)
 	if err != nil {
 		return nil, LockEntry{}, false
@@ -265,7 +320,7 @@ func cleanLockEntry(plugin LoadedPlugin) (map[string]LockEntry, LockEntry, bool)
 	if !ok {
 		return nil, LockEntry{}, false
 	}
-	current, err := hashTree(plugin.PluginDir)
+	current, err := hashRootedTree(dir)
 	if err != nil || current != entry.Hash {
 		return nil, LockEntry{}, false
 	}

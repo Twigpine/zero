@@ -425,6 +425,79 @@ func TestSetEnabledRefusesASwappedPluginDirectory(t *testing.T) {
 	}
 }
 
+// TestSetEnabledDetectsAPluginDirectoryReplacedAfterOpening replaces the live
+// plugin directory after the toggle pinned it. The edit then lands in the
+// moved-away directory, so the toggle must not refresh the lockfile from either
+// tree and must not report success: the plugin installed at the path now is
+// unchanged.
+func TestSetEnabledDetectsAPluginDirectoryReplacedAfterOpening(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		pinned  bool // the pinned manifest's enabled value
+		changes bool // whether disabling it is a real edit
+	}{
+		{"edit", true, true},
+		{"no-op", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			manifestPath := writeRawManifest(t, root, "demo", demoManifest(tc.pinned))
+			pluginDir := filepath.Dir(manifestPath)
+			hash, err := hashTree(pluginDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := writeLock(root, map[string]LockEntry{"zero.demo": {Source: "./demo", Hash: hash}}); err != nil {
+				t.Fatal(err)
+			}
+			lockPath := filepath.Join(root, LockFileName)
+			lockBefore, err := os.ReadFile(lockPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plugin, ok, err := FindByID(enableTestOptions(root), "zero.demo")
+			if err != nil || !ok {
+				t.Fatalf("FindByID: ok=%v err=%v", ok, err)
+			}
+			pinned, err := openPluginDir(plugin)
+			if err != nil {
+				t.Fatalf("openPluginDir: %v", err)
+			}
+			defer pinned.Close()
+
+			moved := filepath.Join(t.TempDir(), "moved-away")
+			if err := os.Rename(pluginDir, moved); err != nil {
+				t.Fatal(err)
+			}
+			replacement := strings.Replace(demoManifest(true), `"version": "1.0.0"`, `"version": "2.0.0"`, 1)
+			writeRawManifest(t, root, "demo", replacement)
+
+			// The lockfile check hashes the pinned tree, which still matches the
+			// recorded hash, not the replacement now at the path.
+			if _, _, clean := cleanLockEntry(plugin, pinned.dir); !clean {
+				t.Error("cleanLockEntry hashed the replacement at the path instead of the pinned directory")
+			}
+
+			if _, err := setEnabledPinned(plugin, pinned, false); !errors.Is(err, errPluginDirReplaced) {
+				t.Fatalf("setEnabledPinned after the directory was replaced: err = %v, want %v", err, errPluginDirReplaced)
+			}
+			if after, err := os.ReadFile(manifestPath); err != nil || string(after) != replacement {
+				t.Fatalf("the replacement manifest changed (err %v): %q", err, after)
+			}
+			if after, err := os.ReadFile(lockPath); err != nil || string(after) != string(lockBefore) {
+				t.Fatalf("the lockfile changed (err %v):\n got %s\nwant %s", err, after, lockBefore)
+			}
+			movedRaw, err := os.ReadFile(filepath.Join(moved, "plugin.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.changes != (string(movedRaw) != demoManifest(tc.pinned)) {
+				t.Fatalf("pinned manifest edit = %v, want %v: %q", !tc.changes, tc.changes, movedRaw)
+			}
+		})
+	}
+}
+
 func TestSetEnabledByIDRespectsUserOnlyFilter(t *testing.T) {
 	dir := t.TempDir()
 	userRoot := filepath.Join(dir, "user")

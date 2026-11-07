@@ -14,8 +14,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -567,15 +569,29 @@ func validInstallID(id string) bool {
 // sorted order. Each file contributes its plugin-relative path, executable bit,
 // and bytes, so renames, mode flips, and content edits all change the hash.
 func hashTree(root string) (string, error) {
+	handle, err := os.OpenRoot(root)
+	if err != nil {
+		return "", err
+	}
+	defer handle.Close()
+	return hashRootedTree(handle)
+}
+
+// hashRootedTree is hashTree over a directory that is already open. Walking
+// relative to the handle hashes the directory it names even if its path is
+// replaced meanwhile, and keeps the walk inside it.
+func hashRootedTree(handle *os.Root) (string, error) {
 	hasher := sha256.New()
-	if err := hashTreeInto(hasher, root, root); err != nil {
+	if err := hashTreeInto(hasher, handle.FS(), "."); err != nil {
 		return "", err
 	}
 	return "sha256:" + hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
-func hashTreeInto(hasher io.Writer, root string, dir string) error {
-	entries, err := os.ReadDir(dir)
+// hashTreeInto hashes dir, a slash-separated path relative to fsys, into
+// hasher.
+func hashTreeInto(hasher io.Writer, fsys fs.FS, dir string) error {
+	entries, err := fs.ReadDir(fsys, dir)
 	if err != nil {
 		return err
 	}
@@ -588,8 +604,8 @@ func hashTreeInto(hasher io.Writer, root string, dir string) error {
 		if name == ".git" {
 			continue
 		}
-		path := filepath.Join(dir, name)
-		info, err := os.Lstat(path)
+		rel := path.Join(dir, name)
+		info, err := fs.Lstat(fsys, rel)
 		if err != nil {
 			return err
 		}
@@ -598,25 +614,21 @@ func hashTreeInto(hasher io.Writer, root string, dir string) error {
 			// Skipped by copyTree, so excluded from the hash too.
 			continue
 		case info.IsDir():
-			if err := hashTreeInto(hasher, root, path); err != nil {
+			if err := hashTreeInto(hasher, fsys, rel); err != nil {
 				return err
 			}
 		case info.Mode().IsRegular():
-			rel, err := filepath.Rel(root, path)
-			if err != nil {
-				return err
-			}
 			executable := 0
 			if info.Mode().Perm()&0o111 != 0 {
 				executable = 1
 			}
 			// Null-delimited header keeps file boundaries unambiguous (paths cannot
 			// contain null bytes) so two trees cannot collide by shifting bytes.
-			header := fmt.Sprintf("%s\x00%d\x00", filepath.ToSlash(rel), executable)
+			header := fmt.Sprintf("%s\x00%d\x00", rel, executable)
 			if _, err := io.WriteString(hasher, header); err != nil {
 				return err
 			}
-			file, err := os.Open(path)
+			file, err := fsys.Open(rel)
 			if err != nil {
 				return err
 			}
