@@ -35,35 +35,63 @@ func TestADelegatedAgentNamesItsModelWhileItRuns(t *testing.T) {
 	}
 }
 
+// startedAgent runs a specialist start through the real handler, seeded with
+// the session's model, and returns the model.
+func startedAgent(t *testing.T, seeded string) model {
+	t.Helper()
+	m := sidebarTestModel()
+	m.activeRunID = 7
+	updated, _ := m.Update(specialistStartMsg{
+		runID:          7,
+		name:           "code-review",
+		description:    "audit",
+		childSessionID: "call_1",
+		model:          seeded,
+	})
+	return updated.(model)
+}
+
 // THE RESULT IS AUTHORITATIVE. A specialist whose manifest names its own model
 // did not run on the session's, and the row seeded at start would keep naming
 // the wrong one.
+//
+// Through the completion handler: calling setModel directly passed even with
+// the handler's model update deleted.
 func TestTheResultsModelCorrectsTheSeededOne(t *testing.T) {
-	m := sidebarTestModel()
-	m.specialists.start("code-review", "audit", "call_1", m.now())
-	m.specialists.setModel("call_1", "glm-5.2") // seeded from the session
-
-	// The executor reports what the child actually used.
-	m.specialists.setModel("call_1", "kimi-k2.6")
-
-	info, _ := m.specialists.getBySessionID("call_1")
+	m := startedAgent(t, "glm-5.2")
+	updated, _ := m.Update(specialistCompleteMsg{
+		runID:          7,
+		toolCallID:     "call_1",
+		childSessionID: "child_1",
+		status:         specialistCompleted,
+		model:          "kimi-k2.6",
+	})
+	done := updated.(model)
+	info, ok := done.specialists.getBySessionID("child_1")
+	if !ok {
+		t.Fatal("the completed agent was not tracked under its real session id")
+	}
 	if info.model != "kimi-k2.6" {
 		t.Fatalf("the row still names %q after the executor reported kimi-k2.6", info.model)
 	}
 }
 
-// An empty report must not blank a model already shown.
+// An empty report must not blank a model already shown. Through the real
+// handler: setModel clears the field for "", so only the handler's non-empty
+// guard keeps the seeded model — and the old test never reached it.
 func TestAnEmptyModelReportDoesNotBlankTheRow(t *testing.T) {
-	m := sidebarTestModel()
-	m.specialists.start("worker", "w", "call_1", m.now())
-	m.specialists.setModel("call_1", "glm-5.2")
-
-	// This is the guard in the complete handler: only a non-empty model is set.
-	reported := ""
-	if reported != "" {
-		m.specialists.setModel("call_1", reported)
+	m := startedAgent(t, "glm-5.2")
+	updated, _ := m.Update(specialistCompleteMsg{
+		runID:          7,
+		toolCallID:     "call_1",
+		childSessionID: "child_1",
+		status:         specialistCompleted,
+	})
+	done := updated.(model)
+	info, ok := done.specialists.getBySessionID("child_1")
+	if !ok {
+		t.Fatal("the completed agent was not tracked under its real session id")
 	}
-	info, _ := m.specialists.getBySessionID("call_1")
 	if info.model != "glm-5.2" {
 		t.Fatalf("an empty report blanked the row: %q", info.model)
 	}

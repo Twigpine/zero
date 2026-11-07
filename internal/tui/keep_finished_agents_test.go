@@ -2,6 +2,8 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
+	"os"
 	"testing"
 
 	"github.com/Twigpine/zero/internal/config"
@@ -55,24 +57,33 @@ func TestTogglingKeepFinishedAgentsPersists(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/config.json"
 
-	// The writer returns the persisted FileConfig; reload it from disk to prove
-	// it actually wrote, not just echoed.
+	// READ BACK INDEPENDENTLY after each toggle. Calling the setter again to
+	// "reload" proved nothing: it sets the requested value on the config it
+	// returns, so both checks passed even when nothing reached the disk.
+	onDisk := func() config.FileConfig {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read back %s: %v", path, err)
+		}
+		var cfg config.FileConfig
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			t.Fatalf("decode %s: %v", path, err)
+		}
+		return cfg
+	}
+
 	if _, err := config.SetKeepFinishedAgents(path, true); err != nil {
 		t.Fatal(err)
 	}
-	reloaded, err := config.SetKeepFinishedAgents(path, true) // reads the file, then writes
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reloaded.Preferences.KeepsFinishedAgents() {
-		t.Fatal("the saved 'keep' preference did not survive a round trip through the file")
+	if stored := onDisk().Preferences.KeepFinishedAgents; stored == nil || !*stored {
+		t.Fatalf("turning 'keep' on did not reach the file: %v", stored)
 	}
 
-	off, err := config.SetKeepFinishedAgents(path, false)
-	if err != nil {
+	if _, err := config.SetKeepFinishedAgents(path, false); err != nil {
 		t.Fatal(err)
 	}
-	if off.Preferences.KeepsFinishedAgents() {
-		t.Fatal("turning it back off did not persist")
+	if stored := onDisk().Preferences.KeepFinishedAgents; stored == nil || *stored {
+		t.Fatalf("turning 'keep' back off did not reach the file: %v", stored)
 	}
 }
