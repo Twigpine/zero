@@ -13,6 +13,7 @@ import (
 	"os"
 	osexec "os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -83,6 +84,13 @@ type Executor struct {
 	// holds; a child still cannot ask for more, and the sandbox it builds is its
 	// own.
 	ExtraWriteRoots func() []string
+	// WorkspaceRoot is the PARENT run's own workspace. A child whose --cwd lies
+	// outside it runs in a tree of its own (an isolated plan worktree), and no
+	// write root that overlaps this directory may follow it there: an ancestor
+	// such as --add-dir ~/dev, or a root inside the parent tree, would hand the
+	// child write access to the very tree the worktree exists to protect. Empty
+	// means unknown, and only the exact --cwd match is skipped.
+	WorkspaceRoot string
 	// ModelPrefs carries the user's per-role model pins and the auto-assign
 	// default. A Task that names no model can then be routed to a role-appropriate
 	// pin — exactly as the same work would be inside a plan — instead of always
@@ -559,12 +567,12 @@ func (executor Executor) BuildArgs(input BuildArgsInput) (BuildArgsResult, error
 	// path forgot the model the fresh path carried, and the plan path forgot the
 	// progress callback the Task path carried. The executor knows its own run;
 	// asking it directly is the only version with no seam to forget.
-	args = appendExtraWriteRootArgs(args, executor.extraWriteRoots(), input.Cwd)
+	args = appendExtraWriteRootArgs(args, executor.extraWriteRoots(), input.Cwd, executor.WorkspaceRoot)
 	// PER-CALL ROOTS, after the run's own. A plan task's scratchpad belongs to
 	// ONE plan, so it cannot come from executor.extraWriteRoots — that is read at
 	// every launch and would leak one plan's directory into every other child the
 	// session starts.
-	args = appendExtraWriteRootArgs(args, input.ExtraReadRoots, input.Cwd)
+	args = appendExtraWriteRootArgs(args, input.ExtraReadRoots, input.Cwd, executor.WorkspaceRoot)
 	// READ-ONLY roots on their own flag: the parent's request_permissions read
 	// grants, so a plan can audit a granted external path. --add-read-dir, never
 	// --add-dir, so the child can read but not write — a read grant must not
@@ -580,16 +588,104 @@ func (executor Executor) BuildArgs(input BuildArgsInput) (BuildArgsResult, error
 // check. Blank entries are dropped rather than emitted as an empty flag value,
 // which the child would reject outright and turn a scope detail into a launch
 // failure.
-func appendExtraWriteRootArgs(args []string, roots []string, cwd string) []string {
+//
+// AN ISOLATED CHILD GETS NO WRITE ROOT THAT OVERLAPS THE PARENT'S TREE. When
+// --cwd lies outside parentWorkspace the child runs in a tree of its own, and a
+// root that CONTAINS the parent workspace (an ancestor: --add-dir ~/dev, a
+// config additionalWriteRoots entry) or is CONTAINED in it re-opens the parent
+// tree for writing. Skipping only the byte-equal root let exactly that through:
+// a plan task in its worktree wrote into the user's real checkout with no
+// branch and no diff. Unrelated roots still follow the child.
+func appendExtraWriteRootArgs(args []string, roots []string, cwd string, parentWorkspace string) []string {
 	workspace := strings.TrimSpace(cwd)
+	isolated := childRunsOutsideParent(parentWorkspace, workspace)
+	parent := canonicalChildPath(parentWorkspace)
 	for _, root := range roots {
 		root = strings.TrimSpace(root)
 		if root == "" || root == workspace {
 			continue
 		}
+		if isolated && pathsOverlap(canonicalChildPath(root), parent, hostPathFlavor) {
+			continue
+		}
 		args = append(args, "--add-dir", root)
 	}
 	return args
+}
+
+// childRunsOutsideParent reports whether a child launched at cwd runs in a tree
+// of its own rather than in (or below) the parent's workspace. Either side
+// unknown answers false: there is no separate tree to protect.
+func childRunsOutsideParent(parentWorkspace, cwd string) bool {
+	parent := canonicalChildPath(parentWorkspace)
+	child := canonicalChildPath(cwd)
+	if parent == "" || child == "" {
+		return false
+	}
+	return !pathContains(parent, child, hostPathFlavor)
+}
+
+// canonicalChildPath is the form two launch paths are compared in: absolute,
+// cleaned, and symlink-resolved when the path exists, so /var and /private/var
+// (or a symlinked checkout) are recognised as one place.
+func canonicalChildPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if absolute, err := filepath.Abs(path); err == nil {
+		path = absolute
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	return filepath.Clean(path)
+}
+
+// pathFlavor is how a platform spells and compares paths. A value rather than
+// runtime checks inline, so the Windows rules are testable on every host.
+type pathFlavor struct {
+	// foldCase compares case-insensitively: Windows always, macOS by default.
+	// Folding where the volume is in fact case-sensitive can only withhold a
+	// root, never grant one.
+	foldCase bool
+	// backslash treats '\' as a separator as well as '/'.
+	backslash bool
+}
+
+var hostPathFlavor = pathFlavor{
+	foldCase:  runtime.GOOS == "windows" || runtime.GOOS == "darwin",
+	backslash: runtime.GOOS == "windows",
+}
+
+// pathsOverlap reports whether either path contains the other.
+func pathsOverlap(a, b string, flavor pathFlavor) bool {
+	return pathContains(a, b, flavor) || pathContains(b, a, flavor)
+}
+
+// pathContains reports whether path is root or lies beneath it, on a separator
+// boundary: "/a/b" contains "/a/b/c" but not "/a/bc".
+func pathContains(root, path string, flavor pathFlavor) bool {
+	if root == "" || path == "" {
+		return false
+	}
+	if flavor.foldCase {
+		root, path = strings.ToLower(root), strings.ToLower(path)
+	}
+	if flavor.backslash {
+		// One spelling of the separator, so C:\a and C:/a/b compare.
+		root, path = strings.ReplaceAll(root, `\`, "/"), strings.ReplaceAll(path, `\`, "/")
+	}
+	if root == path {
+		return true
+	}
+	// A filesystem root ("/", `C:\`) trims to its volume and still contains
+	// everything on it.
+	trimmed := strings.TrimRight(root, "/")
+	if !strings.HasPrefix(path, trimmed) || len(path) <= len(trimmed) {
+		return false
+	}
+	return path[len(trimmed)] == '/'
 }
 
 // appendReadOnlyRootArgs emits one --add-read-dir per root — READ access only, the
@@ -673,7 +769,7 @@ func (executor Executor) BuildResumeArgs(input BuildResumeArgsInput) (BuildArgsR
 	// carried, so a resumed task silently ran on a different one. A resumed task
 	// confined more tightly than the task it resumes would fail on files it had
 	// already read.
-	args = appendExtraWriteRootArgs(args, executor.extraWriteRoots(), input.Cwd)
+	args = appendExtraWriteRootArgs(args, executor.extraWriteRoots(), input.Cwd, executor.WorkspaceRoot)
 	return BuildArgsResult{Args: args, SessionID: sessionID, PromptFile: promptFile}, nil
 }
 
