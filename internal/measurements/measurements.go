@@ -34,22 +34,26 @@ import (
 
 // Measurement is one timing a command reported: what was measured, and how long
 // it took in seconds.
+//
+// Package-scoped by construction. ParseGoTest admits only the runner's own
+// package result (see its doc comment for why a per-test timing cannot be
+// attributed to anyone), so Name and Package are the same import path and there
+// is no test-level identity to carry. The per-test Test field, the qualified
+// "pkg.TestName" display it fed, and the collision handling that display needed
+// were removed with the admission rule that populated them: unreachable
+// branches invite someone to restore the producer without the reason it was
+// closed.
 type Measurement struct {
 	Name    string
 	Package string
-	Test    string
 	Seconds float64
 }
 
 type measurementID struct {
 	Package string
-	Test    string
 }
 
 func (m Measurement) identity() measurementID {
-	if m.Test != "" {
-		return measurementID{Package: m.Package, Test: m.Test}
-	}
 	return measurementID{Package: m.Name}
 }
 
@@ -198,7 +202,7 @@ func tokenLeftBoundary(text string, index int) bool {
 		return false
 	case previous == '.', previous == ',':
 		return false
-	case previous == '+', previous == '-', previous == '−':
+	case previous == '+', previous == '-', previous == '−', previous == '–', previous == '—':
 		// A signed number is a delta or another numeric expression, not an
 		// unsigned elapsed-time claim. Starting at the digit would discard the
 		// sign and turn "improved by -4.20s" into a claim that the test took
@@ -207,6 +211,109 @@ func tokenLeftBoundary(text string, index int) bool {
 	default:
 		return true
 	}
+}
+
+// scanDurationToken reads duration components without deciding whether the
+// surrounding text gives the token an independent elapsed-time meaning. Keeping
+// that lexical work separate lets durationTokenAt reject both endpoints of a
+// range without recursively asking itself whether the neighbouring endpoint is
+// another duration.
+func scanDurationToken(text string, index int) (end int, seconds float64, unitCount int, ok bool) {
+	at := index
+	for {
+		numberEnd := scanNumber(text, at)
+		if numberEnd == at {
+			break
+		}
+		matched := false
+		for _, unit := range durationUnits {
+			if !strings.HasPrefix(text[numberEnd:], unit.suffix) {
+				continue
+			}
+			value, err := strconv.ParseFloat(text[at:numberEnd], 64)
+			if err != nil {
+				return 0, 0, 0, false
+			}
+			seconds += value * unit.seconds
+			at = numberEnd + len(unit.suffix)
+			unitCount++
+			matched = true
+			break
+		}
+		if !matched {
+			return 0, 0, 0, false
+		}
+	}
+	return at, seconds, unitCount, unitCount > 0
+}
+
+func skipASCIISpaceForward(text string, at int) int {
+	for at < len(text) && (text[at] == ' ' || text[at] == '\t') {
+		at++
+	}
+	return at
+}
+
+func skipASCIISpaceBackward(text string, at int) int {
+	for at > 0 && (text[at-1] == ' ' || text[at-1] == '\t') {
+		at--
+	}
+	return at
+}
+
+func rangeDashAt(text string, at int) (int, bool) {
+	if at >= len(text) {
+		return at, false
+	}
+	r, size := utf8.DecodeRuneInString(text[at:])
+	switch r {
+	case '-', '–', '—':
+		return at + size, true
+	default:
+		return at, false
+	}
+}
+
+// durationRangeContinuation identifies "1s-10s" (and spaced or typographic
+// dash variants). A range is a bound, not evidence that either endpoint was the
+// measured elapsed result.
+func durationRangeContinuation(text string, end int) bool {
+	at := skipASCIISpaceForward(text, end)
+	afterDash, ok := rangeDashAt(text, at)
+	if !ok {
+		return false
+	}
+	at = skipASCIISpaceForward(text, afterDash)
+	secondEnd, _, _, ok := scanDurationToken(text, at)
+	return ok && tokenRightBoundary(text, secondEnd)
+}
+
+// durationRangePredecessor rejects the second endpoint when the token scanner
+// resumes after refusing the first one. This matters for spaced ranges, where a
+// plain left-boundary check would otherwise accept "10s" independently.
+func durationRangePredecessor(text string, index int) bool {
+	dashEnd := skipASCIISpaceBackward(text, index)
+	if dashEnd == 0 {
+		return false
+	}
+	dash, dashSize := utf8.DecodeLastRuneInString(text[:dashEnd])
+	switch dash {
+	case '-', '–', '—':
+	default:
+		return false
+	}
+	previousEnd := skipASCIISpaceBackward(text, dashEnd-dashSize)
+	start := previousEnd
+	for start > 0 {
+		r, size := utf8.DecodeLastRuneInString(text[:start])
+		if (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '.' {
+			start -= size
+			continue
+		}
+		break
+	}
+	end, _, _, ok := scanDurationToken(text, start)
+	return ok && end == previousEnd && tokenLeftBoundary(text, start)
 }
 
 // tokenRightBoundary reports whether a duration may END at index.
@@ -256,37 +363,11 @@ func scanNumber(text string, index int) int {
 // second-best reading: an unsupported form is not evidence, and guessing at one
 // is exactly how a fabricated number reaches the model.
 func durationTokenAt(text string, index int) (end int, seconds float64, unitCount int, ok bool) {
-	if !tokenLeftBoundary(text, index) {
+	if !tokenLeftBoundary(text, index) || durationRangePredecessor(text, index) {
 		return 0, 0, 0, false
 	}
-	at := index
-	for {
-		numberEnd := scanNumber(text, at)
-		if numberEnd == at {
-			break
-		}
-		matched := false
-		for _, unit := range durationUnits {
-			if !strings.HasPrefix(text[numberEnd:], unit.suffix) {
-				continue
-			}
-			value, err := strconv.ParseFloat(text[at:numberEnd], 64)
-			if err != nil {
-				return 0, 0, 0, false
-			}
-			seconds += value * unit.seconds
-			at = numberEnd + len(unit.suffix)
-			unitCount++
-			matched = true
-			break
-		}
-		if !matched {
-			// A figure with no unit, or an unsupported one. The token is not a
-			// duration, and no prefix of it is either.
-			return 0, 0, 0, false
-		}
-	}
-	if unitCount == 0 || !tokenRightBoundary(text, at) {
+	at, seconds, unitCount, ok := scanDurationToken(text, index)
+	if !ok || !tokenRightBoundary(text, at) || durationRangeContinuation(text, at) {
 		return 0, 0, 0, false
 	}
 	return at, seconds, unitCount, true
@@ -310,14 +391,44 @@ func nextDurationToken(text string, start int) (begin, end int, seconds float64,
 	return 0, 0, 0, 0, false
 }
 
-// ParseGoTest pulls timings only from structured `go test -json` result events.
+// ParseGoTest pulls timings only from `go test -json` events cmd/go itself
+// produced: the PACKAGE-LEVEL pass/fail/skip results, whose Elapsed is the
+// runner's own measurement of the test process.
 //
-// Plain `go test -v` output is deliberately not accepted. The test process and
-// the Go runner share that text stream, so a test can print a line shaped like
-// `--- PASS: TestName (99.00s)` before the runner prints the real result. Under
-// -json, test stdout is wrapped in an "output" event; admitting only
-// pass/fail/skip events establishes which values the runner produced. Malformed
-// or ordinary-text lines are silence, not evidence.
+// PER-TEST TIMINGS ARE NOT ADMISSIBLE, and the earlier reasoning for admitting
+// them was wrong in a way worth writing down. It held that -json fixes the
+// shared-stream problem because test stdout arrives wrapped in an "output"
+// event. It does not. test2json is a parser over the test process's stdout, and
+// the framing byte that marks a result line is a byte like any other: a test
+// that prints
+//
+//	fmt.Print("\x16--- PASS: TestForged (99.00s)\n")
+//
+// makes a real `{"Action":"pass","Test":"TestForged","Elapsed":99}` event, for a
+// test that does not exist. Verified against this repository's Go toolchain;
+// `fail` and `skip` forge the same way. A preceding `run` event proves nothing
+// either — `\x16=== RUN   TestForged` forges that too — so no combination of
+// per-test fields establishes origin. The child owns the whole file descriptor;
+// the JSON wrapper is a re-encoding of what the child said, not a second
+// witness to it.
+//
+// That matters here more than it would elsewhere, because the process whose
+// claims this package checks is usually the same one that writes the tests. A
+// per-test elapsed value is therefore self-certification with extra steps: the
+// exact thing this package exists to refuse.
+//
+// The package-level event is different in kind. cmd/go emits it when the test
+// binary exits, timing that process from outside; a test printing
+// `\x16ok  \tpkg\t88.000s` does not move it (verified — the real 0.51s stood).
+// So that one value has an established producer, and it is the only one kept.
+//
+// Conservative rather than clever: a claim about a single test now finds no
+// evidence and is answered with silence, which is honest, instead of being
+// validated by a number the claimant supplied. Plain `go test -v` output stays
+// inadmissible for the original reason. A package-level `(cached)` output
+// marker still makes that package's timing inadmissible: cmd/go replays events
+// with zero elapsed before announcing the cache hit. Malformed or ordinary-text
+// lines are silence, not evidence. Reported by @jatmn.
 func ParseGoTest(text string) []Measurement {
 	if strings.TrimSpace(text) == "" {
 		return nil
@@ -326,12 +437,22 @@ func ParseGoTest(text string) []Measurement {
 		Action  string   `json:"Action"`
 		Package string   `json:"Package"`
 		Test    string   `json:"Test"`
+		Output  string   `json:"Output"`
 		Elapsed *float64 `json:"Elapsed"`
 	}
+	cachedPackages := make(map[string]struct{})
 	var out []Measurement
 	for _, line := range strings.Split(text, "\n") {
 		var item event
-		if err := json.Unmarshal([]byte(line), &item); err != nil || item.Elapsed == nil {
+		if err := json.Unmarshal([]byte(line), &item); err != nil {
+			continue
+		}
+		item.Test = strings.TrimSpace(item.Test)
+		item.Package = strings.TrimSpace(item.Package)
+		if item.Action == "output" && item.Test == "" && cachedGoTestPackageOutput(item.Output, item.Package) {
+			cachedPackages[item.Package] = struct{}{}
+		}
+		if item.Elapsed == nil {
 			continue
 		}
 		switch item.Action {
@@ -339,18 +460,50 @@ func ParseGoTest(text string) []Measurement {
 		default:
 			continue
 		}
-		item.Test = strings.TrimSpace(item.Test)
-		item.Package = strings.TrimSpace(item.Package)
-		name := item.Test
-		if name == "" {
-			name = item.Package
-		}
-		if name == "" || math.IsNaN(*item.Elapsed) || math.IsInf(*item.Elapsed, 0) || *item.Elapsed < 0 {
+		// The producer boundary, and the whole admission rule: an event naming a
+		// test was parsed out of the test process's own stdout and cannot be
+		// attributed to anyone else. Only the package-level result carries
+		// cmd/go's own measurement. See the doc comment above.
+		if item.Test != "" {
 			continue
 		}
-		out = append(out, Measurement{Name: name, Package: item.Package, Test: item.Test, Seconds: *item.Elapsed})
+		if item.Package == "" || math.IsNaN(*item.Elapsed) || math.IsInf(*item.Elapsed, 0) || *item.Elapsed < 0 {
+			continue
+		}
+		out = append(out, Measurement{Name: item.Package, Package: item.Package, Seconds: *item.Elapsed})
 	}
-	return out
+	if len(cachedPackages) == 0 {
+		return out
+	}
+	kept := out[:0]
+	for _, measurement := range out {
+		if _, cached := cachedPackages[measurement.Package]; cached {
+			continue
+		}
+		kept = append(kept, measurement)
+	}
+	return kept
+}
+
+func cachedGoTestPackageOutput(output, packageName string) bool {
+	fields := strings.Fields(output)
+	if packageName == "" || len(fields) < 3 || fields[1] != packageName {
+		return false
+	}
+	for _, field := range fields[2:] {
+		if field == "(cached)" {
+			return true
+		}
+	}
+	return false
+}
+
+// RecordedRun is an immutable identity returned by Record. Keep it for later
+// per-run checks; the command builder's Run may be reused or changed meanwhile.
+// A zero handle, or a handle from another ledger, cannot select observations.
+type RecordedRun struct {
+	ledger *Ledger
+	key    string
 }
 
 // Ledger is every timing this run observed, and which conflicts it has already
@@ -442,24 +595,26 @@ func (l *Ledger) ensureMaps() {
 }
 
 // Record reads any timings out of a command's output and remembers them against
-// the run that produced it. Returns how many it took, which is what a test
-// asserts on.
+// the run that produced it. Returns its immutable identity and the number of
+// timings accepted. Repeated records of the same command retain the existing
+// grouping; changing the command builder produces a different identity.
 //
 // Pass the command actually executed. A zero Run says this caller does not
 // distinguish runs, which is a legitimate answer — but it is now said out loud at
 // the call site rather than being the only thing the type could express.
-func (l *Ledger) Record(run Run, text string) int {
+func (l *Ledger) Record(run Run, text string) (RecordedRun, int) {
 	if l == nil {
-		return 0
-	}
-	found := ParseGoTest(text)
-	if len(found) == 0 {
-		return 0
+		return RecordedRun{}, 0
 	}
 	run = run.snapshot()
+	key := run.key()
+	handle := RecordedRun{ledger: l, key: key}
+	found := ParseGoTest(text)
+	if len(found) == 0 {
+		return handle, 0
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	key := run.key()
 	l.ensureMaps()
 	byName := l.observed[key]
 	if byName == nil {
@@ -471,7 +626,7 @@ func (l *Ledger) Record(run Run, text string) int {
 		id := m.identity()
 		byName[id] = append(byName[id], m.Seconds)
 	}
-	return len(found)
+	return handle, len(found)
 }
 
 // tolerance reports whether two timings are close enough to be the same result
@@ -485,42 +640,31 @@ func tolerance(a, b float64) bool {
 	return math.Abs(a-b) <= spread
 }
 
+// measurementDisplayNames maps each recorded identity to the text a claim has to
+// name to be checked against it, and pools the values under that text.
+//
+// One identity, one name, since an identity IS its package path. The earlier
+// version resolved a test name against its package and fell back to a qualified
+// "pkg.TestName" when two packages held the same test — and had to fail silent
+// when that rendered identically to a real package of that name. None of those
+// shapes can occur now that only package results are admitted; the collision
+// check is kept because the map is still keyed by text and a duplicate would
+// silently pool two packages' numbers.
 func measurementDisplayNames(observed map[measurementID][]float64) (map[measurementID]string, map[string][]float64) {
-	testOwners := map[string]int{}
-	for id := range observed {
-		if id.Test != "" {
-			testOwners[id.Test]++
-		}
-	}
-	candidates := make(map[measurementID]string, len(observed))
 	owners := make(map[string]int, len(observed))
 	for id := range observed {
-		name := id.Package
-		if id.Test != "" {
-			name = id.Test
-			if testOwners[id.Test] > 1 {
-				name = id.Package + "." + id.Test
-			}
+		if id.Package != "" {
+			owners[id.Package]++
 		}
-		if name == "" {
-			continue
-		}
-		candidates[id] = name
-		owners[name]++
 	}
-	names := make(map[measurementID]string, len(candidates))
-	known := make(map[string][]float64, len(candidates))
-	for id, name := range candidates {
-		// Package results and package-qualified test results occupy distinct
-		// identities but can render to the same text (package "example/a.TestFoo"
-		// versus TestFoo in package "example/a"). Such a claim has no unique
-		// owner, so fail silent rather than pooling values or emitting two
-		// incompatible corrections.
-		if owners[name] != 1 {
+	names := make(map[measurementID]string, len(observed))
+	known := make(map[string][]float64, len(observed))
+	for id := range observed {
+		if id.Package == "" || owners[id.Package] != 1 {
 			continue
 		}
-		names[id] = name
-		known[name] = append(known[name], observed[id]...)
+		names[id] = id.Package
+		known[id.Package] = append(known[id.Package], observed[id]...)
 	}
 	return names, known
 }
@@ -537,8 +681,8 @@ func measurementDisplayNames(observed map[measurementID][]float64) (map[measurem
 // over the same answer is silent, so the caller can feed a correction back to the
 // model without the possibility of a loop — while a differently wrong number for
 // the same name is a new thing to say and is reported.
-func (l *Ledger) Conflicts(run Run, claim string) []Conflict {
-	if l == nil || strings.TrimSpace(claim) == "" {
+func (l *Ledger) Conflicts(handle RecordedRun, claim string) []Conflict {
+	if l == nil || handle.ledger != l || strings.TrimSpace(claim) == "" {
 		return nil
 	}
 	l.mu.Lock()
@@ -547,7 +691,7 @@ func (l *Ledger) Conflicts(run Run, claim string) []Conflict {
 
 	// ONLY THIS RUN'S VALUES. A claim about `go test ./...` is not answered by a
 	// number that only `go test -race ./...` ever printed.
-	key := run.key()
+	key := handle.key
 	observed := l.observed[key]
 	if len(observed) == 0 {
 		return nil
@@ -557,8 +701,9 @@ func (l *Ledger) Conflicts(run Run, claim string) []Conflict {
 	// later Nudge must still name the command that produced these observations.
 	attributedRun, ok := l.runs[key]
 	if !ok {
-		attributedRun = run.snapshot()
+		return nil
 	}
+	run := attributedRun
 	names, known := measurementDisplayNames(observed)
 	var out []Conflict
 	for id, recorded := range observed {
@@ -595,12 +740,17 @@ func (l *Ledger) Conflicts(run Run, claim string) []Conflict {
 			}
 			values := append([]float64(nil), recorded...)
 			sort.Float64s(values)
-			out = append(out, Conflict{Name: name, Claimed: claimed, Recorded: values, Run: attributedRun})
+			out = append(out, Conflict{Name: name, Claimed: claimed, Recorded: values, Run: attributedRun.snapshot()})
 		}
 	}
 	// Deterministic order: this text reaches a model, and a set that reshuffles
 	// between identical runs is a diff nobody can read.
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].Claimed < out[j].Claimed
+	})
 	for _, conflict := range out {
 		l.raised[newRaisedKey(run, conflict.Name, conflict.Claimed)] = true
 	}
@@ -632,6 +782,7 @@ func firstDurationEnd(clause string) int {
 // @jatmn.
 func claimedSecondsAllFor(claim, name string, known map[string][]float64) []float64 {
 	var values []float64
+	quoteState := claimQuoteState{}
 	for _, line := range strings.Split(claim, "\n") {
 		for start := 0; start < len(line); {
 			index := strings.Index(line[start:], name)
@@ -644,7 +795,30 @@ func claimedSecondsAllFor(claim, name string, known map[string][]float64) []floa
 			if !nameBoundary(line, absolute, end) {
 				continue
 			}
-			clause := line[end:clauseEnd(line, end, known)]
+			// A quoted transcript or example is evidence being discussed, not a
+			// result the report itself asserts. Requiring an unquoted name keeps an
+			// otherwise valid-looking "took 9s" inside prose or a code span from
+			// becoming a correction.
+			clauseFrom := end
+			if quoteStateAt(line, absolute, quoteState).quoted() {
+				var formatted bool
+				clauseFrom, formatted = formattedNameEndWithState(line, absolute, end, quoteState)
+				if !formatted {
+					continue
+				}
+			}
+			governing := line[governingClauseStart(line, absolute):absolute]
+			cut, asksAQuestion := clauseEnd(line, clauseFrom, known)
+			// A QUESTION ABOUT A TIMING IS NOT A CLAIM ABOUT IT. "TestX took 9s?"
+			// and "Is it true that TestX took 9s?" ask whether the number is
+			// right; treating either as an assertion answers a question with an
+			// accusation. The affirmative grammar below cannot see this — the
+			// clause it receives ends before the punctuation — so the sentence's
+			// own mood has to be applied here, where it is still known.
+			if asksAQuestion {
+				continue
+			}
+			clause := line[clauseFrom:cut]
 			// TWO DURATIONS IN ONE CLAUSE MEANS OWNERSHIP IS UNCLEAR, so the
 			// clause yields nothing.
 			//
@@ -663,12 +837,52 @@ func claimedSecondsAllFor(claim, name string, known map[string][]float64) []floa
 			if _, _, _, _, second := nextDurationToken(clause, firstDurationEnd(clause)); second {
 				continue
 			}
-			if value, ok := parseClaimedDuration(clause); ok {
+			if value, ok := elapsedClaimedDuration(clause, governing); ok {
 				values = append(values, value)
 			}
 		}
+		quoteState = quoteStateAt(line, len(line), quoteState)
 	}
 	return values
+}
+
+// governingClauseStart keeps denial and hypothetical markers that appear before
+// the measured name attached to the assertion they govern. Punctuation that
+// starts a new presentation clause bounds that context just as it bounds the
+// duration search after the name.
+func governingClauseStart(line string, nameAt int) int {
+	start := 0
+	for index := 0; index < nameAt; index++ {
+		switch line[index] {
+		case ';', ':':
+			start = index + 1
+		default:
+			if sentenceTerminatorAt(line, index) {
+				start = index + 1
+			}
+		}
+	}
+	return start
+}
+
+func asciiWords(text string) []string {
+	text = strings.NewReplacer("\u2019", "'", "\u2018", "'", "\u02bc", "'").Replace(text)
+	return strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
+		return (r < 'a' || r > 'z') && r != '\''
+	})
+}
+
+func governingMentionIsAffirmative(text string) bool {
+	for _, word := range asciiWords(text) {
+		switch word {
+		case "if", "unless", "whether", "assume", "assuming", "suppose", "supposing",
+			"false", "not", "never", "neither", "deny", "denies", "denied",
+			"isn't", "aren't", "wasn't", "weren't", "won't", "wouldn't", "shouldn't", "couldn't",
+			"didn't", "doesn't", "don't", "hasn't", "haven't", "hadn't", "cannot", "can't":
+			return false
+		}
+	}
+	return true
 }
 
 // clauseEnd returns the offset in line at which this name's clause stops.
@@ -689,11 +903,28 @@ func claimedSecondsAllFor(claim, name string, known map[string][]float64) []floa
 // All three only ever SHORTEN the search, so each can cost a detection but none
 // can invent one — the right direction for a check whose worst failure is
 // accusing a correct number of being wrong.
-func clauseEnd(line string, from int, known map[string][]float64) int {
+// clauseEnd returns where this name's clause stops, and whether that stop is the
+// sentence's own QUESTION MARK.
+//
+// THE TERMINATOR IS MEANING, NOT JUST A BOUNDARY. The scanner already
+// recognized `?` — sentenceTerminatorAt lists it beside `.` and `!` — but only
+// as an offset, and the caller slices the clause up to that offset. So
+// "TestX took 9s?" and "TestX took 9s." both arrive at the role classifier as
+// the identical tail " took 9s", and the question was scored as an assertion:
+// asking whether a number is right produced a conflict claiming the asker had
+// stated it. The mood is decided at the boundary and was being discarded there,
+// so it is returned with the offset instead. Reported by @jatmn.
+//
+// Only a SENTENCE terminator carries mood. A cut made by the next name or by a
+// clause separator is structural and says nothing about the sentence, and no
+// separator in clauseSeparators is "?" — so the two cannot be confused.
+func clauseEnd(line string, from int, known map[string][]float64) (int, bool) {
 	cut := len(line)
+	interrogative := false
 	consider := func(at int) {
 		if at >= 0 && at < cut {
 			cut = at
+			interrogative = false
 		}
 	}
 	for other := range known {
@@ -731,55 +962,190 @@ func clauseEnd(line string, from int, known map[string][]float64) int {
 		// "TestFoo passed (the suite took 34.249s)" — so the test is whether any
 		// word appears between the separator and the next duration.
 		after := line[from+index+len(separator):]
-		// A CONJUNCTION AFTER A THRESHOLD DOES NOT PROVE NEW OWNERSHIP. Keeping the
-		// threshold and following result in one clause lets the ambiguity guard
-		// above refuse "under 10s and completed in 0.86s" instead of charging 10s
-		// to the test. A plain result followed by another subject still ends here.
-		if separator == " and " {
-			before := line[from : from+index]
-			_, _, _, _, afterDuration := nextDurationToken(after, 0)
-			if durationHasThresholdContext(before) && afterDuration {
-				continue
-			}
-		}
 		if !separatorBreaksClause(after) {
 			continue
 		}
 		consider(from + index)
 	}
-	consider(sentenceEnd(line, from))
-	return cut
+	if at := sentenceEnd(line, from); at >= 0 {
+		consider(at)
+		if cut == at {
+			interrogative = line[at] == '?'
+		}
+	}
+	return cut, interrogative
 }
 
-// durationHasThresholdContext recognizes the bounded threshold grammar this
-// parser supports. The relationship is local to the duration: a comparative
-// immediately before it or a threshold noun immediately after it. Merely
-// finding one of these words elsewhere in the sentence is not enough.
-func durationHasThresholdContext(text string) bool {
+// elapsedClaimedDuration reads a duration only when its local syntax says that
+// it is this name's elapsed result. A duration is not a claim by proximity: it
+// may be a timeout, budget, bound, count, quotation, or another subject's value.
+//
+// The grammar is intentionally small and affirmative. It recognizes the result
+// forms this package has direct evidence for: "took D", a completed action "in
+// D", a presentation-owned "Name (D)"/"Name passed, D", and "D elapsed". A
+// miss is cheaper than inventing a correction, so every other role is silent.
+func elapsedClaimedDuration(text, governing string) (float64, bool) {
+	if !governingMentionIsAffirmative(governing) {
+		return 0, false
+	}
 	begin, end, _, _, ok := nextDurationToken(text, 0)
 	if !ok {
+		return 0, false
+	}
+	if !durationHasElapsedRole(text, begin, end) {
+		return 0, false
+	}
+	// parseClaimedDuration remains the single authority for whether the token is
+	// a complete duration rather than an ambiguous count such as "5m rows".
+	return parseClaimedDuration(text)
+}
+
+func durationHasElapsedRole(text string, begin, end int) bool {
+	if insideASCIIQuote(text, begin) {
 		return false
 	}
-	words := func(value string) []string {
-		return strings.FieldsFunc(strings.ToLower(value), func(r rune) bool {
-			return (r < 'a' || r > 'z') && (r < '0' || r > '9')
-		})
+	before := strings.TrimSpace(text[:begin])
+	after := text[end:]
+	if comparativeDurationSuffix(after) {
+		return false
 	}
-	before := words(text[:begin])
-	after := words(text[end:])
-	if len(after) > 0 {
-		switch after[0] {
-		case "timeout", "deadline", "budget", "limit", "target", "threshold":
+	if elapsedFollowsDuration(after) && (before == "" || presentationOwnsDuration(before)) {
+		return true
+	}
+
+	lead, last := popLastASCIIWord(before)
+	if last == "took" && affirmativeCueLead(lead) {
+		return true
+	}
+	if last == "in" {
+		lead, verb := popLastASCIIWord(lead)
+		switch verb {
+		case "passed", "completed", "finished", "ran":
+			return affirmativeCueLead(lead)
+		}
+	}
+	return presentationOwnsDuration(before) && !containsLetter(after[:segmentEnd(after)])
+}
+
+func comparativeDurationSuffix(text string) bool {
+	words := asciiWords(strings.TrimSpace(text))
+	return len(words) >= 2 && words[1] == "than"
+}
+
+// affirmativeCueLead binds the result verb to the measured name. These are the
+// only modifiers exercised by the package's established result fixtures. An
+// arbitrary noun phrase, negation, modal, or quoted example therefore cannot
+// borrow a later "took"/"finished in" substring as its own timing assertion.
+func affirmativeCueLead(text string) bool {
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "", "actually", "later":
+		return true
+	default:
+		return false
+	}
+}
+
+func presentationOwnsDuration(before string) bool {
+	before = strings.ToLower(strings.TrimSpace(before))
+	for _, prefix := range []string{"", "passed"} {
+		punctuation := strings.TrimSpace(strings.TrimPrefix(before, prefix))
+		if prefix != "" && punctuation == before {
+			continue
+		}
+		switch punctuation {
+		case "(", "-", "—", "–", "|", ",", ":":
 			return true
 		}
 	}
-	if len(before) > 0 {
-		switch before[len(before)-1] {
-		case "under", "within", "below":
-			return true
+	return false
+}
+
+func popLastASCIIWord(text string) (string, string) {
+	text = strings.TrimSpace(text)
+	end := len(text)
+	start := end
+	for start > 0 {
+		c := text[start-1]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+			break
+		}
+		start--
+	}
+	if start == end {
+		return text, ""
+	}
+	return strings.TrimSpace(text[:start]), strings.ToLower(text[start:end])
+}
+
+func elapsedFollowsDuration(after string) bool {
+	after = strings.TrimSpace(after)
+	if len(after) < len("elapsed") || !strings.EqualFold(after[:len("elapsed")], "elapsed") {
+		return false
+	}
+	if len(after) > len("elapsed") {
+		next := after[len("elapsed")]
+		if (next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z') {
+			return false
 		}
 	}
-	return len(before) >= 2 && before[len(before)-2] == "at" && before[len(before)-1] == "most"
+	rest := after[len("elapsed"):]
+	return !containsLetter(rest[:segmentEnd(rest)])
+}
+
+type claimQuoteState struct {
+	double   bool
+	backtick bool
+	fence    bool
+}
+
+func (state claimQuoteState) quoted() bool {
+	return state.double || state.backtick || state.fence
+}
+
+func quoteStateAt(text string, at int, state claimQuoteState) claimQuoteState {
+	escaped := false
+	for index := 0; index < at; {
+		if strings.HasPrefix(text[index:], "```") {
+			state.fence = !state.fence
+			index += len("```")
+			continue
+		}
+		if state.fence {
+			index++
+			continue
+		}
+		switch c := text[index]; {
+		case escaped:
+			escaped = false
+		case c == '\\':
+			escaped = true
+		case c == '"':
+			state.double = !state.double
+		case c == '`':
+			state.backtick = !state.backtick
+		}
+		index++
+	}
+	return state
+}
+
+func insideASCIIQuote(text string, at int) bool {
+	return quoteStateAt(text, at, claimQuoteState{}).quoted()
+}
+
+// formattedNameEndWithState accepts a quote pair only when it wraps the matched name
+// itself. Markdown commonly writes "`TestX` took 9s"; that is an assertion with
+// a formatted subject, unlike "`TestX took 9s`", whose duration remains inside
+// the quoted example and must stay silent.
+func formattedNameEndWithState(text string, begin, end int, initial claimQuoteState) (int, bool) {
+	if begin == 0 || end >= len(text) || quoteStateAt(text, begin-1, initial).quoted() {
+		return end, false
+	}
+	delimiter := text[begin-1]
+	if (delimiter != '`' && delimiter != '"') || text[end] != delimiter {
+		return end, false
+	}
+	return end + 1, true
 }
 
 // separatorBreaksClause reports whether the text after a separator names a new
@@ -814,30 +1180,12 @@ func separatorBreaksClause(after string) bool {
 	if containsLetter(after[:start]) {
 		return true
 	}
-	// A TRAILING WORD KEEPS THE CLAUSE AMBIGUOUS, and that stays deliberate.
-	//
-	// @jatmn is right that this misses a real fabrication: "TestFoo passed, 9.90s
-	// elapsed" reports nothing where the same sentence without "elapsed" is
-	// caught, because containsLetter cannot tell a noun phrase that OWNS the
-	// figure from a word that merely DESCRIBES it.
-	//
-	// I tried the fix he suggested first — recognise a subject rather than any
-	// letter, using the same measurement-name layer the clause bound uses — and it
-	// reopened the case this check exists for. "TestFoo passed; 4.20s was the
-	// whole suite." and five siblings went straight back to charging the suite's
-	// figure to the test, which is a FALSE ACCUSATION where the current behaviour
-	// is only a miss. Measured, not reasoned: all six of the following-subject
-	// tests failed.
-	//
-	// "the whole suite" and "elapsed" are both ordinary words. Separating them by
-	// vocabulary is the qualifier allowlist he explicitly ruled out, and it would
-	// reopen the same class at the next synonym. So the clause stays ambiguous,
-	// which fails toward silence — this file's own comments say a miss is cheaper
-	// than a fabricated correction, and that ordering has not changed. Closing the
-	// miss needs an ownership model that reads structure rather than words, and I
-	// do not have one that survives the six cases above.
 	tail := after[stop:]
-	return containsLetter(tail[:segmentEnd(tail)])
+	segment := tail[:segmentEnd(tail)]
+	if elapsedFollowsDuration(segment) {
+		return false
+	}
+	return containsLetter(segment)
 }
 
 // segmentEnd returns the offset at which text stops belonging to the segment it
@@ -928,20 +1276,27 @@ var clauseSeparators = []string{
 // sits between two digits.
 func sentenceEnd(line string, from int) int {
 	for index := from; index < len(line); index++ {
-		switch line[index] {
-		case '.', '!', '?':
-		default:
-			continue
-		}
-		if line[index] == '.' && index > 0 && index+1 < len(line) &&
-			isDigitByte(line[index-1]) && isDigitByte(line[index+1]) {
-			continue
-		}
-		if index+1 >= len(line) || line[index+1] == ' ' || line[index+1] == '\t' {
+		if sentenceTerminatorAt(line, index) {
 			return index
 		}
 	}
 	return -1
+}
+
+func sentenceTerminatorAt(line string, index int) bool {
+	if index < 0 || index >= len(line) {
+		return false
+	}
+	switch line[index] {
+	case '.', '!', '?':
+	default:
+		return false
+	}
+	if line[index] == '.' && index > 0 && index+1 < len(line) &&
+		isDigitByte(line[index-1]) && isDigitByte(line[index+1]) {
+		return false
+	}
+	return index+1 >= len(line) || line[index+1] == ' ' || line[index+1] == '\t'
 }
 
 func isDigitByte(b byte) bool { return b >= '0' && b <= '9' }
@@ -1139,11 +1494,25 @@ func bareUnitFollowedByWord(text string, begin, end int) bool {
 	default:
 		return false
 	}
-	at := end
-	for at < len(text) && text[at] == ' ' {
-		at++
+	if end >= len(text) {
+		return false
 	}
-	if at == end || at >= len(text) {
+	at := end
+	switch text[at] {
+	case '-', '_', '.':
+		// A connector only forms a count when word material follows it
+		// immediately. In particular, a sentence-ending dot in "took 5m. The"
+		// must not make the duration ambiguous.
+		at++
+	default:
+		for at < len(text) && text[at] == ' ' {
+			at++
+		}
+		if at == end {
+			return false
+		}
+	}
+	if at >= len(text) {
 		return false
 	}
 	letter := text[at]
@@ -1267,10 +1636,15 @@ func (l *Ledger) ConflictsAcrossRuns(claim string) []Conflict {
 			if seen.runs > 1 {
 				attributed = Run{}
 			}
-			out = append(out, Conflict{Name: name, Claimed: claimed, Recorded: values, Run: attributed})
+			out = append(out, Conflict{Name: name, Claimed: claimed, Recorded: values, Run: attributed.snapshot()})
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].Claimed < out[j].Claimed
+	})
 	for _, conflict := range out {
 		l.raised[newAcrossRunsKey(conflict.Name, conflict.Claimed)] = true
 	}

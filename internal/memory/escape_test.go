@@ -2,6 +2,7 @@ package memory
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -283,7 +284,7 @@ func TestALinkedIgnoreIsNotProofOfPrivacy(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(paths.LocalDir, "decoy"), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		linkDir(t, "decoy", filepath.Join(paths.LocalDir, ".gitignore"))
+		linkDir(t, filepath.Join(paths.LocalDir, "decoy"), filepath.Join(paths.LocalDir, ".gitignore"))
 		if _, err := Write(paths, ScopeLocal, "private", "d", "secret"); err == nil {
 			t.Error("a reparse point at the ignore path was accepted as privacy")
 		}
@@ -691,6 +692,91 @@ func TestALocalWriteIsRefusedWhenTrackedWithNoIgnorePresent(t *testing.T) {
 	}
 }
 
+func TestAFailedIgnoreWriteCanBeRetried(t *testing.T) {
+	paths := DefaultPaths(t.TempDir())
+	priorWriter := writeLocalIgnore
+	writeLocalIgnore = func(*os.File) error { return errors.New("injected ignore write failure") }
+	t.Cleanup(func() { writeLocalIgnore = priorWriter })
+
+	if _, err := Write(paths, ScopeLocal, "private", "d", "first"); err == nil || !strings.Contains(err.Error(), "injected ignore write failure") {
+		t.Fatalf("first Write error = %v, want injected write failure", err)
+	}
+	ignorePath := filepath.Join(paths.LocalDir, gitignoreName)
+	if _, err := os.Lstat(ignorePath); !os.IsNotExist(err) {
+		t.Fatalf("failed installation left %s behind: %v", ignorePath, err)
+	}
+
+	writeLocalIgnore = priorWriter
+	if _, err := Write(paths, ScopeLocal, "private", "d", "second"); err != nil {
+		t.Fatalf("retry after failed ignore installation = %v", err)
+	}
+	note, err := Read(paths, ScopeLocal, "private")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if note.Body != "second\n" {
+		t.Fatalf("retried note body = %q, want %q", note.Body, "second\n")
+	}
+}
+
+func TestAFailedIgnoreCloseCanBeRetried(t *testing.T) {
+	paths := DefaultPaths(t.TempDir())
+	priorCloser := closeLocalIgnore
+	closeLocalIgnore = func(file *os.File) error {
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return errors.New("injected ignore close failure")
+	}
+	t.Cleanup(func() { closeLocalIgnore = priorCloser })
+
+	if _, err := Write(paths, ScopeLocal, "private", "d", "first"); err == nil || !strings.Contains(err.Error(), "injected ignore close failure") {
+		t.Fatalf("first Write error = %v, want injected close failure", err)
+	}
+	ignorePath := filepath.Join(paths.LocalDir, gitignoreName)
+	if _, err := os.Lstat(ignorePath); !os.IsNotExist(err) {
+		t.Fatalf("failed close left %s behind: %v", ignorePath, err)
+	}
+
+	closeLocalIgnore = priorCloser
+	if _, err := Write(paths, ScopeLocal, "private", "d", "second"); err != nil {
+		t.Fatalf("retry after failed ignore close = %v", err)
+	}
+}
+
+func TestAFailedIgnoreCloseReportsCleanupFailure(t *testing.T) {
+	paths := DefaultPaths(t.TempDir())
+	closeFailure := errors.New("injected ignore close failure")
+	removeFailure := errors.New("injected ignore cleanup failure")
+	priorCloser := closeLocalIgnore
+	priorRemover := removeLocalIgnore
+	closeLocalIgnore = func(file *os.File) error {
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return closeFailure
+	}
+	removeLocalIgnore = func(*os.Root, string) error {
+		return removeFailure
+	}
+	t.Cleanup(func() {
+		closeLocalIgnore = priorCloser
+		removeLocalIgnore = priorRemover
+	})
+
+	_, err := Write(paths, ScopeLocal, "private", "d", "first")
+	if !errors.Is(err, closeFailure) || !errors.Is(err, removeFailure) {
+		t.Fatalf("Write error = %v, want close and cleanup failures", err)
+	}
+	if !strings.Contains(err.Error(), "remove incomplete") {
+		t.Fatalf("Write error = %v, want retained-placeholder context", err)
+	}
+	ignorePath := filepath.Join(paths.LocalDir, gitignoreName)
+	if _, statErr := os.Lstat(ignorePath); statErr != nil {
+		t.Fatalf("retained placeholder %s: %v", ignorePath, statErr)
+	}
+}
+
 // THE ORDINARY CASE KEEPS WORKING, which is the constraint the refusal above has
 // to live inside: a repository whose local store is untracked is the normal
 // state, and a note written there must still land and still be invisible to git.
@@ -799,6 +885,67 @@ func TestALocalWriteOutsideAnyRepositoryNeedsNoGit(t *testing.T) {
 	}
 }
 
+func TestALocalWriteBelowStrayGitMarkers(t *testing.T) {
+	for _, marker := range []string{"empty-directory", "invalid-file", "missing-gitdir"} {
+		for _, withoutGit := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/no-git=%t", marker, withoutGit), func(t *testing.T) {
+				parent := t.TempDir()
+				gitPath := filepath.Join(parent, ".git")
+				if marker == "empty-directory" {
+					if err := os.Mkdir(gitPath, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					content := "not a git directory reference\n"
+					if marker == "missing-gitdir" {
+						content = "gitdir: missing\n"
+					}
+					if err := os.WriteFile(gitPath, []byte(content), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if withoutGit {
+					t.Setenv("PATH", "")
+				}
+				paths := DefaultPaths(filepath.Join(parent, "workspace"))
+				if _, err := Write(paths, ScopeLocal, "private", "d", "local note"); err != nil {
+					t.Fatalf("Write below stray %s = %v, want success", marker, err)
+				}
+				note, err := Read(paths, ScopeLocal, "private")
+				if err != nil || note.Body != "local note\n" {
+					t.Fatalf("Read = %#v, %v", note, err)
+				}
+			})
+		}
+	}
+}
+
+func TestAStrayGitMarkerCannotHideAnEnclosingRepository(t *testing.T) {
+	root := t.TempDir()
+	seedStoreRepo(t, root)
+	workspace := filepath.Join(root, "workspace")
+	paths := DefaultPaths(workspace)
+	writeStoreFile(t, paths, "private.md", "already tracked\n")
+	runStoreGit(t, root, "add", "workspace/.zero/memory/local/private.md")
+	if err := os.Mkdir(filepath.Join(workspace, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Write(paths, ScopeLocal, "private", "d", "new secret"); !errors.Is(err, ErrNotPrivate) {
+		t.Fatalf("Write through stray marker inside real repository = %v, want ErrNotPrivate", err)
+	}
+}
+
+func TestACorruptRepositoryStillRefusesLocalWrites(t *testing.T) {
+	root := t.TempDir()
+	seedStoreRepo(t, root)
+	if err := os.WriteFile(filepath.Join(root, ".git", "HEAD"), []byte("corrupt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Write(DefaultPaths(root), ScopeLocal, "private", "d", "secret"); !errors.Is(err, ErrNotPrivate) {
+		t.Fatalf("Write inside damaged repository = %v, want ErrNotPrivate", err)
+	}
+}
+
 // AN INHERITED INDEX REDIRECT MUST NOT ANSWER FOR THE CHECKOUT.
 //
 // A hook, a rebase, or any git wrapper exports GIT_INDEX_FILE and GIT_DIR into
@@ -849,6 +996,8 @@ func TestTheRepositoryIsFoundThroughALinkedWorkspace(t *testing.T) {
 
 	if _, err := Write(paths, ScopeLocal, "private", "d", "machine-local secret"); !errors.Is(err, ErrNotPrivate) {
 		t.Fatalf("Write through a linked workspace = %v, want ErrNotPrivate", err)
+	} else if !strings.Contains(err.Error(), "tracks private.md") {
+		t.Fatalf("Write through a linked workspace stopped before consulting the repository index: %v", err)
 	}
 	if status := runStoreGit(t, repo, "status", "--porcelain"); status != "" {
 		t.Errorf("git status = %q, want empty", status)
