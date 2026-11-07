@@ -4193,6 +4193,86 @@ func TestRunNilTraceForwardsUsage(t *testing.T) {
 	}
 }
 
+// TestRunReturnsStreamErrorWithStatusCodeAndCause covers the collector-to-agent
+// propagation boundary: a provider stream that terminates with a StreamEventError
+// carrying StatusCode/Cause must have Run return an error that errors.As can
+// still recover those fields from — the detail a session's "error" event needs
+// to actually diagnose why a provider call failed (#674).
+func TestRunReturnsStreamErrorWithStatusCodeAndCause(t *testing.T) {
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{{
+		{
+			Type:       zeroruntime.StreamEventError,
+			Error:      "provider error: provider returned error",
+			StatusCode: 500,
+			Cause:      "upstream returned an empty completion",
+		},
+	}}}
+
+	_, err := Run(context.Background(), "hi", provider, Options{
+		SessionID:    "stream-error-session",
+		Cwd:          t.TempDir(),
+		ProviderName: "test-provider",
+		Model:        "test-model",
+	})
+	if err == nil {
+		t.Fatal("Run: expected an error, got nil")
+	}
+
+	var streamErr *zeroruntime.StreamError
+	if !errors.As(err, &streamErr) {
+		t.Fatalf("Run error %v (%T) does not unwrap to *zeroruntime.StreamError", err, err)
+	}
+	if streamErr.StatusCode != 500 {
+		t.Fatalf("StatusCode = %d, want 500", streamErr.StatusCode)
+	}
+	if streamErr.Cause != "upstream returned an empty completion" {
+		t.Fatalf("Cause = %q, want %q", streamErr.Cause, "upstream returned an empty completion")
+	}
+	if err.Error() != "provider error: provider returned error" {
+		t.Fatalf("Error() = %q, want the flattened message unchanged", err.Error())
+	}
+}
+
+// TestRunImageRejectionKeepsStreamErrorStatusCodeAndCause covers the 400
+// image-rejection recovery path: the friendly message is kept, but the returned
+// error must still unwrap to the *StreamError so StatusCode and Cause reach the
+// session's "error" event (#674).
+func TestRunImageRejectionKeepsStreamErrorStatusCodeAndCause(t *testing.T) {
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{{
+		{
+			Type:       zeroruntime.StreamEventError,
+			Error:      "provider error 400: image input is not supported",
+			StatusCode: 400,
+			Cause:      "this model does not support image input",
+		},
+	}}}
+
+	_, err := Run(context.Background(), "hi", provider, Options{
+		SessionID:    "image-rejection-session",
+		Cwd:          t.TempDir(),
+		ProviderName: "test-provider",
+		Model:        "test-model",
+	})
+	if err == nil {
+		t.Fatal("Run: expected an error, got nil")
+	}
+
+	want := "model test-model rejected the image: provider error 400: image input is not supported. The model may not support image input — try switching to a vision-capable model (claude, gpt-4o, gemini)"
+	if err.Error() != want {
+		t.Fatalf("Error() = %q, want the friendly message unchanged: %q", err.Error(), want)
+	}
+	var streamErr *zeroruntime.StreamError
+	if !errors.As(err, &streamErr) {
+		t.Fatalf("Run error %v (%T) does not unwrap to *zeroruntime.StreamError", err, err)
+	}
+	if streamErr.StatusCode != 400 {
+		t.Fatalf("StatusCode = %d, want 400", streamErr.StatusCode)
+	}
+	if streamErr.Cause != "this model does not support image input" {
+		t.Fatalf("Cause = %q, want the upstream cause", streamErr.Cause)
+	}
+}
+
 // TestRunSuppressesAdvisoryHooksInPlanMode: plan mode promises a read-only
 // turn for advisory hooks (sessionStart/sessionEnd/afterTool), which execute
 // configured host commands outside the advertised-tool and sandbox gates.

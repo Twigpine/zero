@@ -212,6 +212,17 @@ type StreamEvent struct {
 	// available. Stateful turn sessions use it to chain a later compatible
 	// request; ordinary providers and consumers leave it empty.
 	ResponseID string
+	// StatusCode is the HTTP status code behind Error, when the failure came from
+	// an HTTP response (0 for transport-level/context errors that never received
+	// one). Providers set it alongside Error on a StreamEventError so the status
+	// survives past the flattened error string (#674).
+	StatusCode int
+	// Cause is the raw, secret-redacted upstream detail behind Error — the
+	// provider's own error message or response body — kept separate from Error's
+	// curated/classified wording so both are preserved rather than one
+	// overwriting the other. Always passed through the same redaction already
+	// applied to Error (see provider.redact); never stored unredacted.
+	Cause string
 	// FinishReason carries the provider's normalized terminal stop reason when a
 	// response did not end normally (e.g. FinishReasonLength when the output hit
 	// the token cap, or FinishReasonContentFilter when it was filtered). It is
@@ -222,6 +233,20 @@ type StreamEvent struct {
 	// them to the terminal/done event; the collector accumulates them.
 	ReasoningBlocks []ReasoningBlock
 }
+
+// StreamError is the terminal error returned for a failed provider stream. It
+// implements error via Message, so existing `err.Error()` call sites are
+// unaffected by this type; callers that need the underlying HTTP status code or
+// upstream cause recover them with errors.As instead of re-parsing the message
+// string. This is what lets a session's "error" event persist real diagnostic
+// detail instead of only the flattened message (#674).
+type StreamError struct {
+	Message    string
+	StatusCode int
+	Cause      string
+}
+
+func (e *StreamError) Error() string { return e.Message }
 
 // CompletionRequest groups provider input messages and available tools.
 type CompletionRequest struct {
