@@ -92,6 +92,7 @@ func parseField(field string, min, max int, names map[string]int) (uint64, bool,
 func parseItem(item string, min, max int, names map[string]int) (uint64, error) {
 	rangePart := item
 	step := 1
+	hasStep := false
 	if slash := strings.IndexByte(item, '/'); slash >= 0 {
 		rangePart = item[:slash]
 		stepStr := item[slash+1:]
@@ -100,6 +101,7 @@ func parseItem(item string, min, max int, names map[string]int) (uint64, error) 
 			return 0, fmt.Errorf("invalid step %q in %q", stepStr, item)
 		}
 		step = n
+		hasStep = true
 	}
 
 	var lo, hi int
@@ -124,8 +126,10 @@ func parseItem(item string, min, max int, names map[string]int) (uint64, error) 
 			return 0, err
 		}
 		lo = v
-		// A bare "n/s" means n..max step s; a bare "n" is just n.
-		if step > 1 {
+		// A bare "n/s" means n..max step s, for every s including 1
+		// ("5/1" is minutes 5..59, not minute 5 alone); a bare "n"
+		// with no step at all is just n.
+		if hasStep {
 			hi = max
 		} else {
 			hi = v

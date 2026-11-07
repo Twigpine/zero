@@ -37,6 +37,10 @@ func TestNext(t *testing.T) {
 		{"0 0 * * MON", time.Date(2026, 6, 9, 12, 0, 0, 0, utc), time.Date(2026, 6, 15, 0, 0, 0, 0, utc)}, // 2026-06-09 is a Tue
 		// DOM/DOW OR: fires on the 1st OR any Monday
 		{"0 0 1 * MON", time.Date(2026, 6, 9, 0, 0, 0, 0, utc), time.Date(2026, 6, 15, 0, 0, 0, 0, utc)}, // next Monday before next 1st
+		// bare "n/1" runs every minute from n on: 10:05:30 -> 10:06, not 11:05
+		{"5/1 * * * *", time.Date(2026, 6, 9, 10, 5, 30, 0, utc), time.Date(2026, 6, 9, 10, 6, 0, 0, utc)},
+		// ... and wraps to the next hour's first stepped minute (11:05)
+		{"5/1 * * * *", time.Date(2026, 6, 9, 10, 59, 30, 0, utc), time.Date(2026, 6, 9, 11, 5, 0, 0, utc)},
 	}
 	for _, c := range cases {
 		got := mustParse(t, c.expr).Next(c.after)
