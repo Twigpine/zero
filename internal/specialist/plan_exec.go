@@ -495,15 +495,15 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 	report := PlanReport{}
 	results := map[string]TaskResult{}
 	failed := map[string]bool{}
-	// budgetLeft is decremented as tasks complete. Enforced HERE, at dispatch —
-	// validation alone would be a promise, not a bound. Under the zeromaxing
-	// posture every child inherits a 320-turn ceiling, so a twenty-task plan
-	// authorises 6,400 child turns from a single tool call; this is what stands
-	// between that number and the user's bill.
-	// budgetLeft is only a bound when the plan asked for one. Zero means
-	// unbounded: spend is metered and reported, not gated.
-	budgetLeft := plan.Budget().MaxTokens
-	bounded := budgetLeft > 0
+	// The token budget is enforced HERE, at dispatch, from the per-pool spend
+	// harvested below (upstreamUsed / downstreamUsed against each pool's
+	// ceiling) — validation alone would be a promise, not a bound. Under the
+	// zeromaxing posture every child inherits a 320-turn ceiling, so a
+	// twenty-task plan authorises 6,400 child turns from a single tool call;
+	// this is what stands between that number and the user's bill.
+	// It is only a bound when the plan asked for one. Zero means unbounded:
+	// spend is metered and reported, not gated.
+	bounded := plan.Budget().MaxTokens > 0
 	// STICKY PER POOL, not per plan. One flag meant that the moment any task was
 	// skipped for budget, every task after it was skipped too — including work
 	// drawing from a pool that had not been touched. Upstream running out closed
@@ -553,7 +553,7 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 
 	// harvest applies one completed dispatch: its spend, its outcome, its
 	// record. Called only from THIS goroutine, so results, failed, report and
-	// budgetLeft are never touched concurrently and need no lock — the
+	// the per-pool spend are never touched concurrently and need no lock — the
 	// concurrency is in the dispatches, not in the bookkeeping.
 	harvest := func(completion taskCompletion) {
 		slots.release()
@@ -578,11 +578,10 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 			result.Duration = time.Since(completion.started)
 		}
 		report.SequentialTotal += result.Duration
-		budgetLeft -= result.Tokens
 		// HARVESTED PER POOL, for the same reason the live meter is: a dependent
-		// must not be refused dispatch because a feeder overspent. budgetLeft
-		// stays as the whole-plan figure the report reads; these decide who may
-		// still start.
+		// must not be refused dispatch because a feeder overspent.
+		// report.TokensUsed is the whole-plan figure the report reads; these
+		// decide who may still start.
 		if waitsOnOthers[id] {
 			downstreamUsed += result.Tokens
 		} else {
@@ -791,8 +790,8 @@ func ExecutePlanIn(ctx context.Context, plan Plan, workspace PlanWorkspace, pare
 		// A budget-exhausted or timed-out plan SKIPS the rest rather than
 		// aborting: independent work already done still counts, and the record
 		// must show what was not attempted.
-		// THE TASK'S OWN POOL, not the shared remainder. Checking budgetLeft
-		// meant a feeder that overshot its ceiling closed the door on every
+		// THE TASK'S OWN POOL, not the shared remainder. Checking one
+		// whole-plan remainder meant a feeder that overshot its ceiling closed the door on every
 		// dependent — which is precisely what a reserve is supposed to prevent,
 		// and precisely what happened: feeders capped at 375,000 landed at
 		// 534,144 and the dependents were skipped for a budget that was never
@@ -1215,10 +1214,10 @@ func terminalStatus(report PlanReport) PlanStatus {
 
 // planSpend is the plan's token meter as it happens, rather than after the fact.
 //
-// budgetLeft next to it is the AUTHORITATIVE post-completion number and still
-// decides dispatch. This one exists because that one arrives too late: it moves
-// only when a task finishes, so nothing between dispatch and completion can be
-// stopped by it. A measured run spent 3,091,618 against a 200,000 budget and the
+// The per-pool spend ExecutePlanIn harvests from completed tasks is the
+// AUTHORITATIVE post-completion number and decides dispatch. This one exists
+// because that one arrives too late: it moves only when a task finishes, so
+// nothing between dispatch and completion can be stopped by it. A measured run spent 3,091,618 against a 200,000 budget and the
 // meter did not move once while it happened — four tasks were in flight, each
 // unbounded, and the first decrement landed after all of them had finished.
 //
