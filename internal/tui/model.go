@@ -4103,7 +4103,10 @@ func previewTail(s string, width int) string {
 	if i == 0 {
 		return s
 	}
-	return "…" + s[cut:]
+	// Re-encode through []rune so invalid UTF-8 bytes in the tail become
+	// replacement characters, matching the whole-string rune conversion this
+	// truncation replaced.
+	return "…" + string([]rune(s[cut:]))
 }
 
 func (m model) appendStreamingCursor(lines []string, width int) []string {

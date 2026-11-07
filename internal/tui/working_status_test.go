@@ -429,6 +429,12 @@ func TestPreviewTail(t *testing.T) {
 			t.Errorf("previewTail(%q,%d) = %q, want %q", c.in, c.width, got, c.want)
 		}
 	}
+	// A truncated tail must normalize invalid UTF-8 to replacement characters,
+	// matching the whole-string rune conversion this bounded-tail path replaced
+	// (a raw 0xFF would otherwise reach the renderer as invalid bytes).
+	if got := previewTail("abcdefgh\xff", 4); got != "…gh\uFFFD" {
+		t.Errorf("previewTail with invalid byte = %q, want %q", got, "…gh\uFFFD")
+	}
 }
 
 // The fix: during a think (no answer text yet) the streaming reasoning TAIL is
