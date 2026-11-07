@@ -2723,6 +2723,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.exiting && len(m.flushRunIDs) == 0 {
 					return m.quit()
 				}
+				// The cancelled run kept going until it finished, and agentRowMsg
+				// ignored its late tool results because the run is no longer active.
+				// A write that completed in that window reported nothing, so give an
+				// open file view the conservative unknown-scope refresh.
+				return m.invalidateFileViewForUnknownMutation()
 			}
 			return m, nil
 		}

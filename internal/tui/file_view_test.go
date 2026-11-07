@@ -4481,3 +4481,103 @@ func TestFileViewStaleRevalidationDoesNotReloadNewerSnapshot(t *testing.T) {
 		t.Fatalf("a stale revalidation re-highlighted an unchanged file: %d -> %d", highlights, after)
 	}
 }
+
+// TestFileViewGitSweepDetectsBlankLineAddedToEmptyFile covers the one pair of
+// sources the line-joined hash used to conflate: an empty file reads as no
+// lines and a file holding a single newline reads as one empty line. Sweep
+// revalidation compares identities without the file size, so it must still
+// see that change and reload the line-numbered body.
+func TestFileViewGitSweepDetectsBlankLineAddedToEmptyFile(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	name := "empty_then_blank.txt"
+	filePath := filepath.Join(dir, name)
+	if err := os.WriteFile(filePath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m.activeRunID = 1
+	m = testOpenFile(m, name)
+	if m.fileView.mode != fileViewFull || m.fileView.loading {
+		t.Fatal("expected a settled full-file view of the empty file")
+	}
+	emptyBody := plainRender(t, m.renderFileViewFull(80))
+
+	if err := os.WriteFile(filePath, []byte("\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	updated, cmd := m.Update(gitSweepMsg{ok: true})
+	m = drainFileViewCommands(t, updated.(model), cmd)
+	if got := plainRender(t, m.renderFileViewFull(80)); got == emptyBody {
+		t.Fatalf("adding a blank line to an empty file was not detected; body still %q", got)
+	}
+}
+
+// TestFileViewSupersededReadKeepsNewerCacheEntry covers a load that is
+// superseded inside the bounded read after a newer load already committed its
+// entry. The superseded load must not evict that entry.
+func TestFileViewSupersededReadKeepsNewerCacheEntry(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "superseded_keep.go")
+	if err := os.WriteFile(filePath, []byte("package keep\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cache := newFileViewRenderCache(10, defaultFileViewCacheMaxBytes)
+	if _, _, err := cache.loadAndRender(filePath, "superseded_keep.go", 80, nil, "", cache.generation(), zeroTheme, 0, nil, 0); err != nil {
+		t.Fatalf("newer load: %v", err)
+	}
+
+	var liveSeq atomic.Uint64
+	liveSeq.Store(1)
+	fileViewInsideDiskRead = func() { liveSeq.Store(2) }
+	defer func() { fileViewInsideDiskRead = nil }()
+	if _, _, err := cache.loadAndRender(filePath, "superseded_keep.go", 80, nil, "", cache.generation(), zeroTheme, 0, &liveSeq, 1); !errors.Is(err, errFileViewSuperseded) {
+		t.Fatalf("expected errFileViewSuperseded, got %v", err)
+	}
+	fileViewInsideDiskRead = nil
+
+	cache.mu.Lock()
+	_, resident := cache.items[filePath]
+	cache.mu.Unlock()
+	if !resident {
+		t.Fatal("a superseded read evicted the newer resident cache entry")
+	}
+}
+
+// TestFileViewCancelledRunCompletionRefreshesOpenView covers a write that
+// finishes after its run was cancelled. Late tool results from a cancelled run
+// are ignored, so its completion flush must still refresh an open full view.
+func TestFileViewCancelledRunCompletionRefreshesOpenView(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	name := "cancelled_write.go"
+	filePath := filepath.Join(dir, name)
+	if err := os.WriteFile(filePath, []byte("package before\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m = testOpenFile(m, name)
+	if !strings.Contains(plainRender(t, m.renderFileViewFull(80)), "package before") {
+		t.Fatal("expected the pre-write snapshot")
+	}
+
+	// The run was cancelled: it is no longer active, but its completion is
+	// still drained for session-event persistence.
+	const cancelledRunID = 7
+	m.activeRunID = 0
+	m.pending = false
+	m.flushRunIDs = map[int]string{cancelledRunID: m.activeSession.SessionID}
+	if err := os.WriteFile(filePath, []byte("package after\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	updated, cmd := m.Update(agentResponseMsg{runID: cancelledRunID})
+	m = drainFileViewCommands(t, updated.(model), cmd)
+	if len(m.flushRunIDs) != 0 {
+		t.Fatal("the cancelled run's completion must still be drained")
+	}
+	if got := plainRender(t, m.renderFileViewFull(80)); !strings.Contains(got, "package after") {
+		t.Fatalf("a write that finished during cancellation left the view stale: %q", got)
+	}
+}

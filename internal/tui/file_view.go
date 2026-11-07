@@ -149,15 +149,14 @@ func fileViewReadIdentity(res fileViewReadResult) fileViewSourceIdentity {
 
 // fileViewSourceHash fingerprints the bounded source lines so a metadata-only
 // change (cp -p, rsync -t, tar -xp restoring mtime and size) cannot serve a
-// stale entry. Lines are joined with a separator the reader never emits inside
-// a line, so shifted boundaries cannot collide.
+// stale entry. Every line, including the last, is terminated with a separator
+// the reader never emits inside a line. Shifted boundaries therefore cannot
+// collide, and no lines (an empty file) stays distinct from one empty line.
 func fileViewSourceHash(lines []string) [sha256.Size]byte {
 	h := sha256.New()
-	for i, line := range lines {
-		if i > 0 {
-			h.Write([]byte{'\n'})
-		}
+	for _, line := range lines {
 		h.Write([]byte(line))
+		h.Write([]byte{'\n'})
 	}
 	var out [sha256.Size]byte
 	copy(out[:], h.Sum(nil))
@@ -791,6 +790,11 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 	}
 
 	readRes := readFileViewBoundedCancellable(targetPath, fileViewMaxLines, fileViewMaxLineBytes, fileViewMaxBytes, liveSeq, seq)
+	if errors.Is(readRes.err, errFileViewSuperseded) {
+		// A newer load owns this path now and may already have committed its
+		// entry; a cancelled read must not evict it.
+		return "", fileViewSourceIdentity{}, errFileViewSuperseded
+	}
 	if readRes.err != nil && len(readRes.lines) == 0 {
 		c.evictPath(targetPath)
 		rendered := theme.faint.Render("Could not read file: " + readRes.err.Error())
