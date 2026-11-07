@@ -140,6 +140,13 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 			if event.Type == streamjson.EventUsage && event.TotalTokens != nil {
 				spent := *event.TotalTokens
 				task := taskTokens.Add(int64(spent))
+				// EVERY EVENT REACHES THE PLAN METER, before either limit is
+				// judged. The add used to sit inside the second case's condition,
+				// and a switch stops at the first true case — so the event that
+				// tripped the per-task cap, and every event after it, was billed
+				// to the task but never to the plan, and downstream dispatch was
+				// gated on an undercount.
+				poolTotal := req.Spend.add(spent, req.WaitsOnOtherTasks)
 				// BOTH LIMITS, and the task's own is checked first so its message
 				// names the cap the caller actually set for it.
 				switch {
@@ -148,7 +155,7 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 						"task %s stopped after %d tokens: budget.max_tokens_per_task is %d",
 						task_ID(req), task, req.MaxTaskTokens))
 					cancelTask()
-				case req.Spend.overPool(req.Spend.add(spent, req.WaitsOnOtherTasks), req.WaitsOnOtherTasks):
+				case req.Spend.overPool(poolTotal, req.WaitsOnOtherTasks):
 					// THE CEILING IS THIS TASK'S, not the plan's. A task others
 					// depend on stops before the whole budget is gone, so their
 					// work still has something to run on — see planSpendCeiling.
