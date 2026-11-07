@@ -903,12 +903,25 @@ func planString(args map[string]any, key string) string {
 // authority the caller thinks they narrowed. Refused with the offending value
 // named, so the author can see WHICH entry was wrong rather than diffing what
 // they sent against what ran.
+//
+// THE CONTAINER IS STRICT TOO, not only its entries. An ABSENT key is the
+// documented "none" (no dependencies; the inherited read-only grant), and an
+// empty array says the same thing explicitly. A key that is PRESENT but is not
+// an array — a bare string, an object, a number, or null — is refused: reading
+// "depends_on": "setup" as no dependencies ran the task before the
+// precondition it named, and a malformed "tools" became the default grant
+// rather than the narrowing the caller wrote. Only omission means omission.
 func planStringsStrict(args map[string]any, key string) ([]string, error) {
-	raw, ok := args[key].([]any)
-	if !ok {
-		// Absent or not a list at all: left to the caller's own shape checks,
-		// exactly as the lenient version does.
+	value, present := args[key]
+	if !present {
 		return nil, nil
+	}
+	raw, ok := value.([]any)
+	if !ok {
+		if value == nil {
+			return nil, fmt.Errorf("%s must be an array of strings, got null; omit it to declare none", key)
+		}
+		return nil, fmt.Errorf("%s must be an array of strings, got %T; omit it to declare none", key, value)
 	}
 	out := make([]string, 0, len(raw))
 	for index, item := range raw {

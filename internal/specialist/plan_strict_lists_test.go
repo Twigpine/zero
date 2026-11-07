@@ -1,8 +1,14 @@
 package specialist
 
 import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 // A MALFORMED EDGE MUST BE REFUSED, NOT DROPPED.
@@ -245,6 +251,113 @@ func TestTheToolTeachesConflictsAndRelaxationsApart(t *testing.T) {
 	} {
 		if !strings.Contains(tasks.Description, required) {
 			t.Errorf("the tasks description no longer teaches %q", required)
+		}
+	}
+}
+
+// malformedListContainers are present-but-not-an-array values for depends_on and
+// tools. Each was admitted as if the key were absent, so a declared dependency
+// vanished and a declared narrowing became the default grant.
+func malformedListContainers() map[string]any {
+	return map[string]any{
+		"a string":  "a",
+		"null":      nil,
+		"an object": map[string]any{"0": "a"},
+		"a number":  float64(1),
+		"a bool":    true,
+	}
+}
+
+// A MALFORMED CONTAINER IS REFUSED, not read as an omitted one — through the
+// inline tool-argument path, which is what a model drives. The runner must never
+// be reached: a task admitted dependency-free would already have run.
+func TestAMalformedListContainerIsRefusedInline(t *testing.T) {
+	for _, field := range []string{"depends_on", "tools"} {
+		for name, value := range malformedListContainers() {
+			t.Run(field+"/"+name, func(t *testing.T) {
+				ran := 0
+				tool := &OrchestrateTool{
+					PostureActive: func() bool { return true },
+					ParentTools:   []string{"read_file", "grep"},
+					RunTask: func(context.Context, PlanTaskRequest) (TaskResult, error) {
+						ran++
+						return TaskResult{Outcome: TaskSucceeded, Output: "ran"}, nil
+					},
+				}
+				result := tool.RunWithOptions(context.Background(), map[string]any{
+					"name":   "p",
+					"budget": map[string]any{"max_workers": float64(1)},
+					"tasks": []any{
+						map[string]any{"id": "a", "prompt": "x"},
+						map[string]any{"id": "b", "prompt": "y", field: value},
+					},
+				}, tools.RunOptions{Model: "m"})
+				if result.Status != tools.StatusError {
+					t.Fatalf("a present non-array %s (%s) was admitted as if omitted:\n%s", field, name, result.Output)
+				}
+				if !strings.Contains(result.Output, field) || !strings.Contains(result.Output, "task at position 1") {
+					t.Errorf("the refusal does not locate the field: %s", result.Output)
+				}
+				if ran != 0 {
+					t.Errorf("%d task(s) ran from a refused plan", ran)
+				}
+			})
+		}
+	}
+}
+
+// AND THROUGH SAVED-PLAN ADMISSION. A hand-edited plan file reaches the same
+// parser with no provider schema in front of it at all, so the container rule
+// has to hold there too.
+func TestAMalformedListContainerIsRefusedFromASavedPlan(t *testing.T) {
+	for _, field := range []string{"depends_on", "tools"} {
+		for name, value := range malformedListContainers() {
+			t.Run(field+"/"+name, func(t *testing.T) {
+				dir := t.TempDir()
+				body, err := json.Marshal(map[string]any{
+					"name":   "edited",
+					"budget": map[string]any{"max_workers": 1},
+					"tasks": []any{
+						map[string]any{"id": "a", "prompt": "x"},
+						map[string]any{"id": "b", "prompt": "y", field: value},
+					},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "edited"+planFileExt), body, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				tool := &OrchestrateTool{Plans: PlanPaths{UserDir: dir}}
+				resolved, err := tool.resolveSavedPlan(map[string]any{"saved": "edited"})
+				if err != nil {
+					t.Fatalf("the saved plan did not load, so nothing below reaches the parser: %v", err)
+				}
+				_, err = ParsePlan(resolved, readOnlyLimits())
+				if err == nil {
+					t.Fatalf("a saved plan with a non-array %s (%s) was admitted", field, name)
+				}
+				if !strings.Contains(err.Error(), field) {
+					t.Errorf("the refusal does not name %s: %v", field, err)
+				}
+			})
+		}
+	}
+}
+
+// OMISSION AND AN EXPLICIT EMPTY ARRAY STILL MEAN "NONE". The container rule
+// must not turn the documented spelling of no dependencies into an error.
+func TestAnEmptyListContainerStillMeansNone(t *testing.T) {
+	plan, err := ParsePlan(planArgs([]any{
+		map[string]any{"id": "a", "prompt": "x", "depends_on": []any{}, "tools": []any{}},
+		map[string]any{"id": "b", "prompt": "y"},
+	}, okBudget()), readOnlyLimits())
+	if err != nil {
+		t.Fatalf("an empty or omitted list was refused: %v", err)
+	}
+	for _, task := range plan.Tasks() {
+		if len(task.DependsOn) != 0 || len(task.Tools) != 0 {
+			t.Errorf("task %s: an empty list became non-empty: %+v", task.ID, task)
 		}
 	}
 }
