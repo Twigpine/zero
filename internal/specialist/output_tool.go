@@ -166,8 +166,11 @@ func (tool *OutputTool) readOutput(task background.Task) tools.Result {
 	if tokens := summary.Usage.EffectiveTotalTokens(); tokens > 0 {
 		meta["tokens"] = strconv.Itoa(tokens)
 	}
-	if n := len(summary.Tools); n > 0 {
-		meta["tools"] = strconv.Itoa(n)
+	// CALLS, not distinct names: the panel's live count increments once per
+	// call, so publishing len(summary.Tools) made a background agent that ran
+	// read_file forty times read "1 tool" beside a foreground one reading 40.
+	if n := summary.ToolCalls; n > 0 {
+		meta["tool_calls"] = strconv.Itoa(n)
 	}
 	return tools.Result{
 		Status: tools.StatusOK,

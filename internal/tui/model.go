@@ -7086,7 +7086,7 @@ func backgroundPollUpdate(toolName string, meta map[string]string) (backgroundPo
 	if tokens, err := strconv.Atoi(meta["tokens"]); err == nil && tokens > 0 {
 		update.tokens = tokens
 	}
-	if tools, err := strconv.Atoi(meta["tools"]); err == nil && tools > 0 {
+	if tools, err := strconv.Atoi(meta["tool_calls"]); err == nil && tools > 0 {
 		update.tools = tools
 	}
 	update.status, update.done = backgroundAgentStatus(meta["status"])

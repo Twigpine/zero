@@ -53,7 +53,7 @@ func TestSetToolCountNeverGoesBackwards(t *testing.T) {
 // THE POLL-PARSE DECISION, pinned — the emit lives in the untestable agent loop.
 func TestBackgroundPollUpdateParsesTheMeta(t *testing.T) {
 	got, ok := backgroundPollUpdate("TaskOutput", map[string]string{
-		"task_id": "task_w2", "status": "completed", "tokens": "1355600", "tools": "40",
+		"task_id": "task_w2", "status": "completed", "tokens": "1355600", "tool_calls": "40",
 	})
 	if !ok || got.taskID != "task_w2" || got.tokens != 1355600 || got.tools != 40 || !got.done || got.status != specialistCompleted {
 		t.Fatalf("terminal poll parsed to %+v (ok=%v)", got, ok)

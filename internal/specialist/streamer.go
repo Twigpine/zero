@@ -13,7 +13,12 @@ type StreamResult struct {
 	RunID     string
 	SessionID string
 	Text      string
-	Tools     []string
+	// Tools is the DISTINCT tool names the child used, in first-use order.
+	Tools []string
+	// ToolCalls is how many tool calls the child made — every call, repeats
+	// included. It is the figure the AGENTS panel counts live, so a summary that
+	// reports a count must report this one, not len(Tools).
+	ToolCalls int
 	Errors    []string
 	Status    string
 	ExitCode  int
@@ -61,6 +66,7 @@ func SummarizeStream(events []streamjson.Event, processExitCode int) StreamResul
 		case streamjson.EventFinal:
 			finalText = event.Text
 		case streamjson.EventToolCall:
+			result.ToolCalls++
 			if name := strings.TrimSpace(event.Name); name != "" && !seenTools[name] {
 				seenTools[name] = true
 				result.Tools = append(result.Tools, name)

@@ -3,6 +3,7 @@ package specialist
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -165,22 +166,39 @@ func TestSummarizeTaskDataCollectsErrors(t *testing.T) {
 
 // A TERMINAL TASKOUTPUT POLL EXPOSES THE CHILD'S SPEND in Meta, so the AGENTS
 // panel can show it for a detached background child that never streamed.
+//
+// Driven through TaskOutput itself and its returned Meta: checking only the
+// summary passed even with the Meta assignments deleted. The child calls
+// read_file twice, so the published figure must be 3 CALLS — the count the
+// panel keeps live — not the 2 distinct tool names.
 func TestTaskOutputMetaCarriesTokensAndToolCount(t *testing.T) {
 	// A stream-json blob a background child would have written: usage + tools.
 	data := strings.Join([]string{
 		`{"schemaVersion":2,"type":"run_start","runId":"r","sessionId":"child"}`,
 		`{"schemaVersion":2,"type":"tool_call","runId":"r","id":"c1","name":"grep"}`,
 		`{"schemaVersion":2,"type":"tool_call","runId":"r","id":"c2","name":"read_file"}`,
+		`{"schemaVersion":2,"type":"tool_call","runId":"r","id":"c3","name":"read_file"}`,
 		`{"schemaVersion":2,"type":"usage","runId":"r","totalTokens":1355600}`,
 		`{"schemaVersion":2,"type":"final","runId":"r","text":"done"}`,
 		`{"schemaVersion":2,"type":"run_end","runId":"r","status":"success","exitCode":0}`,
 	}, "\n")
-
-	summary, _ := summarizeTaskData(data, 0)
-	if got := summary.Usage.EffectiveTotalTokens(); got != 1355600 {
-		t.Fatalf("summary tokens = %d, want 1355600", got)
+	outputFile := filepath.Join(t.TempDir(), "task_w2.jsonl")
+	if err := os.WriteFile(outputFile, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if len(summary.Tools) != 2 {
-		t.Fatalf("summary tool count = %d, want 2", len(summary.Tools))
+
+	result := (&OutputTool{}).readOutput(background.Task{
+		ID:         "task_w2",
+		Status:     background.StatusCompleted,
+		OutputFile: outputFile,
+	})
+	if result.Status != tools.StatusOK {
+		t.Fatalf("TaskOutput status = %q: %s", result.Status, result.Output)
+	}
+	if got := result.Meta["tokens"]; got != "1355600" {
+		t.Fatalf("Meta[tokens] = %q, want 1355600 (meta %v)", got, result.Meta)
+	}
+	if got := result.Meta["tool_calls"]; got != "3" {
+		t.Fatalf("Meta[tool_calls] = %q, want 3 calls — not the 2 distinct names (meta %v)", got, result.Meta)
 	}
 }
