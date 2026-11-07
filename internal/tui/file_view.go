@@ -727,7 +727,8 @@ func (c *fileViewRenderCache) peekRenderOnly(targetPath string, width int, chang
 // bytes, so the content hash decides freshness. On a matching metadata+hash pair
 // the highlight/format work is reused (re-formatting only for a new width
 // variant). It is intended to run from a tea.Cmd / background worker, off the
-// View path.
+// View path. It also returns the identity of the source it rendered, which a
+// later git-sweep revalidation compares against.
 var errFileViewSuperseded = errors.New("file view request superseded")
 
 var (
@@ -746,7 +747,7 @@ func fileViewSuperseded(liveSeq *atomic.Uint64, seq uint64) bool {
 	return liveSeq != nil && liveSeq.Load() != seq
 }
 
-func (c *fileViewRenderCache) loadAndRenderSource(targetPath string, displayPath string, width int, changed map[string]bool, changedFingerprint string, reqGen int, theme tuiTheme, reqSourceRev uint64, liveSeq *atomic.Uint64, seq uint64) (string, fileViewSourceIdentity, error) {
+func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath string, width int, changed map[string]bool, changedFingerprint string, reqGen int, theme tuiTheme, reqSourceRev uint64, liveSeq *atomic.Uint64, seq uint64) (string, fileViewSourceIdentity, error) {
 	if fileViewSuperseded(liveSeq, seq) {
 		return "", fileViewSourceIdentity{}, errFileViewSuperseded
 	}
@@ -967,12 +968,6 @@ func (c *fileViewRenderCache) loadAndRenderSource(targetPath string, displayPath
 	return rendered, identity, nil
 }
 
-// loadAndRender is loadAndRenderSource without the source identity.
-func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath string, width int, changed map[string]bool, changedFingerprint string, reqGen int, theme tuiTheme, reqSourceRev uint64, liveSeq *atomic.Uint64, seq uint64) (string, error) {
-	rendered, _, err := c.loadAndRenderSource(targetPath, displayPath, width, changed, changedFingerprint, reqGen, theme, reqSourceRev, liveSeq, seq)
-	return rendered, err
-}
-
 // sanitizeRawFileLine strips or transforms raw control characters and terminal escape sequences
 // when syntax highlighting is bypassed or unavailable, preventing terminal screen corruption.
 func sanitizeRawFileLine(s string) string {
@@ -995,7 +990,7 @@ func sanitizeRawFileLine(s string) string {
 
 func (c *fileViewRenderCache) getOrRender(targetPath string, displayPath string, width int, changed map[string]bool) string {
 	fingerprint := changedLinesFingerprint(changed)
-	rendered, _ := c.loadAndRender(targetPath, displayPath, width, changed, fingerprint, c.generation(), zeroTheme, 0, nil, 0)
+	rendered, _, _ := c.loadAndRender(targetPath, displayPath, width, changed, fingerprint, c.generation(), zeroTheme, 0, nil, 0)
 	return rendered
 }
 
@@ -1020,7 +1015,7 @@ func loadFileViewCmd(targetPath string, displayPath string, width int, changed m
 		if fileViewSuperseded(liveSeq, seq) {
 			return fileViewLoadedMsg{lifetimeToken: token, seq: seq, requiredSourceRev: reqRev, generation: gen, targetPath: targetPath, displayPath: displayPath, width: width, fingerprint: fingerprint, err: errFileViewSuperseded}
 		}
-		rendered, source, err := defaultFileViewCache.loadAndRenderSource(targetPath, displayPath, width, changed, fingerprint, gen, theme, reqRev, liveSeq, seq)
+		rendered, source, err := defaultFileViewCache.loadAndRender(targetPath, displayPath, width, changed, fingerprint, gen, theme, reqRev, liveSeq, seq)
 		return fileViewLoadedMsg{
 			lifetimeToken:     token,
 			seq:               seq,

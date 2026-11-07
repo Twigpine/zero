@@ -2072,7 +2072,7 @@ func TestFileViewCacheHitRespectsLiveSeq(t *testing.T) {
 	defer func() { fileViewBeforeCacheCommit = nil }()
 	target := filepath.Join(dir, name)
 	gen := defaultFileViewCache.generation()
-	_, err := defaultFileViewCache.loadAndRender(target, name, m.fileView.loadedWidth+17, nil, m.fileView.loadedFingerprint, gen, zeroTheme, 0, live, seq)
+	_, _, err := defaultFileViewCache.loadAndRender(target, name, m.fileView.loadedWidth+17, nil, m.fileView.loadedFingerprint, gen, zeroTheme, 0, live, seq)
 	if !errors.Is(err, errFileViewSuperseded) {
 		t.Fatalf("cache-hit put after supersede: err=%v", err)
 	}
@@ -2737,7 +2737,7 @@ func TestFileView_SupersededInsideDiskReadAndHighlight(t *testing.T) {
 	}
 	defer func() { fileViewInsideDiskRead = nil }()
 
-	_, err := cache.loadAndRender(filePath, "cancel_test.go", 80, nil, "", 0, theme, 0, &liveSeq, 1)
+	_, _, err := cache.loadAndRender(filePath, "cancel_test.go", 80, nil, "", 0, theme, 0, &liveSeq, 1)
 	if !errors.Is(err, errFileViewSuperseded) {
 		t.Fatalf("expected errFileViewSuperseded on inside-disk-read supersession, got: %v", err)
 	}
@@ -2750,7 +2750,7 @@ func TestFileView_SupersededInsideDiskReadAndHighlight(t *testing.T) {
 	}
 	defer func() { fileViewBeforeHighlight = nil }()
 
-	_, err = cache.loadAndRender(filePath, "cancel_test.go", 80, nil, "", 0, theme, 0, &liveSeq, 10)
+	_, _, err = cache.loadAndRender(filePath, "cancel_test.go", 80, nil, "", 0, theme, 0, &liveSeq, 10)
 	if !errors.Is(err, errFileViewSuperseded) {
 		t.Fatalf("expected errFileViewSuperseded on before-highlight supersession, got: %v", err)
 	}
@@ -2763,7 +2763,7 @@ func TestFileView_SupersededInsideDiskReadAndHighlight(t *testing.T) {
 	}
 	defer func() { fileViewInsideHighlight = nil }()
 
-	_, err = cache.loadAndRender(filePath, "cancel_test.go", 80, nil, "", 0, theme, 0, &liveSeq, 20)
+	_, _, err = cache.loadAndRender(filePath, "cancel_test.go", 80, nil, "", 0, theme, 0, &liveSeq, 20)
 	if !errors.Is(err, errFileViewSuperseded) {
 		t.Fatalf("expected errFileViewSuperseded on inside-highlight supersession, got: %v", err)
 	}
@@ -2964,7 +2964,7 @@ func TestFileViewCacheByteBudget(t *testing.T) {
 		if err := os.WriteFile(path, []byte(payload), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := cache.loadAndRender(path, name, 80, nil, "", cache.generation(), zeroTheme, 0, nil, 0); err != nil {
+		if _, _, err := cache.loadAndRender(path, name, 80, nil, "", cache.generation(), zeroTheme, 0, nil, 0); err != nil {
 			t.Fatalf("load %d: %v", i, err)
 		}
 	}
@@ -2993,7 +2993,7 @@ func TestFileViewCacheRefusesOversizedEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 	cache := newFileViewRenderCache(64, 512)
-	rendered, err := cache.loadAndRender(path, "oversized.txt", 80, nil, "", cache.generation(), zeroTheme, 0, nil, 0)
+	rendered, _, err := cache.loadAndRender(path, "oversized.txt", 80, nil, "", cache.generation(), zeroTheme, 0, nil, 0)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -3027,7 +3027,7 @@ func TestFileViewCacheEvictionDropsPathRevision(t *testing.T) {
 
 	// Give a a revision, then load it so the entry and its revision coexist.
 	cache.invalidatePath(a)
-	if _, err := cache.loadAndRender(a, "rev_a.txt", 80, nil, "", cache.generation(), zeroTheme, cache.requiredRevision(a), nil, 0); err != nil {
+	if _, _, err := cache.loadAndRender(a, "rev_a.txt", 80, nil, "", cache.generation(), zeroTheme, cache.requiredRevision(a), nil, 0); err != nil {
 		t.Fatalf("load a: %v", err)
 	}
 	cache.mu.Lock()
@@ -3038,7 +3038,7 @@ func TestFileViewCacheEvictionDropsPathRevision(t *testing.T) {
 	}
 
 	// Loading b with maxEntries=1 evicts a and must drop a's revision.
-	if _, err := cache.loadAndRender(b, "rev_b.txt", 80, nil, "", cache.generation(), zeroTheme, 0, nil, 0); err != nil {
+	if _, _, err := cache.loadAndRender(b, "rev_b.txt", 80, nil, "", cache.generation(), zeroTheme, 0, nil, 0); err != nil {
 		t.Fatalf("load b: %v", err)
 	}
 	cache.mu.Lock()
@@ -3110,7 +3110,7 @@ func TestFileViewCacheFreshnessBySourceHash(t *testing.T) {
 	}
 
 	cache := newFileViewRenderCache(64, defaultFileViewCacheMaxBytes)
-	first, err := cache.loadAndRender(path, "fresh.go", 80, nil, "", cache.generation(), zeroTheme, 0, nil, 0)
+	first, _, err := cache.loadAndRender(path, "fresh.go", 80, nil, "", cache.generation(), zeroTheme, 0, nil, 0)
 	if err != nil {
 		t.Fatalf("first load: %v", err)
 	}
@@ -3125,7 +3125,7 @@ func TestFileViewCacheFreshnessBySourceHash(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	second, err := cache.loadAndRender(path, "fresh.go", 80, nil, "", cache.generation(), zeroTheme, 0, nil, 0)
+	second, _, err := cache.loadAndRender(path, "fresh.go", 80, nil, "", cache.generation(), zeroTheme, 0, nil, 0)
 	if err != nil {
 		t.Fatalf("second load: %v", err)
 	}
@@ -3344,7 +3344,7 @@ func TestFileViewLifecycle_RevisionMetadataBounded(t *testing.T) {
 
 	cache := newFileViewRenderCache(defaultFileViewCacheMaxEntries, defaultFileViewCacheMaxBytes)
 	oldRev := cache.invalidatePath(warm)
-	if _, err := cache.loadAndRender(warm, "revision_warm.go", 80, nil, "", cache.generation(), zeroTheme, oldRev, nil, 0); err != nil {
+	if _, _, err := cache.loadAndRender(warm, "revision_warm.go", 80, nil, "", cache.generation(), zeroTheme, oldRev, nil, 0); err != nil {
 		t.Fatalf("warm load: %v", err)
 	}
 
@@ -3373,7 +3373,7 @@ func TestFileViewLifecycle_RevisionMetadataBounded(t *testing.T) {
 	// A request captured before the retirement must not reuse the still-resident
 	// entry; it has to re-render under the advanced authority.
 	highlightBefore := cache.stats().HighlightCalls
-	if _, err := cache.loadAndRender(warm, "revision_warm.go", 80, nil, "", cache.generation(), zeroTheme, oldRev, nil, 0); err != nil {
+	if _, _, err := cache.loadAndRender(warm, "revision_warm.go", 80, nil, "", cache.generation(), zeroTheme, oldRev, nil, 0); err != nil {
 		t.Fatalf("stale load: %v", err)
 	}
 	if highlightAfter := cache.stats().HighlightCalls; highlightAfter != highlightBefore+1 {
@@ -3401,7 +3401,7 @@ func TestFileViewLifecycle_TruncationStateEquivalence(t *testing.T) {
 	if err := os.Chtimes(filePath, stamp, stamp); err != nil {
 		t.Fatal(err)
 	}
-	first, err := defaultFileViewCache.loadAndRender(filePath, name, 80, nil, "", defaultFileViewCache.generation(), zeroTheme, 0, nil, 0)
+	first, _, err := defaultFileViewCache.loadAndRender(filePath, name, 80, nil, "", defaultFileViewCache.generation(), zeroTheme, 0, nil, 0)
 	if err != nil {
 		t.Fatalf("first load: %v", err)
 	}
@@ -3417,7 +3417,7 @@ func TestFileViewLifecycle_TruncationStateEquivalence(t *testing.T) {
 	if err := os.Chtimes(filePath, stamp, stamp); err != nil {
 		t.Fatal(err)
 	}
-	second, err := defaultFileViewCache.loadAndRender(filePath, name, 80, nil, "", defaultFileViewCache.generation(), zeroTheme, 0, nil, 0)
+	second, _, err := defaultFileViewCache.loadAndRender(filePath, name, 80, nil, "", defaultFileViewCache.generation(), zeroTheme, 0, nil, 0)
 	if err != nil {
 		t.Fatalf("second load: %v", err)
 	}
@@ -3432,7 +3432,7 @@ func TestFileViewLifecycle_TruncationStateEquivalence(t *testing.T) {
 	if err := os.Chtimes(filePath, stamp, stamp); err != nil {
 		t.Fatal(err)
 	}
-	third, err := defaultFileViewCache.loadAndRender(filePath, name, 80, nil, "", defaultFileViewCache.generation(), zeroTheme, 0, nil, 0)
+	third, _, err := defaultFileViewCache.loadAndRender(filePath, name, 80, nil, "", defaultFileViewCache.generation(), zeroTheme, 0, nil, 0)
 	if err != nil {
 		t.Fatalf("third load: %v", err)
 	}
@@ -3471,7 +3471,7 @@ func TestFileViewLifecycle_VariantAccountingConsistency(t *testing.T) {
 		t.Fatal(err)
 	}
 	cache := newFileViewRenderCache(64, defaultFileViewCacheMaxBytes)
-	if _, err := cache.loadAndRender(path, "variant_accounting.go", 80, nil, "", cache.generation(), zeroTheme, 0, nil, 0); err != nil {
+	if _, _, err := cache.loadAndRender(path, "variant_accounting.go", 80, nil, "", cache.generation(), zeroTheme, 0, nil, 0); err != nil {
 		t.Fatalf("seed load: %v", err)
 	}
 
@@ -3512,7 +3512,7 @@ func TestFileViewLifecycle_VariantAccountingConsistency(t *testing.T) {
 	}
 
 	// A purge detaches every entry the same way.
-	if _, err := cache.loadAndRender(path, "variant_accounting.go", 80, nil, "", cache.generation(), zeroTheme, 0, nil, 0); err != nil {
+	if _, _, err := cache.loadAndRender(path, "variant_accounting.go", 80, nil, "", cache.generation(), zeroTheme, 0, nil, 0); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
 	cache.mu.Lock()
