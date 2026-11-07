@@ -325,13 +325,24 @@ type Options struct {
 	SessionTitle     string
 	ProviderName     string
 	Model            string
-	ReasoningEffort  string
-	ServiceTier      string
-	Cwd              string
-	SystemPrompt     string
+	// ModelFamily is the family the PROVIDER declares it serves, from the
+	// provider catalog — "openai", "anthropic", "gemini", or "" when the provider
+	// is a gateway serving several and cannot answer. Empty falls back to
+	// classifying the model id, which is a guess that matches nothing for most of
+	// the catalog. Prompt tuning only; it selects the family addendum and nothing
+	// else.
+	ModelFamily     string
+	ReasoningEffort string
+	ServiceTier     string
+	Cwd             string
+	SystemPrompt    string
 	// TransientSystemPrompt adds trusted runtime guidance for this run only.
 	// Empty preserves the ordinary system prompt byte-for-byte.
 	TransientSystemPrompt string
+	// userMessage is this turn's raw user text, set by Run from its prompt
+	// argument and forwarded to tools. Unexported: it is not a knob a caller
+	// sets, it is what the caller already passed as `prompt`.
+	userMessage string
 	// ResponseStyle is the operator-selected reply style from the TUI /style
 	// command (e.g. "concise", "explanatory", "review"). It is rendered into the
 	// system prompt as a short directive. Empty or "balanced" adds nothing — the
@@ -346,6 +357,19 @@ type Options struct {
 	// boundary when this is false. nil uses the curated catalog plus the
 	// name heuristic via modelregistry.SupportsVision.
 	SupportsVision func(modelID string) bool
+	// MaxTokens bounds what a whole run may SPEND, in provider-reported tokens.
+	// 0 is unbounded, which is every caller that does not set it.
+	//
+	// MaxTurns IS NOT A COST BOUND, and treating it as one is how a run ends at
+	// an arbitrary place. A cheap run reaches 320 turns having spent ~3M tokens; a
+	// measured heavy run reached the same 320 having spent 35,781,390. The turn
+	// count bounds round trips, not spend, and the two diverge by an order of
+	// magnitude on exactly the runs worth bounding.
+	//
+	// Crossing it ends the run the same way MaxTurns does — one final call asking
+	// for a summary — so a budget expiry produces a written report of what was
+	// done rather than a run that simply stops.
+	MaxTokens int
 	// ContextWindow is the model's maximum input token budget. When > 0 the agent
 	// loop compacts long conversations once the estimated size crosses a fraction
 	// of this window. 0 DISABLES compaction entirely (every existing caller/test
@@ -437,6 +461,24 @@ type Options struct {
 	// byte-identical: no observation, no escalation, no counters. Same opt-in
 	// convention as Trace and SelfCorrect.
 	Profile *ProfilePolicy
+	// Zeromaxing reports where this run sits in the zeromaxing execution
+	// posture's lifecycle, driving the model-facing reminders the turn loop
+	// appends. The zero value (ZeromaxingOff) suppresses every reminder, so a
+	// caller that never heard of it is byte-identical to today. Deliberately
+	// separate from Profile: zeromaxing arms no escalation triggers, so
+	// Profile.Policy() returns nil for it and could not carry this.
+	Zeromaxing Zeromaxing
+	// PlanCompletions, when set, is drained once per turn for background plans
+	// that finished since the last turn. Its text is appended to the
+	// conversation TAIL as a user-role message, on the same channel as the
+	// post-edit diagnostics nudge — background work reporting into a later turn
+	// already has a channel here, and a second one would be a second ordering
+	// and a second thing to budget. nil is a no-op.
+	PlanCompletions func() string
+	// OrchestrateAvailable reports whether the orchestrate tool is actually
+	// advertised this run, so the enter notice names it only when it exists.
+	// Zero value false keeps every existing caller's prompt unchanged.
+	OrchestrateAvailable bool
 	// Trace, when set, records per-turn timing for the run: the loop stamps
 	// spans (prompt build, generation, tool execution, permission wait,
 	// compaction, provider connect) and counters (model requests, tool calls,

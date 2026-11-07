@@ -47,7 +47,7 @@ func TestFormatCommandHelpLinesGroupsCommandsByStableOrder(t *testing.T) {
 		"model:",
 		"  /provider [add|status] - Manage providers: activate, add, edit, delete.",
 		"  /model [list|id] - Show or switch the active model.",
-		"  /effort [list|level|auto] - Show or set reasoning effort for supported models.",
+		"  /effort [list|low|medium|high|zeromaxing|auto] - Show or set reasoning effort for supported models.",
 		"  /fast - Toggle fast mode for supported ChatGPT subscription models.",
 		"session:",
 		"  /plan [status|on|off] - Show plan status, or enter/exit read-only planning mode.",

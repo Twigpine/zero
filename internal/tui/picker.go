@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/execprofile"
 	"github.com/Twigpine/zero/internal/modelregistry"
 	"github.com/Twigpine/zero/internal/notify"
 	"github.com/Twigpine/zero/internal/providercatalog"
@@ -1196,23 +1197,40 @@ func (m *model) selectPickerValue(value string) {
 	}
 }
 
-// newEffortPicker lists the reasoning efforts the active model supports plus an
-// "auto" option, preselecting the current preference. When the model exposes no
-// effort controls, still returns a single "auto" picker so the user gets the
-// popup affordance on /effort instead of a static status card; handleEffortCommand
-// reports "Active model does not expose reasoning effort controls" if they pick
-// anything other than auto.
+// newEffortPicker lists everything /effort accepts on the active model, plus
+// "auto", preselecting the current preference.
+//
+// THE THIRD DOOR onto "which efforts can I set?", after the /effort card and
+// the command itself. It used to read availableReasoningEfforts() — the
+// CATALOG's answer — so on a model with no catalog entry it offered nothing but
+// "auto", and it never offered the zeromaxing posture on any model even though
+// picking it routes straight into handleEffortCommand, which accepts it.
+//
+// It now shares settableEfforts() with the card, so the three cannot disagree.
 func (m model) newEffortPicker() *commandPicker {
-	efforts := m.availableReasoningEfforts()
 	items := []pickerItem{{Label: "auto", Value: "auto"}}
 	selected := 0
-	if m.reasoningEffort == "" {
-		selected = 0
-	}
-	for _, effort := range efforts {
-		items = append(items, pickerItem{Label: string(effort), Value: string(effort)})
-		if m.reasoningEffort != "" && effort == m.reasoningEffort {
+	for _, value := range m.settableEfforts() {
+		label := value
+		if isZeromaxingOption(value) {
+			// The posture is not another effort level — it is a run posture
+			// that raises a cost multiplier. It is marked here so it looks in
+			// the picker like it looks once it is on.
+			label = "◉ " + value
+		}
+		items = append(items, pickerItem{Label: label, Value: value})
+		if m.reasoningEffort != "" && value == string(m.reasoningEffort) {
 			selected = len(items) - 1
+		}
+	}
+	// The posture is not a reasoning level, so it is preselected from the
+	// active PROFILE rather than from m.reasoningEffort — which under
+	// zeromaxing holds "high", the level the posture filled.
+	if m.execProfileName == execprofile.Name {
+		for index, item := range items {
+			if item.Value == execprofile.Name {
+				selected = index
+			}
 		}
 	}
 	return &commandPicker{kind: pickerEffort, title: "select reasoning effort", items: items, selected: selected}

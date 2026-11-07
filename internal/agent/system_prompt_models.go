@@ -22,6 +22,13 @@ const (
 
 // modelFamily classifies a model id into a prompt-tuning family, or "" when
 // unknown (in which case no addendum is added).
+//
+// A GUESS, AND THE FALLBACK ONLY. Matching id prefixes answers correctly for
+// first-party ids and for the vendor-prefixed ones a gateway uses
+// ("openai/gpt-4.1"), and answers nothing at all for most of the market: of the
+// 37 providers in the catalog, 28 have a default model that matches none of
+// these arms — including the recommended default. Where the PROVIDER knows the
+// answer it is passed in instead; see modelPromptAddendum.
 func modelFamily(model string) string {
 	m := strings.ToLower(strings.TrimSpace(model))
 	switch {
@@ -41,8 +48,21 @@ func modelFamily(model string) string {
 
 // modelPromptAddendum returns the family-specific prompt block for a model id,
 // or "" when the family is unknown.
-func modelPromptAddendum(model string) string {
-	switch modelFamily(model) {
+// modelPromptAddendum returns the family-specific prompt block, preferring the
+// family the PROVIDER declared over anything guessed from the model id.
+//
+// The provider is authoritative where it is single-family, and the id is not: a
+// ChatGPT OAuth session was classified correctly only because "gpt-5.5" happens
+// to begin with "gpt", which no future id is obliged to do. Gateways serve
+// several families at once and declare none, so those still fall back to the id
+// — which is the right answer for them, since only the id distinguishes
+// "openai/gpt-4.1" from "z-ai/glm-4.6" on the same endpoint.
+func modelPromptAddendum(providerFamily, model string) string {
+	family := strings.TrimSpace(providerFamily)
+	if family == "" {
+		family = modelFamily(model)
+	}
+	switch family {
 	case familyOpenAI:
 		return openAIPromptAddendum
 	case familyGemini:

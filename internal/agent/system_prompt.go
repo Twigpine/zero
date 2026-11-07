@@ -11,6 +11,7 @@ import (
 
 	"github.com/Twigpine/zero/internal/config"
 	"github.com/Twigpine/zero/internal/repomap"
+	"github.com/Twigpine/zero/internal/sandbox"
 	"github.com/Twigpine/zero/internal/tools"
 	"github.com/Twigpine/zero/internal/workspaceseed"
 )
@@ -66,6 +67,72 @@ const (
 	workspaceSeedWidth    = 100
 )
 
+// runCanMutate reports whether this run holds any tool that could change
+// something — and therefore whether the confirmation policy applies to it.
+//
+// FAIL CLOSED at every step. A nil registry, a run with no visible tools, and
+// any tool whose effect is not explicitly read-only all answer TRUE, so the
+// policy is dropped ONLY when every visible tool is positively known to be a
+// pure read. EffectUnknown (MCP tools, plugin tools, the specialist tools)
+// keeps it, which is what makes an ordinary session byte-identical.
+//
+// Keyed on the RESOLVED TOOL SET, not on a specialist name or a manifest flag:
+// what a run can do is decided by the tools it actually holds, and a name is
+// not a capability.
+//
+// Filters, NOT advertising. ToolAllowedByFilters answers "does this run hold
+// the tool"; ToolVisible also applies the permission mode's advertising rules,
+// and a write tool that auto mode does not advertise is still held and still
+// callable once approved. Using ToolVisible here dropped the policy from a run
+// launched with --enabled-tools read_file,grep,glob,write_file — a fail-OPEN
+// exactly inverse to this function's purpose, caught by driving the binary.
+func runCanMutate(options Options) bool {
+	if options.Registry == nil {
+		return true
+	}
+	held := 0
+	for _, tool := range options.Registry.All() {
+		if !ToolAllowedByFilters(tool.Name(), options.EnabledTools, options.DisabledTools) {
+			continue
+		}
+		if permanentlyDenied(tool) {
+			// A tool the run can never call cannot act, so it says nothing
+			// about what the run can do. This is what keeps registering a
+			// posture-gated tool from changing the prompt while the posture is
+			// off — the additivity guarantee, which its identity test caught
+			// this function breaking.
+			continue
+		}
+		held++
+		if tools.CapabilitiesOf(tool).Effect != tools.EffectReadOnly {
+			return true
+		}
+	}
+	return held == 0
+}
+
+// permanentlyDenied reports whether a tool can never be invoked in this run.
+//
+// A tool that varies its permission by arguments is NEVER treated as denied,
+// however its static safety reads: the question is whether any call could
+// succeed, and only a tool with no per-argument override can be ruled out from
+// its static permission alone. Fail closed.
+func permanentlyDenied(tool tools.Tool) bool {
+	// A tool that KNOWS it cannot fire is believed first, before the
+	// argument-varying escape below. Otherwise a tool gated on something that is
+	// not an argument — the zeromaxing posture is a session state, not a
+	// parameter — would count as held in every run merely for implementing
+	// ArgsPermissioner, and the confirmation policy would appear in read-only
+	// runs that do not have the feature turned on at all.
+	if denier, ok := tool.(tools.PermanentDenier); ok && denier.PermanentlyDenied() {
+		return true
+	}
+	if _, varies := tool.(tools.ArgsPermissioner); varies {
+		return false
+	}
+	return tool.Safety().Permission == tools.PermissionDeny
+}
+
 // buildSystemPrompt assembles the full system prompt for a run: the core
 // coding-craft instructions, dynamic workspace context (cwd, git branch, project
 // guidelines), and the safety confirmation policy. It is built once per run so
@@ -98,7 +165,7 @@ func buildSystemPromptParts(options Options) systemPromptParts {
 	if transient := strings.TrimSpace(options.TransientSystemPrompt); transient != "" {
 		sections = append(sections, transient)
 	}
-	if addendum := modelPromptAddendum(options.Model); addendum != "" {
+	if addendum := modelPromptAddendum(options.ModelFamily, options.Model); addendum != "" {
 		sections = append(sections, addendum)
 	}
 	if session := sessionRuntimeContext(options); session != "" {
@@ -117,7 +184,7 @@ func buildSystemPromptParts(options Options) systemPromptParts {
 	if user := userGuidelines(); user != "" {
 		sections = append(sections, user)
 	}
-	project := workspaceContext(options.Cwd)
+	project := workspaceContext(options.Cwd, options.Sandbox)
 	if project != "" {
 		sections = append(sections, project)
 	}
@@ -135,6 +202,13 @@ func buildSystemPromptParts(options Options) systemPromptParts {
 		sections = append(sections, style)
 	}
 	policy := strings.TrimSpace(confirmationPolicy)
+	if !runCanMutate(options) {
+		// A run that cannot mutate anything has nothing to confirm. Carrying
+		// ~5 KB of confirmation policy into such a run is pure cost: measured
+		// at 2,527 of a plan child's 7,648 prompt tokens, multiplied by every
+		// task in a plan and by every specialist sub-agent.
+		policy = ""
+	}
 	if policy != "" {
 		sections = append(sections, policy)
 	}
@@ -306,7 +380,7 @@ func sessionRuntimeContext(options Options) string {
 // directory, git branch, and any project guideline doc, so the model grounds its
 // work in the actual repo. Returns "" when cwd is unset (keeps headless/test
 // runs deterministic).
-func workspaceContext(cwd string) string {
+func workspaceContext(cwd string, sandboxEngine *sandbox.Engine) string {
 	cwd = strings.TrimSpace(cwd)
 	if cwd == "" {
 		return ""
@@ -315,7 +389,7 @@ func workspaceContext(cwd string) string {
 	b.WriteString("<environment>\n")
 	b.WriteString("Working directory: " + cwd + "\n")
 	b.WriteString("Operating system: " + runtime.GOOS + "\n")
-	b.WriteString(tools.HostShellEnvironmentGuidance() + "\n")
+	b.WriteString(tools.HostShellEnvironmentGuidanceForEngine(sandboxEngine, cwd) + "\n")
 	if branch := gitBranchForPrompt(cwd); branch != "" {
 		b.WriteString("Git branch: " + branch + "\n")
 	}

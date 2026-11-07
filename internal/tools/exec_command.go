@@ -184,9 +184,6 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 	// unsandboxed) can actually bypass the MSYS guard instead of being
 	// hard-blocked by the same check it was meant to escalate past.
 	commandEngine := commandEngineForSandboxPermissions(engine, sandboxPermissions)
-	if issue := detectShellCommandIssueForRuntime(commandText, detectShellRuntime(runtimeGOOS())); issue != nil && !msysGuardBypassed(issue, commandEngine) {
-		return shellIssueBlockResult(*issue)
-	}
 	// tty:true exists exactly to run prompting commands, so the
 	// non-interactive guard steps aside and the PTY path gets the session.
 	if !ttyRequested {
@@ -200,9 +197,13 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 	if err != nil {
 		return errorResult("Error running exec_command: " + err.Error())
 	}
+	effectiveShell := shellRuntimeForEngine(commandEngine, absoluteCwd)
+	if issue := detectShellCommandIssueForRuntime(commandText, effectiveShell); issue != nil && !msysGuardBypassed(issue, commandEngine) {
+		return shellIssueBlockResult(*issue)
+	}
 
 	commandCtx, cancel := context.WithCancel(context.Background())
-	command, plan, err := buildBashCommand(commandCtx, commandText, absoluteCwd, commandEngine)
+	command, plan, err := buildBashCommandWithRuntime(commandCtx, commandText, absoluteCwd, commandEngine, effectiveShell)
 	if err != nil {
 		cancel()
 		return errorResult("Error starting exec_command: " + err.Error())
@@ -213,7 +214,7 @@ func (tool execCommandTool) run(ctx context.Context, args map[string]any, engine
 		cancel()
 		return errorResult("Error starting exec_command: prepare execution request: " + err.Error())
 	}
-	meta := map[string]string{}
+	meta := map[string]string{"shell_kind": string(effectiveShell.Kind)}
 	addSandboxMeta(meta, plan)
 	monitor := zeroSandbox.StartDenialMonitor(context.Background(), plan.MonitorTag)
 	processResult, err := tool.manager.Start(ctx, execution.ProcessStart{
@@ -476,7 +477,11 @@ func execToolResultWithBudget(input execToolResultInput, directBudget bool) Resu
 	}
 	body := formatExecCommandOutput(output, input.sessionID, input.exited, input.exitCode, input.interrupted, input.tty)
 	if status == StatusError && input.exited && !input.interrupted {
-		if issue := detectShellOutputIssueForRuntime(output, detectShellRuntime(runtimeGOOS())); issue != nil {
+		shell := detectShellRuntime(runtimeGOOS())
+		if kind := input.sandboxMeta["shell_kind"]; kind != "" {
+			shell.Kind = shellKind(kind)
+		}
+		if issue := detectShellOutputIssueForRuntime(output, shell); issue != nil {
 			meta["shell_issue"] = issue.Kind
 			body = appendShellIssueHint(body, *issue)
 		}
@@ -708,8 +713,8 @@ func runtimeGOOS() string {
 // three platforms, not only on whichever one the test happens to run on.
 func execCommandDescription(goos string) string {
 	description := "Runs a command in a PTY, returning output or a session ID for ongoing interaction."
-	if goos == "windows" {
-		description += "\n\n" + shellGuidanceForGOOS(goos)
+	if guidance := hostExecCommandShellGuidance(goos); guidance != "" {
+		description += "\n\n" + guidance
 	}
 	return description
 }

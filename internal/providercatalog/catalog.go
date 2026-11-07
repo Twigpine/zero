@@ -52,6 +52,22 @@ type Descriptor struct {
 	SupportedAPIFormats []APIFormat
 	Aliases             []string
 
+	// ModelFamily names the model family this provider serves, for prompt tuning
+	// only. EMPTY MEANS MIXED OR UNKNOWN, which is most of this catalog: a
+	// gateway like OpenRouter or Ollama Cloud serves several families at once, so
+	// the provider cannot answer the question and the model id has to.
+	//
+	// Set ONLY where the provider is first-party and single-family. It is NOT the
+	// wire format: ollama-cloud speaks openai-compatible and serves Qwen, and
+	// treating that as "OpenAI" would hand GPT-shaped guidance to a model that
+	// never asked for it.
+	//
+	// Why it exists: prompt tuning classified by model-id PREFIX, so a ChatGPT
+	// OAuth session was recognised only because "gpt-5.5" happens to begin with
+	// "gpt" — luck no future id is obliged to repeat — while most providers here
+	// matched nothing and silently received no guidance at all.
+	ModelFamily string
+
 	// Custom marks the "bring your own endpoint" catalog entries
 	// (custom-openai-compatible, custom-anthropic-compatible). Unlike every other
 	// descriptor, RequiresAuth here is just a template default for the credential
@@ -135,6 +151,9 @@ var descriptors = []Descriptor{
 		// New ChatGPT profiles follow the vendor's GPT-5.5 replacement guidance:
 		// https://learn.chatgpt.com/docs/models#gpt-55-retirement
 		d := openAICompat("chatgpt", "ChatGPT", "https://chatgpt.com/backend-api/codex", "gpt-6.1-sol", nil)
+		// First-party OpenAI behind a subscription endpoint: the PROVIDER answers
+		// the family question, so a future model id need not start with "gpt".
+		d.ModelFamily = FamilyOpenAI
 		d.RequiresAuth = true
 		return oauthProvider(d, false, false)
 	}(),
@@ -182,7 +201,7 @@ var descriptors = []Descriptor{
 	// at a local proxy that holds the OAuth session and exposes an OpenAI-compatible
 	// endpoint. Local (no API key — the proxy authenticates); override the base URL
 	// for your proxy's port. See docs/oauth-subscriptions.md.
-	localOpenAI("chatgpt-proxy", "ChatGPT (local OAuth proxy)", "http://localhost:10531/v1", "gpt-5", "chatgpt"),
+	familyOf(localOpenAI("chatgpt-proxy", "ChatGPT (local OAuth proxy)", "http://localhost:10531/v1", "gpt-5", "chatgpt"), FamilyOpenAI),
 	func() Descriptor {
 		d := openAICompat("custom-openai-compatible", "Custom OpenAI-compatible", "https://example.invalid/v1", "custom-model", []string{"OPENAI_API_KEY"}, "custom openai compatible")
 		d.Custom = true
@@ -216,6 +235,32 @@ func Get(id string) (Descriptor, bool) {
 		}
 	}
 	return Descriptor{}, false
+}
+
+// The model families prompt tuning distinguishes. Deliberately few: a family
+// exists here only when the system prompt has something family-specific to say,
+// and inventing one per vendor would imply guidance that does not exist.
+const (
+	FamilyOpenAI    = "openai"
+	FamilyAnthropic = "anthropic"
+	FamilyGemini    = "gemini"
+)
+
+// ModelFamilyFor returns the model family a catalogued provider serves, or ""
+// when the provider is unknown, is a gateway, or otherwise serves more than one.
+// "" is the honest answer for most of this catalog and means "ask the model id".
+func ModelFamilyFor(catalogID string) string {
+	descriptor, ok := Get(catalogID)
+	if !ok {
+		return ""
+	}
+	return descriptor.ModelFamily
+}
+
+// familyOf stamps a model family onto a descriptor built by a generic helper.
+func familyOf(descriptor Descriptor, family string) Descriptor {
+	descriptor.ModelFamily = family
+	return descriptor
 }
 
 func Require(id string) (Descriptor, error) {
@@ -256,6 +301,7 @@ func openAI(id string, name string, baseURL string, model string, env []string, 
 		RequiresAuth:        true,
 		SupportedAPIFormats: []APIFormat{APIFormatOpenAIResponses, APIFormatOpenAIChatCompletions},
 		Aliases:             aliases,
+		ModelFamily:         FamilyOpenAI,
 	}
 }
 
@@ -270,6 +316,7 @@ func anthropic(id string, name string, baseURL string, model string, env []strin
 		RequiresAuth:        true,
 		SupportedAPIFormats: []APIFormat{APIFormatAnthropicMessages},
 		Aliases:             aliases,
+		ModelFamily:         FamilyAnthropic,
 	}
 }
 
@@ -284,6 +331,7 @@ func google(id string, name string, baseURL string, model string, env []string, 
 		RequiresAuth:        true,
 		SupportedAPIFormats: []APIFormat{APIFormatGoogleGenerateContent},
 		Aliases:             aliases,
+		ModelFamily:         FamilyGemini,
 	}
 }
 

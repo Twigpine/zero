@@ -4361,6 +4361,142 @@ func TestPlanModeHonorsBeforeToolVeto(t *testing.T) {
 	}
 }
 
+// (h) The zeromaxing variant of TestRunPreservesRequestPrefixAcrossTurns.
+//
+// This is the test the whole reminder design exists to satisfy. The system
+// prompt and tool definitions are the provider's CACHED PREFIX; #760 made them
+// build once per run so they stay byte-identical across turns. The posture adds
+// per-turn text, so it is exactly the kind of change that silently destroys the
+// cache — roughly doubling input cost with nothing detecting it.
+//
+// The reminders are appended to the conversation TAIL as user-role messages, so
+// each turn's request must still be an exact prefix-extension of the previous
+// one, with identical tools and cache key.
+func TestRunPreservesRequestPrefixAcrossTurnsUnderZeromaxing(t *testing.T) {
+	root := t.TempDir()
+	writeAgentTestFile(t, filepath.Join(root, "notes.txt"), "alpha\n")
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(root))
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		{
+			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "read_file"},
+			{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"path":"notes.txt"}`},
+			{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+		{
+			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-2", ToolName: "read_file"},
+			{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-2", ArgumentsFragment: `{"path":"notes.txt"}`},
+			{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-2"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+		{
+			{Type: zeroruntime.StreamEventText, Content: "done"},
+			{Type: zeroruntime.StreamEventDone},
+		},
+	}}
+
+	if _, err := Run(context.Background(), "read notes", provider, Options{
+		Cwd:        root,
+		Registry:   registry,
+		SessionID:  "session-stable-prefix-zeromaxing",
+		Zeromaxing: ZeromaxingEntering,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.requests) != 3 {
+		t.Fatalf("provider requests = %d, want 3", len(provider.requests))
+	}
+
+	// Every request must extend the previous one exactly — nothing rewritten
+	// above the append point, which is what keeps the cached prefix valid.
+	for i := 1; i < len(provider.requests); i++ {
+		prev, cur := provider.requests[i-1], provider.requests[i]
+		if len(cur.Messages) < len(prev.Messages) ||
+			!reflect.DeepEqual(cur.Messages[:len(prev.Messages)], prev.Messages) {
+			t.Fatalf("request %d is not an exact prefix-extension of request %d:\nprev=%#v\ncur=%#v",
+				i, i-1, prev.Messages, cur.Messages)
+		}
+		if !reflect.DeepEqual(prev.Tools, cur.Tools) {
+			t.Fatalf("tool definitions drifted between turns %d and %d", i-1, i)
+		}
+		if cur.PromptCacheKey != prev.PromptCacheKey {
+			t.Fatalf("prompt cache key drifted: %q -> %q", prev.PromptCacheKey, cur.PromptCacheKey)
+		}
+	}
+
+	// The system prompt — the cached prefix itself — must be byte-identical
+	// across turns, and must contain NONE of the posture text.
+	system := provider.requests[0].Messages[0]
+	for i, request := range provider.requests {
+		if !reflect.DeepEqual(request.Messages[0], system) {
+			t.Fatalf("system message changed on turn %d — the cached prefix is broken", i+1)
+		}
+	}
+	for _, forbidden := range []string{
+		ZeromaxingEnterNotice, ZeromaxingBudgetNotice, ZeromaxingStillOnNotice, ZeromaxingExitNotice,
+		ZeromaxingEvidenceNotice, ZeromaxingOrchestrateNotice,
+	} {
+		if strings.Contains(system.Content, forbidden) {
+			t.Fatalf("posture reminder leaked into the SYSTEM PROMPT (above the cache breakpoint): %q", forbidden)
+		}
+	}
+
+	// ...and the reminders really did arrive, on schedule. Without this the
+	// assertions above would pass just as happily if the feature did nothing.
+	firstTurn := renderZeromaxingMessages(provider.requests[0].Messages)
+	if !strings.Contains(firstTurn, ZeromaxingEnterNotice) || !strings.Contains(firstTurn, ZeromaxingBudgetNotice) {
+		t.Fatalf("turn 1 must carry the enter + budget notices:\n%s", firstTurn)
+	}
+	if strings.Contains(firstTurn, ZeromaxingStillOnNotice) {
+		t.Fatalf("turn 1 must NOT carry the still-on notice:\n%s", firstTurn)
+	}
+	secondOnly := renderZeromaxingMessages(provider.requests[1].Messages[len(provider.requests[0].Messages):])
+	if !strings.Contains(secondOnly, ZeromaxingStillOnNotice) {
+		t.Fatalf("turn 2 must carry the still-on notice:\n%s", secondOnly)
+	}
+	if strings.Contains(secondOnly, ZeromaxingEnterNotice) {
+		t.Fatalf("turn 2 must NOT re-announce entry:\n%s", secondOnly)
+	}
+}
+
+// A run with the posture OFF must be byte-identical to one that never heard of
+// it — the no-regression half of the feature.
+func TestRunWithoutZeromaxingCarriesNoPostureText(t *testing.T) {
+	root := t.TempDir()
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(root))
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{
+		{{Type: zeroruntime.StreamEventText, Content: "done"}, {Type: zeroruntime.StreamEventDone}},
+	}}
+	if _, err := Run(context.Background(), "hello", provider, Options{
+		Cwd: root, Registry: registry, SessionID: "session-no-zeromaxing",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rendered := renderZeromaxingMessages(provider.requests[0].Messages)
+	for _, forbidden := range []string{
+		ZeromaxingEnterNotice, ZeromaxingBudgetNotice, ZeromaxingStillOnNotice, ZeromaxingExitNotice,
+		ZeromaxingEvidenceNotice, ZeromaxingOrchestrateNotice,
+	} {
+		if strings.Contains(rendered, forbidden) {
+			t.Fatalf("a posture-free run must carry no posture text, found %q", forbidden)
+		}
+	}
+}
+
+// renderZeromaxingMessages flattens messages to one searchable string.
+func renderZeromaxingMessages(messages []zeroruntime.Message) string {
+	var b strings.Builder
+	for _, message := range messages {
+		b.WriteString(string(message.Role))
+		b.WriteString(": ")
+		b.WriteString(message.Content)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
 // A cancelled permission on either sandbox-retry path must abort the run with a
 // recognisable cancellation, and must not run the escalated retry.
 //

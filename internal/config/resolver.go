@@ -174,6 +174,7 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 			Notify:              cfg.Notify,
 			Tools:               cfg.Tools,
 			Swarm:               cfg.Swarm,
+			Profiles:            cfg.Profiles,
 			Preferences:         cfg.Preferences,
 			KeyBindings:         cfg.KeyBindings,
 			LocalControl:        cfg.LocalControl,
@@ -195,6 +196,7 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		Notify:              cfg.Notify,
 		Tools:               cfg.Tools,
 		Swarm:               cfg.Swarm,
+		Profiles:            cfg.Profiles,
 		Preferences:         cfg.Preferences,
 		KeyBindings:         cfg.KeyBindings,
 		LocalControl:        cfg.LocalControl,
@@ -291,6 +293,64 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	if src.Swarm.MaxTeamSize != 0 {
 		dst.Swarm.MaxTeamSize = src.Swarm.MaxTeamSize
 	}
+	// User config is higher-trust and may turn the zeromaxing posture off. It is
+	// presence-only here too (with omitempty a false is indistinguishable from
+	// absent); re-enabling is done by removing the key.
+	if src.Profiles.DisableZeromaxing {
+		dst.Profiles.DisableZeromaxing = true
+	}
+	// User config may enable either of these freely; both default off so a caller
+	// that sets neither is byte-identical to a build without them.
+	if src.Profiles.RequirePlanKeyword {
+		dst.Profiles.RequirePlanKeyword = true
+	}
+	if src.Profiles.Memory {
+		dst.Profiles.Memory = true
+	}
+	// User config is higher-trust and may set ANY tier, tighter or looser. An
+	// unrecognised value is ignored rather than stored, so a typo falls back to
+	// the default instead of being carried around as a value every reader has to
+	// re-validate.
+	if size, err := ParsePlanSize(src.Profiles.PlanSize); err == nil && strings.TrimSpace(src.Profiles.PlanSize) != "" {
+		dst.Profiles.PlanSize = string(size)
+	}
+	// PlanModels: USER config may set anything. Each field is presence-checked
+	// on its own so a config setting only `verify` does not blank the other two.
+	if v := strings.TrimSpace(src.Profiles.PlanModels.Scan); v != "" {
+		dst.Profiles.PlanModels.Scan = v
+	}
+	if v := strings.TrimSpace(src.Profiles.PlanModels.Implement); v != "" {
+		dst.Profiles.PlanModels.Implement = v
+	}
+	if v := strings.TrimSpace(src.Profiles.PlanModels.Verify); v != "" {
+		dst.Profiles.PlanModels.Verify = v
+	}
+	if v := strings.TrimSpace(src.Profiles.PlanModels.Router); v != "" {
+		dst.Profiles.PlanModels.Router = v
+	}
+	// User config only, like the pins: guidance steers which model does the work
+	// and therefore what a plan costs, so a cloned repo must not be able to write
+	// it. mergeProjectConfig deliberately does not carry this.
+	if v := strings.TrimSpace(src.Profiles.PlanModels.RouterGuidance); v != "" {
+		dst.Profiles.PlanModels.RouterGuidance = v
+	}
+	if len(src.Profiles.PlanModels.Exclude) > 0 {
+		dst.Profiles.PlanModels.Exclude = append([]string(nil), src.Profiles.PlanModels.Exclude...)
+	}
+	// User config only, like the pins and guidance: a size floor decides which
+	// models do the work and therefore what a plan costs, so a cloned repo must
+	// not set it. A positive value overrides; 0 or negative is "unset".
+	if src.Profiles.PlanModels.TopModels > 0 {
+		dst.Profiles.PlanModels.TopModels = src.Profiles.PlanModels.TopModels
+	}
+	if src.Profiles.PlanModels.MinSize > 0 {
+		dst.Profiles.PlanModels.MinSize = src.Profiles.PlanModels.MinSize
+	}
+	// Presence-only, like DisableZeromaxing: with omitempty a false is
+	// indistinguishable from absent, so turning it back off means removing the key.
+	if src.Profiles.PlanModels.AutoAssign {
+		dst.Profiles.PlanModels.AutoAssign = true
+	}
 	if src.Preferences.FavoriteModels != nil {
 		dst.Preferences.FavoriteModels = normalizeFavoriteModels(src.Preferences.FavoriteModels)
 	}
@@ -299,6 +359,17 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 	}
 	if src.Preferences.Recaps != nil {
 		dst.Preferences.Recaps = src.Preferences.Recaps
+	}
+	// Pointer-valued for the same reason as Recaps above: an explicit false has
+	// to stay distinguishable from an absent key, so the nil check is the whole
+	// merge and copying the pointer preserves both states.
+	//
+	// Missing here until now, which left the persistence half of the AGENTS
+	// panel toggle dead. SetKeepFinishedAgents wrote the key, the next launch
+	// loaded the file, and mergeConfig dropped it, so Resolve always answered
+	// false and the panel re-seeded itself off on every session.
+	if src.Preferences.KeepFinishedAgents != nil {
+		dst.Preferences.KeepFinishedAgents = src.Preferences.KeepFinishedAgents
 	}
 	if strings.TrimSpace(src.Preferences.Theme) != "" {
 		dst.Preferences.Theme = strings.TrimSpace(src.Preferences.Theme)
@@ -319,9 +390,27 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 	if activeProvider := strings.TrimSpace(src.ActiveProvider); activeProvider != "" {
 		dst.ActiveProvider = activeProvider
 	}
+	// PROJECT CONFIG MAY ONLY TIGHTEN THE TURN BUDGET.
+	//
+	// A cloned repo setting maxTurns to the ceiling raises the per-run cost for
+	// whoever opens it — the same hazard PlanSize and DisableZeromaxing are
+	// tighten-only for, three fields below. User config stays free to raise: it
+	// is the user's own file and their own money.
+	//
+	// COMPARED AGAINST THE EFFECTIVE VALUE, NOT THE FIELD. Zero here does not
+	// mean "no limit", it means "fall back to defaultMaxTurns" — and that
+	// fallback happens after this merge. Treating zero as unbounded lets a repo
+	// raise 80 to 500 for every user who never wrote a config, which is the
+	// common case and the one this rule exists for.
 	if src.MaxTurns > 0 {
-		dst.MaxTurns = src.MaxTurns
-		dst.maxTurnsSet = true
+		effective := dst.MaxTurns
+		if effective == 0 {
+			effective = defaultMaxTurns
+		}
+		if src.MaxTurns < effective {
+			dst.MaxTurns = src.MaxTurns
+			dst.maxTurnsSet = true
+		}
 	}
 	for _, provider := range src.Providers {
 		candidate := providerMergeCandidate(*dst, provider)
@@ -371,6 +460,65 @@ func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
 	}
 	if src.Swarm.MaxTeamSize != 0 {
 		dst.Swarm.MaxTeamSize = src.Swarm.MaxTeamSize
+	}
+	// Profiles.DisableZeromaxing from project config may only TIGHTEN (turn the
+	// posture OFF), never WEAKEN (turn it back on). A cloned repo must not be
+	// able to switch a cost multiplier on for whoever opens it — the same
+	// posture as Sandbox.Network's allow/deny rule above, and for the same
+	// reason: project config is not trust-gated. Because the field is
+	// presence-only, an attempted "enable" arrives as a false that this simply
+	// ignores — silently, like an ignored network "allow", not as an error.
+	if src.Profiles.DisableZeromaxing {
+		dst.Profiles.DisableZeromaxing = true
+	}
+	// RequirePlanKeyword from project config may only ENABLE. Turning a safety
+	// gate ON is tightening and a repo may reasonably ask for it; turning it OFF
+	// is a downgrade, and presence-only means an attempted "false" is simply not
+	// there to act on — the same shape as DisableZeromaxing above.
+	if src.Profiles.RequirePlanKeyword {
+		dst.Profiles.RequirePlanKeyword = true
+	}
+	// Profiles.Memory is IGNORED here, deliberately. memory_write is a write
+	// primitive pointed at the workspace, and project config is not trust-gated:
+	// a cloned repo must not be able to hand the agent a new way to write into
+	// it. User config still enables it freely, which is where that decision
+	// belongs.
+	//
+	// Profiles.PlanSize from project config may only TIGHTEN. A cloned repo can
+	// ask for a smaller ceiling; it cannot raise one, because raising it is
+	// raising a spend ceiling for whoever opens the repo — the same privilege
+	// boundary as Sandbox.Network's allow/deny rule and DisableZeromaxing's
+	// disable-only rule. A looser tier is ignored SILENTLY, matching the ignored
+	// network "allow" rather than erroring: the project simply does not hold that
+	// privilege, which is not a malformed config.
+	//
+	// An unknown tier ranks tightest (rank -1) and so can never win here either.
+	// PlanModels from project config is IGNORED ENTIRELY — pins and exclusions
+	// alike.
+	//
+	// The pin half was always refused: a cloned repo pinning all three roles to
+	// the priciest model on the account raises cost for whoever opens it, the
+	// same hazard the PlanSize rule below exists to prevent.
+	//
+	// EXCLUSION WAS ALLOWED ON A FALSE PREMISE — that removing a candidate "can
+	// only ever lower what a plan spends". It does the opposite just as easily.
+	// The selector picks per role from what is left, so excluding the cheapest
+	// scan model does not remove the scan, it promotes the next model up. A repo
+	// listing every inexpensive id on the account steers all three roles onto
+	// the priciest survivor while naming no model to run at all — the pin's
+	// effect, spelled as its inverse, and it would have passed a reviewer reading
+	// the old comment.
+	//
+	// Ignored silently, like the network "allow" above: a project that does not
+	// hold this privilege is not a malformed project. USER config still sets both
+	// freely, which is where a genuine "this model cannot handle our codebase"
+	// belongs — the repo's maintainer writes it there, or says it in the README.
+	if strings.TrimSpace(src.Profiles.PlanSize) != "" {
+		if size, err := ParsePlanSize(src.Profiles.PlanSize); err == nil {
+			if size.rank() < dst.Profiles.PlanSizeTier().rank() {
+				dst.Profiles.PlanSize = string(size)
+			}
+		}
 	}
 	if inbound := strings.TrimSpace(src.CrossSessionInbound); inboundPolicyRank(inbound) > inboundPolicyRank(dst.CrossSessionInbound) {
 		dst.CrossSessionInbound = inbound

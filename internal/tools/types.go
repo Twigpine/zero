@@ -234,6 +234,40 @@ type ArgsPermissioner interface {
 	PermissionForArgs(args map[string]any) Permission
 }
 
+// PermanentDenier lets a tool state that NO arguments can make it callable in
+// this run.
+//
+// It exists because ArgsPermissioner cannot say this. A tool that varies its
+// permission by argument is never treated as permanently denied — the question
+// is whether any call could succeed, and only a tool with no per-argument
+// override can be ruled out from its static permission alone. But a tool can be
+// gated on something that is not an argument at all: the zeromaxing posture is
+// a session state, not a parameter, and with it off no arguments make
+// orchestrate callable. Without this, implementing ArgsPermissioner would make
+// such a tool count as HELD in a run where it can never fire, which changes the
+// assembled prompt of runs that do not have the feature turned on.
+type PermanentDenier interface {
+	PermanentlyDenied() bool
+}
+
+// PersistentPermissionRefuser lets a tool refuse to be REMEMBERED.
+//
+// "Always allow" persists a grant that future calls skip the prompt on, which
+// is right for a narrow tool and wrong for one whose blast radius is decided by
+// its arguments. permissionSupportsPersistentDecision already refuses it for
+// bash, exec_command, write_stdin and apply_patch by name, for exactly that
+// reason.
+//
+// A name list cannot cover a tool that RUNS those. orchestrate can be given
+// bash by a plan, so remembering it is a strictly broader standing grant than
+// the one the name list refuses — and the next tool with that property would be
+// silently persistable too. A tool that knows its own reach declares it here
+// instead of internal/agent knowing its name, which is the same reason
+// ChildProgressStreamer exists.
+type PersistentPermissionRefuser interface {
+	RefusesPersistentPermission() bool
+}
+
 // PrePermissionRejecter lets a tool reject a call that cannot safely or validly
 // run before any permission prompt is shown. Implementations must be purely
 // local and deterministic: no filesystem, process, DNS, or network access.

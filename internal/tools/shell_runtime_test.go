@@ -463,3 +463,40 @@ func TestDetectShellOutputIssueSignatureOmitsCommandText(t *testing.T) {
 		t.Fatalf("expected real MSYS output to still be flagged, got %#v", issue)
 	}
 }
+
+// The probe decides which shell every sandboxed command uses, so it has to run
+// where those commands run. On Windows the sandbox wraps commands in a
+// WRITE_RESTRICTED token that PowerShell cannot start under — .NET fails crypto
+// init with "Unable to load DLL 'BCrypt.dll'" — while the same PowerShell starts
+// perfectly in the unsandboxed parent. A probe that answers for the parent
+// therefore selects a shell that cannot run anything at all, and every
+// exec_command and bash call fails. cmd.exe does survive the token.
+func TestWindowsShellFallsBackToCmdWhenPowerShellCannotStartSandboxed(t *testing.T) {
+	lookPath := func(name string) (string, error) {
+		if name == "powershell.exe" {
+			return `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, nil
+		}
+		return "", errors.New("not found")
+	}
+	getenv := func(string) string { return "" }
+
+	// Probed in the parent, PowerShell looks fine and is chosen.
+	unsandboxed := detectShellRuntimeWithProbe("windows", lookPath, getenv, func(string) bool { return true })
+	if unsandboxed.Kind != shellKindPowerShell {
+		t.Fatalf("unsandboxed shell = %#v, want PowerShell", unsandboxed)
+	}
+
+	// Probed through the sandbox, it cannot start, so detection must reach the
+	// cmd.exe fallback rather than returning a shell that is unable to run.
+	sandboxed := detectShellRuntimeWithProbe("windows", lookPath, getenv, func(string) bool { return false })
+	if sandboxed.Kind != shellKindCmd || !strings.EqualFold(sandboxed.Executable, "cmd.exe") {
+		t.Fatalf("sandboxed shell = %#v, want cmd.exe fallback", sandboxed)
+	}
+	guidance := hostShellEnvironmentGuidanceForRuntime(sandboxed)
+	if !strings.Contains(guidance, "Windows cmd.exe") || strings.Contains(guidance, "PowerShell cmdlets") {
+		t.Fatalf("guidance describes a different shell than the sandbox selected: %q", guidance)
+	}
+	if args := sandboxed.arguments("echo ok"); len(args) == 0 || args[0] != "/d" {
+		t.Fatalf("selected runtime does not construct cmd.exe arguments: %v", args)
+	}
+}

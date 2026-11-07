@@ -3,6 +3,7 @@ package specialist
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/Twigpine/zero/internal/background"
 	"github.com/Twigpine/zero/internal/streamjson"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 func NewOutputTool(manager *background.Manager) *OutputTool {
@@ -52,4 +54,20 @@ func ParseStream(reader io.Reader) ([]streamjson.Event, error) {
 		}
 	}
 	return events, nil
+}
+
+// Moved from the production file: test-only convenience seam (deadcode gate).
+func ExecutePlan(ctx context.Context, plan Plan, parentTools []string, run PlanRunner, recorder PlanRecorder, opts ...ExecOption) PlanReport {
+	return ExecutePlanIn(ctx, plan, PlanWorkspace{}, parentTools, run, recorder, opts...)
+}
+
+// Moved from the production file: test-only convenience seam (deadcode gate).
+func withDependencyBriefing(task Task, results map[string]TaskResult) string {
+	return withDependencyBriefingBudget(task, results, dependencyBriefingPerTask, dependencyBriefingTotal)
+}
+
+// Moved from the production file: test-only convenience seam (deadcode gate).
+func (tool *OrchestrateTool) autoAssignModels(ctx context.Context, args map[string]any, options tools.RunOptions) ([]string, error) {
+	notes, _, err := tool.autoAssignModelsCosting(ctx, args, options)
+	return notes, err
 }

@@ -343,3 +343,154 @@ func TestTaskToolIsAdvertisedInAutoMode(t *testing.T) {
 		t.Fatal("Task should be visible in auto mode so the TUI can request permission")
 	}
 }
+
+// A BACKGROUND SPAWN MUST SAY SO, STRUCTURALLY.
+//
+// Run returns the moment the child is launched, so a caller reading "the Task
+// tool returned" as "the sub-agent finished" reports work as done that has not
+// started. The TUI did exactly that: four background workers rendered
+// "✓ completed · 0 tool calls · 1s" with the header reading "4 finished" while
+// every one was still running — four specialist_start events with
+// mode=background and not one specialist_stop.
+//
+// The marker is in Meta rather than inferred from the summary prose, for the
+// same reason Stalled, ModelRejected and Signal are flags.
+func TestABackgroundTaskMarksItselfAsBackground(t *testing.T) {
+	manager, err := background.NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := Executor{
+		BinaryPath:        "/usr/local/bin/zero",
+		BackgroundManager: manager,
+		NewSessionID:      func() (string, error) { return "child_task", nil },
+		Load: func(LoadOptions) (LoadResult, error) {
+			return LoadResult{Specialists: []Manifest{{
+				Metadata:      Metadata{Name: "worker", Description: "Does focused work"},
+				SystemPrompt:  "Work carefully.",
+				ResolvedTools: []string{"read_file"},
+			}}}, nil
+		},
+		LaunchBackground: func(string, []string, string, func(int)) (int, error) { return 4321, nil },
+	}
+
+	result := NewTaskTool(executor).RunWithOptions(context.Background(), map[string]any{
+		"name": "worker", "prompt": "inspect auth", "run_in_background": true,
+	}, tools.RunOptions{SessionID: "parent_session"})
+
+	if result.Status != tools.StatusOK {
+		t.Fatalf("background spawn failed: %s", result.Output)
+	}
+	if result.Meta["background"] != "true" {
+		t.Fatalf("a background spawn does not declare itself, so a caller cannot tell it is still running: %#v", result.Meta)
+	}
+}
+
+// And a FOREGROUND task must not claim to be one, or every finished sub-agent
+// would be left rendering as though it were still working.
+func TestAForegroundTaskDoesNotClaimToBeBackground(t *testing.T) {
+	const childSession = "specialist_00000000000000000000000a"
+	executor := Executor{
+		BinaryPath:   "/bin/true",
+		NewSessionID: func() (string, error) { return childSession, nil },
+		Load: func(LoadOptions) (LoadResult, error) {
+			return LoadResult{Specialists: []Manifest{{
+				Metadata:      Metadata{Name: "explorer", Description: "Explores"},
+				SystemPrompt:  "Explore.",
+				ResolvedTools: []string{"read_file"},
+			}}}, nil
+		},
+		RunChild: func(_ context.Context, _ string, _ []string, progress func(streamjson.Event)) (ChildRunResult, error) {
+			events := []streamjson.Event{
+				{Type: streamjson.EventRunStart, SessionID: childSession},
+				{Type: streamjson.EventFinal, Text: "done"},
+				{Type: streamjson.EventRunEnd, Status: "success"},
+			}
+			for _, event := range events {
+				if progress != nil {
+					progress(event)
+				}
+			}
+			return ChildRunResult{Started: true, ExitCode: 0, Events: events}, nil
+		},
+	}
+	result := NewTaskTool(executor).RunWithOptions(context.Background(), map[string]any{
+		"name": "explorer", "prompt": "look around",
+	}, tools.RunOptions{Cwd: t.TempDir(), Model: "glm-5.2"})
+
+	// ASSERT IT SUCCEEDED FIRST. An earlier version checked only that the
+	// "background" key was absent — which is true of a NIL map, so it passed
+	// while the tool was erroring and Meta was never built at all.
+	if result.Status != tools.StatusOK {
+		t.Fatalf("the foreground task failed, so the assertion below proves nothing: %s", result.Output)
+	}
+	if len(result.Meta) == 0 {
+		t.Fatal("no Meta at all: an absent key here means nothing")
+	}
+	if _, present := result.Meta["background"]; present {
+		t.Fatalf("a foreground task claims to be background: %#v", result.Meta)
+	}
+}
+
+// THE MODEL THE CHILD RAN ON MUST REACH THE CALLER.
+//
+// The AGENTS sidebar renders "on <model>" and showed nothing for a Task
+// sub-agent: the parent's specialist_start recorded model=(absent) on every one,
+// while the child's own session metadata knew it was glm-5.2. Only the executor
+// resolves it — manifest model when named, parent's otherwise — so it has to be
+// carried back rather than recomputed.
+func TestATaskResultNamesTheModelTheChildRanOn(t *testing.T) {
+	const childSession = "specialist_00000000000000000000000a"
+	executor := Executor{
+		BinaryPath:   "/bin/true",
+		NewSessionID: func() (string, error) { return childSession, nil },
+		Load: func(LoadOptions) (LoadResult, error) {
+			return LoadResult{Specialists: []Manifest{{
+				Metadata:      Metadata{Name: "explorer", Description: "Explores"},
+				SystemPrompt:  "Explore.",
+				ResolvedTools: []string{"read_file"},
+			}}}, nil
+		},
+		RunChild: func(_ context.Context, _ string, _ []string, progress func(streamjson.Event)) (ChildRunResult, error) {
+			events := []streamjson.Event{
+				{Type: streamjson.EventRunStart, SessionID: childSession},
+				{Type: streamjson.EventFinal, Text: "done"},
+				{Type: streamjson.EventRunEnd, Status: "success"},
+			}
+			for _, event := range events {
+				if progress != nil {
+					progress(event)
+				}
+			}
+			return ChildRunResult{Started: true, ExitCode: 0, Events: events}, nil
+		},
+	}
+	// Inherits the parent's model when the manifest names none.
+	result := NewTaskTool(executor).RunWithOptions(context.Background(), map[string]any{
+		"name": "explorer", "prompt": "look around",
+	}, tools.RunOptions{Cwd: t.TempDir(), Model: "glm-5.2"})
+	if result.Meta["model"] != "glm-5.2" {
+		t.Fatalf("the result does not name the model the child ran on: %#v", result.Meta)
+	}
+
+	// And a manifest that names its own model wins, which is why the caller
+	// cannot just assume the session's.
+	named := Executor{
+		BinaryPath:   "/bin/true",
+		NewSessionID: func() (string, error) { return childSession, nil },
+		Load: func(LoadOptions) (LoadResult, error) {
+			return LoadResult{Specialists: []Manifest{{
+				Metadata:      Metadata{Name: "judge", Model: "kimi-k2.6"},
+				SystemPrompt:  "Judge carefully.",
+				ResolvedTools: []string{"read_file"},
+			}}}, nil
+		},
+		RunChild: executor.RunChild,
+	}
+	result = NewTaskTool(named).RunWithOptions(context.Background(), map[string]any{
+		"name": "judge", "prompt": "judge it",
+	}, tools.RunOptions{Cwd: t.TempDir(), Model: "glm-5.2"})
+	if result.Meta["model"] != "kimi-k2.6" {
+		t.Fatalf("a manifest model was overridden by the session's: %#v", result.Meta)
+	}
+}

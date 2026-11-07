@@ -12,13 +12,33 @@ import (
 )
 
 const (
-	defaultCompletedRetention = 30 * time.Second
-	defaultMaxProcesses       = 64
-	maxPendingOutputBytes     = 2 * 1024 * 1024
-	recentOutputBytes         = 4096
-	processStopTimeout        = 3 * time.Second
-	maxInteractiveYield       = 30 * time.Second
-	maxEmptyPollYield         = 5 * time.Minute
+	defaultMaxProcesses   = 64
+	maxPendingOutputBytes = 2 * 1024 * 1024
+	recentOutputBytes     = 4096
+	processStopTimeout    = 3 * time.Second
+	maxInteractiveYield   = 30 * time.Second
+	maxEmptyPollYield     = 5 * time.Minute
+
+	// defaultCompletedRetention is how long a finished process stays addressable.
+	//
+	// DERIVED FROM THE POLL BOUND, never chosen beside it. It was 30 seconds
+	// while maxEmptyPollYield allowed a five-minute poll, and those two numbers
+	// contradict each other: a caller Zero itself invites to wait five minutes
+	// could arrive to find the answer already forgotten. In a measured run a
+	// 60-second test was started, polled with yield_time_ms 40000, and the id was
+	// gone — so the same 60-second test was run a second time to recover a result
+	// the first one had already produced.
+	//
+	// Doubled so a caller that waits the full poll still has as long again to come
+	// back with what it learned. TestCompletedRetentionCoversTheLongestPoll pins
+	// the relationship rather than the number.
+	defaultCompletedRetention = 2 * maxEmptyPollYield
+
+	// maxRememberedCompletions bounds the finished-session records kept after a
+	// process is evicted. Each immutable result is already bounded by the process
+	// output cap; the count bound prevents a long session from accumulating them
+	// without limit.
+	maxRememberedCompletions = 64
 )
 
 var (
@@ -37,6 +57,18 @@ type ProcessManagerOptions struct {
 
 // ProcessManager owns retained interactive-process identity, transport,
 // bounded output, continuation, cancellation, completion, and cleanup.
+// completedProcess is the immutable terminal result a finished session leaves
+// behind once its process is gone.
+//
+// A LATE POLL IS NOT A GUESS. Without this, an id that ran and finished is
+// indistinguishable from one a model invented, and both are answered by
+// UnknownExecSessionError — which tells the caller not to probe ids, having just
+// handed it that id and instructed it to poll. The result is a re-run of work
+// already done.
+type completedProcess struct {
+	result ProcessResult
+}
+
 type ProcessManager struct {
 	mu                 sync.Mutex
 	nextID             int
@@ -45,6 +77,10 @@ type ProcessManager struct {
 	completedRetention time.Duration
 	maxProcesses       int
 	startTransport     processTransportStarter
+	// completed remembers finished sessions after their process is evicted, in
+	// arrival order so the oldest is dropped first.
+	completed      map[int]completedProcess
+	completedOrder []int
 }
 
 type ProcessStart struct {
@@ -109,6 +145,7 @@ func NewProcessManager(options ProcessManagerOptions) *ProcessManager {
 	return &ProcessManager{
 		nextID:             1000,
 		processes:          make(map[int]*managedProcess),
+		completed:          make(map[int]completedProcess),
 		completedRetention: retention,
 		maxProcesses:       maxProcesses,
 		startTransport:     startProcessTransport,
@@ -210,6 +247,7 @@ func (manager *ProcessManager) Start(ctx context.Context, input ProcessStart, wa
 		result.Changes = more.Changes
 	}
 	if result.Exited {
+		manager.remember(result)
 		manager.Remove(process.id)
 	}
 	return result, nil
@@ -218,6 +256,14 @@ func (manager *ProcessManager) Start(ctx context.Context, input ProcessStart, wa
 func (manager *ProcessManager) Continue(ctx context.Context, input ProcessContinue) (ProcessResult, error) {
 	process, ok := manager.get(input.ProcessID)
 	if !ok {
+		// A SESSION THAT RAN AND FINISHED IS NOT A GUESSED ID. Answering both with
+		// ErrProcessNotFound told a caller "do not probe session ids" about an id
+		// this manager had issued and instructed it to poll — and threw away the
+		// result, so the work was done again. An id never issued still falls
+		// through to the error, so a real probe is still refused.
+		if finished, remembered := manager.Completed(input.ProcessID); remembered {
+			return finished, nil
+		}
 		return ProcessResult{}, ErrProcessNotFound
 	}
 	process.touch()
@@ -233,6 +279,7 @@ func (manager *ProcessManager) Continue(ctx context.Context, input ProcessContin
 	}
 	result := process.collectResult(ctx, clampContinuationWait(input.Wait, len(input.Input) == 0), input.Interrupt)
 	if result.Exited {
+		manager.remember(result)
 		manager.Remove(process.id)
 	}
 	return result, nil
@@ -311,10 +358,25 @@ func (manager *ProcessManager) List() []ProcessSnapshot {
 
 func (manager *ProcessManager) Snapshot(id int) (ProcessSnapshot, bool) {
 	process, ok := manager.get(id)
+	if ok {
+		return process.snapshot(), true
+	}
+	result, ok := manager.Completed(id)
 	if !ok {
 		return ProcessSnapshot{}, false
 	}
-	return process.snapshot(), true
+	exitCode := result.ExitCode
+	return ProcessSnapshot{
+		ID:              result.ProcessID,
+		Command:         result.CommandText,
+		Cwd:             result.Request.WorkingDirectory,
+		RelativeCwd:     result.RelativeCwd,
+		TTY:             result.TTY,
+		Status:          "exited",
+		ExitCode:        &exitCode,
+		RecentOutput:    result.Output,
+		OutputTruncated: result.OutputTruncated,
+	}, true
 }
 
 func (manager *ProcessManager) Stop(id int) bool {
@@ -353,6 +415,39 @@ func (manager *ProcessManager) Remove(id int) {
 		delete(manager.processes, id)
 	}
 	manager.mu.Unlock()
+}
+
+// remember records a finished session so a late poll gets its result rather than
+// an error telling it not to probe ids.
+func (manager *ProcessManager) remember(result ProcessResult) {
+	if !result.Exited || result.ProcessID == 0 {
+		return
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if _, seen := manager.completed[result.ProcessID]; seen {
+		return
+	} else {
+		manager.completedOrder = append(manager.completedOrder, result.ProcessID)
+		for len(manager.completedOrder) > maxRememberedCompletions {
+			delete(manager.completed, manager.completedOrder[0])
+			manager.completedOrder = manager.completedOrder[1:]
+		}
+	}
+	manager.completed[result.ProcessID] = completedProcess{result: cloneProcessResult(result)}
+}
+
+// Completed reports a finished session's result when the id ran in this process
+// and has since been evicted. A never-issued id is not found, so a genuine probe
+// is still refused.
+func (manager *ProcessManager) Completed(id int) (ProcessResult, bool) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	record, ok := manager.completed[id]
+	if !ok {
+		return ProcessResult{}, false
+	}
+	return cloneProcessResult(record.result), true
 }
 
 func (manager *ProcessManager) Len() int {
@@ -414,6 +509,12 @@ func (manager *ProcessManager) processToPruneLocked() *managedProcess {
 func (manager *ProcessManager) removeCompletedLater(process *managedProcess) {
 	go func() {
 		<-process.done
+		// CAPTURED BEFORE THE WAIT, because the common case is that NOBODY polled
+		// while it ran: a caller starts a long command, goes away to do other
+		// work, and comes back after it finished. Recording only on the polling
+		// paths would leave exactly that case with nothing to hand back — which is
+		// the case that was measured, and it cost a 60-second test being run twice.
+		manager.remember(process.collectResult(context.Background(), 0, false))
 		if manager.completedRetention > 0 {
 			timer := time.NewTimer(manager.completedRetention)
 			<-timer.C
@@ -448,6 +549,9 @@ type managedProcess struct {
 	reportErr    error
 	changes      []Change
 	metadata     map[string]string
+	collectMu    sync.Mutex
+	terminal     *ProcessResult
+	interrupted  bool
 }
 
 func (process *managedProcess) markDone(err error, exitCode int, report AdapterReport, reportErr error, changes []Change) {
@@ -462,6 +566,14 @@ func (process *managedProcess) markDone(err error, exitCode int, report AdapterR
 }
 
 func (process *managedProcess) collectResult(ctx context.Context, wait time.Duration, interrupted bool) ProcessResult {
+	// Output collection is destructive, so exactly one collector owns the
+	// transition to a terminal result. Once the process exits, every caller and
+	// the retention goroutine receives a clone of the same immutable result.
+	process.collectMu.Lock()
+	defer process.collectMu.Unlock()
+	if process.terminal != nil {
+		return cloneProcessResult(*process.terminal)
+	}
 	output, truncated := process.collect(ctx, wait)
 	process.mu.Lock()
 	exitCode := 0
@@ -472,11 +584,15 @@ func (process *managedProcess) collectResult(ctx context.Context, wait time.Dura
 	result := ProcessResult{
 		ProcessID: process.id, CommandText: process.commandText, RelativeCwd: process.relativeCwd,
 		TTY: process.tty, Output: output, OutputTruncated: truncated, Exited: exited,
-		ExitCode: exitCode, Interrupted: interrupted, Request: process.request,
+		ExitCode: exitCode, Interrupted: interrupted || process.interrupted, Request: cloneRequest(process.request),
 		Enforcement: process.enforcement, Report: process.resultReport, ReportErr: process.reportErr,
 		Changes: append([]Change(nil), process.changes...), Metadata: cloneStringMap(process.metadata),
 	}
 	process.mu.Unlock()
+	if result.Exited {
+		terminal := cloneProcessResult(result)
+		process.terminal = &terminal
+	}
 	return result
 }
 
@@ -579,6 +695,9 @@ func (process *managedProcess) lastUsed() time.Time {
 	return process.lastUsedAt
 }
 func (process *managedProcess) terminate() {
+	process.mu.Lock()
+	process.interrupted = true
+	process.mu.Unlock()
 	if process.reapedClosed() || process.command.Process == nil {
 		return
 	}
@@ -701,6 +820,27 @@ func cloneStringMap(input map[string]string) map[string]string {
 	output := make(map[string]string, len(input))
 	for key, value := range input {
 		output[key] = value
+	}
+	return output
+}
+
+func cloneRequest(input Request) Request {
+	output := input
+	output.Command.Args = append([]string(nil), input.Command.Args...)
+	output.Command.Env = append([]string(nil), input.Command.Env...)
+	output.WorkspaceRoots = append([]string(nil), input.WorkspaceRoots...)
+	output.Capabilities = append([]Capability(nil), input.Capabilities...)
+	return output
+}
+
+func cloneProcessResult(input ProcessResult) ProcessResult {
+	output := input
+	output.Request = cloneRequest(input.Request)
+	output.Changes = append([]Change(nil), input.Changes...)
+	output.Metadata = cloneStringMap(input.Metadata)
+	if input.Report.Denial != nil {
+		denial := *input.Report.Denial
+		output.Report.Denial = &denial
 	}
 	return output
 }

@@ -1196,6 +1196,15 @@ func renderFocusedPermissionPrompt(request agent.PermissionRequest, cursor int, 
 	if scope := strings.TrimSpace(request.Scope); scope != "" {
 		lines = append(lines, fill(zeroTheme.muted).Render(permissionScopeLine(request, scope)))
 	}
+	// WHAT IS ACTUALLY BEING APPROVED, for tools that can say. PermissionRequest
+	// has carried an Args map since it was written and nothing read it, so the
+	// card could name a tool and state a static reason and nothing more. A tool
+	// with no registered renderer produces no lines, which is what keeps every
+	// existing prompt byte-identical.
+	if detail := permissionDetailLines(request, width); len(detail) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, detail...)
+	}
 
 	lines = append(lines, "")
 

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -168,7 +169,24 @@ var selfReportPhrases = []string{
 var inabilityStems = []string{
 	"i cannot ", "i can't ", "i can not ", "i could not ", "i couldn't ",
 	"i am unable to", "i'm unable to", "i was unable to", "i wasn't able to",
-	"i was not able to", "i do not have", "i don't have", "unable to ",
+	"i was not able to", "i do not have", "i don't have",
+	"we are unable to", "we were unable to",
+	// THE SUBJECTLESS STEM IS KEPT, and the heading it fired on is handled where
+	// the heading is, not by deleting the stem.
+	//
+	// It was removed once because a completed audit's own section heading —
+	// "**Unable to verify (1):** - MCP #3 claim was truncated" — reads as an
+	// admission. But it is the ONLY stem that catches an admission with no
+	// first-person subject, and removing it lost every one of those:
+	//
+	//	"Unable to complete the task; the build never succeeded."
+	//	"The agent was unable to finish the migration."
+	//	"Unable to verify the fix, so the change is unverified."
+	//
+	// None name "i" or "we", so no other stem sees them. That traded one false
+	// positive for three false negatives, in the direction this guard exists to
+	// prevent. countedLabelSentence drops the heading shape instead.
+	"unable to ",
 	"without being able to",
 }
 
@@ -179,6 +197,19 @@ var inabilityStems = []string{
 var successNegationTails = []string{
 	"find any", "found any", "find a ", "see any", "detect any", "identify any",
 	"reproduce", "spot any", "locate any",
+	// A NEGATIVE SEARCH RESULT IS THE ANSWER, not a failure to produce one.
+	//
+	// The list above already encodes this — "I could not find any remaining
+	// issues" is success — but only for the "any" phrasings. A finder reporting
+	// "I could NOT find where AllowManifestToolAutoApproval is set to true in
+	// production code" was marked INCOMPLETE after 53 tool calls and a 19,145
+	// character audit, for doing precisely the job it was given: establishing
+	// that something is not there.
+	"find where", "find the", "find it", "find that", "find this",
+	"found where", "found the",
+	"locate where", "locate the", "locate it",
+	"determine where", "identify where", "see where",
+	"reproduce ", "confirm any", "observe any",
 }
 
 // narrativeMarkers flag a sentence as RETELLING a past exchange rather than
@@ -247,9 +278,399 @@ func admissionSentences(lower string) []string {
 // retells a past exchange (narrativeMarkers) is skipped entirely — an admission
 // must be the model's own report about the CURRENT objective, not general
 // language that merely resembles one.
+// toolGrantMarkers flag a sentence as reporting WHICH TOOLS this run was given,
+// not whether the work was done.
+//
+// A read-only plan task is SUPPOSED to say this. One wrote "I don't have an
+// update_plan tool available in this specialist context (only read-only
+// exploration tools were provided)" and then delivered the complete answer —
+// helper name, file, line 214, full source — and was marked INCOMPLETE on the
+// "i don't have" stem. The prompt asks tasks to name their limits plainly; a
+// detector that punishes exactly that teaches the opposite.
+//
+// NARROW ON PURPOSE: the sentence must name a TOOL or a GRANT. "I do not have
+// enough evidence" is still an admission and still fires.
+// NARROWED AFTER AN AUDIT OF THIS VERY FIX. The first version listed a bare
+// " tool", which exempts any inability sentence that merely mentions one —
+// measured at 5/5 on ordinary phrasings:
+//
+//	"I cannot run the build tool, so the change is unverified"
+//	"I could not use the migration tool and the data is untouched"
+//	"I was unable to invoke the formatting tool on the output"
+//
+// Those are genuine admissions, and silently exempting them is the WORSE
+// direction: a false positive costs a re-run, a false negative reports
+// unfinished work as done. The markers now have to be about what the run WAS
+// GIVEN, not about a tool being mentioned at all.
+var toolGrantMarkers = []string{
+	"tool available", "tools available", "no such tool", "not available in this",
+	"read-only tools", "read only tools", "only read-only", "only read only",
+	"tools were provided", "tools were given", "toolset provided",
+	"in this specialist context", "in this context only",
+	"is not in my toolset", "not in my toolset", "not in this toolset",
+}
+
+// objectiveFailureMarkers name the OBJECTIVE rather than a capability. A
+// sentence carrying one is about whether the job got done, so the tool-grant
+// exemption above does not apply to it however many tools it mentions.
+// VERB-ANCHORED, not bare nouns. "this task" alone was too crude: a task that
+// finished wrote "so i could not record a plan; the task is a single
+// read-and-report step and is now complete" — it names the task in order to
+// report SUCCESS, and a bare-noun override read that as failure. The marker has
+// to be the objective NOT BEING DONE, which needs the verb.
+var objectiveFailureMarkers = []string{
+	"complete this task", "complete the task", "completing this task", "completing the task",
+	"finish this task", "finish the task", "finishing this task",
+	"complete it", "completing it", "finish it", "finishing it",
+	// The objective and the assignment need the verb too, for the same reason
+	// "this task" did. "the objective is met" and "the assignment is complete"
+	// name the objective in order to report SUCCESS, and a bare noun read both
+	// as failure — so a finished answer carrying a tool caveat was told it had
+	// not finished, which is the worst thing this detector can do.
+	"complete the objective", "completing the objective",
+	"finish the objective", "finishing the objective",
+	"meet the objective", "meeting the objective", "achieve the objective",
+	"complete the assignment", "completing the assignment",
+	"finish the assignment", "finishing the assignment",
+	"as requested", "what was asked",
+	"do this task", "perform this task", "carry out this task",
+}
+
+// blockedWorkMarkers are what turns an absence-establishing sentence back into
+// an admission of failure.
+//
+// MEASURED, NOT ARGUED. The successNegationTails list above exists so a finder
+// reporting "I could not find where X is set" is not marked incomplete for doing
+// its job. But the stems it added — "find the", "reproduce ", "confirm any",
+// "observe any" — also head the most ordinary way of admitting defeat, and the
+// allowance fired on the whole sentence regardless of how it ended. Measured
+// against eleven genuine admissions, TEN passed the detector undetected:
+//
+//	"I could not reproduce the crash, so the fix is unverified."
+//	"I could not find the root cause; someone else will need to pick this up."
+//	"I could not locate the source of the regression and have run out of ideas."
+//
+// That is the guard's entire purpose defeated — it is the last thing between a
+// stalled run and a report that reads like success.
+//
+// So the allowance now yields when the sentence ALSO says the work is blocked.
+// "I could not find where X is set in production code" still passes, because
+// nothing in it claims the objective was left undone; the three above do not.
+// strongAbsenceTails are the allowance tails carrying an explicit "any": the
+// model asserting it looked and found NOTHING. That is a finding whatever the
+// rest of the sentence says, so blockedWorkMarkers does not override them.
+var strongAbsenceTails = []string{
+	"find any", "found any", "see any", "detect any", "identify any",
+	"spot any", "locate any", "confirm any", "observe any",
+	// The OBSERVATION family. Looking for a failure and not producing one is the
+	// same kind of result as looking for an issue and not finding one, and
+	// leaving these out meant "I could not reproduce any failure in the parser"
+	// was not a strong absence — so an unrelated blocked statement in the next
+	// sentence flipped a clean negative result into an admission.
+	"reproduce any", "trigger any", "produce any", "hit any",
+	"encounter any", "provoke any", "surface any", "measure any",
+}
+
+// strongAbsenceObjects are the things whose ABSENCE IS THE RESULT: you go
+// looking for them precisely so you can report there are none, and finding none
+// is the work succeeding.
+//
+// WHAT FOLLOWS "any" DECIDES, and treating every "find any" as success was too
+// broad:
+//
+//	"I could not find any remaining issues"  -> a finding, the search succeeded
+//	"I could not find any solution"          -> an admission, the work did not
+//
+// Both carry the explicit "any". Only the object separates them, so only the
+// object can classify them.
+//
+// AN ALLOW-LIST, because this grants the exemption. A deny-list of deliverables
+// would have to anticipate every noun a model might reach for, and everything
+// forgotten would be waved through as success — the failure direction this
+// detector exists to prevent. An unrecognised object is simply not strong, which
+// leaves the sentence to the ordinary blocked-work handling rather than
+// flagging it outright.
+var strongAbsenceObjects = []string{
+	"issue", "issues", "problem", "problems", "bug", "bugs", "defect", "defects",
+	"error", "errors", "failure", "failures", "regression", "regressions",
+	"evidence", "example", "examples", "occurrence", "occurrences",
+	"instance", "instances", "reference", "references", "match", "matches",
+	"caller", "callers", "usage", "usages", "use", "uses", "case", "cases",
+	"vulnerability", "vulnerabilities", "leak", "leaks", "race", "races",
+	"sign", "signs", "trace", "traces", "mention", "mentions", "difference", "differences",
+	"blocker", "blockers", "gap", "gaps", "omission", "omissions", "discrepancy", "discrepancies",
+	"conflict", "conflicts", "violation", "violations", "warning", "warnings",
+	"call", "calls", "site", "sites", "callsite", "callsites", "consumer", "consumers",
+	"dependency", "dependencies", "user", "users", "path", "paths",
+}
+
+// absenceQualifiers sit between "any" and the object without changing it.
+var absenceQualifiers = []string{
+	"remaining", "other", "further", "more", "additional", "obvious", "such",
+	"outstanding", "new", "existing", "actual", "real", "clear", "direct",
+}
+
+// strongAbsence reports whether tail is an "any"-family absence whose OBJECT
+// makes finding nothing the result rather than the shortfall.
+func strongAbsence(tail string) bool {
+	for _, prefix := range strongAbsenceTails {
+		if !strings.HasPrefix(tail, prefix) {
+			continue
+		}
+		rest := strings.TrimSpace(tail[len(prefix):])
+		for trimmed := true; trimmed; {
+			trimmed = false
+			for _, qualifier := range absenceQualifiers {
+				if word, remainder, ok := cutFirstWord(rest); ok && word == qualifier {
+					rest, trimmed = remainder, true
+					break
+				}
+			}
+		}
+		word, _, ok := cutFirstWord(rest)
+		if !ok {
+			continue
+		}
+		for _, object := range strongAbsenceObjects {
+			if word == object {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// cutFirstWord returns the first bare word of text, lowercased by the caller's
+// own normalisation, with surrounding punctuation removed.
+func cutFirstWord(text string) (word string, rest string, ok bool) {
+	text = strings.TrimLeft(text, " \t")
+	end := 0
+	for end < len(text) {
+		c := text[end]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' {
+			end++
+			continue
+		}
+		break
+	}
+	if end == 0 {
+		return "", text, false
+	}
+	return text[:end], text[end:], true
+}
+
+var blockedWorkMarkers = []string{
+	"unverified", "not verified", "cannot verify", "could not verify",
+	"someone else", "will need to", "needs someone", "handed off", "hand off",
+	// "someone else" and "will need to" are the two that also appear in
+	// SUCCESSFUL reports, describing somebody else's future work — "I could not
+	// find any remaining issues, though a follow-up will need to cover the
+	// Windows path" is a finding. They are kept because they do carry a genuine
+	// handoff-because-blocked ("someone else will need to pick this up"), and the
+	// strongAbsenceTails exemption above is what stops them flipping a finding.
+	"ran out of", "run out of", "out of time", "in the time available",
+	"stopped there", "stopping here", "gave up", "giving up",
+	"nothing was modified", "no changes were made", "left unchanged", "left undone",
+	"may be inert", "is unresolved", "remains unresolved", "still broken",
+	"so i cannot", "so i could not",
+	// Saying the work is BLOCKED, in as many words. "I could not find the root
+	// cause, so the work is blocked" carries the statement in the same sentence
+	// and still passed, because every marker above names a symptom of being
+	// blocked and none named the thing itself.
+	"is blocked", "are blocked", "remains blocked", "stays blocked", "still blocked",
+	"cannot proceed", "could not proceed", "can not proceed", "unable to proceed",
+	"is unfinished", "remains unfinished", "left unfinished", "still unfinished",
+	"is incomplete", "remains incomplete",
+	"still unresolved", "still unverified",
+}
+
+// bareInabilityStems are the two entries above that are STEMS rather than
+// descriptions of a blocked state. The stem loop below already scans them with
+// its own tail logic, and a sentence can carry one on its way to reporting
+// success: "so i could not record a plan; the task is a single read-and-report
+// step and is now complete" is a finished task that did not need the plan.
+var bareInabilityStems = []string{"so i cannot", "so i could not"}
+
+// unambiguousFailureStates say the work is in a bad state, with no reading on
+// which it is a result.
+//
+// AN OBJECT CANNOT OUTRANK AN EXPLICIT STATE. strongAbsence returns true for
+// "evidence", and that suppressed every blocked-work marker in the sentence — so
+// "I could not find any evidence supporting the fix, so it remains unverified"
+// reported success while saying in as many words that the work is unverified.
+// The absence protection exists for ownership and follow-up wording, where "I
+// could not find any remaining issues, though a follow-up will need to cover the
+// Windows path" really is a finding. It was never meant to cover a sentence that
+// states the outcome.
+//
+// So this is the SHORT list: "unverified" and "still broken" have one reading,
+// while "someone else", "will need to" and "nothing was modified" have two and
+// stay ambiguous. Same-sentence only — a state in the NEXT sentence may belong
+// to another subject, which is what the lookahead's topic-shift guard is for.
+var unambiguousFailureStates = []string{
+	"unverified", "not verified",
+	"is unresolved", "remains unresolved",
+	"still broken",
+	"is blocked", "are blocked", "remains blocked", "stays blocked", "still blocked",
+	"is unfinished", "remains unfinished", "left unfinished", "still unfinished",
+	"still unresolved", "still unverified",
+	"is incomplete", "remains incomplete",
+	"cannot proceed", "could not proceed", "unable to proceed",
+	"gave up", "giving up", "ran out of", "run out of",
+	"left undone",
+}
+
+// consequenceBoundaries separate what was looked for from what followed.
+//
+// THE STATE HAS TO BE THE OUTCOME, NOT PART OF WHAT WAS NEGATED. Matching
+// "is unresolved" anywhere in the sentence read the negated PROPOSITION as the
+// reported result:
+//
+//	"I could not find any evidence that the issue is unresolved."
+//
+// That is a successful negative finding — there is no evidence the issue remains
+// unresolved — and it was marked incomplete, which is the opposite polarity of
+// the case the override was added for. What separates them is position: after a
+// consequence boundary the state is being asserted, inside a "that…" clause it is
+// the thing being denied.
+var consequenceBoundaries = []string{", so ", "; ", ", but ", ", therefore", ", leaving ", ", which "}
+
+// reportedConsequence returns the part of a sentence that states the OUTCOME,
+// or "" when the sentence never turns to one. Everything before the first
+// boundary is what was searched for.
+func reportedConsequence(sentence string) string {
+	earliest := -1
+	width := 0
+	for _, boundary := range consequenceBoundaries {
+		if index := strings.Index(sentence, boundary); index >= 0 && (earliest < 0 || index < earliest) {
+			earliest, width = index, len(boundary)
+		}
+	}
+	if earliest < 0 {
+		return ""
+	}
+	return sentence[earliest+width:]
+}
+
+// blockedStateMarkers describe WORK LEFT BLOCKED — unverified, unresolved,
+// handed off, abandoned for time. Only these break the tool-grant exemption:
+// they say something about the state the work is in, which a tool caveat cannot
+// excuse, whereas a bare stem says only that one step did not happen.
+//
+// DERIVED, not copied. Two hand-maintained lists that must stay in step drift,
+// and the drift here would be silent in both directions.
+var blockedStateMarkers = func() []string {
+	bare := make(map[string]bool, len(bareInabilityStems))
+	for _, stem := range bareInabilityStems {
+		bare[stem] = true
+	}
+	out := make([]string, 0, len(blockedWorkMarkers))
+	for _, marker := range blockedWorkMarkers {
+		if !bare[marker] {
+			out = append(out, marker)
+		}
+	}
+	return out
+}()
+
+// carriesTheConsequence reports whether the sentence after an allowance should
+// be read as that allowance's consequence.
+//
+// The lookahead exists because the consequence usually IS the next sentence, but
+// "usually" is not "always" — a message can turn to something else, and reading
+// a blocked statement about a different subject as this one's consequence is the
+// cost of the lookahead. A sentence that announces the change of subject, or
+// disclaims the thing as out of scope, is taken at its word.
+//
+// This does not catch every unrelated follow-on, and deliberately errs toward
+// reading the next sentence: an admission reported as success is the failure this
+// guard exists to prevent, and a message that says something is unverified has
+// said it whether or not it is the same something.
+func carriesTheConsequence(next string) bool {
+	return !containsAny(next, topicShiftMarkers)
+}
+
+// topicShiftMarkers say the message has moved on to something else.
+var topicShiftMarkers = []string{
+	"separately", "unrelatedly", "unrelated", "as an aside", "aside from",
+	"out of scope", "outside the scope", "not in scope", "for a different",
+	"in a different", "on another", "elsewhere in", "in other news",
+}
+
+// countedLabelSentence reports whether a sentence is a markdown LABEL that
+// introduces and counts a bucket of findings, rather than a claim about the
+// objective.
+//
+// "**Unable to verify (1):** - MCP #3 claim was truncated" is a section heading
+// in a COMPLETED audit. Read as a sentence it is indistinguishable from an
+// admission, which is why the subjectless stem was once deleted to silence it.
+//
+// NARROW ON PURPOSE: the sentence must BEGIN with the inability phrase, after
+// markdown emphasis, AND carry a parenthesised count. "Unable to complete the
+// task; the build never succeeded" begins the same way and has no count, so it
+// still fires — which is the whole reason this is preferable to dropping the
+// stem.
+func countedLabelSentence(sentence string) bool {
+	trimmed := strings.TrimLeft(strings.TrimSpace(sentence), "-*#> \t")
+	if !strings.HasPrefix(trimmed, "unable to ") {
+		return false
+	}
+	return countedLabelSuffix.MatchString(sentence)
+}
+
+var countedLabelSuffix = regexp.MustCompile(`\(\s*\d+\s*\)`)
+
 func selfReportedIncompletion(text string) string {
-	for _, sentence := range admissionSentences(strings.ToLower(stripQuoted(text))) {
+	sentences := admissionSentences(strings.ToLower(stripQuoted(text)))
+	for index, sentence := range sentences {
+		// THE CONSEQUENCE IS OFTEN THE NEXT SENTENCE. The blocked-work override
+		// only ever saw the sentence the allowance fired in, so the same
+		// admission escaped or was caught purely on its punctuation:
+		//
+		//	"I could not reproduce the crash, so the fix is unverified."  caught
+		//	"I could not reproduce the crash. The fix is unverified."     missed
+		//
+		// A full stop is not a claim that the work finished, and writing the
+		// consequence as its own sentence is how most people write. The
+		// blocked-work question is asked of this sentence AND the one after it;
+		// everything else is still decided on the sentence alone, so a stem in
+		// one sentence cannot be paired with an allowance tail in another.
+		blockedContext := sentence
+		if index+1 < len(sentences) && carriesTheConsequence(sentences[index+1]) {
+			blockedContext += " " + sentences[index+1]
+		}
 		if containsAny(sentence, narrativeMarkers) {
+			continue
+		}
+		// A counted label is a heading, not a claim about the objective.
+		if countedLabelSentence(sentence) {
+			continue
+		}
+		// A sentence about the tool grant is about CAPABILITY, not about the
+		// objective — UNLESS it also says the task itself could not be done.
+		//
+		// THE OVERRIDE IS NOT OPTIONAL. Without it the exemption swallowed a
+		// genuine failure: "I am unable to complete this task with the current
+		// tool set … Only write_file is enabled … so I cannot inspect the
+		// codebase." That task really did fail, and it mentions tools, so a bare
+		// tool-marker check waved it through. Naming the task is what separates
+		// "I lack a tool I did not need" from "I lack the tools this needed".
+		// BLOCKED WORK BREAKS THE EXEMPTION TOO, not just a named objective. The
+		// override above asks whether the sentence names the task, which a whole
+		// class of real admissions never does:
+		//
+		//	"No write tool is available in this context, so the fix is unverified."
+		//	"There is no edit tool available here, so the change remains unapplied."
+		//	"Write tools are not available in this setup, so the tests were never run."
+		//
+		// Every one mentions tools, none names the objective, and all four were
+		// waved through. The tool caveat is the REASON the work is blocked, not a
+		// reason to stop reading — so a sentence that also says something is
+		// unverified, unapplied or untested goes on to the blocked-work handling
+		// below instead of being exempted here.
+		if containsAny(sentence, toolGrantMarkers) &&
+			!containsAny(sentence, objectiveFailureMarkers) &&
+			!containsAny(sentence, blockedStateMarkers) {
 			continue
 		}
 		for _, phrase := range selfReportPhrases {
@@ -268,7 +689,18 @@ func selfReportedIncompletion(text string) string {
 				}
 				abs := start + rel
 				tail := strings.TrimSpace(sentence[abs+len(stem):])
-				if !hasAnyPrefix(tail, successNegationTails) {
+				// The allowance yields to a sentence that also says the work is
+				// blocked: "could not reproduce the crash" is a finding, "could not
+				// reproduce the crash, so the fix is unverified" is an admission,
+				// and the tail prefix alone cannot tell them apart.
+				strong := strongAbsence(tail)
+				// The object decides whether finding nothing is a result; an
+				// explicit failure state in the SAME sentence decides that it is
+				// not, whatever the object.
+				if strong && containsAny(reportedConsequence(sentence), unambiguousFailureStates) {
+					strong = false
+				}
+				if !hasAnyPrefix(tail, successNegationTails) || (!strong && containsAny(blockedContext, blockedWorkMarkers)) {
 					return selfReportReason(strings.TrimSpace(stem) + " …")
 				}
 				start = abs + len(stem)

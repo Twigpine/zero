@@ -15,6 +15,7 @@ import (
 	"github.com/Twigpine/zero/internal/sandbox"
 	"github.com/Twigpine/zero/internal/sessions"
 	"github.com/Twigpine/zero/internal/skills"
+	"github.com/Twigpine/zero/internal/specialist"
 	"github.com/Twigpine/zero/internal/tools"
 	"github.com/Twigpine/zero/internal/usage"
 	"github.com/Twigpine/zero/internal/zeroruntime"
@@ -35,6 +36,9 @@ type Options struct {
 	FavoriteModels       []string
 	RecentModels         []config.RecentModelEntry
 	RecapsEnabled        bool
+	// KeepFinishedAgents seeds showDoneAgents so finished sub-agents stay in the
+	// AGENTS panel from the first render, without a click.
+	KeepFinishedAgents bool
 	// CompactionModel is the resolved preferences.compactionModel value; see
 	// providers.CompactionModelID for how it combines with the env override
 	// and the curated cheap defaults.
@@ -46,16 +50,36 @@ type Options struct {
 	DiscoverProviderModels      func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error)
 	DiscoverOllamaContextWindow func(ctx context.Context, baseURL string, model string) (int, error)
 	RuntimeMessageSink          func(tea.Msg)
+	// PlanProgress is the recorder the orchestrate tool was registered with.
+	// The model re-attaches it to each run so plan lifecycle events become
+	// transcript cards. nil disables the live plan view without affecting
+	// execution — recording is best-effort everywhere on this path.
+	PlanProgress *PlanProgressBridge
+	// PlanPaths locates saved plans. Empty means saved plans are unavailable,
+	// which the commands report as such rather than as "you have none".
+	PlanPaths                   specialist.PlanPaths
 	PrepareRunCompletionWarning func()
 	RunCompletionWarning        func() string
 	Registry                    *tools.Registry
 	// AwaitToolReadiness gives prompt-critical integration startup a bounded
 	// chance to publish its tools before this turn snapshots the registry. The
 	// wait runs inside the asynchronous agent command, so the TUI stays usable.
-	AwaitToolReadiness  func(context.Context)
-	SessionStore        *sessions.Store
-	SandboxStore        *sandbox.GrantStore
-	MCPConfig           config.MCPConfig
+	AwaitToolReadiness func(context.Context)
+	SessionStore       *sessions.Store
+	SandboxStore       *sandbox.GrantStore
+	MCPConfig          config.MCPConfig
+	// ZeromaxingDisabled carries resolved config's profiles.disableZeromaxing so
+	// /effort and /profile refuse the posture on exactly the same rule the
+	// headless exec path applies. Resolved config already folded the
+	// project-scope tighten-only merge, so a project .zero/config.json can set
+	// it but never clear it.
+	ZeromaxingDisabled bool
+	// ZeromaxingGate is the SHARED posture flag the orchestrate tool reads. A
+	// pointer, not a bool: the tool is registered once and the registry is
+	// cloned per run copying tool POINTERS, so the flip has to be visible
+	// through shared state rather than through re-registration or a closure
+	// over this value-typed model. nil disables the posture for the tool.
+	ZeromaxingGate      *specialist.PostureGate
 	MCPPermissionStore  *mcp.PermissionStore
 	MCPTokenStore       *mcp.TokenStore
 	MCPCommand          func(context.Context, []string) MCPCommandResult

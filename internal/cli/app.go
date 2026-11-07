@@ -17,10 +17,12 @@ import (
 
 	"github.com/Twigpine/zero/internal/agent"
 	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/execprofile"
 	"github.com/Twigpine/zero/internal/execution"
 	"github.com/Twigpine/zero/internal/hooks"
 	"github.com/Twigpine/zero/internal/localcontrol"
 	"github.com/Twigpine/zero/internal/mcp"
+	"github.com/Twigpine/zero/internal/memory"
 	"github.com/Twigpine/zero/internal/modelregistry"
 	"github.com/Twigpine/zero/internal/observability"
 	"github.com/Twigpine/zero/internal/peermsg"
@@ -788,6 +790,19 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	}
 
 	registry := newCoreRegistryScoped(workspaceRoot, scope)
+	// OPT-IN, and the default matters: registering these changes the advertised
+	// tool set for EVERY run, which is exactly what this branch guarantees the
+	// posture does not do when it is off. Off by default keeps that guarantee
+	// true; a user who wants durable notes says so in their own config.
+	if resolved.Profiles.Memory {
+		registry.Register(tools.NewMemoryTool(memory.DefaultPaths(workspaceRoot)))
+		registry.Register(tools.NewMemoryWriteTool(memory.DefaultPaths(workspaceRoot)))
+		// Deletion is its own tool so the approval can disclose it. memory_write's
+		// prompt says only that it saves, and deleting under that sentence is what
+		// made an omitted content field destructive (#897) — registering the save
+		// tool without this one would leave notes undeletable instead.
+		registry.Register(tools.NewMemoryForgetTool(memory.DefaultPaths(workspaceRoot)))
+	}
 	registerLocalControlTools(registry, workspaceRoot, resolved.LocalControl)
 	// Mid-run model escalation is opt-in on this surface too. The tool is present
 	// only when the operator asked for it with --allow-escalation, and the
@@ -817,11 +832,98 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		SensitiveEnvKeys: providerSensitiveEnvKeys(resolved),
 	})
 	executionRunner.SetPreparer(sandboxEngine)
-	specialistRuntime, err := registerSpecialistTools(registry, workspaceRoot, resolved.Swarm.MaxTeamSize)
+	// One gate shared by the registered tool and the TUI that flips it.
+	zeromaxingGate := &specialist.PostureGate{}
+	// The plan recorder. Registered once with the tool and re-attached to each
+	// run by the model — without it the TUI recorded NONE of the five plan
+	// lifecycle events, so a plan ran completely invisibly (audit finding 9).
+	planProgress := tui.NewPlanProgressBridge()
+	// A CANCELLABLE session root, replacing the context.Background() this used
+	// to hand the TUI.
+	//
+	// Never cancelling it was harmless while nothing outlived a run. A
+	// background plan does, and under an uncancellable root it would keep
+	// running — and keep spending — after the session ended. Close() cancels
+	// AND WAITS, so a plan is stopped and its terminal event written rather
+	// than the process exiting out from under it.
+	sessionCtx, cancelSession := context.WithCancel(context.Background())
+	defer cancelSession()
+	planLaunch := newPlanLauncher(sessionCtx, planProgress)
+	// ITS defer IS REGISTERED LAST, further down, and that is load-bearing —
+	// see the ordering note beside closeSpecialistRuntime.
+	// Saved plans, resolved ONCE and handed to both consumers: the orchestrate
+	// tool (which loads a plan named with `saved`) and the TUI (which saves,
+	// lists and shows them). Two computations of the same pair of directories
+	// would eventually disagree about where a plan lives, and the symptom would
+	// be "I saved it" followed by "no saved plan named that".
+	tuiUserConfigDir, _ := config.UserConfigDir()
+	planPaths := specialist.DefaultPlanPaths(workspaceRoot, tuiUserConfigDir)
+	// nil filters: the TUI has no --enabled-tools/--disabled-tools equivalent,
+	// so the run's grant is every read-only tool the registry holds.
+	specialistRuntime, err := registerSpecialistTools(registry, workspaceRoot, resolved.Swarm.MaxTeamSize, nil, nil, planProgress,
+		orchestrateWiring{
+			DiscoverModels: planModelDiscoverer(workspaceRoot, resolved.Provider),
+			// Sizes each task's dependency briefing to the window of the model
+			// that will READ it. Wired here because only this side knows the
+			// provider profile and the session's own model.
+			ContextWindows: planContextWindows(resolved.Provider, resolved.Provider.Model),
+			// The LIVE scope, not a snapshot of it. A request_permissions grant
+			// lands mid-session and must reach the children dispatched after it.
+			// ExtraRoots, not Roots: this is what the run holds BEYOND its
+			// workspace, which is what the field means and what a child needs.
+			// Roots() also returns the workspace root itself, and for a plan task
+			// running in an isolated worktree that arrived as --add-dir <parent
+			// tree> — re-opening everything --cwd had just narrowed. A measured
+			// run wrote ten times into the user's real tree that way, each write
+			// allowed with the reason "workspace write is allowed", because by
+			// then it genuinely was inside the child's write roots.
+			ExtraWriteRoots: scope.ExtraRoots,
+			// The read counterpart: a request_permissions READ grant lands in the
+			// scope's readRoots, which ExtraRoots (write grants) does not return, so
+			// without this a plan auditing a granted path failed "outside the
+			// workspace" in every task. LIVE scope, read at dispatch, same as above.
+			ExtraReadRoots: scope.ExtraReadRoots,
+			ProbeModel:     planModelProber(workspaceRoot, resolved.Provider, deps.newProvider),
+			ProbeIdentity:  planModelProbeIdentity(workspaceRoot, resolved.Provider),
+			ModelPrefs:     planModelPreferences(resolved.Profiles.PlanModels),
+			// Off unless the user's own config asks for it: on by default would
+			// refuse a plan for everyone whose phrasing does not happen to match.
+			RequirePlanKeyword: resolved.Profiles.RequirePlanKeyword,
+			Gate:               zeromaxingGate,
+			// Depth stays 0: the TUI is always a root session — it has no
+			// --depth and is never launched as a child — so zero is the
+			// measured value here, not an unset one.
+			PlanContext: specialist.PlanTaskContext{
+				Cwd: workspaceRoot, Depth: 0,
+				PostureReasoningEffort: string(execprofile.Zeromaxing.ReasoningEffort),
+			},
+			// The plan-size tier, from the SAME resolved config the rest of this
+			// wiring reads. Project config may only have tightened it.
+			Size:  resolved.Profiles.PlanSizeTier(),
+			Plans: planPaths,
+			// The TUI can carry a background plan: it has a session that
+			// outlives a turn. Headless exec supplies no launcher.
+			Launch: planLaunch.Launch,
+			// A write-capable plan gets a worktree of its own, or is refused.
+			Isolate: newPlanIsolator(workspaceRoot),
+		})
 	if err != nil {
 		return writeAppError(stderr, "failed to initialize specialist tools: "+err.Error(), 1)
 	}
+	// SHUTDOWN ORDER, and defers run LIFO so the registration order here is the
+	// REVERSE of what happens.
+	//
+	// Required: stop the plan, then close the runtime it was using, then cancel
+	// the session. It was the exact opposite. planLaunch.Close() was registered
+	// early (right where the launcher is built, which reads naturally), so it ran
+	// AFTER closeSpecialistRuntime — and Close "cancels AND WAITS", so a
+	// background plan was still being waited on with the specialist runtime it
+	// needs already torn down.
+	//
+	// Registering Close here, last, is what puts it first at shutdown. Anything
+	// added below this line runs BEFORE the plan is stopped; put it above.
 	defer closeSpecialistRuntime(stderr, specialistRuntime)
+	defer planLaunch.Close()
 	// The TUI has no --worktree reassignment, so trustRoot == workspaceRoot here.
 	// Gate the project MCP layer behind the workspace-trust check (fail-closed): an
 	// untrusted workspace must not spawn its ./.zero/config.json stdio MCP servers.
@@ -970,7 +1072,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// describes the sandbox they actually get.
 	startupNotices := []string{sandboxEngine.DegradedNotice()}
 	modelRPM := zeroruntime.NewModelRPMLimiter(resolved.ModelRPM)
-	return deps.runTUI(context.Background(), tui.Options{
+	return deps.runTUI(sessionCtx, tui.Options{
 		ModelRPM:             modelRPM,
 		Cwd:                  workspaceRoot,
 		Version:              version,
@@ -987,6 +1089,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		FavoriteModels:       resolved.Preferences.FavoriteModels,
 		RecentModels:         resolved.Preferences.RecentModels,
 		RecapsEnabled:        resolved.Preferences.RecapsEnabled(),
+		KeepFinishedAgents:   resolved.Preferences.KeepsFinishedAgents(),
 		CompactionModel:      resolved.Preferences.CompactionModel,
 		Provider:             provider,
 		NewProvider:          deps.newProvider,
@@ -1013,6 +1116,10 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 		PeerService:        peerService,
 		SandboxStore:       sandboxStore,
 		MCPConfig:          mcpConfig,
+		ZeromaxingDisabled: resolved.Profiles.DisableZeromaxing,
+		ZeromaxingGate:     zeromaxingGate,
+		PlanProgress:       planProgress,
+		PlanPaths:          planPaths,
 		MCPPermissionStore: mcpPermissionStore,
 		MCPTokenStore:      mcpTokenStore,
 		MCPCommand: func(ctx context.Context, args []string) tui.MCPCommandResult {
@@ -1038,13 +1145,22 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			MaxTurns:       resolved.MaxTurns,
 			Registry:       registry,
 			PermissionMode: permissionMode,
-			Autonomy:       "low",
-			Sandbox:        sandboxEngine,
-			FileTracker:    fileTracker,
-			Hooks:          hookDispatcher,
-			DeferThreshold: resolved.Tools.DeferThreshold,
-			Specialists:    specialistRuntime.specialists,
-			Skills:         pluginActivation.skillInfos(deps.skillsDir()),
+			// Set ONCE, here, rather than beside each of the three places the
+			// TUI assigns Zeromaxing: the registry is built per session and does
+			// not change per run, and three assignments of one fact is three
+			// chances for the next one to be forgotten — which is precisely how
+			// this field came to be set nowhere at all.
+			OrchestrateAvailable: orchestrateAvailable(registry),
+			// Background plans report into a later turn through this drain, on
+			// the same channel as the post-edit diagnostics nudge.
+			PlanCompletions: planProgress.DrainCompletedPlans,
+			Autonomy:        "low",
+			Sandbox:         sandboxEngine,
+			FileTracker:     fileTracker,
+			Hooks:           hookDispatcher,
+			DeferThreshold:  resolved.Tools.DeferThreshold,
+			Specialists:     specialistRuntime.specialists,
+			Skills:          pluginActivation.skillInfos(deps.skillsDir()),
 		},
 		AllowEscalation: allowEscalation,
 		// LoadSkills backs /skills and direct /<skill-name> invocation in the TUI.
@@ -1249,13 +1365,125 @@ func (r *agentToolRuntime) attachLifecycleHooks(dispatcher *hooks.Dispatcher) {
 	}
 }
 
-func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, maxTeamSize int) (*agentToolRuntime, error) {
+// orchestrateWiring carries what registerSpecialistTools needs to wire the
+// plan tool. A zero value leaves the tool registered but permanently off, which
+// is the posture-off behaviour every existing caller already gets.
+type orchestrateWiring struct {
+	// RequirePlanKeyword carries Profiles.RequirePlanKeyword to the tool.
+	RequirePlanKeyword bool
+	// Gate is the shared posture flag. A POINTER, not a closure over caller
+	// state: the TUI model is a value type copied on every update, so a closure
+	// would freeze the posture as it was at registration.
+	Gate *specialist.PostureGate
+	// PlanContext supplies the run-invariant state a plan task inherits.
+	PlanContext specialist.PlanTaskContext
+	// ContextWindows sizes a task's dependency briefing to the model that will
+	// read it. nil keeps the fixed caps.
+	ContextWindows specialist.ContextWindowFunc
+	// ExtraWriteRoots reports the run's non-workspace roots at LAUNCH time, so a
+	// child's sandbox covers the same ground its parent's does. nil means the
+	// workspace only, which is what every child got before this existed.
+	ExtraWriteRoots func() []string
+	// ExtraReadRoots reports the paths the run may READ beyond its workspace — its
+	// request_permissions grants — at DISPATCH time, so a plan's tasks can read a
+	// granted external path instead of failing "outside the workspace". The read
+	// counterpart of ExtraWriteRoots: a read grant lands in a separate scope list
+	// that ExtraWriteRoots does not cover. nil means workspace-only reads.
+	ExtraReadRoots func() []string
+	// ProbeModel proves a model will actually run before any task is assigned it.
+	// nil skips proving, which is what every plan did before this existed.
+	ProbeModel specialist.ModelProber
+	// ProbeIdentity namespaces cached verdicts by the live provider/profile and
+	// endpoint. nil uses the specialist package's private default namespace.
+	ProbeIdentity func() string
+	// Size is the configured plan-size tier. The zero value is the default tier,
+	// so a call site that has no resolved config yet still gets a real ceiling
+	// rather than none.
+	Size config.PlanSize
+	// Plans locates saved plans. Empty means a `saved` reference is refused with
+	// a reason rather than searched for in nowhere.
+	Plans specialist.PlanPaths
+	// Isolate prepares a worktree for a write-capable plan. nil refuses one.
+	Isolate specialist.PlanIsolator
+	// Launch runs a plan in the background. nil — the headless default — makes
+	// a background plan refuse rather than start one nothing can report.
+	Launch func(run func(ctx context.Context)) bool
+	// DiscoverModels lists what the active provider can serve, for auto_assign.
+	// nil makes a plan asking for it refuse with a reason.
+	DiscoverModels specialist.ModelDiscoverer
+	// ModelPrefs carries the user's per-role model pins and exclusions.
+	ModelPrefs specialist.ModelPreferences
+}
+
+// planParentTools is the run's grant: the tools a plan task may inherit.
+//
+// Derived, never hand-written. The candidate set is specialist's own exported
+// list — nothing outside it can ever be granted — narrowed to what this
+// registry actually holds and what the run's operator filters allow. Keeping
+// one authoritative list rather than a second copy here is invariant 5; the
+// previous field was a hand-supplied []string that BOTH production call sites
+// left nil, which silently disabled the narrowing rule entirely.
+func planParentTools(registry *tools.Registry, enabledTools, disabledTools []string) []string {
+	grant := []string{}
+	// EVERY GRANTABLE NAME, read-only and write alike. The write tools are not
+	// thereby granted to anything: a task inherits only the read-only ones
+	// (planToolGrant) and must NAME a write tool to hold it. Narrowing this list
+	// to read-only would instead make a named write tool undeliverable — the
+	// task would validate and then run with less than it asked for.
+	for _, name := range specialist.PlanGrantableToolNames() {
+		if _, found := registry.Get(name); !found {
+			continue
+		}
+		if !agent.ToolAllowedByFilters(name, enabledTools, disabledTools) {
+			continue
+		}
+		grant = append(grant, name)
+	}
+	return grant
+}
+
+// registerSpecialistTools registers the specialist, swarm and orchestrate tools.
+// The wiring argument carries what the orchestrate tool needs; a zero value
+// leaves it registered but permanently off, which is the posture-off behaviour.
+//
+// enabledTools/disabledTools are the run's operator filters, and recorder is the
+// plan lifecycle sink. All three are explicit PARAMETERS rather than wiring
+// fields on purpose: a call site cannot forget them without failing to compile.
+// As a field, Recorder was simply never set by the TUI, so a plan there recorded
+// none of its five lifecycle events (finding 9) — the same omission the parent
+// grant suffered. An explicit nil is a stated choice; an absent field is not.
+func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, maxTeamSize int, enabledTools, disabledTools []string, recorder specialist.PlanRecorder, wiring orchestrateWiring) (*agentToolRuntime, error) {
 	paths, err := specialist.DefaultPaths(workspaceRoot)
 	if err != nil {
 		return nil, err
 	}
 	lifecycleHooks := &specialist.LifecycleHooks{}
-	executor := specialist.Executor{Paths: paths, LifecycleHooks: lifecycleHooks}
+	// One budget for the whole session, shared by every run and every plan in it
+	// — which is the point: a per-run counter would reset on each message and
+	// bound nothing a conversation does over time.
+	sessionBudget := specialist.NewSessionBudget(specialist.DefaultSessionSubagents)
+	executor := specialist.Executor{
+		SessionBudget: sessionBudget,
+		Paths:         paths,
+		// Dispatches specialistStart/specialistStop hooks once the session's
+		// hook dispatcher is attached (attachLifecycleHooks).
+		LifecycleHooks: lifecycleHooks,
+		// The run's own roots, read at every launch. Without this a child is
+		// confined more tightly than its parent: a run granted a directory
+		// outside its workspace could create and populate it, then watch every
+		// plan task be refused at that same directory.
+		ExtraWriteRoots: wiring.ExtraWriteRoots,
+		// So a delegated Task that names no model is routed to a role-appropriate
+		// pin under the zeromaxing posture, the same way a plan task is. Off unless
+		// the posture is active and auto-assign is configured. The discoverer is
+		// the same one the plan tool uses: a pin fires only when the provider's
+		// own listing carries it, so a stale pin after a provider switch degrades
+		// to inherit instead of a child dead at spawn.
+		ModelPrefs:     wiring.ModelPrefs,
+		PostureActive:  wiring.Gate.Active,
+		DiscoverModels: wiring.DiscoverModels,
+		ServeCache:     &specialist.ModelServeCache{},
+	}
 	runtime, err := specialist.RegisterTools(registry, executor)
 	if err != nil {
 		return nil, err
@@ -1274,6 +1502,41 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, max
 		return nil, err
 	}
 	swarm.RegisterTools(registry, sw)
+	// The orchestrate tool. Registered ALWAYS and gated by Safety(): with the
+	// posture off it reports PermissionDeny, so it is never advertised and the
+	// prefix is byte-identical to a build without it. Registering conditionally
+	// would not work — the TUI builds its registry once per session and clones
+	// tool POINTERS per run, so a tool added on a posture flip would never
+	// reach a run already holding a clone.
+	planContext := wiring.PlanContext
+	planContext.Executor = executor
+	if strings.TrimSpace(planContext.Cwd) == "" {
+		planContext.Cwd = workspaceRoot
+	}
+	if strings.TrimSpace(planContext.SpecialistName) == "" {
+		planContext.SpecialistName = "explorer"
+	}
+	registry.Register(&specialist.OrchestrateTool{
+		PostureActive: wiring.Gate.Active,
+		RunTask:       specialist.NewPlanRunner(planContext),
+		Recorder:      recorder,
+		ParentTools:   planParentTools(registry, enabledTools, disabledTools),
+		Depth:         planContext.Depth,
+		Size:          wiring.Size,
+		// Refuse a plan the user's own turn did not ask for, when this session
+		// asks to be protected that way. Off unless configured — see
+		// ProfilesConfig.RequirePlanKeyword.
+		RequirePlanKeyword: wiring.RequirePlanKeyword,
+		Plans:              wiring.Plans,
+		Launch:             wiring.Launch,
+		Isolate:            wiring.Isolate,
+		DiscoverModels:     wiring.DiscoverModels,
+		ContextWindows:     wiring.ContextWindows,
+		ExtraReadRoots:     wiring.ExtraReadRoots,
+		ProbeModel:         wiring.ProbeModel,
+		ProbeIdentity:      wiring.ProbeIdentity,
+		ModelPrefs:         wiring.ModelPrefs,
+	})
 	return &agentToolRuntime{
 		specialist:     runtime,
 		swarm:          sw,
@@ -1712,4 +1975,22 @@ func cachedSkillsLoader(load func() []skills.Skill) func() []skills.Skill {
 		at = time.Now()
 		return cached
 	}
+}
+
+// orchestrateAvailable reports whether this run actually holds the orchestrate
+// tool, for the reminder that names it.
+//
+// DERIVED FROM THE REGISTRY, never hand-set. The field it feeds was declared,
+// documented and consumed by the reminder selector — and set by NEITHER
+// production call site, so the notice that tells the model the tool exists
+// could not fire. The model was handed an advertised tool it was never told
+// about, and did not use it. That is invariant 1 for the second time in this
+// feature, and a bool a caller has to remember to pass is how it happened; the
+// registry is the thing that actually knows.
+func orchestrateAvailable(registry *tools.Registry) bool {
+	if registry == nil {
+		return false
+	}
+	_, found := registry.Get(specialist.OrchestrateToolName)
+	return found
 }
