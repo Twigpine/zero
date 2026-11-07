@@ -129,23 +129,32 @@ func TestStoreAppendEventPersistsErrorEventStatusCodeAndCause(t *testing.T) {
 }
 
 func TestErrorEventPayloadBoundsCause(t *testing.T) {
-	// "é" is two bytes; an odd cap boundary must not split it.
-	cause := strings.Repeat("é", maxErrorCauseBytes)
-	payload := ErrorEventPayload(&zeroruntime.StreamError{Message: "m", StatusCode: 500, Cause: cause})
+	for _, tc := range []struct {
+		name  string
+		cause string
+	}{
+		// "é" is two bytes; an odd cap boundary must not split it.
+		{"two-byte runes", strings.Repeat("é", maxErrorCauseBytes)},
+		{"one byte over the cap", strings.Repeat("a", maxErrorCauseBytes+1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := ErrorEventPayload(&zeroruntime.StreamError{Message: "m", StatusCode: 500, Cause: tc.cause})
 
-	got, ok := payload["cause"].(string)
-	if !ok {
-		t.Fatalf("cause = %#v, want string", payload["cause"])
-	}
-	if !strings.HasSuffix(got, errorCauseTruncationMarker) {
-		t.Fatalf("cause missing truncation marker: ...%q", got[len(got)-20:])
-	}
-	body := strings.TrimSuffix(got, errorCauseTruncationMarker)
-	if len(body) > maxErrorCauseBytes {
-		t.Fatalf("bounded cause body is %d bytes, want <= %d", len(body), maxErrorCauseBytes)
-	}
-	if !utf8.ValidString(got) {
-		t.Fatal("bounded cause is not valid UTF-8")
+			got, ok := payload["cause"].(string)
+			if !ok {
+				t.Fatalf("cause = %#v, want string", payload["cause"])
+			}
+			if !strings.HasSuffix(got, errorCauseTruncationMarker) {
+				t.Fatalf("cause missing truncation marker: ...%q", got[len(got)-20:])
+			}
+			// The marker counts: the persisted cause as a whole stays within the cap.
+			if len(got) > maxErrorCauseBytes {
+				t.Fatalf("bounded cause is %d bytes with its marker, want <= %d", len(got), maxErrorCauseBytes)
+			}
+			if !utf8.ValidString(got) {
+				t.Fatal("bounded cause is not valid UTF-8")
+			}
+		})
 	}
 }
 
