@@ -480,3 +480,41 @@ func TestAReadOnlyPlanSaysNothingAboutAnIsolatedWorkspace(t *testing.T) {
 		t.Errorf("a read-only plan claimed an isolated workspace:\n%s", result.Output)
 	}
 }
+
+// THE PLAN METER COUNTS THE EVENT THAT TRIPS THE PER-TASK CAP, and every one
+// after it. The add used to be a side effect inside the second switch case, so
+// once the per-task case matched the plan meter stopped hearing about the task:
+// the same child read 40,000 on the meter with a cap set and 80,000 without,
+// and downstream dispatch was gated on the undercount.
+func TestThePlanMeterCountsTheEventThatTripsThePerTaskCap(t *testing.T) {
+	exec := Executor{
+		BinaryPath:   "/bin/true",
+		NewSessionID: func() (string, error) { return "specialist_00000000000000000000000a", nil },
+		Load:         func(LoadOptions) (LoadResult, error) { return LoadResult{}, nil },
+		RunChild: func(ctx context.Context, _ string, _ []string, progress func(streamjson.Event)) (ChildRunResult, error) {
+			// Two events, then one more already in the pipe after the cancel:
+			// all three were billed by the provider.
+			for round := 0; round < 3; round++ {
+				progress(usageEvents(40_000)[0])
+			}
+			if ctx.Err() != nil {
+				return ChildRunResult{Started: true, ExitCode: -1}, ctx.Err()
+			}
+			return ChildRunResult{Started: true}, nil
+		},
+	}
+	run := NewPlanRunner(PlanTaskContext{Executor: exec, Cwd: t.TempDir(), SpecialistName: "explorer"})
+	spend := &planSpend{limit: 10_000_000, totalTasks: 1}
+	result, _ := run(context.Background(), PlanTaskRequest{
+		Task:          Task{ID: "greedy", Prompt: "p"},
+		Tools:         []string{"read_file"},
+		Spend:         spend,
+		MaxTaskTokens: 60_000,
+	})
+	if result.Outcome != TaskCancelled {
+		t.Fatalf("the per-task cap did not stop the task: %s / %s", result.Outcome, result.Err)
+	}
+	if got := spend.upstream.Load(); got != 120_000 {
+		t.Fatalf("plan meter = %d, want all 120000 tokens the child was billed for", got)
+	}
+}
