@@ -712,7 +712,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 				"arguments": call.Arguments,
 			})
 			// Snapshot before-state of files this call will mutate (safe rewind).
-			if checkpoint, ok := sessionRecorder.captureCheckpoint(workspaceRoot, call); ok {
+			if checkpoint, ok := sessionRecorder.captureCheckpoint(workspaceRoot, registry, call); ok {
 				writer.checkpoint(checkpoint)
 			}
 		},

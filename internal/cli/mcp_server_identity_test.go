@@ -81,7 +81,12 @@ func TestUpsertAllowsADistinctName(t *testing.T) {
 func TestACollisionAcrossTheStartupSplitIsStillRefused(t *testing.T) {
 	defaults := config.DefaultMCPServers()
 	names := make([]string, 0, len(defaults))
-	for name := range defaults {
+	for name, server := range defaults {
+		// An opt-in default is disabled until the user enables it, so it never
+		// reaches the split this test is about.
+		if server.Disabled {
+			continue
+		}
 		names = append(names, name)
 	}
 	sort.Strings(names)

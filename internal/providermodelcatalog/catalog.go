@@ -45,6 +45,20 @@ var minimaxCuratedModels = []Model{
 		Source:           minimaxModelSource,
 	},
 	{
+		ID:                     "MiniMax-M3.1-Flash",
+		Description:            "fast reasoning model",
+		ContextWindow:          1_000_000,
+		ToolCall:               true,
+		Reasoning:              true,
+		ReasoningEfforts:       []string{"low", "medium", "high", "xhigh", "max"},
+		DefaultReasoningEffort: "max",
+		InputModalities:        []string{"text", "image", "video"},
+		OutputModalities:       []string{"text"},
+		InputCost:              0.15,
+		OutputCost:             0.60,
+		Source:                 minimaxModelSource,
+	},
+	{
 		ID:               "MiniMax-M2.7",
 		Description:      "agentic coding model",
 		ContextWindow:    204_800,
@@ -113,10 +127,12 @@ var curatedModels = map[string][]Model{
 		{ID: "deepseek/deepseek-chat", Description: "coding model"},
 	},
 	"chatgpt": {
-		{ID: "gpt-5.5", Description: "recommended Codex model"},
-		{ID: "gpt-5.4", Description: "strong Codex model"},
-		{ID: "gpt-5.4-mini", Description: "fast Codex model"},
-		{ID: "gpt-5.3-codex-spark", Description: "research preview fast Codex model"},
+		// Suggestions only: availability comes from the authenticated Codex catalog.
+		// https://learn.chatgpt.com/docs/models
+		{ID: "gpt-6.1-sol", Description: "balanced Codex model"},
+		{ID: "gpt-6.1-terra", Description: "fast model for writing, visual understanding, and computer use"},
+		{ID: "gpt-6-astra", Description: "advanced reasoning model"},
+		{ID: "gpt-6-luna", Description: "efficient coding model"},
 	},
 	"deepseek": {
 		{ID: "deepseek-chat", Description: "catalog default"},

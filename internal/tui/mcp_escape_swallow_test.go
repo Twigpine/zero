@@ -24,7 +24,9 @@ var (
 // of one byte of an echoed credential, the sequence eats that byte, so the
 // reader was shown every other byte of it while equality matched nothing, and
 // the split-byte tests passed because they only checked that the whole value
-// was gone. The reason is withheld in that case. A sequence that eats nothing
+// was gone. The reason is withheld in that case. A bare ESC is caught one layer
+// earlier now: the redaction package matches a configured value across a
+// separator byte, so that split is redacted and the reason kept. A sequence that eats nothing
 // of the credential still rejoins it for ordinary redaction, and an ordinary
 // coloured error keeps its text.
 func TestAnEscapeThatEatsPartOfACredentialWithholdsTheReason(t *testing.T) {
@@ -38,7 +40,7 @@ func TestAnEscapeThatEatsPartOfACredentialWithholdsTheReason(t *testing.T) {
 		withheld bool
 		present  []string
 	}{
-		{name: "bare ESC eats the next byte", echo: "wk-live-" + escByte + "4f9c2b7ae1d8", withheld: true},
+		{name: "bare ESC before a credential byte is redacted across the split", echo: "wk-live-" + escByte + "4f9c2b7ae1d8", present: []string{"[REDACTED]", "handshake rejected"}},
 		{name: "CSI final byte is a byte of the credential", echo: "wk-live-" + escByte + "[4f9c2b7ae1d8", withheld: true},
 		{name: "OSC payload holds part of the credential", echo: "wk-live-" + escByte + "]4f9c2b7ae1" + belByte + "d8", withheld: true},
 		{name: "control: a whole sequence between the halves is redacted", echo: "wk-live-" + escByte + "7" + "4f9c2b7ae1d8", present: []string{"[REDACTED]", "handshake rejected"}},
@@ -70,7 +72,9 @@ func TestAnEscapeThatEatsPartOfACredentialIsWithheldInBothViews(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte("rejected " + credential[:10] + escByte + credential[10:]))
+		// A CSI introducer in front of a credential byte: the display takes the
+		// byte as the sequence final byte, so it shows every other byte.
+		_, _ = w.Write([]byte("rejected " + credential[:10] + escByte + "[" + credential[10:]))
 	}))
 	defer server.Close()
 	cfg := config.MCPConfig{Servers: map[string]config.MCPServerConfig{

@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/Twigpine/zero/internal/aimlapi"
 )
 
 // THE PRODUCER SAYS WHEN IT CUT, AND THE CUT STAYS AT THE END.
@@ -85,6 +88,31 @@ func writeInterruptedStatus(t *testing.T, w http.ResponseWriter, status int, bod
 	_, _ = fmt.Fprintf(buffered, "HTTP/1.1 %d %s\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s",
 		status, http.StatusText(status), len(body)+2048, body)
 	_ = buffered.Flush()
+}
+
+// A HINT GOES IN FRONT OF THE BODY, NOT AFTER IT.
+//
+// A 401 from the AI/ML API server carries an authentication hint. The display
+// repairs a credential cut only at the END of the message, so the hint sits
+// between the status and the body, and the retained body stays last.
+func TestAnUnauthorizedHintKeepsTheCutBodyAtTheEnd(t *testing.T) {
+	server := Server{
+		Name: "aimlapi", Type: ServerTypeHTTP, URL: aimlapi.MCPServerURL,
+		// The user's own header, so no key was injected and the body is kept.
+		Headers: map[string]string{"Authorization": "Bearer the-users-own-key"},
+	}
+	body := strings.Repeat("a", maxHTTPErrorDetail-4) + "tail" + "X"
+	err := httpStatusError(server, &http.Response{StatusCode: http.StatusUnauthorized, Body: io.NopCloser(strings.NewReader(body))})
+	hint := strings.TrimSpace(aimlapiUnauthorizedHint(server, http.StatusUnauthorized))
+	if hint == "" || !strings.Contains(err.Error(), hint) {
+		t.Fatalf("the hint is missing, so this does not cover the hinted path: %v", err)
+	}
+	if !ErrorDetailTruncated(err) {
+		t.Error("a body cut at the limit was not marked as cut")
+	}
+	if !strings.HasSuffix(err.Error(), "tail") {
+		t.Errorf("the retained body is no longer at the end of the error: %q", tailOf(err.Error(), 80))
+	}
 }
 
 func TestErrorDetailTruncatedIsFalseForOtherErrors(t *testing.T) {

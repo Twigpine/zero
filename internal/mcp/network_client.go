@@ -427,6 +427,7 @@ func (client *networkClient) applyHeaders(request *http.Request) {
 	if client.sessionID != "" {
 		request.Header.Set("Mcp-Session-Id", client.sessionID)
 	}
+	applyAIMLAPIRequestHeaders(client.server, request)
 }
 
 func (client *remoteSSEClient) applyStreamHeaders(request *http.Request) {
@@ -434,6 +435,7 @@ func (client *remoteSSEClient) applyStreamHeaders(request *http.Request) {
 		request.Header.Set(key, value)
 	}
 	request.Header.Set("Accept", "text/event-stream")
+	applyAIMLAPIRequestHeaders(client.server, request)
 }
 
 func (client *remoteSSEClient) applyPostHeaders(request *http.Request) {
@@ -442,6 +444,7 @@ func (client *remoteSSEClient) applyPostHeaders(request *http.Request) {
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
+	applyAIMLAPIRequestHeaders(client.server, request)
 }
 
 func closeResponseBody(errp *error, server Server, body io.Closer) {
@@ -640,6 +643,12 @@ func ErrorDetailTruncated(err error) bool {
 }
 
 func httpStatusError(server Server, response *http.Response) error {
+	hint := aimlapiUnauthorizedHint(server, response.StatusCode)
+	if sentAIMLAPIServiceKey(server, response.Request) {
+		// The body is server text that may echo the key Zero injected, whole or
+		// cut by the read limit, so it is left out rather than matched.
+		return fmt.Errorf("MCP %s server %s returned HTTP %d (response body omitted: the request carried your AI/ML API key)%s", server.Type, server.Name, response.StatusCode, hint)
+	}
 	// One byte past the limit is what distinguishes "exactly this long" from
 	// "there was more", and it is never kept.
 	//
@@ -657,12 +666,14 @@ func httpStatusError(server Server, response *http.Response) error {
 	detail := strings.TrimSpace(string(body))
 	if detail == "" {
 		return &statusError{
-			message:   fmt.Sprintf("MCP %s server %s returned HTTP %d", server.Type, server.Name, response.StatusCode),
+			message:   fmt.Sprintf("MCP %s server %s returned HTTP %d%s", server.Type, server.Name, response.StatusCode, hint),
 			truncated: truncated,
 		}
 	}
+	// The hint goes BEFORE the body, so the retained body stays at the end of
+	// the message, the only place a reader repairs a credential the cut split.
 	return &statusError{
-		message:   fmt.Sprintf("MCP %s server %s returned HTTP %d: %s", server.Type, server.Name, response.StatusCode, detail),
+		message:   fmt.Sprintf("MCP %s server %s returned HTTP %d%s: %s", server.Type, server.Name, response.StatusCode, hint, detail),
 		truncated: truncated,
 	}
 }
