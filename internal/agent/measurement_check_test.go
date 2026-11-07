@@ -53,7 +53,7 @@ func TestAFinalAnswerContradictingTheTranscriptIsSentBack(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
 	registry.Register(goTestTool{output: suiteOutput})
-	provider := callThenAnswer("TestChattyChild took 4.20s.", "Corrected: TestChattyChild took 0.86s.")
+	provider := callThenAnswer("github.com/x/y took 4.20s.", "Corrected: github.com/x/y took 0.86s.")
 
 	result, err := Run(context.Background(), "run the suite", provider, Options{
 		Cwd: root, Registry: registry, SessionID: "session-measured",
@@ -67,7 +67,7 @@ func TestAFinalAnswerContradictingTheTranscriptIsSentBack(t *testing.T) {
 		t.Fatalf("the run ended after %d requests: the contradicted answer was accepted", len(provider.requests))
 	}
 	sentBack := renderZeromaxingMessages(provider.requests[2].Messages)
-	for _, required := range []string{"TestChattyChild", "4.2s", "0.86s", "Re-run the command"} {
+	for _, required := range []string{"github.com/x/y", "4.2s", "0.86s", "Re-run the command"} {
 		if !strings.Contains(sentBack, required) {
 			t.Errorf("the correction does not mention %q:\n%s", required, sentBack)
 		}
@@ -83,7 +83,7 @@ func TestAnAnswerThatMatchesTheTranscriptIsReturnedAsIs(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
 	registry.Register(goTestTool{output: suiteOutput})
-	provider := callThenAnswer("TestChattyChild took 0.86s.", "should never be reached")
+	provider := callThenAnswer("github.com/x/y took 0.86s.", "should never be reached")
 
 	result, err := Run(context.Background(), "run the suite", provider, Options{
 		Cwd: root, Registry: registry, SessionID: "session-honest",
@@ -107,7 +107,7 @@ func TestThePostureOffRunIsNeverSentBackForANumber(t *testing.T) {
 	root := t.TempDir()
 	registry := tools.NewRegistry()
 	registry.Register(goTestTool{output: suiteOutput})
-	provider := callThenAnswer("TestChattyChild took 4.20s.", "should never be reached")
+	provider := callThenAnswer("github.com/x/y took 4.20s.", "should never be reached")
 
 	result, err := Run(context.Background(), "run the suite", provider, Options{
 		Cwd: root, Registry: registry, SessionID: "session-posture-off",
@@ -131,7 +131,7 @@ func TestARepeatedNumberEndsTheRunRatherThanLooping(t *testing.T) {
 	registry := tools.NewRegistry()
 	registry.Register(goTestTool{output: suiteOutput})
 	// Says the same wrong number both times.
-	provider := callThenAnswer("TestChattyChild took 4.20s.", "TestChattyChild took 4.20s.")
+	provider := callThenAnswer("github.com/x/y took 4.20s.", "github.com/x/y took 4.20s.")
 
 	result, err := Run(context.Background(), "run the suite", provider, Options{
 		Cwd: root, Registry: registry, SessionID: "session-stubborn",
