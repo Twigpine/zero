@@ -55,13 +55,23 @@ func (budget *SessionBudget) admit() error {
 	if budget == nil || budget.max <= 0 {
 		return nil
 	}
-	if started := budget.started.Add(1); started > int64(budget.max) {
-		return fmt.Errorf(
-			"this session has started %d sub-agents, which is its limit of %d: "+
-				"finish what is running, or start a new session for further work",
-			started-1, budget.max)
+	// ONLY AN ADMITTED START IS COUNTED. Incrementing first and judging after
+	// counted every refusal as a start, so Started() over-reported and each
+	// further refusal quoted a larger "has started" than the session ever did.
+	// The compare-and-swap keeps the check and the count one atomic step, so
+	// concurrent spawns can neither overshoot the limit nor inflate the count.
+	for {
+		started := budget.started.Load()
+		if started >= int64(budget.max) {
+			return fmt.Errorf(
+				"this session has started %d sub-agents, which is its limit of %d: "+
+					"finish what is running, or start a new session for further work",
+				started, budget.max)
+		}
+		if budget.started.CompareAndSwap(started, started+1) {
+			return nil
+		}
 	}
-	return nil
 }
 
 // Started reports how many sub-agents this session has begun, for display.

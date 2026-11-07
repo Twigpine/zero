@@ -3,6 +3,8 @@ package specialist
 import (
 	"context"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Twigpine/zero/internal/streamjson"
@@ -102,5 +104,50 @@ func TestFinishedSubAgentsStillCountAgainstTheSession(t *testing.T) {
 func TestTheDefaultSessionCapSitsWellAboveObservedUse(t *testing.T) {
 	if DefaultSessionSubagents < 100 {
 		t.Fatalf("DefaultSessionSubagents = %d; the observed maximum was 22 and a cap near it would refuse ordinary work", DefaultSessionSubagents)
+	}
+}
+
+// A REFUSAL IS NOT A START. admit used to increment before judging, so every
+// refused spawn was counted: Started() over-reported, and each later refusal
+// quoted a larger "has started" than the session ever reached.
+func TestARefusedSpawnIsNotCountedAsStarted(t *testing.T) {
+	budget := NewSessionBudget(2)
+	for i := 0; i < 2; i++ {
+		if err := budget.admit(); err != nil {
+			t.Fatalf("admission %d within the limit was refused: %v", i+1, err)
+		}
+	}
+	var last error
+	for i := 0; i < 5; i++ {
+		if last = budget.admit(); last == nil {
+			t.Fatal("a spawn past the limit was admitted")
+		}
+	}
+	if got := budget.Started(); got != 2 {
+		t.Fatalf("Started() = %d after 2 admissions and 5 refusals, want 2", got)
+	}
+	if !strings.Contains(last.Error(), "has started 2 sub-agents") {
+		t.Fatalf("the refusal misreports how many were started: %v", last)
+	}
+}
+
+// And the limit holds exactly under concurrent spawns: never more admissions
+// than the limit, and the count equals the admissions.
+func TestConcurrentSpawnsAreAdmittedExactlyUpToTheLimit(t *testing.T) {
+	budget := NewSessionBudget(25)
+	var admitted atomic.Int64
+	var wg sync.WaitGroup
+	for i := 0; i < 200; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if budget.admit() == nil {
+				admitted.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if admitted.Load() != 25 || budget.Started() != 25 {
+		t.Fatalf("admitted %d, Started() %d; want exactly 25 each", admitted.Load(), budget.Started())
 	}
 }
