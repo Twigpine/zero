@@ -1360,6 +1360,48 @@ func TestApplyPatchReportsWorkspaceRelativeChangedFilesUnderCwd(t *testing.T) {
 	}
 }
 
+// Writing or editing through a symbolic link must fail closed: the link is not
+// replaced by a regular file and the bytes it points at are not altered.
+func TestWriteAndEditToolsRefuseSymlinkDestinations(t *testing.T) {
+	for _, toolName := range []string{"write_file", "edit_file"} {
+		t.Run(toolName, func(t *testing.T) {
+			root := t.TempDir()
+			real := filepath.Join(root, "real.txt")
+			if err := os.WriteFile(real, []byte("original bytes\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			link := filepath.Join(root, "link.txt")
+			if err := os.Symlink(real, link); err != nil {
+				t.Skipf("symlink unavailable: %v", err)
+			}
+
+			var result Result
+			if toolName == "write_file" {
+				result = NewScopedWriteFileTool(root, nil).Run(context.Background(), map[string]any{
+					"path": "link.txt", "content": "clobbered\n", "overwrite": true,
+				})
+			} else {
+				result = NewScopedEditFileTool(root, nil).Run(context.Background(), map[string]any{
+					"path": "link.txt", "old_string": "original", "new_string": "edited",
+				})
+			}
+			if result.Status != StatusError {
+				t.Fatalf("%s on a symlink = %s (%q), want error", toolName, result.Status, result.Output)
+			}
+			info, err := os.Lstat(link)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode()&os.ModeSymlink == 0 {
+				t.Fatalf("%s replaced the symlink with a regular file", toolName)
+			}
+			if got, err := os.ReadFile(real); err != nil || string(got) != "original bytes\n" {
+				t.Fatalf("%s altered the symlink target: %q, err=%v", toolName, got, err)
+			}
+		})
+	}
+}
+
 func TestWriteFileReportsChangedFileAndDisplay(t *testing.T) {
 	root := t.TempDir()
 	res := NewScopedWriteFileTool(root, nil).Run(context.Background(), map[string]any{"path": "notes.txt", "content": "hello"})

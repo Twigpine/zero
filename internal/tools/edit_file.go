@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -72,6 +73,13 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 		return errorResult("Error reading " + relativePath + ": " + err.Error())
 	}
 	defer root.Close()
+	if info, lerr := root.Lstat(rootedRelative); lerr == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errorResult("Error: " + relativePath + " is a symbolic link. Editing through a symlink is not allowed; target the real file instead.")
+		}
+	} else if !os.IsNotExist(lerr) {
+		return errorResult("Error reading " + relativePath + ": " + lerr.Error())
+	}
 	contentBytes, priorInfo, err := readRootedFile(root, rootedRelative)
 	if err != nil {
 		return errorResult("Error reading " + relativePath + ": " + err.Error())
@@ -161,25 +169,22 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	if err := recheckScopedWriteTarget(tool.workspaceRoot, tool.scope, requestedPath); err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
-	if err := commitRootedFileContents(root, absolutePath, rootedRelative, priorInfo, &content, updated); err != nil {
+	modelKnownContent := updated
+	formatting := maybeFormatWrittenFileScoped(ctx, tool.workspaceRoot, tool.scope, absolutePath, updated)
+	updated = formatting.Content
+	finalContentKnown := true
+
+	// Bind the atomic publication to the pre-edit object and bytes: a path or
+	// inode swap since the read fails closed instead of clobbering a newer file.
+	expectedContent := &content
+	cleanupWarning, err := commitRootedFileContents(root, absolutePath, rootedRelative, priorInfo, expectedContent, updated)
+	if err != nil {
 		return errorResult("Error writing " + relativePath + ": " + err.Error())
 	}
-	modelKnownContent := updated
-	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
-	// FileTracker re-baseline: recording pre-format content would make the very
-	// next edit look like an external modification and trip the conflict guard.
-	formatting := maybeFormatWrittenFileScoped(ctx, tool.workspaceRoot, tool.scope, absolutePath, updated, priorInfo.Mode().Perm())
-	updated = formatting.Content
-	finalContentKnown := formatting.ContentKnown
 	// Re-baseline to the content we just wrote so subsequent edits in this session
 	// compare against the current on-disk state, not the pre-edit version.
-	newInfo := formatting.Info
-	if newInfo == nil {
-		newInfo, _ = root.Stat(rootedRelative)
-	}
-	if !finalContentKnown {
-		options.FileTracker.Forget(absolutePath)
-	} else if updated == modelKnownContent {
+	newInfo, _ := root.Stat(rootedRelative)
+	if updated == modelKnownContent {
 		// OUR edit, so we know precisely which lines moved: RecordEdit carries
 		// across the reads this edit did not disturb instead of dropping them.
 		//
@@ -209,6 +214,9 @@ func (tool editFileTool) RunWithOptions(ctx context.Context, args map[string]any
 	}
 	summary := fmt.Sprintf("Successfully edited %s (replaced %d occurrence%s).", relativePath, replacedCount, suffix)
 	summary += formatting.notice(relativePath)
+	if cleanupWarning != "" {
+		summary += " " + cleanupWarning
+	}
 	if finalContentKnown {
 		summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
 	}
