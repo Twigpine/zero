@@ -1596,9 +1596,26 @@ func TestRunUpdateHelpDocumentsCheckFlag(t *testing.T) {
 	if exitCode != exitSuccess {
 		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
 	}
-	for _, want := range []string{"--check", "--repo", "--endpoint", "--timeout", "--target"} {
+	for _, want := range []string{"--check", "--repo", "--endpoint", "--timeout", "--target", "ZERO_GITHUB_TOKEN", "ZERO_UPDATE_RELEASE_URL"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("expected update help to document %s, got %q", want, stdout.String())
+		}
+	}
+	// GITHUB_TOKEN must appear as a standalone token, not as a substring of ZERO_GITHUB_TOKEN.
+	out := stdout.String()
+	if idx := strings.Index(out, "GITHUB_TOKEN"); idx < 0 {
+		t.Fatalf("expected update help to document GITHUB_TOKEN, got %q", out)
+	} else if idx >= 5 && out[idx-5:idx] == "ZERO_" {
+		// Check after the ZERO_GITHUB_TOKEN occurrence too.
+		rest := out[idx+len("GITHUB_TOKEN"):]
+		if strings.Index(rest, "GITHUB_TOKEN") < 0 {
+			// Only ZERO_GITHUB_TOKEN matched; GITHUB_TOKEN is missing as a standalone entry.
+			// Find the first occurrence for the error message.
+			firstIdx := strings.Index(out, "ZERO_GITHUB_TOKEN")
+			after := out[firstIdx+len("ZERO_GITHUB_TOKEN"):]
+			if strings.Index(after, "GITHUB_TOKEN") < 0 {
+				t.Fatalf("expected update help to document GITHUB_TOKEN (standalone), got %q", out)
+			}
 		}
 	}
 	if stderr.Len() != 0 {
