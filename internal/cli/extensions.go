@@ -670,6 +670,10 @@ Flags:
 
 Without --user, a project plugin with the same id takes precedence over a user
 plugin, matching the loader's discovery order.
+
+Zero reads plugins when it starts, so the change applies to the next zero exec
+run or interactive session. A running interactive session keeps the plugins it
+started with until you restart it.
 `, command)
 	return err
 }

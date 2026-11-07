@@ -352,7 +352,7 @@ zero plugins enable github-pr-review    # sets "enabled": true in plugin.json
 zero plugins remove github-pr-review    # alias: rm
 ```
 
-A plugin is active when it is present under a plugins directory and its `plugin.json` has `"enabled": true` (the default when the field is omitted). Use `zero plugins disable <id>` / `zero plugins enable <id>` to toggle that field without removing the plugin. Pass `--user` to target only user plugins and ignore `./.zero/plugins`; without it, a project plugin with the same id takes precedence. The toggle edits the `enabled` value in place — the rest of the manifest keeps its formatting, field order, and numeric literals — and serializes with `plugins add` / `plugins remove` on the same plugins root.
+A plugin is active when it is present under a plugins directory and its `plugin.json` has `"enabled": true` (the default when the field is omitted). Use `zero plugins disable <id>` / `zero plugins enable <id>` to toggle that field without removing the plugin. Pass `--user` to target only user plugins and ignore `./.zero/plugins`; without it, a project plugin with the same id takes precedence. The toggle edits the `enabled` value in place — the rest of the manifest keeps its formatting, field order, and numeric literals — and serializes with `plugins add` / `plugins remove` on the same plugins root. Zero reads plugins when it starts, so the change applies to the next `zero exec` run or interactive session; an interactive session that is already running keeps the plugin tools, hooks, and skills it started with until you restart it.
 
 Plugin commands run with the plugin directory as their working directory. Use relative paths; the loader resolves them at activation time.
 
