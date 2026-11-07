@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Twigpine/zero/internal/installtxn"
+	"github.com/Twigpine/zero/internal/pathjail"
 )
 
 func enableTestOptions(root string) LoadOptions {
@@ -274,6 +275,11 @@ func TestToggleEnabledManifestFormattingEdges(t *testing.T) {
 		{"null to false", `{"enabled": null}`, false, `{"enabled": false}`, true},
 		{"null to true is a no-op", `{"enabled": null}`, true, `{"enabled": null}`, false},
 		{"already enabled is a no-op", `{"enabled": true}`, true, `{"enabled": true}`, false},
+		// The loader keeps the last duplicate, so an overwritten non-boolean
+		// value is not an error and only the last value is rewritten.
+		{"overwritten string", `{"enabled":"obsolete","enabled":true}`, false, `{"enabled":"obsolete","enabled":false}`, true},
+		{"overwritten composite", `{"enabled":{"a":[1,{"enabled":2}]},"enabled":null}`, false, `{"enabled":{"a":[1,{"enabled":2}]},"enabled":false}`, true},
+		{"overwritten number is a no-op", `{"enabled":1,"enabled":false}`, false, `{"enabled":1,"enabled":false}`, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -298,7 +304,7 @@ func TestToggleEnabledManifestFormattingEdges(t *testing.T) {
 }
 
 func TestToggleEnabledManifestRejectsMalformedInput(t *testing.T) {
-	for _, raw := range []string{`{"enabled": "yes"}`, `{"enabled": 1}`, `{"enabled": []}`, `{"enabled": {}}`} {
+	for _, raw := range []string{`{"enabled": "yes"}`, `{"enabled": 1}`, `{"enabled": []}`, `{"enabled": {}}`, `{"enabled": true, "enabled": "yes"}`} {
 		t.Run("value "+raw, func(t *testing.T) {
 			_, _, err := toggleEnabledManifest([]byte(raw), false)
 			if err == nil {
@@ -317,6 +323,103 @@ func TestToggleEnabledManifestRejectsMalformedInput(t *testing.T) {
 		t.Run("document "+raw, func(t *testing.T) {
 			if _, _, err := toggleEnabledManifest([]byte(raw), false); err == nil {
 				t.Fatalf("toggleEnabledManifest(%q) succeeded, want error", raw)
+			}
+		})
+	}
+}
+
+// TestSetEnabledByIDHonorsTheLastDuplicateEnabledValue keeps the toggle in step
+// with the loader on a manifest whose earlier "enabled" value is overwritten:
+// the loader discovers the plugin from the last value, so the toggle must be
+// able to change it too.
+func TestSetEnabledByIDHonorsTheLastDuplicateEnabledValue(t *testing.T) {
+	root := t.TempDir()
+	writeRawManifest(t, root, "demo", `{
+  "schemaVersion": 1,
+  "id": "zero.demo",
+  "name": "Demo",
+  "version": "1.0.0",
+  "enabled": "obsolete",
+  "enabled": true
+}
+`)
+	loadedEnabled := func() bool {
+		t.Helper()
+		plugin, ok, err := FindByID(enableTestOptions(root), "zero.demo")
+		if err != nil || !ok {
+			t.Fatalf("FindByID: ok=%v err=%v", ok, err)
+		}
+		return plugin.Enabled
+	}
+	if !loadedEnabled() {
+		t.Fatal("the loader should discover the plugin as enabled from the last value")
+	}
+	for _, enabled := range []bool{false, true} {
+		result, err := SetEnabledByID(enableTestOptions(root), "zero.demo", enabled)
+		if err != nil {
+			t.Fatalf("SetEnabledByID(%v): %v", enabled, err)
+		}
+		if !result.Changed {
+			t.Fatalf("SetEnabledByID(%v) reported no change", enabled)
+		}
+		if got := loadedEnabled(); got != enabled {
+			t.Fatalf("after SetEnabledByID(%v) the loader sees enabled=%v", enabled, got)
+		}
+	}
+}
+
+// TestSetEnabledRefusesASwappedPluginDirectory swaps the plugin directory that
+// discovery found for a link between the lookup and the edit. The install lock
+// does not cover that window, because it only serializes cooperating
+// installers. The edit must fail without following the link: neither the
+// link's target nor the moved-away original may change.
+func TestSetEnabledRefusesASwappedPluginDirectory(t *testing.T) {
+	cases := []struct {
+		name string
+		// link returns the symlink target to plant and the manifest it leads to.
+		link func(t *testing.T, root string) (target string, manifest string)
+	}{
+		{"to a directory outside the plugins root", func(t *testing.T, root string) (string, string) {
+			manifest := writeRawManifest(t, t.TempDir(), "elsewhere", demoManifest(true))
+			return filepath.Dir(manifest), manifest
+		}},
+		{"to another plugin in the same root", func(t *testing.T, root string) (string, string) {
+			// A relative link stays inside the root, so confinement to the
+			// root alone would follow it.
+			manifest := writeRawManifest(t, root, "other", strings.Replace(demoManifest(true), "zero.demo", "zero.other", 1))
+			return "other", manifest
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			raw := demoManifest(true)
+			writeRawManifest(t, root, "demo", raw)
+			plugin, ok, err := FindByID(enableTestOptions(root), "zero.demo")
+			if err != nil || !ok {
+				t.Fatalf("FindByID: ok=%v err=%v", ok, err)
+			}
+			target, targetManifest := tc.link(t, root)
+			targetBefore, err := os.ReadFile(targetManifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			moved := filepath.Join(t.TempDir(), "moved-away")
+			if err := os.Rename(plugin.PluginDir, moved); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, plugin.PluginDir); err != nil {
+				t.Skipf("cannot create a directory symlink here: %v", err)
+			}
+
+			if _, err := setEnabledLocked(plugin, false); !errors.Is(err, pathjail.ErrReparse) {
+				t.Fatalf("setEnabledLocked through a swapped directory: err = %v, want %v", err, pathjail.ErrReparse)
+			}
+			if after, err := os.ReadFile(targetManifest); err != nil || string(after) != string(targetBefore) {
+				t.Fatalf("the edit followed the link and changed %s (err %v):\n got %q\nwant %q", targetManifest, err, after, targetBefore)
+			}
+			if after, err := os.ReadFile(filepath.Join(moved, "plugin.json")); err != nil || string(after) != raw {
+				t.Fatalf("the moved-away manifest changed (err %v): %q", err, after)
 			}
 		})
 	}

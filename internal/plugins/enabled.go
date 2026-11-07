@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/Twigpine/zero/internal/installtxn"
+	"github.com/Twigpine/zero/internal/pathjail"
 )
 
 // SetEnabledResult describes a successful enable/disable of one plugin manifest.
@@ -114,8 +116,20 @@ func SetEnabledByID(options LoadOptions, id string, enabled bool) (SetEnabledRes
 
 // setEnabledLocked performs the manifest read-modify-write while the caller
 // holds the installtxn lock for the plugin's install root.
+//
+// The lock only serializes cooperating installers; it does not stop the plugin
+// directory from being swapped for a link after discovery found it. So the
+// manifest is read and published through a handle pinned to that directory
+// (openPluginDir), never by re-resolving its path.
 func setEnabledLocked(plugin LoadedPlugin, enabled bool) (bool, error) {
-	raw, err := os.ReadFile(plugin.ManifestPath)
+	dir, err := openPluginDir(plugin)
+	if err != nil {
+		return false, err
+	}
+	defer dir.Close()
+
+	manifestName := filepath.Base(plugin.ManifestPath)
+	raw, perm, err := readManifest(dir, manifestName)
 	if err != nil {
 		return false, err
 	}
@@ -132,12 +146,7 @@ func setEnabledLocked(plugin LoadedPlugin, enabled bool) (bool, error) {
 	// pre-existing drift.
 	lock, entry, hashClean := cleanLockEntry(plugin)
 
-	// Fail closed on stat errors instead of widening the permissions.
-	info, err := os.Stat(plugin.ManifestPath)
-	if err != nil {
-		return false, fmt.Errorf("inspect plugin manifest: %w", err)
-	}
-	if err := installtxn.WriteFileAtomically(plugin.ManifestPath, data, info.Mode().Perm()); err != nil {
+	if err := publishManifest(dir, manifestName, data, perm); err != nil {
 		return false, err
 	}
 	if !hashClean {
@@ -153,6 +162,96 @@ func setEnabledLocked(plugin LoadedPlugin, enabled bool) (bool, error) {
 		return true, fmt.Errorf("plugin manifest updated but %s hash refresh failed: %w", LockFileName, err)
 	}
 	return true, nil
+}
+
+// openPluginDir returns a handle on the plugin directory discovery found,
+// confined to the plugin's install root.
+//
+// The directory entry must be a real directory, not a symlink, junction, or
+// other reparse point, and it must be the very directory the handle opened: a
+// link swapped in before the open is refused here, and one swapped in after it
+// cannot redirect anything, because every later read and write is relative to
+// the returned handle rather than to a path.
+func openPluginDir(plugin LoadedPlugin) (*os.Root, error) {
+	root, name, err := pathjail.Open(plugin.Root, plugin.PluginDir)
+	if err != nil {
+		return nil, fmt.Errorf("open plugin directory: %w", err)
+	}
+	defer root.Close()
+	if name == "." || filepath.Base(name) != name {
+		return nil, fmt.Errorf("%w: plugin directory %s is not an entry of %s", pathjail.ErrEscapes, plugin.PluginDir, plugin.Root)
+	}
+	if err := pathjail.RefuseReparse(root, name); err != nil {
+		return nil, fmt.Errorf("open plugin directory: %w", err)
+	}
+	dir, err := root.OpenRoot(name)
+	if err != nil {
+		return nil, fmt.Errorf("open plugin directory: %w", err)
+	}
+	opened, err := dir.Stat(".")
+	if err != nil {
+		_ = dir.Close()
+		return nil, fmt.Errorf("inspect plugin directory: %w", err)
+	}
+	entry, err := root.Lstat(name)
+	if err != nil {
+		_ = dir.Close()
+		return nil, fmt.Errorf("inspect plugin directory: %w", err)
+	}
+	if entry.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 || !os.SameFile(entry, opened) {
+		_ = dir.Close()
+		return nil, fmt.Errorf("%w: plugin directory %s changed while it was being opened", pathjail.ErrReparse, plugin.PluginDir)
+	}
+	return dir, nil
+}
+
+// readManifest reads name from dir and returns its bytes and permission bits.
+// Failing on a stat error keeps the publish from widening the permissions.
+func readManifest(dir *os.Root, name string) ([]byte, os.FileMode, error) {
+	file, err := dir.Open(name)
+	if err != nil {
+		return nil, 0, fmt.Errorf("read plugin manifest: %w", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, 0, fmt.Errorf("inspect plugin manifest: %w", err)
+	}
+	raw, err := io.ReadAll(file)
+	if err != nil {
+		return nil, 0, fmt.Errorf("read plugin manifest: %w", err)
+	}
+	return raw, info.Mode().Perm(), nil
+}
+
+// publishManifest replaces name in dir with data by renaming a complete
+// temporary sibling over it, so a concurrent reader sees either the old
+// manifest or the new one, never a partial write.
+func publishManifest(dir *os.Root, name string, data []byte, perm os.FileMode) error {
+	temp, tempName, err := pathjail.CreateTemp(dir, ".", ".zero-manifest", "")
+	if err != nil {
+		return fmt.Errorf("write plugin manifest: %w", err)
+	}
+	defer func() { _ = dir.Remove(tempName) }()
+	if err := temp.Chmod(perm); err != nil {
+		_ = temp.Close()
+		return fmt.Errorf("write plugin manifest: %w", err)
+	}
+	if _, err := temp.Write(data); err != nil {
+		_ = temp.Close()
+		return fmt.Errorf("write plugin manifest: %w", err)
+	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return fmt.Errorf("write plugin manifest: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		return fmt.Errorf("write plugin manifest: %w", err)
+	}
+	if err := dir.Rename(tempName, name); err != nil {
+		return fmt.Errorf("write plugin manifest: %w", err)
+	}
+	return nil
 }
 
 // cleanLockEntry reports whether the tree on disk still matches the lockfile
@@ -188,6 +287,7 @@ func toggleEnabledManifest(raw []byte, enabled bool) (out []byte, changed bool, 
 	openEnd := dec.InputOffset()
 
 	current := true
+	lastInvalid := false
 	var valueStart, valueEnd int64 = -1, -1
 	for dec.More() {
 		keyTok, err := dec.Token()
@@ -221,8 +321,17 @@ func toggleEnabledManifest(raw []byte, enabled bool) (out []byte, changed bool, 
 			current = true
 			literal = "null"
 		default:
-			return nil, false, ManifestError{FieldPath: "enabled", Message: "Expected a boolean."}
+			// Only the last occurrence of a duplicate key counts, as in the
+			// loader's json.Unmarshal, so an earlier non-boolean value that a
+			// later one overwrites is not an error. Remember it and decide after
+			// the last member.
+			if err := skipManifestComposite(dec, valueTok); err != nil {
+				return nil, false, fmt.Errorf("parse plugin manifest: %w", err)
+			}
+			lastInvalid = true
+			continue
 		}
+		lastInvalid = false
 		start, err := enabledValueOffset(raw, keyEnd)
 		if err != nil {
 			return nil, false, err
@@ -244,6 +353,9 @@ func toggleEnabledManifest(raw []byte, enabled bool) (out []byte, changed bool, 
 	closingEnd := dec.InputOffset()
 	if _, err := dec.Token(); err != io.EOF {
 		return nil, false, errors.New("parse plugin manifest: unexpected data after the top-level object")
+	}
+	if lastInvalid {
+		return nil, false, ManifestError{FieldPath: "enabled", Message: "Expected a boolean."}
 	}
 
 	if current == enabled {
@@ -351,6 +463,13 @@ func skipManifestValue(dec *json.Decoder) error {
 	if err != nil {
 		return err
 	}
+	return skipManifestComposite(dec, tok)
+}
+
+// skipManifestComposite consumes the rest of the value whose first token tok
+// was just read from dec. A scalar is already complete; an object or array is
+// consumed through its matching closing delimiter.
+func skipManifestComposite(dec *json.Decoder, tok json.Token) error {
 	delim, ok := tok.(json.Delim)
 	if !ok || (delim != '{' && delim != '[') {
 		return nil

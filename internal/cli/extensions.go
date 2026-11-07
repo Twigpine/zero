@@ -97,14 +97,22 @@ type pluginToggleOptions struct {
 	user bool
 }
 
+// runPluginsToggle implements `zero plugins enable|disable <id>`.
+//
+// Every message it writes, including usage errors that echo the caller's
+// arguments, passes through the redaction pipeline: an argument is user input
+// and can be a mistyped credential.
 func runPluginsToggle(args []string, stdout io.Writer, stderr io.Writer, deps appDeps, disabled bool) int {
 	commandName := "enable"
 	if disabled {
 		commandName = "disable"
 	}
+	usageError := func(message string) int {
+		return writeExecUsageError(stderr, redaction.RedactString(message, redaction.Options{}))
+	}
 	options, positional, help, err := parsePluginToggleArgs(args, commandName)
 	if err != nil {
-		return writeExecUsageError(stderr, err.Error())
+		return usageError(err.Error())
 	}
 	if help {
 		if err := writePluginsToggleHelp(stdout, commandName); err != nil {
@@ -113,22 +121,22 @@ func runPluginsToggle(args []string, stdout io.Writer, stderr io.Writer, deps ap
 		return exitSuccess
 	}
 	if len(positional) != 1 {
-		return writeExecUsageError(stderr, fmt.Sprintf("usage: zero plugins %s <id> [--user] [--json]", commandName))
+		return usageError(fmt.Sprintf("usage: zero plugins %s <id> [--user] [--json]", commandName))
 	}
 	pluginID := strings.TrimSpace(positional[0])
 	if pluginID == "" {
-		return writeExecUsageError(stderr, fmt.Sprintf("usage: zero plugins %s <id> [--user] [--json]", commandName))
+		return usageError(fmt.Sprintf("usage: zero plugins %s <id> [--user] [--json]", commandName))
 	}
 
 	cwd, err := deps.getwd()
 	if err != nil {
-		return writeAppError(stderr, "failed to resolve workspace: "+err.Error(), exitCrash)
+		return writeAppError(stderr, "failed to resolve workspace: "+redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}
 	loadOptions := plugins.LoadOptions{Cwd: cwd, ExcludeProject: options.user}
 	result, err := plugins.SetEnabledByID(loadOptions, pluginID, !disabled)
 	if err != nil {
 		if errors.Is(err, plugins.ErrNotInstalled) {
-			return writeExecUsageError(stderr, err.Error())
+			return usageError(err.Error())
 		}
 		return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
 	}

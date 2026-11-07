@@ -527,3 +527,41 @@ func TestRunPluginsDisableUserIgnoresProject(t *testing.T) {
 		t.Fatalf("project manifest should stay enabled: %s", projectRaw)
 	}
 }
+
+// The toggle's usage errors echo the caller's arguments, which can be a
+// mistyped credential, so they pass through redaction like its other output.
+func TestRunPluginsToggleUsageErrorsAreRedacted(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("HOME", home)
+	deps := appDeps{getwd: func() (string, error) { return t.TempDir(), nil }}
+	const secret = "sk-proj-abcdefghijklmnopqrstuvwxyz"
+
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"unknown flag", []string{"zero.demo", "--token=" + secret}, "unknown plugins"},
+		{"missing plugin", []string{secret}, "plugin is not installed"},
+	}
+	for _, subcommand := range []string{"enable", "disable"} {
+		for _, tc := range cases {
+			t.Run(subcommand+" "+tc.name, func(t *testing.T) {
+				var stdout bytes.Buffer
+				var stderr bytes.Buffer
+				args := append([]string{"plugins", subcommand}, tc.args...)
+				exitCode := runWithDeps(args, &stdout, &stderr, deps)
+				if exitCode != exitUsage {
+					t.Fatalf("exit=%d want %d stderr=%s", exitCode, exitUsage, stderr.String())
+				}
+				if strings.Contains(stderr.String(), secret) {
+					t.Fatalf("usage error leaked the argument: %q", stderr.String())
+				}
+				if !strings.Contains(stderr.String(), tc.want) || !strings.Contains(stderr.String(), "[REDACTED]") {
+					t.Fatalf("stderr = %q, want a redacted %q error", stderr.String(), tc.want)
+				}
+			})
+		}
+	}
+}
