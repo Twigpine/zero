@@ -31,7 +31,7 @@ func argsContainPair(args []string, flag, value string) bool {
 func TestAChildIsLaunchedWithTheRunsExtraRoots(t *testing.T) {
 	executor := Executor{
 		NewSessionID:    func() (string, error) { return "specialist_00000000000000000000000a", nil },
-		ExtraWriteRoots: func() []string { return []string{"/Users/kratos/dev/zero", "/Users/kratos/zm-lab"} },
+		ExtraWriteRoots: func(bool) []string { return []string{"/Users/kratos/dev/zero", "/Users/kratos/zm-lab"} },
 	}
 	built, err := executor.BuildArgs(BuildArgsInput{
 		Manifest: Manifest{Metadata: Metadata{Name: "explorer"}},
@@ -84,7 +84,7 @@ func TestTheRunsRootsAreReadAtEveryLaunchNotCapturedOnce(t *testing.T) {
 	roots := []string{"/ws"}
 	executor := Executor{
 		NewSessionID:    func() (string, error) { return "specialist_00000000000000000000000a", nil },
-		ExtraWriteRoots: func() []string { return roots },
+		ExtraWriteRoots: func(bool) []string { return roots },
 	}
 	input := BuildArgsInput{
 		Manifest: Manifest{Metadata: Metadata{Name: "explorer"}}, Prompt: "p", Cwd: "/ws",
@@ -128,7 +128,7 @@ func TestAnUnwiredSupplierLeavesTheChildConfinedToItsWorkspace(t *testing.T) {
 func TestBlankRootsAreDroppedRatherThanEmittedAsEmptyFlags(t *testing.T) {
 	executor := Executor{
 		NewSessionID:    func() (string, error) { return "specialist_00000000000000000000000a", nil },
-		ExtraWriteRoots: func() []string { return []string{"", "   ", "/real"} },
+		ExtraWriteRoots: func(bool) []string { return []string{"", "   ", "/real"} },
 	}
 	built, err := executor.BuildArgs(BuildArgsInput{
 		Manifest: Manifest{Metadata: Metadata{Name: "explorer"}}, Prompt: "p", Cwd: "/ws",
@@ -152,7 +152,7 @@ func TestBlankRootsAreDroppedRatherThanEmittedAsEmptyFlags(t *testing.T) {
 func TestAResumedChildCarriesTheSameRootsAsAFreshOne(t *testing.T) {
 	executor := Executor{
 		NewSessionID:    func() (string, error) { return "specialist_00000000000000000000000a", nil },
-		ExtraWriteRoots: func() []string { return []string{"/ws", "/granted"} },
+		ExtraWriteRoots: func(bool) []string { return []string{"/ws", "/granted"} },
 	}
 	fresh, err := executor.BuildArgs(BuildArgsInput{
 		Manifest: Manifest{Metadata: Metadata{Name: "explorer"}}, Prompt: "p", Cwd: "/ws",

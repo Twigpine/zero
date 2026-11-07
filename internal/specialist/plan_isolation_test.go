@@ -42,7 +42,7 @@ func TestAnIsolatedPlanTaskIsNotHandedTheParentTree(t *testing.T) {
 		// Exactly what app.go wires: the run's scope, asked for what it holds
 		// BEYOND its workspace. Wiring scope.Roots here instead — which also
 		// returns the workspace root — is the defect this test exists for.
-		ExtraWriteRoots: mustScope(t, parentWorkspace, granted).ExtraRoots,
+		ExtraWriteRoots: allRoots(mustScope(t, parentWorkspace, granted)),
 		WorkspaceRoot:   parentWorkspace,
 	}
 
@@ -92,7 +92,7 @@ func TestAnOrdinarySubAgentKeepsEveryRootItHadBefore(t *testing.T) {
 	executor := Executor{
 		BinaryPath:      "/bin/true",
 		NewSessionID:    func() (string, error) { return "specialist_00000000000000000000000a", nil },
-		ExtraWriteRoots: mustScope(t, parentWorkspace, granted).ExtraRoots,
+		ExtraWriteRoots: allRoots(mustScope(t, parentWorkspace, granted)),
 		WorkspaceRoot:   parentWorkspace,
 	}
 	built, err := executor.BuildArgs(BuildArgsInput{
@@ -152,7 +152,7 @@ func TestAnIsolatedChildIsNotHandedARootOverlappingTheParentTree(t *testing.T) {
 			executor := Executor{
 				BinaryPath:      "/bin/true",
 				NewSessionID:    func() (string, error) { return "specialist_00000000000000000000000a", nil },
-				ExtraWriteRoots: mustScope(t, parentWorkspace, tc.extras...).ExtraRoots,
+				ExtraWriteRoots: allRoots(mustScope(t, parentWorkspace, tc.extras...)),
 				WorkspaceRoot:   parentWorkspace,
 			}
 			fresh, err := executor.BuildArgs(BuildArgsInput{
@@ -212,7 +212,7 @@ func TestANonIsolatedChildKeepsAnAncestorRoot(t *testing.T) {
 	executor := Executor{
 		BinaryPath:      "/bin/true",
 		NewSessionID:    func() (string, error) { return "specialist_00000000000000000000000a", nil },
-		ExtraWriteRoots: mustScope(t, parentWorkspace, dev).ExtraRoots,
+		ExtraWriteRoots: allRoots(mustScope(t, parentWorkspace, dev)),
 		WorkspaceRoot:   parentWorkspace,
 	}
 	built, err := executor.BuildArgs(BuildArgsInput{
@@ -284,6 +284,13 @@ func mustScope(t *testing.T, workspaceRoot string, extras ...string) *sandbox.Sc
 		t.Fatalf("NewScope: %v", err)
 	}
 	return scope
+}
+
+// allRoots answers the executor's supplier from a real scope, turn-scoped
+// grants included — the widest answer, so the isolation filter is what is
+// tested, not the lifetime one.
+func allRoots(scope *sandbox.Scope) func(bool) []string {
+	return func(bool) []string { return scope.ExtraRoots() }
 }
 
 func containsRoot(roots []string, want string) bool {

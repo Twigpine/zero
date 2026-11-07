@@ -83,7 +83,13 @@ type Executor struct {
 	// This never widens beyond the parent. It reports what the parent already
 	// holds; a child still cannot ask for more, and the sandbox it builds is its
 	// own.
-	ExtraWriteRoots func() []string
+	//
+	// withinTurn says whether the child is certain to exit before the parent's
+	// current turn ends. Only then may the answer include TURN-SCOPED grants: a
+	// root in a child's argv cannot be revoked, so a turn-scoped grant handed to
+	// a child that outlives the turn becomes a permanent one. A false caller gets
+	// only grants that outlive the turn.
+	ExtraWriteRoots func(withinTurn bool) []string
 	// WorkspaceRoot is the PARENT run's own workspace. A child whose --cwd lies
 	// outside it runs in a tree of its own (an isolated plan worktree), and no
 	// write root that overlaps this directory may follow it there: an ancestor
@@ -248,6 +254,9 @@ type BuildArgsInput struct {
 	// --add-read-dir (scope.AddRead). The parent's request_permissions read grants
 	// arrive here — separate from ExtraReadRoots because --add-dir grants write.
 	ReadOnlyRoots []string
+	// WithinTurn marks a child that exits before the parent's turn ends, so it
+	// may inherit the parent's turn-scoped grants. See TaskRunOptions.WithinTurn.
+	WithinTurn bool
 }
 
 type BuildResumeArgsInput struct {
@@ -262,6 +271,8 @@ type BuildResumeArgsInput struct {
 	ParentModel           string
 	ParentReasoningEffort string
 	PermissionMode        string
+	// WithinTurn: see BuildArgsInput.WithinTurn.
+	WithinTurn bool
 }
 
 type BuildArgsResult struct {
@@ -314,6 +325,12 @@ type TaskRunOptions struct {
 	// ReadOnlyRoots are directories this child may READ but not write, emitted as
 	// --add-read-dir. The parent's request_permissions read grants arrive here.
 	ReadOnlyRoots []string
+	// WithinTurn marks a child whose whole life lies inside the parent's current
+	// turn — a foreground Task or resume, which the tool call waits on. Only such
+	// a child inherits the parent's TURN-SCOPED grants; anything that can outlive
+	// the turn (a background Task, a plan task, a swarm member) gets only grants
+	// that outlive it too. The zero value is the conservative one.
+	WithinTurn bool
 	// Progress, when set, is called with each stream-json event emitted by the
 	// child process while it runs. nil is a no-op.
 	Progress func(streamjson.Event)
@@ -567,7 +584,7 @@ func (executor Executor) BuildArgs(input BuildArgsInput) (BuildArgsResult, error
 	// path forgot the model the fresh path carried, and the plan path forgot the
 	// progress callback the Task path carried. The executor knows its own run;
 	// asking it directly is the only version with no seam to forget.
-	args = appendExtraWriteRootArgs(args, executor.extraWriteRoots(), input.Cwd, executor.WorkspaceRoot)
+	args = appendExtraWriteRootArgs(args, executor.extraWriteRoots(input.WithinTurn), input.Cwd, executor.WorkspaceRoot)
 	// PER-CALL ROOTS, after the run's own. A plan task's scratchpad belongs to
 	// ONE plan, so it cannot come from executor.extraWriteRoots — that is read at
 	// every launch and would leak one plan's directory into every other child the
@@ -707,11 +724,11 @@ func appendReadOnlyRootArgs(args []string, roots []string, cwd string) []string 
 // never wired the supplier — the same fail-safe direction as every other unset
 // hook here: a child confined more tightly than its parent is a smaller problem
 // than one confined less.
-func (executor Executor) extraWriteRoots() []string {
+func (executor Executor) extraWriteRoots(withinTurn bool) []string {
 	if executor.ExtraWriteRoots == nil {
 		return nil
 	}
-	return executor.ExtraWriteRoots()
+	return executor.ExtraWriteRoots(withinTurn)
 }
 
 func (executor Executor) BuildResumeArgs(input BuildResumeArgsInput) (BuildArgsResult, error) {
@@ -769,7 +786,7 @@ func (executor Executor) BuildResumeArgs(input BuildResumeArgsInput) (BuildArgsR
 	// carried, so a resumed task silently ran on a different one. A resumed task
 	// confined more tightly than the task it resumes would fail on files it had
 	// already read.
-	args = appendExtraWriteRootArgs(args, executor.extraWriteRoots(), input.Cwd, executor.WorkspaceRoot)
+	args = appendExtraWriteRootArgs(args, executor.extraWriteRoots(input.WithinTurn), input.Cwd, executor.WorkspaceRoot)
 	return BuildArgsResult{Args: args, SessionID: sessionID, PromptFile: promptFile}, nil
 }
 
@@ -805,6 +822,7 @@ func (executor Executor) runFresh(ctx context.Context, params TaskParameters, op
 		MemberAutonomy:        options.MemberAutonomy,
 		ExtraReadRoots:        options.ExtraReadRoots,
 		ReadOnlyRoots:         options.ReadOnlyRoots,
+		WithinTurn:            options.WithinTurn,
 	})
 	if err != nil {
 		return ExecResult{}, err
@@ -893,6 +911,7 @@ func (executor Executor) runResume(ctx context.Context, params TaskParameters, o
 		ParentModel:           options.ParentModel,
 		ParentReasoningEffort: options.ParentReasoningEffort,
 		PermissionMode:        options.PermissionMode,
+		WithinTurn:            options.WithinTurn,
 	})
 	if err != nil {
 		return ExecResult{}, err

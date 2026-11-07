@@ -119,6 +119,11 @@ func (tool *TaskTool) RunWithOptions(ctx context.Context, args map[string]any, o
 		// sub-agent run at "--auto high" (unsafe) regardless of the parent.
 		PermissionMode: options.PermissionMode,
 		Progress:       options.Progress,
+		// A foreground launch or resume (a resume cannot run in the background)
+		// is waited on by this tool call, so it exits inside the parent's turn
+		// and may use the parent's turn-scoped grants. A background spawn
+		// outlives the call and gets only the grants that outlive the turn.
+		WithinTurn: !params.RunInBackground,
 	})
 	if err != nil {
 		return taskError(err)

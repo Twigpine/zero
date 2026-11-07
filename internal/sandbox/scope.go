@@ -67,6 +67,27 @@ func (s *Scope) ExtraRoots() []string {
 	return append([]string(nil), s.extraRoots...)
 }
 
+// SessionExtraRoots is ExtraRoots without the turn-scoped grants: only write
+// roots that outlive the current turn (configured roots, --add-dir, /add-dir and
+// session-scoped request_permissions grants). It is what a child that may
+// outlive the turn may be handed.
+//
+// ExtraRoots alone cannot answer that: a root held by AddTemporaryWrite is in
+// the same list, and once it left in a child's argv as --add-dir the parent's
+// release at the end of the turn could no longer take it back. A root that is
+// both (a permanent grant promoted over a temporary one) is permanent.
+func (s *Scope) SessionExtraRoots() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	roots := make([]string, 0, len(s.extraRoots))
+	for _, root := range s.extraRoots {
+		if !s.temporaryWriteLocked(root) {
+			roots = append(roots, root)
+		}
+	}
+	return roots
+}
+
 // Roots returns the workspace root first, then the extra roots, as a copy.
 func (s *Scope) Roots() []string {
 	s.mu.RLock()
