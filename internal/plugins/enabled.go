@@ -49,7 +49,8 @@ func FindByID(options LoadOptions, id string) (LoadedPlugin, bool, error) {
 //
 // The read-modify-write is serialized with plugin installs and removals: it
 // takes the same cross-process installtxn lock they take on the plugin's
-// install root, re-resolves the plugin under that lock, and publishes the
+// install root, runs the same interrupted-transaction recovery they run under
+// it, re-resolves the plugin under that lock, and publishes the
 // manifest with an atomic rename while still holding it, so a concurrent
 // install can never be interleaved between the read and the write. Only the
 // bytes of the "enabled" value change, so field order, formatting, and numeric
@@ -67,6 +68,14 @@ func SetEnabledByID(options LoadOptions, id string, enabled bool) (SetEnabledRes
 		// install or remove cannot swap the tree between them.
 		unlock, err := installtxn.Lock(plugin.Root)
 		if err != nil {
+			return SetEnabledResult{}, err
+		}
+		// Put back anything an earlier install or removal was killed mid-commit,
+		// and abort if a transaction could not be resolved: editing a tree that is
+		// still owed a restore loses the edit when the next install or removal
+		// puts the backup back over it. See installtxn.Recover.
+		if err := installtxn.Recover(plugin.Root, reconcileInterrupted(plugin.Root)); err != nil {
+			unlock()
 			return SetEnabledResult{}, err
 		}
 		final, ok, err := FindByID(options, id)

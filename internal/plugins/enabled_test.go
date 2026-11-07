@@ -668,3 +668,156 @@ func TestSetEnabledByIDRefreshesCleanLockEntry(t *testing.T) {
 		t.Fatalf("toggle absorbed pre-existing drift: hash = %q, want %q", entries["zero.demo"].Hash, afterToggle)
 	}
 }
+
+// TestSetEnabledByIDReportsAPluginRemovedWhileWaiting removes the plugin while
+// the toggle is blocked on the install-root lock, exactly as Remove does while
+// it holds that lock. The toggle must report the plugin as not installed
+// instead of editing, or recreating, a tree that no longer exists.
+func TestSetEnabledByIDReportsAPluginRemovedWhileWaiting(t *testing.T) {
+	root := t.TempDir()
+	pluginDir := filepath.Dir(writeRawManifest(t, root, "zero.demo", demoManifest(true)))
+
+	unlock, err := installtxn.Lock(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	failures := make(chan error, 1)
+	go func() {
+		_, err := SetEnabledByID(enableTestOptions(root), "zero.demo", false)
+		failures <- err
+	}()
+
+	select {
+	case err := <-failures:
+		unlock()
+		t.Fatalf("toggle returned while the install lock was held: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	if err := installtxn.RemoveDir(pluginDir, func() error { return nil }); err != nil {
+		unlock()
+		t.Fatal(err)
+	}
+	unlock()
+
+	select {
+	case err := <-failures:
+		if !errors.Is(err, ErrNotInstalled) {
+			t.Fatalf("toggle after a concurrent removal: error = %v, want ErrNotInstalled", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("toggle did not finish after the removal released the lock")
+	}
+	if _, err := os.Stat(pluginDir); !os.IsNotExist(err) {
+		t.Fatalf("toggle recreated the removed plugin: %v", err)
+	}
+}
+
+// TestSetEnabledByIDResolvesInterruptedUpdatesFirst covers every point an
+// update can be killed at that leaves the plugin discoverable. The toggle
+// holds the install-root lock, so it has to
+// run the same recovery pass Install and Remove run before it reads the tree:
+// otherwise it edits, or fails to find, a tree that is still owed a restore,
+// and the next install or removal puts the backup back over the user's edit.
+func TestSetEnabledByIDResolvesInterruptedUpdatesFirst(t *testing.T) {
+	for _, state := range interruptedStates() {
+		t.Run(state.name, func(t *testing.T) {
+			u := seedInterruptedUpdate(t)
+			workspace := state.plant(t, u)
+			want := state.want(u)
+			if _, err := os.Lstat(u.target()); os.IsNotExist(err) {
+				// No root lists a plugin whose only copy is in a workspace, so the
+				// toggle reports it not installed without taking any lock, just as
+				// list and info do; the next install or removal restores it.
+				t.Skip("nothing is at the target, so the toggle never takes the lock")
+			}
+
+			result, err := SetEnabledByID(enableTestOptions(u.dir), "zero.demo", false)
+			if err != nil {
+				t.Fatalf("toggle after the interrupted update: %v", err)
+			}
+			if !result.Changed || result.Enabled {
+				t.Fatalf("toggle result = %#v, want changed and disabled", result)
+			}
+			assertDisabledAfterRecovery(t, u, workspace, want)
+
+			// The next lock holder runs recovery again. The disable has to survive
+			// it rather than be replaced by a backup the toggle never saw.
+			if err := installOther(t, u.dir, "zero.other"); err != nil {
+				t.Fatalf("install after the toggle: %v", err)
+			}
+			assertDisabledAfterRecovery(t, u, workspace, want)
+		})
+	}
+}
+
+func assertDisabledAfterRecovery(t *testing.T, u interruptedUpdate, workspace string, want recoveryWant) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(u.target(), "generation.txt"))
+	if err != nil {
+		t.Fatalf("reading the live tree: %v", err)
+	}
+	if string(data) != want.generation {
+		t.Errorf("the live tree is the %q generation, want %q", data, want.generation)
+	}
+	plugin, ok, err := FindByID(enableTestOptions(u.dir), "zero.demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("Load does not see the toggled plugin")
+	}
+	if plugin.Version != want.version {
+		t.Errorf("Load sees version %q, want %q", plugin.Version, want.version)
+	}
+	if plugin.Enabled {
+		t.Errorf("the disable did not stick: Load sees the plugin enabled")
+	}
+	_, err = os.Stat(workspace)
+	if want.workspace && err != nil {
+		t.Errorf("the workspace should be left alone, got %v", err)
+	}
+	if !want.workspace && !os.IsNotExist(err) {
+		t.Errorf("the resolved workspace should be cleared, got %v", err)
+	}
+}
+
+// TestSetEnabledByIDAbortsOnAnUnresolvedInterruptedUpdate leaves a workspace
+// whose trees match neither lockfile hash. Recovery cannot pick one, so the
+// toggle must fail without editing the live manifest or the lockfile.
+func TestSetEnabledByIDAbortsOnAnUnresolvedInterruptedUpdate(t *testing.T) {
+	u := seedInterruptedUpdate(t)
+	workspace := u.plantWorkspace(t)
+	u.mustRename(t, u.target(), filepath.Join(workspace, "previous"))
+	u.mustRename(t, filepath.Join(workspace, "staged"), u.target())
+	unmatched := LockEntry{Source: u.oldSource, Hash: "sha256:0000000000000000000000000000000000000000000000000000000000000000"}
+	lock, err := ReadLock(u.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock["zero.demo"] = unmatched
+	if err := writeLock(u.dir, lock); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(u.target(), "plugin.json")
+	before, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := SetEnabledByID(enableTestOptions(u.dir), "zero.demo", false); err == nil {
+		t.Fatal("toggle did not report the unresolved transaction")
+	}
+	after, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("the aborted toggle edited the manifest:\n got %q\nwant %q", after, before)
+	}
+	assertUntouched(t, u, "new", unmatched)
+	if _, err := os.Stat(filepath.Join(workspace, "previous")); err != nil {
+		t.Errorf("the backup should still be there for a hand rescue, got %v", err)
+	}
+}
