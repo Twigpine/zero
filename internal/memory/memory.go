@@ -250,14 +250,6 @@ func (paths Paths) openScope(scope Scope) (*os.Root, string, error) {
 	return handle, relative, nil
 }
 
-// refuseReparseChain refuses a link or reparse point at every component of
-// relative, outermost first.
-//
-// Built on pathjail.RefuseReparse rather than reimplementing the test, so the
-// Windows junction handling and the trailing-separator care stay in one place.
-// Outermost first because that is the component whose redirection decides where
-// everything below it lands, and it makes the error name the link the caller can
-// actually act on.
 // storedEntryName returns the spelling the store actually holds for a note, and
 // whether anything holds it at all.
 //
@@ -308,6 +300,14 @@ func presentOnDisk(root string, relative string) bool {
 	return err == nil
 }
 
+// refuseReparseChain refuses a link or reparse point at every component of
+// relative, outermost first.
+//
+// Built on pathjail.RefuseReparse rather than reimplementing the test, so the
+// Windows junction handling and the trailing-separator care stay in one place.
+// Outermost first because that is the component whose redirection decides where
+// everything below it lands, and it makes the error name the link the caller can
+// actually act on.
 func refuseReparseChain(handle *os.Root, root string, relative string) error {
 	relative = filepath.Clean(relative)
 	if relative == "." || relative == string(filepath.Separator) {
@@ -622,7 +622,7 @@ func keepLocalScopePrivate(handle *os.Root, scope Scope, relative, dir string) e
 	// ignore is accepted leaves the same leak reachable by deleting the ignore
 	// from the worktree: O_EXCL would then create a fresh one, report a clean
 	// first write, and overwrite the tracked note anyway.
-	if err := refuseTrackedLocalStore(dir); err != nil {
+	if err := refuseTrackedLocalStore(handle, relative, dir); err != nil {
 		return err
 	}
 	ignorePath := filepath.Join(relative, gitignoreName)
@@ -631,9 +631,19 @@ func keepLocalScopePrivate(handle *os.Root, scope Scope, relative, dir string) e
 	file, err := handle.OpenFile(ignorePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	switch {
 	case err == nil:
-		defer file.Close()
-		if _, writeErr := file.WriteString(localIgnoreContent); writeErr != nil {
-			return fmt.Errorf("write %s: %w", ignorePath, writeErr)
+		if writeErr := writeLocalIgnore(file); writeErr != nil {
+			_ = file.Close()
+			// Do not leave the exclusive-create placeholder behind. An empty or
+			// partial ignore makes every retry take the existing-file branch and
+			// fail as ErrNotPrivate instead of retrying the installation.
+			return removeIncompleteLocalIgnore(handle, ignorePath, fmt.Errorf("write %s: %w", ignorePath, writeErr))
+		}
+		if closeErr := closeLocalIgnore(file); closeErr != nil {
+			// A failed close does not establish that the ignore reached disk. Remove
+			// it for the same reason as a failed write so the next call can retry. If
+			// cleanup also fails, preserve both errors: callers must know that an
+			// incomplete placeholder remains and needs manual recovery.
+			return removeIncompleteLocalIgnore(handle, ignorePath, fmt.Errorf("close %s: %w", ignorePath, closeErr))
 		}
 		return nil
 	case !errors.Is(err, fs.ErrExist):
@@ -656,6 +666,26 @@ func keepLocalScopePrivate(handle *os.Root, scope Scope, relative, dir string) e
 		return fmt.Errorf("%w: %s does not ignore the whole store", ErrNotPrivate, ignorePath)
 	}
 	return nil
+}
+
+var writeLocalIgnore = func(file *os.File) error {
+	_, err := file.WriteString(localIgnoreContent)
+	return err
+}
+
+var closeLocalIgnore = func(file *os.File) error {
+	return file.Close()
+}
+
+var removeLocalIgnore = func(handle *os.Root, path string) error {
+	return handle.Remove(path)
+}
+
+func removeIncompleteLocalIgnore(handle *os.Root, path string, cause error) error {
+	if err := removeLocalIgnore(handle, path); err != nil {
+		return errors.Join(cause, fmt.Errorf("remove incomplete %s: %w", path, err))
+	}
+	return cause
 }
 
 // ignoresEverything reports whether an existing ignore file actually excludes the
@@ -702,15 +732,12 @@ func ignoresEverything(content string) bool {
 
 // refuseTrackedLocalStore refuses a local write whose store git already TRACKS.
 //
-// The two questions are asked by different means on purpose. Whether a
-// repository encloses the store is answered from the FILESYSTEM, because "this
-// is not a repository" and "git is not installed" both come back from a
-// subprocess as an error, and a check that cannot tell them apart has to choose
-// between failing open on the first and breaking every non-repository workspace
-// on the second. Looking for .git separates them without running anything. Only
-// once a repository is found does the INDEX get consulted, and only there does
-// an unanswerable question become a refusal.
-func refuseTrackedLocalStore(dir string) error {
+// Filesystem discovery first excludes inert .git markers without requiring a
+// git installation. A marker containing repository metadata is only a candidate:
+// git must then answer the index question. A damaged repository or an unavailable
+// index remains a refusal; an empty directory or broken gitdir stub is not by
+// itself evidence that the store belongs to a repository.
+func refuseTrackedLocalStore(handle *os.Root, relative, dir string) error {
 	// The physical path, because that is the one git will see: os/exec chdirs
 	// into it, and git discovers the repository from the resulting getcwd. A
 	// lexical walk up a symlinked workspace looks at ancestors the child process
@@ -729,7 +756,7 @@ func refuseTrackedLocalStore(dir string) error {
 	// this function, and this function's contract is that an unanswerable
 	// privacy question is a refusal. A future caller that skips the earlier
 	// guards would otherwise inherit a silent fail-open.
-	resolved, err := filepath.EvalSymlinks(dir)
+	resolved, err := resolvePhysicalPath(handle, relative, dir)
 	if err != nil {
 		return fmt.Errorf("%w: cannot resolve %s to ask git about it: %v", ErrNotPrivate, dir, err)
 	}
@@ -768,17 +795,16 @@ func refuseTrackedLocalStore(dir string) error {
 }
 
 // enclosingGitRepo returns the nearest ancestor of dir, dir itself included,
-// carrying a .git entry, or "" when none does.
+// carrying possible repository metadata, or "" when none does. Inert markers
+// do not stop the walk: a real enclosing checkout may still track the store.
 func enclosingGitRepo(dir string) (string, error) {
 	for current := filepath.Clean(dir); ; {
-		_, err := os.Lstat(filepath.Join(current, gitDirName))
-		switch {
-		case err == nil:
-			return current, nil
-		case !errors.Is(err, fs.ErrNotExist):
-			// Unreadable is not absent. Reporting "no repository above this" from a
-			// permission error is the same fail-open shape in a smaller place.
+		candidate, err := gitMarkerHasMetadata(filepath.Join(current, gitDirName))
+		if err != nil {
 			return "", err
+		}
+		if candidate {
+			return current, nil
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
@@ -786,6 +812,66 @@ func enclosingGitRepo(dir string) (string, error) {
 		}
 		current = parent
 	}
+}
+
+// gitMarkerHasMetadata only rules out markers that cannot name a repository.
+// It does not certify one: even partial/corrupt metadata must reach git and fail
+// closed if the index cannot be read. Following a gitdir reference is read-only;
+// it never grants filesystem access for a note operation.
+func gitMarkerHasMetadata(marker string) (bool, error) {
+	info, err := os.Stat(marker)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	dir := marker
+	if !info.IsDir() {
+		if !info.Mode().IsRegular() || info.Size() > 4096 {
+			return false, fmt.Errorf("cannot classify git marker %s", marker)
+		}
+		file, err := os.Open(marker)
+		if err != nil {
+			return false, err
+		}
+		content, readErr := io.ReadAll(io.LimitReader(file, 4097))
+		closeErr := file.Close()
+		if err := errors.Join(readErr, closeErr); err != nil {
+			return false, err
+		}
+		if len(content) > 4096 {
+			return false, fmt.Errorf("git marker %s exceeds 4096 bytes", marker)
+		}
+		if !strings.HasPrefix(string(content), "gitdir: ") {
+			return false, nil
+		}
+		dir = strings.TrimRight(string(content[len("gitdir: "):]), "\r\n")
+		if dir == "" {
+			return false, nil
+		}
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(filepath.Dir(marker), dir)
+		}
+		info, err = os.Stat(dir)
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if !info.IsDir() {
+			return false, nil
+		}
+	}
+	for _, name := range []string{"HEAD", "objects", "refs", "index", "commondir", "config"} {
+		if _, err := os.Lstat(filepath.Join(dir, name)); err == nil {
+			return true, nil
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return false, err
+		}
+	}
+	return false, nil
 }
 
 // trackedStoreEntries lists what git's index holds under dir, named relative to
@@ -1016,22 +1102,6 @@ func renderNote(name, description, body string) string {
 	return b.String()
 }
 
-// splitFrontmatter returns the description and the body. A note without
-// frontmatter is not an error — it is a file someone wrote by hand, and losing
-// it because it lacks a header would be the store punishing the reader it exists
-// to serve.
-//
-// CRLF is accepted as well as LF. Project-scope notes are checked in, and Git for
-// Windows defaults to autocrlf=true, so a note that merely round-trips through a
-// clone comes back with "---\r\n" — under an LF-only split the whole header,
-// delimiters included, fell through into the body and the description was lost.
-//
-// LINE ENDINGS ARE NORMALISED TO LF in what this returns, on every path. The
-// earlier version normalised only for the split and then returned the body from
-// whichever string that path happened to hold, so a note WITH frontmatter came
-// back as LF and one WITHOUT kept its CRLF — a difference no caller asked for and
-// nothing documented. The file on disk is untouched either way; this is only
-// what the reader is handed.
 // boundedDescription caps the summary so one note cannot crowd out the listing.
 // Truncated on a rune boundary with an ellipsis, so the result stays readable and
 // is visibly cut rather than looking like the whole of a short description.
@@ -1061,6 +1131,22 @@ func boundedDescription(text string) string {
 	return text[:cut] + ellipsis
 }
 
+// splitFrontmatter returns the description and the body. A note without
+// frontmatter is not an error — it is a file someone wrote by hand, and losing
+// it because it lacks a header would be the store punishing the reader it exists
+// to serve.
+//
+// CRLF is accepted as well as LF. Project-scope notes are checked in, and Git for
+// Windows defaults to autocrlf=true, so a note that merely round-trips through a
+// clone comes back with "---\r\n" — under an LF-only split the whole header,
+// delimiters included, fell through into the body and the description was lost.
+//
+// LINE ENDINGS ARE NORMALISED TO LF in what this returns, on every path. The
+// earlier version normalised only for the split and then returned the body from
+// whichever string that path happened to hold, so a note WITH frontmatter came
+// back as LF and one WITHOUT kept its CRLF — a difference no caller asked for and
+// nothing documented. The file on disk is untouched either way; this is only
+// what the reader is handed.
 func splitFrontmatter(content string) (description string, body string) {
 	normalized := strings.ReplaceAll(content, "\r\n", "\n")
 	if !strings.HasPrefix(normalized, "---\n") {

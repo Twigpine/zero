@@ -3,7 +3,9 @@ package tools
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -156,6 +158,33 @@ func TestMemoryForgetReportsAbsenceRatherThanClaimingSuccess(t *testing.T) {
 	}
 }
 
+func TestMemoryForgetPreservesANoteThatCannotBeRead(t *testing.T) {
+	paths := memoryTestPaths(t)
+	if err := os.MkdirAll(paths.LocalDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	notePath := filepath.Join(paths.LocalDir, "unreadable.md")
+	// Oversize input is a deterministic, cross-platform read failure; unlike
+	// permission bits, it behaves the same when tests run with elevated access.
+	if err := os.WriteFile(notePath, []byte(strings.Repeat("x", 70<<10)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := memory.Read(paths, memory.ScopeLocal, "unreadable"); err == nil {
+		t.Fatal("oversized fixture unexpectedly remained readable")
+	}
+
+	result := NewMemoryForgetTool(paths).Run(context.Background(), map[string]any{"name": "unreadable"})
+	if result.Status != StatusError {
+		t.Fatalf("memory_forget deleted an unreadable note: %q", result.Output)
+	}
+	if !strings.Contains(strings.ToLower(result.Output), "cannot read") {
+		t.Fatalf("memory_forget hid the read failure: %q", result.Output)
+	}
+	if _, err := os.Stat(notePath); err != nil {
+		t.Fatalf("memory_forget removed the unreadable note: %v", err)
+	}
+}
+
 // One unreadable note must not empty the listing. memory.List deliberately
 // returns what it could read alongside the failures; the tool returning an error
 // instead threw that away, turning partial success back into total failure one
@@ -180,29 +209,29 @@ func TestAnUnreadableNoteDoesNotEmptyTheListing(t *testing.T) {
 	}
 }
 
-// A failure in the project scope must not hide the user's own local note.
-// Project is searched first and arrives with a clone; local is the default write
-// scope, so the shared scope masking the private one is the wrong way round.
-func TestAProjectFailureDoesNotHideTheLocalNote(t *testing.T) {
+// A failure in the local scope must not hide a readable project note. Unscoped
+// reads resolve local first, then continue to the checked-in project scope when
+// the local entry cannot be read.
+func TestALocalFailureDoesNotHideTheProjectNote(t *testing.T) {
 	paths := memoryTestPaths(t)
-	if _, err := memory.Write(paths, memory.ScopeLocal, "findings", "mine", "the local body"); err != nil {
+	if _, err := memory.Write(paths, memory.ScopeProject, "findings", "team", "the project body"); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(paths.ProjectDir, 0o700); err != nil {
+	if err := os.MkdirAll(paths.LocalDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// An unreadable project note of the SAME name, searched first.
+	// An unreadable local note of the SAME name, searched first.
 	oversized := strings.Repeat("x", 70<<10)
-	if err := os.WriteFile(filepath.Join(paths.ProjectDir, "findings.md"), []byte(oversized), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(paths.LocalDir, "findings.md"), []byte(oversized), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	result := NewMemoryTool(paths).Run(context.Background(), map[string]any{"name": "findings"})
 	if result.Status == StatusError {
-		t.Fatalf("a project-scope failure hid the readable local note: %q", result.Output)
+		t.Fatalf("a local-scope failure hid the readable project note: %q", result.Output)
 	}
-	if !strings.Contains(result.Output, "the local body") {
-		t.Errorf("the local note was not returned: %q", result.Output)
+	if !strings.Contains(result.Output, "the project body") {
+		t.Errorf("the project note was not returned: %q", result.Output)
 	}
 }
 
@@ -276,4 +305,89 @@ func TestAnUnscopedListingIsProjectFirst(t *testing.T) {
 	if project > local {
 		t.Errorf("the listing put local before project, which is the resolution order, not the listing order:\n%s", result.Output)
 	}
+}
+
+// linkDirForTool mirrors internal/memory's helper: a junction on Windows, where
+// os.Symlink needs a privilege an ordinary session does not hold.
+func linkDirForTool(t *testing.T, target, link string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		if out, err := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
+			t.Skipf("cannot create a junction: %v %s", err, out)
+		}
+		return
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("cannot create a symlink: %v", err)
+	}
+}
+
+// NOTHING READ PLUS A FAILURE MUST NOT RENDER AS AN EMPTY STORE. memory.List
+// returns its error precisely so a caller can tell "there are no notes" from
+// "the notes could not be read" — escape_test.go pins that at the library — and
+// the tool put the confusion back by rendering the empty-store copy first and
+// appending the failure below it. A model reading "No saved notes yet" writes
+// the note again, or proceeds as though nothing was ever recorded.
+//
+// Both ways of reaching zero-notes-plus-error are covered: a redirected .zero
+// (the store is never opened) and every on-disk entry failing to read (the
+// store opens, its contents do not).
+func TestAFailedMemoryListingDoesNotRenderAsAnEmptyStore(t *testing.T) {
+	t.Run("redirected store", func(t *testing.T) {
+		base := t.TempDir()
+		outside := filepath.Join(base, "outside")
+		workspace := filepath.Join(base, "workspace")
+		for _, dir := range []string{outside, workspace, filepath.Join(outside, "memory")} {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		linkDirForTool(t, outside, filepath.Join(workspace, ".zero"))
+		paths := memory.DefaultPaths(workspace)
+		// The library's own answer is the premise of this test.
+		if notes, err := memory.List(paths); err == nil || len(notes) != 0 {
+			t.Fatalf("premise failed: List returned %d notes, err=%v", len(notes), err)
+		}
+
+		result := NewMemoryTool(paths).Run(context.Background(), map[string]any{})
+		if result.Status != StatusError {
+			t.Errorf("an unreadable store reported ok: %q", result.Output)
+		}
+		if strings.Contains(strings.ToLower(result.Output), "no saved notes") {
+			t.Errorf("an unreadable store was rendered as an empty one: %q", result.Output)
+		}
+		if !strings.Contains(strings.ToLower(result.Output), "unknown") {
+			t.Errorf("the output does not say the contents are unknown: %q", result.Output)
+		}
+		// The caveat has to match the failure: nothing was "unread" here, the
+		// store was refused outright, and sending an operator to look for
+		// corrupt note files is the wrong instruction.
+		if strings.Contains(result.Output, "Some notes could not be read") {
+			t.Errorf("a containment refusal was reported as unreadable notes: %q", result.Output)
+		}
+	})
+
+	t.Run("readable store with readable notes still lists", func(t *testing.T) {
+		paths := memoryTestPaths(t)
+		if _, err := memory.Write(paths, memory.ScopeProject, "kept", "d", "body"); err != nil {
+			t.Fatal(err)
+		}
+		result := NewMemoryTool(paths).Run(context.Background(), map[string]any{})
+		if result.Status != StatusOK || !strings.Contains(result.Output, "kept") {
+			t.Fatalf("a healthy listing regressed: status=%s %q", result.Status, result.Output)
+		}
+	})
+
+	// And a genuinely empty, readable store still says so — the fix must not
+	// turn "no notes" into an error.
+	t.Run("empty readable store still reports empty", func(t *testing.T) {
+		paths := memoryTestPaths(t)
+		result := NewMemoryTool(paths).Run(context.Background(), map[string]any{})
+		if result.Status != StatusOK {
+			t.Fatalf("an empty store reported an error: %q", result.Output)
+		}
+		if !strings.Contains(strings.ToLower(result.Output), "no saved notes") {
+			t.Errorf("an empty store lost its empty-store copy: %q", result.Output)
+		}
+	})
 }
