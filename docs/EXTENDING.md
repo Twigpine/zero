@@ -203,7 +203,11 @@ Events the agent emits (in dispatch order):
 | `specialistStart` | A sub-agent is spawned | yes (specialist name) |
 | `specialistStop` | A sub-agent ends | yes (specialist name) |
 
-A hook's exit code decides what happens next: `0` continues, non-zero blocks the tool call (`beforeTool`) or surfaces an error (`afterTool`). Hook execution is recorded in the audit log; the audit is reachable from the agent's view of past actions, not from a dedicated `zero doctor` check.
+For swarm members the matcher subject is the **agent type** (`subagent`, `teammate`, …), not a registered specialist profile name — swarm members run from an inline manifest keyed by agent type.
+
+`specialistStart` fires once the child process has actually started; a launch that fails before exec (missing binary, spawn error) records no public lifecycle hooks. `specialistStop` fires once per terminal stop: completion, error, explicit stop of a recovered task, and a background task reaped by a later `TaskOutput` all share one durable claim, so a hook that notifies or cleans up does not run twice for the same sub-agent run.
+
+A hook's exit code decides what happens next: `0` continues, non-zero blocks the tool call (`beforeTool`) or surfaces an error (`afterTool`). `sessionStart` / `sessionEnd` / `specialistStart` / `specialistStop` hooks are advisory (failures are audited but do not interrupt the run). Hook execution is recorded in the audit log; the audit is reachable from the agent's view of past actions, not from a dedicated `zero doctor` check.
 
 > **Roadmap.** An in-UI hooks manager is on the backlog. Today you edit the JSON directly.
 
