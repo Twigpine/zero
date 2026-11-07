@@ -35,6 +35,10 @@ type remoteSSEClient struct {
 	pending      map[string]chan ssePendingResponse
 	streamErr    error
 	closed       bool
+	// streamKey is the injected AI/ML API key the stream request carried, if
+	// any. openStream sets it once, before the reader starts; the messages on
+	// the stream are answers from a server that was sent it.
+	streamKey string
 }
 
 type ssePendingResponse struct {
@@ -259,12 +263,13 @@ func (client *remoteSSEClient) request(ctx context.Context, method string, param
 	client.pending[key] = responseChannel
 	client.mu.Unlock()
 
-	if err := client.post(ctx, rpcMessage{
+	sentKey, err := client.post(ctx, rpcMessage{
 		JSONRPC: "2.0",
 		ID:      id,
 		Method:  method,
 		Params:  rawParams,
-	}); err != nil {
+	})
+	if err != nil {
 		client.removePending(key)
 		return err
 	}
@@ -274,14 +279,15 @@ func (client *remoteSSEClient) request(ctx context.Context, method string, param
 		if response.err != nil {
 			return response.err
 		}
-		if !rpcIDMatches(response.message.ID, id) {
+		message := scrubAIMLAPIKeys(response.message, client.streamKey, sentKey)
+		if !rpcIDMatches(message.ID, id) {
 			return fmt.Errorf("MCP %s response id mismatch for server %s", method, client.server.Name)
 		}
-		if response.message.Error != nil {
-			return fmt.Errorf("MCP %s failed: %s", method, response.message.Error.Message)
+		if message.Error != nil {
+			return fmt.Errorf("MCP %s failed: %s", method, message.Error.Message)
 		}
-		if target != nil && len(response.message.Result) > 0 {
-			if err := json.Unmarshal(response.message.Result, target); err != nil {
+		if target != nil && len(message.Result) > 0 {
+			if err := json.Unmarshal(message.Result, target); err != nil {
 				return fmt.Errorf("decode MCP %s result: %w", method, err)
 			}
 		}
@@ -320,11 +326,12 @@ func (client *remoteSSEClient) notify(ctx context.Context, method string, params
 	if err != nil {
 		return err
 	}
-	return client.post(ctx, rpcMessage{
+	_, err = client.post(ctx, rpcMessage{
 		JSONRPC: "2.0",
 		Method:  method,
 		Params:  rawParams,
 	})
+	return err
 }
 
 func (client *networkClient) post(ctx context.Context, message rpcMessage, expectResponse bool) (result rpcMessage, err error) {
@@ -357,7 +364,11 @@ func (client *networkClient) post(ctx context.Context, message rpcMessage, expec
 	if response.StatusCode == http.StatusNoContent {
 		return rpcMessage{}, fmt.Errorf("MCP %s server %s returned no response body", client.server.Type, client.server.Name)
 	}
-	return client.decodeResponse(response)
+	decoded, err := client.decodeResponse(response)
+	if err != nil {
+		return rpcMessage{}, err
+	}
+	return scrubAIMLAPIKeys(decoded, injectedAIMLAPIKey(client.server, response.Request)), nil
 }
 
 func (client *remoteSSEClient) openStream(ctx context.Context) error {
@@ -380,6 +391,7 @@ func (client *remoteSSEClient) openStream(ctx context.Context) error {
 		return err
 	}
 	client.streamBody = response.Body
+	client.streamKey = injectedAIMLAPIKey(client.server, response.Request)
 
 	ready := make(chan error, 1)
 	go client.readStream(response.Body, ready)
@@ -391,31 +403,34 @@ func (client *remoteSSEClient) openStream(ctx context.Context) error {
 	}
 }
 
-func (client *remoteSSEClient) post(ctx context.Context, message rpcMessage) (err error) {
+// post sends message to the endpoint and returns the injected AI/ML API key the
+// request carried, if any, since the answer arrives on the stream from a server
+// that was sent it.
+func (client *remoteSSEClient) post(ctx context.Context, message rpcMessage) (sentKey string, err error) {
 	endpointURL, err := client.currentEndpoint()
 	if err != nil {
-		return err
+		return "", err
 	}
 	body, err := json.Marshal(message)
 	if err != nil {
-		return err
+		return "", err
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("create MCP SSE post for %s: %w", client.server.Name, err)
+		return "", fmt.Errorf("create MCP SSE post for %s: %w", client.server.Name, err)
 	}
 	client.applyPostHeaders(request)
 
 	response, err := client.client.Do(request)
 	if err != nil {
-		return fmt.Errorf("post MCP SSE message to %s: %w", client.server.Name, err)
+		return "", fmt.Errorf("post MCP SSE message to %s: %w", client.server.Name, err)
 	}
 	defer closeResponseBody(&err, client.server, response.Body)
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return httpStatusError(client.server, response)
+		return "", httpStatusError(client.server, response)
 	}
 	_, _ = io.Copy(io.Discard, response.Body)
-	return nil
+	return injectedAIMLAPIKey(client.server, response.Request), nil
 }
 
 func (client *networkClient) applyHeaders(request *http.Request) {
@@ -526,7 +541,8 @@ func (client *remoteSSEClient) readStream(reader io.Reader, ready chan<- error) 
 func (client *remoteSSEClient) setEndpoint(value string) error {
 	endpointURL, err := resolveSSEEndpointURL(client.server.URL, strings.TrimSpace(value))
 	if err != nil {
-		return err
+		// A URL parse error quotes the endpoint, which is the server's text.
+		return scrubAIMLAPIKeyError(err, client.streamKey)
 	}
 	client.mu.Lock()
 	client.endpointURL = endpointURL

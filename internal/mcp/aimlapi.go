@@ -1,6 +1,9 @@
 package mcp
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -8,6 +11,7 @@ import (
 
 	"github.com/Twigpine/zero/internal/aimlapi"
 	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/redaction"
 )
 
 // The AI/ML API MCP server authenticates with the user's AI/ML API key.
@@ -21,10 +25,12 @@ import (
 // be sent (no proxy profile, a single token), so a provider change applies to
 // the next request and a withheld or invalid key means no Authorization
 // header. It lives only in that request's headers: never in Server, its
-// Identity (OAuth token binding), config.json, list output or errors (an
-// error response to such a request is reported without its body). A
-// user-configured Authorization header, OAuth, or a project-touched server
-// always goes without it.
+// Identity (OAuth token binding), config.json, list output, errors or tool
+// output. An error status to such a request is reported without its body, and
+// any other response to it has the key scrubbed from its error text, method
+// and result before anything reads them (scrubAIMLAPIKeys), since that text is
+// the server's own. A user-configured Authorization header, OAuth, or a
+// project-touched server always goes without it.
 var loadAIMLAPIServiceKey = config.LoadAIMLAPIServiceKey
 
 var aimlapiMCPHost = func() string {
@@ -99,6 +105,118 @@ func hasUserAuthorizationHeader(server Server) bool {
 		}
 	}
 	return false
+}
+
+// injectedAIMLAPIKey returns the key applyAIMLAPIRequestHeaders put on request,
+// or "" when request went out without it. Pass the request a response answers
+// (response.Request, the last hop of any redirect): that is what the responding
+// server was sent.
+func injectedAIMLAPIKey(server Server, request *http.Request) string {
+	if !sentAIMLAPIServiceKey(server, request) {
+		return ""
+	}
+	value := strings.TrimSpace(request.Header.Get("Authorization"))
+	if scheme, key, ok := strings.Cut(value, " "); ok && strings.EqualFold(scheme, "Bearer") {
+		value = strings.TrimSpace(key)
+	}
+	return value
+}
+
+// scrubAIMLAPIKeys removes the injected keys from a response before any of it
+// is read: the error text, the method name and every string in the result,
+// object member names included. A server can echo the credential it was sent,
+// and MCP reports a failed tool call as a result rather than an error, so the
+// result needs it as much as the error text. Only the known values go, split
+// forms included (redaction.RedactSecretValues); a result that holds none of
+// them keeps its original bytes.
+func scrubAIMLAPIKeys(message rpcMessage, keys ...string) rpcMessage {
+	var sent []string
+	for _, key := range keys {
+		if strings.TrimSpace(key) != "" {
+			sent = append(sent, key)
+		}
+	}
+	if len(sent) == 0 {
+		return message
+	}
+	if message.Error != nil {
+		scrubbed := *message.Error
+		scrubbed.Message = redaction.RedactSecretValues(scrubbed.Message, sent...)
+		message.Error = &scrubbed
+	}
+	message.Method = redaction.RedactSecretValues(message.Method, sent...)
+	message.Result = scrubAIMLAPIKeysFromJSON(message.Result, sent)
+	return message
+}
+
+func scrubAIMLAPIKeysFromJSON(raw json.RawMessage, keys []string) json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		// Decoding it into the caller's type fails the same way, and that
+		// error does not quote the text.
+		return raw
+	}
+	scrubbed, changed := scrubAIMLAPIKeysFromValue(value, keys)
+	if !changed {
+		return raw
+	}
+	encoded, err := json.Marshal(scrubbed)
+	if err != nil {
+		// Never hand back the unscrubbed bytes: an empty result reads as
+		// nothing rather than as the key.
+		return nil
+	}
+	return encoded
+}
+
+func scrubAIMLAPIKeysFromValue(value any, keys []string) (any, bool) {
+	switch typed := value.(type) {
+	case string:
+		scrubbed := redaction.RedactSecretValues(typed, keys...)
+		return scrubbed, scrubbed != typed
+	case []any:
+		changed := false
+		for index, item := range typed {
+			if scrubbed, itemChanged := scrubAIMLAPIKeysFromValue(item, keys); itemChanged {
+				typed[index] = scrubbed
+				changed = true
+			}
+		}
+		return typed, changed
+	case map[string]any:
+		changed := false
+		scrubbed := make(map[string]any, len(typed))
+		for name, item := range typed {
+			scrubbedName := redaction.RedactSecretValues(name, keys...)
+			scrubbedItem, itemChanged := scrubAIMLAPIKeysFromValue(item, keys)
+			if itemChanged || scrubbedName != name {
+				changed = true
+			}
+			scrubbed[scrubbedName] = scrubbedItem
+		}
+		return scrubbed, changed
+	}
+	return value, false
+}
+
+// scrubAIMLAPIKeyError returns err with the injected keys removed from its text.
+// An error the keys do not appear in keeps its chain; one they do appear in is
+// replaced by its scrubbed text, because its chain still holds the key.
+func scrubAIMLAPIKeyError(err error, keys ...string) error {
+	if err == nil {
+		return nil
+	}
+	text := err.Error()
+	scrubbed := redaction.RedactSecretValues(text, keys...)
+	if scrubbed == text {
+		return err
+	}
+	return errors.New(scrubbed)
 }
 
 // aimlapiUnauthorizedHint explains how to authenticate when the AI/ML API MCP
