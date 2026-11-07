@@ -14,10 +14,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -580,18 +578,21 @@ func hashTree(root string) (string, error) {
 // hashRootedTree is hashTree over a directory that is already open. Walking
 // relative to the handle hashes the directory it names even if its path is
 // replaced meanwhile, and keeps the walk inside it.
+//
+// The walk calls the handle's own methods rather than handle.FS(): the fs.FS
+// adapter only accepts fs.ValidPath names, which must be UTF-8, so it would
+// refuse file names that the filesystem and copyTree accept.
 func hashRootedTree(handle *os.Root) (string, error) {
 	hasher := sha256.New()
-	if err := hashTreeInto(hasher, handle.FS(), "."); err != nil {
+	if err := hashTreeInto(hasher, handle, "."); err != nil {
 		return "", err
 	}
 	return "sha256:" + hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
-// hashTreeInto hashes dir, a slash-separated path relative to fsys, into
-// hasher.
-func hashTreeInto(hasher io.Writer, fsys fs.FS, dir string) error {
-	entries, err := fs.ReadDir(fsys, dir)
+// hashTreeInto hashes dir, a path relative to handle, into hasher.
+func hashTreeInto(hasher io.Writer, handle *os.Root, dir string) error {
+	entries, err := readRootedDir(handle, dir)
 	if err != nil {
 		return err
 	}
@@ -604,8 +605,8 @@ func hashTreeInto(hasher io.Writer, fsys fs.FS, dir string) error {
 		if name == ".git" {
 			continue
 		}
-		rel := path.Join(dir, name)
-		info, err := fs.Lstat(fsys, rel)
+		rel := filepath.Join(dir, name)
+		info, err := handle.Lstat(rel)
 		if err != nil {
 			return err
 		}
@@ -614,7 +615,7 @@ func hashTreeInto(hasher io.Writer, fsys fs.FS, dir string) error {
 			// Skipped by copyTree, so excluded from the hash too.
 			continue
 		case info.IsDir():
-			if err := hashTreeInto(hasher, fsys, rel); err != nil {
+			if err := hashTreeInto(hasher, handle, rel); err != nil {
 				return err
 			}
 		case info.Mode().IsRegular():
@@ -624,11 +625,11 @@ func hashTreeInto(hasher io.Writer, fsys fs.FS, dir string) error {
 			}
 			// Null-delimited header keeps file boundaries unambiguous (paths cannot
 			// contain null bytes) so two trees cannot collide by shifting bytes.
-			header := fmt.Sprintf("%s\x00%d\x00", rel, executable)
+			header := fmt.Sprintf("%s\x00%d\x00", filepath.ToSlash(rel), executable)
 			if _, err := io.WriteString(hasher, header); err != nil {
 				return err
 			}
-			file, err := fsys.Open(rel)
+			file, err := handle.Open(rel)
 			if err != nil {
 				return err
 			}
@@ -645,4 +646,17 @@ func hashTreeInto(hasher io.Writer, fsys fs.FS, dir string) error {
 		}
 	}
 	return nil
+}
+
+// readRootedDir lists dir, a path relative to handle, like os.ReadDir.
+func readRootedDir(handle *os.Root, dir string) ([]os.DirEntry, error) {
+	file, err := handle.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := file.ReadDir(-1)
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	return entries, err
 }
