@@ -203,3 +203,46 @@ func TestPermissionDetailSurvivesNarrowWidths(t *testing.T) {
 		}
 	}
 }
+
+// THE CARD DESCRIBES THE BUDGET ADMISSION WILL ENFORCE. Admission accepts a
+// numeric string ("Some models send numbers as strings"), but the card decoded
+// the raw arguments itself and read "500000" as absent — so the user approved
+// "no token limit" for a plan that would stop at 500,000.
+func TestPlanCardShowsANumericStringBudgetAsEnforced(t *testing.T) {
+	args := samplePlanArgs()
+	args["budget"] = map[string]any{"max_workers": "2", "max_tokens": "500000", "max_wall_seconds": "600"}
+	joined := strings.Join(planPermissionDetail(args, 120), "\n")
+	if strings.Contains(joined, "no token limit") {
+		t.Fatalf("the card claims no token limit for a plan bounded at 500000:\n%s", joined)
+	}
+	for _, want := range []string{"500000 tokens", "600s wall"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("card is missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+// A budget admission will refuse is shown as refused, not as a plausible bound.
+func TestPlanCardFlagsABudgetAdmissionWillRefuse(t *testing.T) {
+	args := samplePlanArgs()
+	args["budget"] = map[string]any{"max_workers": float64(1), "max_tokens": 1.5}
+	joined := strings.Join(planPermissionDetail(args, 160), "\n")
+	if !strings.Contains(joined, "invalid budget") {
+		t.Fatalf("a fractional max_tokens was not flagged:\n%s", joined)
+	}
+}
+
+// BACKGROUND IS A TOP-LEVEL DIRECTIVE. The card looked for it inside budget,
+// where no call puts it, so it never told the user a plan would outlive the
+// turn — for an inline plan or a saved one.
+func TestPlanCardSaysWhenAPlanRunsInTheBackground(t *testing.T) {
+	inline := samplePlanArgs()
+	inline["background"] = true
+	if joined := strings.Join(planPermissionDetail(inline, 160), "\n"); !strings.Contains(joined, "background") {
+		t.Fatalf("an inline background plan's card does not say so:\n%s", joined)
+	}
+	saved := map[string]any{"saved": "sweep", "background": true}
+	if joined := strings.Join(planPermissionDetail(saved, 160), "\n"); !strings.Contains(joined, "background") {
+		t.Fatalf("a saved background plan's card does not say so:\n%s", joined)
+	}
+}

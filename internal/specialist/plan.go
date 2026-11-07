@@ -716,6 +716,22 @@ func PlanGrantableToolNames() []string {
 // granted, so a caller need only consider these names.
 func PlanReadOnlyToolNames() []string { return sortedReadOnlyTools() }
 
+// DecodePlanBudget decodes a plan call's budget exactly as admission will, for a
+// surface that must show what a plan asks for BEFORE it runs — the approval
+// card. A second, laxer decoder there once read a numeric-string max_tokens as
+// absent and told the user "no token limit" about a plan that would enforce
+// one. No run limits are applied: the card shows the request, and admission
+// still judges it against the run's ceiling.
+func DecodePlanBudget(args map[string]any) (Budget, error) {
+	return planBudget(args, Limits{})
+}
+
+// PlanRunsInBackground reports whether a plan call asks to run in the
+// background, read the way the tool reads it: a top-level boolean.
+func PlanRunsInBackground(args map[string]any) bool {
+	return planBool(args, "background")
+}
+
 func planBudget(args map[string]any, limits Limits) (Budget, error) {
 	raw, ok := args["budget"].(map[string]any)
 	if !ok {

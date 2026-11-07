@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/specialist"
 )
 
 // What a permission prompt SHOWS about the thing it is approving.
@@ -64,8 +66,12 @@ func planPermissionDetail(args map[string]any, width int) []string {
 		// A saved plan's tasks are on disk, not in the arguments — there is
 		// nothing here to render, and inventing a summary would describe a plan
 		// this card never saw.
+		head := "saved plan: " + saved
+		if specialist.PlanRunsInBackground(args) {
+			head += " · background"
+		}
 		return []string{
-			"  " + zeroTheme.muted.Render(truncateRunes("saved plan: "+saved, room)),
+			"  " + zeroTheme.muted.Render(truncateRunes(head, room)),
 			"  " + zeroTheme.faint.Render(truncateRunes("run /plans show "+saved+" to read it", room)),
 		}
 	}
@@ -134,21 +140,33 @@ func planTaskDetailLine(task map[string]any) string {
 
 // planBudgetSummary renders the bounds a plan asked for, naming the unbounded
 // case rather than omitting it: "no token limit" is the thing worth seeing.
+//
+// DECODED BY THE PLAN'S OWN DECODER. This card used to read the raw arguments
+// itself, accepting only JSON numbers, while admission also accepts a numeric
+// string — so a plan asking for "500000" tokens was shown as having no token
+// limit, and the user approved a plan described differently from the one that
+// ran. A budget admission will refuse is shown as refused, with the reason.
 func planBudgetSummary(args map[string]any) string {
-	budget, ok := args["budget"].(map[string]any)
-	if !ok {
-		return ""
-	}
 	parts := []string{}
-	if tokens := permissionInt(budget, "max_tokens"); tokens > 0 {
-		parts = append(parts, fmt.Sprintf("%d tokens", tokens))
-	} else {
-		parts = append(parts, "no token limit")
+	if _, ok := args["budget"].(map[string]any); ok {
+		budget, err := specialist.DecodePlanBudget(args)
+		if err != nil {
+			parts = append(parts, "invalid budget: "+sanitizeCardText(err.Error()))
+		} else {
+			if budget.MaxTokens > 0 {
+				parts = append(parts, fmt.Sprintf("%d tokens", budget.MaxTokens))
+			} else {
+				parts = append(parts, "no token limit")
+			}
+			if budget.MaxWall > 0 {
+				parts = append(parts, fmt.Sprintf("%ds wall", int(budget.MaxWall/time.Second)))
+			}
+		}
 	}
-	if wall := permissionInt(budget, "max_wall_seconds"); wall > 0 {
-		parts = append(parts, fmt.Sprintf("%ds wall", wall))
-	}
-	if background, _ := budget["background"].(bool); background {
+	// A TOP-LEVEL directive, as the tool reads it. It was looked up inside the
+	// budget object, where no call ever puts it, so the card never said a plan
+	// would keep running after the turn ended.
+	if specialist.PlanRunsInBackground(args) {
 		parts = append(parts, "background")
 	}
 	return strings.Join(parts, ", ")
@@ -198,15 +216,4 @@ func permissionStrings(args map[string]any, key string) []string {
 		}
 	}
 	return out
-}
-
-func permissionInt(args map[string]any, key string) int {
-	switch value := args[key].(type) {
-	case float64:
-		return int(value)
-	case int:
-		return value
-	default:
-		return 0
-	}
 }
