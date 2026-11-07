@@ -1,6 +1,7 @@
 package specialist
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,11 +29,23 @@ import (
 //     keys on precisely `!planReadOnlyTools[name]`, so adding a write tool would
 //     silently make every scratchpad-using plan demand a git worktree.
 //
-// So NO TASK WRITES HERE. The EXECUTOR does, single-threaded, as each result
-// comes back — and dependents read with the read_file they already hold. Write
-// contention is not locked against; it cannot arise, because there is exactly
-// one writer. The excerpt stops being lossy and becomes a summary with the whole
-// thing one tool call behind it.
+// So tasks are not ASKED to write here. The EXECUTOR records each result,
+// single-threaded, as it comes back — and dependents read with the read_file
+// they already hold. The excerpt stops being lossy and becomes a summary with
+// the whole thing one tool call behind it.
+//
+// WHAT IS AND IS NOT GUARANTEED. The directory sits under the OS temp dir, which
+// is a default sandbox write root, so a task granted a write tool CAN write here:
+// it can list the directory, and edit or delete a record after the executor
+// wrote it. Nothing binds a record to the task that produced it, so this is not
+// an integrity boundary — the dependent's prompt still carries the real excerpt
+// inline, and a task holding write_file over the shared worktree already holds a
+// larger target. A read-only plan's tasks cannot write here at all.
+//
+// What IS guaranteed is that the executor — the unsandboxed parent — never
+// writes through something a task planted: Record creates each file with
+// O_EXCL, so a file, symlink or hard link already at a task's destination makes
+// the record fail instead of redirecting the write.
 //
 // DISPOSABLE, and deliberately not memory: memory is durable, user-facing and
 // believed by later sessions. This is one plan's working notes and it is deleted
@@ -93,8 +106,19 @@ func (pad *Scratchpad) Record(taskID, output string) (string, error) {
 		return "", nil
 	}
 	path := filepath.Join(pad.root, taskID+".md")
-	if err := os.WriteFile(path, []byte(output), 0o600); err != nil {
+	// EXCLUSIVE CREATE. Each task is recorded exactly once, so anything already
+	// at the destination was put there by someone else — and following it would
+	// let a planted symlink or hard link aim the parent's write at any file it
+	// can reach. O_EXCL refuses every such case, a dangling symlink included.
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
 		return "", fmt.Errorf("record task %q output: %w", taskID, err)
+	}
+	_, writeErr := file.WriteString(output)
+	closeErr := file.Close()
+	if writeErr != nil || closeErr != nil {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("record task %q output: %w", taskID, errors.Join(writeErr, closeErr))
 	}
 	return path, nil
 }
