@@ -283,6 +283,10 @@ type PlanTaskRequest struct {
 	// MaxTaskTokens bounds what THIS task may spend. 0 is unbounded, which is
 	// every plan that does not ask for a cap.
 	MaxTaskTokens int
+	// TaskTokensSpent is what this task already spent on EARLIER ATTEMPTS. The
+	// cap bounds the task, not one attempt, so a retry's meter starts here
+	// rather than at zero. 0 on a first attempt.
+	TaskTokensSpent int
 	// WaitsOnOtherTasks marks a task with dependencies, which decides WHICH POOL
 	// it draws from: work that waits draws from the reserve, so it cannot be
 	// starved by the work it waited for.
@@ -1022,6 +1026,16 @@ func runTaskWithRetries(ctx context.Context, policy retryPolicy, run PlanRunner)
 	retriedAfterProviderFailure := false
 
 	for attempt := 1; ; attempt++ {
+		// max_tokens_per_task BOUNDS THE TASK, across every attempt. Each retry
+		// used to get the whole cap afresh, so a task that stalled after
+		// spending most of it could spend (max_retries+1) times what the plan
+		// author allowed it. A retry starts its meter at what was already spent,
+		// and one whose task has nothing left is not launched at all.
+		if attempt > 1 && policy.maxTaskTokens > 0 && totalTokens >= policy.maxTaskTokens {
+			result.Err = fmt.Sprintf("%s; not retried: task %s already spent %d tokens and budget.max_tokens_per_task is %d",
+				result.Err, policy.task.ID, totalTokens, policy.maxTaskTokens)
+			return result, err
+		}
 		started := time.Now()
 		result, err = run(ctx, PlanTaskRequest{
 			Task:              policy.task,
@@ -1030,6 +1044,7 @@ func runTaskWithRetries(ctx context.Context, policy retryPolicy, run PlanRunner)
 			StallTimeout:      policy.stallTimeout,
 			Spend:             policy.spend,
 			MaxTaskTokens:     policy.maxTaskTokens,
+			TaskTokensSpent:   totalTokens,
 			WaitsOnOtherTasks: policy.waitsOnOthers,
 			ReadRoots:         policy.readRoots,
 			ReadOnlyRoots:     policy.readOnlyRoots,

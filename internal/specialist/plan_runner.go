@@ -107,6 +107,10 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 		// tasks in flight, none of them bounded, and the first number landing
 		// after all four were done.
 		taskTokens := &atomic.Int64{}
+		// SEEDED with what earlier attempts of this task spent: the per-task cap
+		// bounds the TASK, and a fresh zero here handed every retry the whole
+		// cap again.
+		taskTokens.Store(int64(req.TaskTokensSpent))
 		overspent := &atomic.Value{}
 		// THE TASK'S OWN NUMBERS, read from the commands it actually ran. Every
 		// tool result a child emits streams through here, which is the only place
