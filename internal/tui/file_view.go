@@ -134,6 +134,19 @@ func (e *fileViewCachedEntry) byteSize() int {
 	return n
 }
 
+// fileViewSourceIdentity is what decides whether two bounded reads show the
+// same file: the retained source hash plus both truncation flags.
+type fileViewSourceIdentity struct {
+	hash         [sha256.Size]byte
+	truncated    bool
+	omittedLines bool
+}
+
+// fileViewReadIdentity returns the identity of one bounded read.
+func fileViewReadIdentity(res fileViewReadResult) fileViewSourceIdentity {
+	return fileViewSourceIdentity{hash: fileViewSourceHash(res.lines), truncated: res.truncated, omittedLines: res.omittedLines}
+}
+
 // fileViewSourceHash fingerprints the bounded source lines so a metadata-only
 // change (cp -p, rsync -t, tar -xp restoring mtime and size) cannot serve a
 // stale entry. Lines are joined with a separator the reader never emits inside
@@ -215,7 +228,12 @@ type fileViewRenderCache struct {
 	revOrder      *list.List               // LRU of revision keys: front = most recently invalidated path
 	revElems      map[string]*list.Element // targetPath -> *list.Element containing the path string
 	revEpochFloor uint64                   // minimum required revision for any path absent from pathRevisions
-	statsData     fileViewCacheStats
+	// revClock is the last revision issued to any path. It never decreases,
+	// including across purges, so every new invalidation is newer than any
+	// revision a surface already holds and a path's required revision never
+	// moves backwards.
+	revClock  uint64
+	statsData fileViewCacheStats
 }
 
 var defaultFileViewCache = newFileViewRenderCache(defaultFileViewCacheMaxEntries, defaultFileViewCacheMaxBytes)
@@ -232,14 +250,15 @@ func newFileViewRenderCache(maxEntries int, maxBytes int) *fileViewRenderCache {
 	}
 }
 
+// invalidatePath marks targetPath as mutated and returns its new required
+// revision. Revisions come from one cache-wide clock, so the result is newer
+// than every revision issued before it, including ones a BTW surface kept from
+// before a purge. Surfaces adopt this value rather than counting on their own.
 func (c *fileViewRenderCache) invalidatePath(targetPath string) uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	rev := c.pathRevisions[targetPath]
-	if rev < c.revEpochFloor {
-		rev = c.revEpochFloor
-	}
-	rev++
+	c.revClock++
+	rev := c.revClock
 	c.pathRevisions[targetPath] = rev
 	c.touchRevisionLocked(targetPath)
 	c.trimRevisionsLocked()
@@ -379,6 +398,11 @@ func (c *fileViewRenderCache) evictPath(targetPath string) {
 	c.mu.Unlock()
 }
 
+// purgeLocked drops every entry and per-path revision key. The epoch floor
+// moves up to the revision clock instead of resetting, so no path's required
+// revision falls below a revision it already reported. Resetting it would let a
+// surface hold a revision newer than the shared one, and that surface would
+// miss a later exact-path edit made on the other surface.
 func (c *fileViewRenderCache) purgeLocked() {
 	c.gen++
 	c.items = make(map[string]*list.Element)
@@ -387,7 +411,7 @@ func (c *fileViewRenderCache) purgeLocked() {
 	c.pathRevisions = make(map[string]uint64)
 	c.revOrder = list.New()
 	c.revElems = make(map[string]*list.Element)
-	c.revEpochFloor = 0
+	c.revEpochFloor = c.revClock
 }
 
 func (c *fileViewRenderCache) clear() {
@@ -722,28 +746,28 @@ func fileViewSuperseded(liveSeq *atomic.Uint64, seq uint64) bool {
 	return liveSeq != nil && liveSeq.Load() != seq
 }
 
-func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath string, width int, changed map[string]bool, changedFingerprint string, reqGen int, theme tuiTheme, reqSourceRev uint64, liveSeq *atomic.Uint64, seq uint64) (string, error) {
+func (c *fileViewRenderCache) loadAndRenderSource(targetPath string, displayPath string, width int, changed map[string]bool, changedFingerprint string, reqGen int, theme tuiTheme, reqSourceRev uint64, liveSeq *atomic.Uint64, seq uint64) (string, fileViewSourceIdentity, error) {
 	if fileViewSuperseded(liveSeq, seq) {
-		return "", errFileViewSuperseded
+		return "", fileViewSourceIdentity{}, errFileViewSuperseded
 	}
 	if fileViewInsideLoad != nil {
 		fileViewInsideLoad()
 	}
 	if fileViewSuperseded(liveSeq, seq) {
-		return "", errFileViewSuperseded
+		return "", fileViewSourceIdentity{}, errFileViewSuperseded
 	}
 
 	stat, err := os.Stat(targetPath)
 	if err != nil {
 		c.evictPath(targetPath)
 		rendered := theme.faint.Render("Could not read file: " + err.Error())
-		return rendered, err
+		return rendered, fileViewSourceIdentity{}, err
 	}
 	if !stat.Mode().IsRegular() {
 		c.evictPath(targetPath)
 		readErr := fmt.Errorf("cannot display non-regular file %s (mode %s)", displayPath, stat.Mode().String())
 		rendered := theme.faint.Render("Could not read file: " + readErr.Error())
-		return rendered, readErr
+		return rendered, fileViewSourceIdentity{}, readErr
 	}
 
 	modTime := stat.ModTime()
@@ -753,7 +777,7 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 	c.mu.Lock()
 	if c.gen != reqGen {
 		c.mu.Unlock()
-		return "", errors.New("request superseded by cache invalidation")
+		return "", fileViewSourceIdentity{}, errors.New("request superseded by cache invalidation")
 	}
 	c.statsData.DiskReads++
 	c.mu.Unlock()
@@ -762,21 +786,22 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 		fileViewBeforeDiskRead()
 	}
 	if fileViewSuperseded(liveSeq, seq) {
-		return "", errFileViewSuperseded
+		return "", fileViewSourceIdentity{}, errFileViewSuperseded
 	}
 
 	readRes := readFileViewBoundedCancellable(targetPath, fileViewMaxLines, fileViewMaxLineBytes, fileViewMaxBytes, liveSeq, seq)
 	if readRes.err != nil && len(readRes.lines) == 0 {
 		c.evictPath(targetPath)
 		rendered := theme.faint.Render("Could not read file: " + readRes.err.Error())
-		return rendered, readRes.err
+		return rendered, fileViewSourceIdentity{}, readRes.err
 	}
-	sourceHash := fileViewSourceHash(readRes.lines)
+	identity := fileViewReadIdentity(readRes)
+	sourceHash := identity.hash
 
 	c.mu.Lock()
 	if c.gen != reqGen {
 		c.mu.Unlock()
-		return "", errors.New("request superseded by cache invalidation")
+		return "", identity, errors.New("request superseded by cache invalidation")
 	}
 
 	curRequiredRev := c.requiredRevisionLocked(targetPath)
@@ -796,21 +821,21 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 			entry.omittedLines == readRes.omittedLines {
 			if fileViewSuperseded(liveSeq, seq) {
 				c.mu.Unlock()
-				return "", errFileViewSuperseded
+				return "", identity, errFileViewSuperseded
 			}
 			c.statsData.CacheHits++
 			c.lru.MoveToFront(elem)
 			c.mu.Unlock()
 
 			if rendered, ok := entry.getRender(renderKey); ok {
-				return rendered, nil
+				return rendered, identity, nil
 			}
 
 			if fileViewBeforeCacheHitFormat != nil {
 				fileViewBeforeCacheHitFormat()
 			}
 			if fileViewSuperseded(liveSeq, seq) {
-				return "", errFileViewSuperseded
+				return "", identity, errFileViewSuperseded
 			}
 
 			// Re-format for the new width or changed markers using cached display and lines
@@ -819,16 +844,16 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 				fileViewBeforeCacheCommit()
 			}
 			if fileViewSuperseded(liveSeq, seq) {
-				return "", errFileViewSuperseded
+				return "", identity, errFileViewSuperseded
 			}
 			c.commitRenderPut(entry, renderKey, rendered)
-			return rendered, nil
+			return rendered, identity, nil
 		}
 	}
 
 	if fileViewSuperseded(liveSeq, seq) {
 		c.mu.Unlock()
-		return "", errFileViewSuperseded
+		return "", identity, errFileViewSuperseded
 	}
 
 	c.statsData.CacheMisses++
@@ -843,7 +868,7 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 		fileViewBeforeHighlight()
 	}
 	if fileViewSuperseded(liveSeq, seq) {
-		return "", errFileViewSuperseded
+		return "", identity, errFileViewSuperseded
 	}
 
 	display, ok := func() ([]string, bool) {
@@ -864,7 +889,7 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 		return highlightCodeForPathWithTheme(cleanLines, displayPath, 1<<20, nil, theme)
 	}()
 	if fileViewSuperseded(liveSeq, seq) {
-		return "", errFileViewSuperseded
+		return "", identity, errFileViewSuperseded
 	}
 	if !ok || len(display) != len(cleanLines) {
 		display = cleanLines
@@ -874,7 +899,7 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 		fileViewBeforeFormat()
 	}
 	if fileViewSuperseded(liveSeq, seq) {
-		return "", errFileViewSuperseded
+		return "", identity, errFileViewSuperseded
 	}
 
 	rendered := formatFileViewLines(cleanLines, display, changed, readRes.truncated, readRes.omittedLines, width, theme)
@@ -883,7 +908,7 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 		fileViewBeforeCacheCommit()
 	}
 	if fileViewSuperseded(liveSeq, seq) {
-		return "", errFileViewSuperseded
+		return "", identity, errFileViewSuperseded
 	}
 
 	sourceBytes := 0
@@ -913,24 +938,24 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 	c.mu.Lock()
 	if c.gen != reqGen {
 		c.mu.Unlock()
-		return "", errors.New("request superseded by cache invalidation")
+		return "", identity, errors.New("request superseded by cache invalidation")
 	}
 	if fileViewSuperseded(liveSeq, seq) {
 		c.mu.Unlock()
-		return "", errFileViewSuperseded
+		return "", identity, errFileViewSuperseded
 	}
 	if c.maxEntries <= 0 || c.maxBytes <= 0 || entry.byteSize() > c.maxBytes {
 		c.statsData.SkippedOversized++
 		c.removeItemLocked(targetPath)
 		c.mu.Unlock()
-		return rendered, nil
+		return rendered, identity, nil
 	}
 
 	if elem, ok := c.items[targetPath]; ok {
 		existing := elem.Value.(*fileViewCachedEntry)
 		if existing.modTime.After(readRes.modTime) && existing.sourceRev > reqSourceRev {
 			c.mu.Unlock()
-			return rendered, nil
+			return rendered, identity, nil
 		}
 		c.removeItemLocked(targetPath)
 	}
@@ -939,7 +964,13 @@ func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath strin
 	c.evictOverflowLocked()
 	c.mu.Unlock()
 
-	return rendered, nil
+	return rendered, identity, nil
+}
+
+// loadAndRender is loadAndRenderSource without the source identity.
+func (c *fileViewRenderCache) loadAndRender(targetPath string, displayPath string, width int, changed map[string]bool, changedFingerprint string, reqGen int, theme tuiTheme, reqSourceRev uint64, liveSeq *atomic.Uint64, seq uint64) (string, error) {
+	rendered, _, err := c.loadAndRenderSource(targetPath, displayPath, width, changed, changedFingerprint, reqGen, theme, reqSourceRev, liveSeq, seq)
+	return rendered, err
 }
 
 // sanitizeRawFileLine strips or transforms raw control characters and terminal escape sequences
@@ -979,7 +1010,9 @@ type fileViewLoadedMsg struct {
 	width             int
 	fingerprint       string
 	rendered          string
-	err               error
+	// source identifies the bytes behind rendered; zero when err is set.
+	source fileViewSourceIdentity
+	err    error
 }
 
 func loadFileViewCmd(targetPath string, displayPath string, width int, changed map[string]bool, fingerprint string, token [16]byte, seq uint64, gen int, reqRev uint64, theme tuiTheme, liveSeq *atomic.Uint64) tea.Cmd {
@@ -987,7 +1020,7 @@ func loadFileViewCmd(targetPath string, displayPath string, width int, changed m
 		if fileViewSuperseded(liveSeq, seq) {
 			return fileViewLoadedMsg{lifetimeToken: token, seq: seq, requiredSourceRev: reqRev, generation: gen, targetPath: targetPath, displayPath: displayPath, width: width, fingerprint: fingerprint, err: errFileViewSuperseded}
 		}
-		rendered, err := defaultFileViewCache.loadAndRender(targetPath, displayPath, width, changed, fingerprint, gen, theme, reqRev, liveSeq, seq)
+		rendered, source, err := defaultFileViewCache.loadAndRenderSource(targetPath, displayPath, width, changed, fingerprint, gen, theme, reqRev, liveSeq, seq)
 		return fileViewLoadedMsg{
 			lifetimeToken:     token,
 			seq:               seq,
@@ -998,8 +1031,37 @@ func loadFileViewCmd(targetPath string, displayPath string, width int, changed m
 			width:             width,
 			fingerprint:       fingerprint,
 			rendered:          rendered,
+			source:            source,
 			err:               err,
 		}
+	}
+}
+
+// fileViewRevalidatedMsg reports whether the open full-file view's source still
+// matches the snapshot it is showing. seq is the loadedSeq of that snapshot.
+type fileViewRevalidatedMsg struct {
+	lifetimeToken [16]byte
+	displayPath   string
+	seq           uint64
+	changed       bool
+}
+
+// revalidateFileViewCmd rereads the bounded source off the update goroutine and
+// compares it with the displayed snapshot's identity. It neither highlights
+// nor touches the cache. A read cancelled by a newer load reports no change,
+// because that load reads the file itself.
+func revalidateFileViewCmd(targetPath string, displayPath string, token [16]byte, shown fileViewSourceIdentity, liveSeq *atomic.Uint64, seq uint64) tea.Cmd {
+	return func() tea.Msg {
+		res := readFileViewBoundedCancellable(targetPath, fileViewMaxLines, fileViewMaxLineBytes, fileViewMaxBytes, liveSeq, seq)
+		changed := false
+		switch {
+		case errors.Is(res.err, errFileViewSuperseded):
+		case res.err != nil && len(res.lines) == 0:
+			changed = true
+		default:
+			changed = fileViewReadIdentity(res) != shown
+		}
+		return fileViewRevalidatedMsg{lifetimeToken: token, displayPath: displayPath, seq: seq, changed: changed}
 	}
 }
 
@@ -1038,10 +1100,14 @@ type fileViewState struct {
 	loadedToken       [16]byte
 	loadedSeq         uint64
 	loadedRev         uint64
-	loading           bool
-	hasError          bool
-	snapshotReady     bool
-	liveSeq           *atomic.Uint64
+	loadedSource      fileViewSourceIdentity
+	// revalidateOnLoad defers a git-sweep revalidation until the in-flight load
+	// lands, so the sweep neither repeats nor cancels that load's work.
+	revalidateOnLoad bool
+	loading          bool
+	hasError         bool
+	snapshotReady    bool
+	liveSeq          *atomic.Uint64
 }
 
 func (m model) startFileViewLoadCmd(width int) (model, tea.Cmd) {
@@ -1071,12 +1137,7 @@ func (m model) startFileViewLoad(width int, refreshSource bool) (model, tea.Cmd)
 		target = filepath.Join(m.cwd, target)
 	}
 	if refreshSource {
-		rev := defaultFileViewCache.invalidatePath(target)
-		if rev > m.fileView.requiredSourceRev {
-			m.fileView.requiredSourceRev = rev
-		} else {
-			m.fileView.requiredSourceRev++
-		}
+		m.fileView.requiredSourceRev = defaultFileViewCache.invalidatePath(target)
 	}
 	curReq := defaultFileViewCache.requiredRevision(target)
 	if curReq > m.fileView.requiredSourceRev {
@@ -1142,6 +1203,8 @@ func (m model) openFileView(path string) (model, tea.Cmd) {
 	m.fileView.loadedToken = [16]byte{}
 	m.fileView.loadedSeq = 0
 	m.fileView.loadedRev = 0
+	m.fileView.loadedSource = fileViewSourceIdentity{}
+	m.fileView.revalidateOnLoad = false
 	m.fileView.requiredSourceRev = defaultFileViewCache.requiredRevision(target)
 	m.fileView.hasError = false
 	// A file only the git sweep knows about (bash/subagent mutation) has no edit
@@ -1225,6 +1288,7 @@ func (m model) handleFileViewLoaded(msg fileViewLoadedMsg) (model, tea.Cmd) {
 	m.fileView.loadedToken = msg.lifetimeToken
 	m.fileView.loadedSeq = msg.seq
 	m.fileView.loadedRev = msg.requiredSourceRev
+	m.fileView.loadedSource = msg.source
 	m.fileView.hasError = (msg.err != nil)
 	// Reconcile the held reading offset against the real body now that the
 	// loading placeholder is gone. Apply the height delta exactly once to
@@ -1239,7 +1303,64 @@ func (m model) handleFileViewLoaded(msg fileViewLoadedMsg) (model, tea.Cmd) {
 		}
 	}
 	m.fileView.completedBodyLines = current
+	if m.fileView.revalidateOnLoad {
+		m.fileView.revalidateOnLoad = false
+		return m.revalidateFileView()
+	}
 	return m, nil
+}
+
+// fileViewSnapshotCurrent reports whether the completed snapshot is still the
+// authoritative body for the open view.
+func (m model) fileViewSnapshotCurrent() bool {
+	return m.fileView.snapshotReady &&
+		m.fileView.loadedPath == m.fileView.path &&
+		m.fileView.loadedSeq == m.fileView.desiredSeq &&
+		m.fileView.loadedRev >= m.fileView.requiredSourceRev &&
+		m.fileView.loadedGen == defaultFileViewCache.generation() &&
+		m.fileView.loadedToken == m.fileView.lifetimeToken
+}
+
+// revalidateFileView handles a git sweep for the open full-file view. A sweep
+// lists every path dirty since the session baseline, not what changed since
+// this snapshot, and it lands after the tool-result, turn-end, or BTW-return
+// handling it started beside. So it checks the file content: a current
+// snapshot stays on screen while the source is reread and compared, and the
+// view reloads only if the bytes differ. An in-flight load is left to finish
+// and then checked. A snapshot that is not current, including a read error,
+// takes an ordinary load.
+func (m model) revalidateFileView() (model, tea.Cmd) {
+	if !m.fileView.active || m.fileView.mode != fileViewFull || m.fileView.path == "" {
+		return m, nil
+	}
+	if m.fileView.loading {
+		m.fileView.revalidateOnLoad = true
+		return m, nil
+	}
+	if !m.fileViewSnapshotCurrent() || m.fileView.hasError || m.fileView.liveSeq == nil {
+		return m.startFileViewLoadCmd(m.chatColumnWidth())
+	}
+	target := m.fileView.path
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(m.cwd, target)
+	}
+	return m, revalidateFileViewCmd(target, m.fileView.path, m.fileView.lifetimeToken, m.fileView.loadedSource, m.fileView.liveSeq, m.fileView.loadedSeq)
+}
+
+// handleFileViewRevalidated reloads the open view when its source changed after
+// the displayed snapshot was read. The reload is a refresh, so the shared path
+// revision advances and the other BTW surface picks up the change as well. If a
+// newer load replaced the compared snapshot while the read ran, that load may
+// already show the change, so the view is checked again rather than reloaded.
+func (m model) handleFileViewRevalidated(msg fileViewRevalidatedMsg) (model, tea.Cmd) {
+	if !msg.changed || !m.fileView.active || m.fileView.mode != fileViewFull ||
+		m.fileView.lifetimeToken != msg.lifetimeToken || m.fileView.path != msg.displayPath {
+		return m, nil
+	}
+	if msg.seq != m.fileView.loadedSeq || !m.fileViewSnapshotCurrent() {
+		return m.revalidateFileView()
+	}
+	return m.startFileViewRefreshCmd(m.chatColumnWidth())
 }
 
 // fileViewNavBar renders the single-line header shown in place of the pinned
@@ -1327,12 +1448,7 @@ func (m model) renderFileViewFull(width int) string {
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(m.cwd, target)
 	}
-	if m.fileView.snapshotReady &&
-		m.fileView.loadedPath == m.fileView.path &&
-		m.fileView.loadedSeq == m.fileView.desiredSeq &&
-		m.fileView.loadedRev >= m.fileView.requiredSourceRev &&
-		m.fileView.loadedGen == defaultFileViewCache.generation() &&
-		m.fileView.loadedToken == m.fileView.lifetimeToken {
+	if m.fileViewSnapshotCurrent() {
 		if !m.fileView.hasError {
 			defaultFileViewCache.recordHit()
 		}

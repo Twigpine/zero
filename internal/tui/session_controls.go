@@ -762,10 +762,9 @@ func (m model) handleRewindCommand(args string) (model, string, tea.Cmd) {
 	// Workspace files may be touched or restored starting with ApplyRewind:
 	// Invalidate file view cache immediately so any partial or full disk mutation
 	// cannot serve stale pre-rewind snapshots regardless of subsequent step failures.
+	// The purge advances the cache generation, which retires the open view's
+	// snapshot and any in-flight load without a view-local revision bump.
 	defaultFileViewCache.invalidateUnknownScope()
-	if m.fileView.active {
-		m.fileView.requiredSourceRev++
-	}
 
 	report, err := m.sessionStore.ApplyRewind(m.activeSession.SessionID, m.cwd, target)
 	if err != nil {

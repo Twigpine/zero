@@ -314,6 +314,13 @@ func (m model) routeBTWParentMessage(msg tea.Msg) (model, tea.Cmd, bool) {
 		}
 		return m, nil, false
 	}
+	if revalidated, ok := msg.(fileViewRevalidatedMsg); ok {
+		// A revalidation the parent started before /btw is routed the same way.
+		if m.btw.parent.fileView.active && m.btw.parent.fileView.lifetimeToken == revalidated.lifetimeToken {
+			return m.routeBTWMessageToParent(msg)
+		}
+		return m, nil, false
+	}
 	runID, ok := btwMessageRunID(msg)
 	if !ok || runID <= 0 || runID >= m.btw.sideRunIDBase {
 		return m, nil, false

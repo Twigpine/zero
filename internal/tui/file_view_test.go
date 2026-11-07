@@ -3053,13 +3053,16 @@ func TestFileViewCacheEvictionDropsPathRevision(t *testing.T) {
 	}
 }
 
-// TestFileViewCachePurgeResetsPathRevisions verifies clear() resets the revision
+// TestFileViewCachePurgeResetsPathRevisions verifies clear() drops the revision
 // map instead of bumping dead keys forever, so /clear cannot leak one key per
-// abandoned tool result.
+// abandoned tool result, while every path's required revision stays monotonic:
+// a purge never lowers it, and the next invalidation is newer than any
+// revision issued before the purge.
 func TestFileViewCachePurgeResetsPathRevisions(t *testing.T) {
 	cache := newFileViewRenderCache(8, defaultFileViewCacheMaxBytes)
 	cache.invalidatePath("one.go")
-	cache.invalidatePath("two.go")
+	lastBefore := cache.invalidatePath("two.go")
+	oneBefore := cache.requiredRevision("one.go")
 	cache.mu.Lock()
 	before := len(cache.pathRevisions)
 	cache.mu.Unlock()
@@ -3074,8 +3077,16 @@ func TestFileViewCachePurgeResetsPathRevisions(t *testing.T) {
 	if after != 0 {
 		t.Fatalf("clear() must drop revision keys, got %d", after)
 	}
-	if rev := cache.invalidatePath("one.go"); rev != 1 {
-		t.Fatalf("revision after purge = %d, want 1", rev)
+	for _, p := range []string{"one.go", "two.go", "never_seen.go"} {
+		if got := cache.requiredRevision(p); got < lastBefore {
+			t.Fatalf("required revision for %s fell to %d after purge, below %d", p, got, lastBefore)
+		}
+	}
+	if got := cache.requiredRevision("one.go"); got < oneBefore {
+		t.Fatalf("one.go required revision moved backwards across purge: %d -> %d", oneBefore, got)
+	}
+	if rev := cache.invalidatePath("one.go"); rev <= lastBefore {
+		t.Fatalf("revision after purge = %d, must exceed every pre-purge revision (%d)", rev, lastBefore)
 	}
 }
 
@@ -4222,4 +4233,251 @@ func TestFileViewCrossSurfaceMixedWriteStdinOutsideGit(t *testing.T) {
 			t.Fatalf("restored parent under dist/ stayed stale on return from BTW: %s", gotParent)
 		}
 	})
+}
+
+// drainFileViewCommands runs cmd and every command the resulting updates return,
+// so multi-hop flows (a sweep revalidation that then schedules a reload) settle.
+func drainFileViewCommands(t *testing.T, m model, cmd tea.Cmd) model {
+	t.Helper()
+	pending := []tea.Cmd{cmd}
+	for steps := 0; len(pending) > 0; steps++ {
+		if steps > 64 {
+			t.Fatal("file-view command chain did not settle")
+		}
+		current := pending[0]
+		pending = pending[1:]
+		if current == nil {
+			continue
+		}
+		msg := current()
+		if msg == nil {
+			continue
+		}
+		if batch, ok := msg.(tea.BatchMsg); ok {
+			pending = append(pending, batch...)
+			continue
+		}
+		updated, next := m.Update(msg)
+		m = updated.(model)
+		pending = append(pending, next)
+	}
+	return m
+}
+
+// TestFileViewCrossSurfaceExactEditAfterPurgeReloadsOtherSurface covers a purge
+// followed by an exact-path edit on the other BTW surface. The purge used to
+// reset shared path revisions to zero while the side kept its own (higher)
+// required revision, so the parent's later edit produced a shared revision the
+// side did not see as newer and the side kept rendering stale content.
+func TestFileViewCrossSurfaceExactEditAfterPurgeReloadsOtherSurface(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	name := "purge_then_edit.go"
+	write := func(content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("package before\n")
+
+	m := newBTWTestModel(t)
+	m.cwd = dir
+	m.width = 100
+	m.height = 30
+	m.gitFileBaseline = nil
+	m.gitSweepUnavailable = true
+	m.pending = true
+	m.runID = 4
+	m.activeRunID = 4
+	side, _ := m.handleBTWCommand("")
+	if !side.btw.active || side.btw.parent == nil {
+		t.Fatal("fork failed")
+	}
+	side.activeRunID = side.btw.sideRunIDBase
+	side.runID = side.btw.sideRunIDBase
+	side = testOpenFile(side, name)
+	if side.fileView.mode != fileViewFull {
+		t.Fatal("side must open the untouched file in full mode")
+	}
+
+	sideResult := func(tool string, changed []string) {
+		t.Helper()
+		updated, cmd := side.Update(agentRowMsg{
+			runID: side.activeRunID,
+			row: transcriptRow{
+				kind:         rowToolResult,
+				tool:         tool,
+				status:       tools.StatusOK,
+				changedFiles: changed,
+			},
+		})
+		side = drainFileViewCommands(t, updated.(model), cmd)
+	}
+	// An exact side edit gives the path a revision, then an unknown-scope
+	// command purges the shared cache and reloads the side.
+	sideResult("edit_file", []string{name})
+	sideResult("bash", nil)
+	if !strings.Contains(plainRender(t, side.renderFileViewFull(80)), "package before") {
+		t.Fatal("side must settle on the pre-mutation content after the purge reload")
+	}
+
+	write("package after\n")
+	updated, cmd := side.Update(agentRowMsg{
+		runID: 4,
+		row: transcriptRow{
+			kind:         rowToolResult,
+			tool:         "edit_file",
+			status:       tools.StatusOK,
+			changedFiles: []string{name},
+		},
+	})
+	side = drainFileViewCommands(t, updated.(model), cmd)
+	got := plainRender(t, side.renderFileViewFull(80))
+	if !strings.Contains(got, "package after") || strings.Contains(got, "package before") {
+		t.Fatalf("parent edit after a purge left the side stale: %s", got)
+	}
+}
+
+// TestFileViewGitSweepRevalidatesWithoutDuplicateReload covers a git sweep that
+// lands after the open view already reloaded. An unchanged file must keep its
+// snapshot on screen with no reread-and-highlight pass and no loading
+// placeholder, while a mutation the sweep cannot attribute to the open path
+// (the swept list omits it) must still reach the view.
+func TestFileViewGitSweepRevalidatesWithoutDuplicateReload(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	name := "sweep_revalidate.go"
+	filePath := filepath.Join(dir, name)
+	if err := os.WriteFile(filePath, []byte("package v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m.activeRunID = 1
+	m = testOpenFile(m, name)
+	m = testSetMode(m, fileViewFull)
+	if !strings.Contains(plainRender(t, m.renderFileViewFull(80)), "package v1") {
+		t.Fatal("expected v1")
+	}
+
+	highlights := defaultFileViewCache.stats().HighlightCalls
+	updated, cmd := m.Update(gitSweepMsg{ok: true, files: []gitSweepFile{{path: name, adds: 1}}})
+	m = updated.(model)
+	if got := plainRender(t, m.renderFileViewFull(80)); !strings.Contains(got, "package v1") {
+		t.Fatalf("a sweep must not replace an unchanged snapshot with the loading placeholder: %q", got)
+	}
+	m = drainFileViewCommands(t, m, cmd)
+	if m.fileView.loading {
+		t.Fatal("an unchanged file must not leave the view loading after a sweep")
+	}
+	if after := defaultFileViewCache.stats().HighlightCalls; after != highlights {
+		t.Fatalf("a sweep over an unchanged file re-highlighted it: HighlightCalls %d -> %d", highlights, after)
+	}
+	if got := plainRender(t, m.renderFileViewFull(80)); !strings.Contains(got, "package v1") {
+		t.Fatalf("unchanged snapshot lost after sweep: %q", got)
+	}
+
+	// A later mutation that no tool reported, and that the swept list does not
+	// name, must still be picked up.
+	if err := os.WriteFile(filePath, []byte("package v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	updated, cmd = m.Update(gitSweepMsg{ok: true})
+	m = drainFileViewCommands(t, updated.(model), cmd)
+	if got := plainRender(t, m.renderFileViewFull(80)); !strings.Contains(got, "package v2") {
+		t.Fatalf("a mutation after the first refresh must reach the view: %q", got)
+	}
+}
+
+// TestFileViewGitSweepDuringLoadDefersToThatLoad covers a sweep that lands while
+// the tool-result refresh is still in flight. The sweep must not cancel and
+// repeat that load. Once it lands, the view still checks for a mutation made
+// after the load read the file.
+func TestFileViewGitSweepDuringLoadDefersToThatLoad(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	name := "sweep_inflight.go"
+	filePath := filepath.Join(dir, name)
+	if err := os.WriteFile(filePath, []byte("package v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m.activeRunID = 1
+	m, loadCmd := m.openFileView(name)
+	if loadCmd == nil || m.fileView.mode != fileViewFull {
+		t.Fatal("expected an in-flight full-file load")
+	}
+	loaded := loadCmd() // reads v1
+	if err := os.WriteFile(filePath, []byte("package v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, sweepCmd := m.Update(gitSweepMsg{ok: true, files: []gitSweepFile{{path: name}}})
+	m = updated.(model)
+	if sweepCmd != nil {
+		t.Fatal("a sweep during a load must not start a competing load")
+	}
+	updated, next := m.Update(loaded)
+	m = updated.(model)
+	if next == nil {
+		t.Fatal("the landed load must run the deferred sweep revalidation")
+	}
+	m = drainFileViewCommands(t, m, next)
+	if got := plainRender(t, m.renderFileViewFull(80)); !strings.Contains(got, "package v2") {
+		t.Fatalf("a mutation after the in-flight read must reach the view: %q", got)
+	}
+}
+
+// TestFileViewStaleRevalidationDoesNotReloadNewerSnapshot covers a revalidation
+// that saw a change, but landed after a newer load already showed that change.
+// It must recheck the newer snapshot instead of forcing another reload.
+func TestFileViewStaleRevalidationDoesNotReloadNewerSnapshot(t *testing.T) {
+	resetFileViewCacheForTest()
+	dir := t.TempDir()
+	name := "stale_revalidation.go"
+	filePath := filepath.Join(dir, name)
+	if err := os.WriteFile(filePath, []byte("package v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := filesPanelTestModel()
+	m.cwd = dir
+	m.activeRunID = 1
+	m = testOpenFile(m, name)
+	if err := os.WriteFile(filePath, []byte("package v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	updated, sweepCmd := m.Update(gitSweepMsg{ok: true})
+	m = updated.(model)
+	if sweepCmd == nil {
+		t.Fatal("expected a revalidation for the settled snapshot")
+	}
+	stale, ok := sweepCmd().(fileViewRevalidatedMsg)
+	if !ok || !stale.changed {
+		t.Fatalf("revalidation must report the v2 change, got %#v", stale)
+	}
+
+	updated, cmd := m.Update(agentRowMsg{
+		runID: 1,
+		row:   transcriptRow{kind: rowToolResult, tool: "edit_file", status: tools.StatusOK, changedFiles: []string{name}},
+	})
+	m = drainFileViewCommands(t, updated.(model), cmd)
+	if got := plainRender(t, m.renderFileViewFull(80)); !strings.Contains(got, "package v2") {
+		t.Fatalf("tool-result refresh must show v2: %q", got)
+	}
+
+	highlights := defaultFileViewCache.stats().HighlightCalls
+	updated, cmd = m.Update(stale)
+	m = updated.(model)
+	if got := plainRender(t, m.renderFileViewFull(80)); !strings.Contains(got, "package v2") {
+		t.Fatalf("a stale revalidation must not replace the current snapshot: %q", got)
+	}
+	m = drainFileViewCommands(t, m, cmd)
+	if m.fileView.loading {
+		t.Fatal("a stale revalidation must not leave the view loading")
+	}
+	if after := defaultFileViewCache.stats().HighlightCalls; after != highlights {
+		t.Fatalf("a stale revalidation re-highlighted an unchanged file: %d -> %d", highlights, after)
+	}
 }

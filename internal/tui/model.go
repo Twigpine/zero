@@ -1456,6 +1456,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case fileViewLoadedMsg:
 		return m.handleFileViewLoaded(msg)
+	case fileViewRevalidatedMsg:
+		return m.handleFileViewRevalidated(msg)
 	case uv.CellSizeEvent:
 		if msg.Width > 0 && msg.Height > 0 {
 			m.petCellPixelWidth = msg.Width
@@ -3087,11 +3089,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				rev := defaultFileViewCache.invalidatePath(target)
 				if m.fileView.active && (p == m.fileView.path || target == m.fileView.path) {
-					if rev > m.fileView.requiredSourceRev {
-						m.fileView.requiredSourceRev = rev
-					} else {
-						m.fileView.requiredSourceRev++
-					}
+					m.fileView.requiredSourceRev = rev
 					if m.fileView.mode == fileViewFull {
 						selfNeedsRefresh = true
 					}
@@ -3178,21 +3176,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case gitSweepMsg:
 		m = m.handleGitSweepMsg(msg)
-		if msg.ok && !msg.baseline {
-			for _, f := range msg.files {
-				p := f.path
-				if !filepath.IsAbs(p) {
-					p = filepath.Join(m.cwd, p)
-				}
-				defaultFileViewCache.invalidatePath(p)
-			}
-		}
-		if m.fileView.active && m.fileView.mode == fileViewFull {
-			var cmd tea.Cmd
-			m, cmd = m.startFileViewRefreshCmd(m.chatColumnWidth())
-			return m, cmd
-		}
-		return m, nil
+		// The swept list is cumulative since the baseline, so it says nothing
+		// about what changed since the open snapshot, and each live sweep starts
+		// beside tool-result, turn-end, or BTW-return handling that already
+		// reloads or rechecks the open view. Revalidate the open view's content
+		// rather than force a second reload.
+		return m.revalidateFileView()
 	case prWatcherStartedMsg:
 		if msg.stop == nil {
 			return m, nil
