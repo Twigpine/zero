@@ -119,15 +119,19 @@ func (c *textCoalescer) flush() {
 // drainAndForwardLocked forwards any buffered deltas as one coalesced
 // agentTextMsg or agentReasoningMsg (whichever kind was buffered) and stops the
 // timer, all while the caller holds c.mu — so a flush and any concurrent
-// forward are strictly ordered and never interleave. A no-op when nothing is
-// buffered. string(c.buf) copies, so reusing the backing array via [:0] is safe.
+// forward are strictly ordered and never interleave. Nothing is forwarded when
+// nothing is buffered, but the timer is still cleared: an empty delta can arm
+// a timer that fires against an empty buffer, and leaving that timer non-nil
+// would make send() skip arming a new one, stalling all later deltas until a
+// kind switch or non-stream message. string(c.buf) copies, so reusing the
+// backing array via [:0] is safe.
 func (c *textCoalescer) drainAndForwardLocked() {
-	if len(c.buf) == 0 {
-		return
-	}
 	if c.timer != nil {
 		c.timer.Stop()
 		c.timer = nil
+	}
+	if len(c.buf) == 0 {
+		return
 	}
 	text := string(c.buf)
 	c.buf = c.buf[:0]

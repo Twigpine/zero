@@ -181,6 +181,57 @@ func TestCoalescerTimerFlushes(t *testing.T) {
 	}
 }
 
+// An empty delta can arm a timer whose flush fires against an empty buffer.
+// That fired timer must be cleared, or send() sees a non-nil timer and skips
+// arming a new one, stalling all later deltas until a kind switch or non-stream
+// message happens to flush them.
+func TestCoalescerEmptyDeltaDoesNotStrandTimer(t *testing.T) {
+	rec := &recorder{}
+	c := newTextCoalescer(rec.forward)
+
+	var (
+		mu         sync.Mutex
+		armCount   int
+		fireLatest func()
+	)
+	c.afterFunc = func(fn func()) coalesceTimer {
+		mu.Lock()
+		defer mu.Unlock()
+		armCount++
+		fireLatest = fn
+		return &manualTimer{}
+	}
+
+	// Empty delta arms a timer; it fires against an empty buffer.
+	c.send(agentTextMsg{runID: 1, delta: ""})
+	mu.Lock()
+	first := armCount
+	mu.Unlock()
+	if first != 1 {
+		t.Fatalf("empty delta should arm exactly one timer, armed %d", first)
+	}
+	fireLatest()
+
+	// A real delta after the fired timer must arm a NEW timer, so it can be
+	// delivered on schedule instead of stalling forever.
+	c.send(agentTextMsg{runID: 1, delta: "after stall"})
+	mu.Lock()
+	second := armCount
+	mu.Unlock()
+	if second != 2 {
+		t.Fatalf("delta after empty-buffer timer fire should re-arm the timer (arm count %d), so later deltas stall", second)
+	}
+	fireLatest()
+
+	got := rec.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("expected exactly one forwarded message, got %d: %#v", len(got), got)
+	}
+	if text, ok := got[0].(agentTextMsg); !ok || text.delta != "after stall" {
+		t.Fatalf("forwarded message = %#v, want agentTextMsg{\"after stall\"}", got[0])
+	}
+}
+
 // Rapid reasoning deltas within one frame collapse into a single
 // agentReasoningMsg, exactly like text deltas. Without this, every reasoning
 // token forces a full Update→View cycle that re-renders the whole growing
