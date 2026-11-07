@@ -90,6 +90,18 @@ type Executor struct {
 	// a child that outlives the turn becomes a permanent one. A false caller gets
 	// only grants that outlive the turn.
 	ExtraWriteRoots func(withinTurn bool) []string
+	// ExtraReadRoots is the READ counterpart of ExtraWriteRoots: every path the
+	// run may read beyond its workspace — its request_permissions read grants
+	// among them — read at every launch, fresh or resumed, and emitted ONLY as
+	// --add-read-dir. A read grant handed over as --add-dir would be a write.
+	//
+	// It was wired into the orchestrate tool alone, so an ordinary Task could
+	// not read a path the parent had just been granted, and a resume could not
+	// either. Same withinTurn rule as above. A root that is also a write root
+	// the child receives is not repeated; one withheld from an isolated child's
+	// write roots (an ancestor of the parent workspace) still arrives here, read
+	// only, because reading the parent tree does not defeat write isolation.
+	ExtraReadRoots func(withinTurn bool) []string
 	// WorkspaceRoot is the PARENT run's own workspace. A child whose --cwd lies
 	// outside it runs in a tree of its own (an isolated plan worktree), and no
 	// write root that overlaps this directory may follow it there: an ancestor
@@ -595,6 +607,8 @@ func (executor Executor) BuildArgs(input BuildArgsInput) (BuildArgsResult, error
 	// --add-dir, so the child can read but not write — a read grant must not
 	// become a write.
 	args = appendReadOnlyRootArgs(args, input.ReadOnlyRoots, input.Cwd)
+	// The run's own read grants, read at launch like its write roots above.
+	args = appendReadOnlyRootArgs(args, executor.extraReadRoots(input.WithinTurn), input.Cwd)
 	return BuildArgsResult{Args: args, SessionID: sessionID, PromptFile: promptFile}, nil
 }
 
@@ -707,17 +721,30 @@ func pathContains(root, path string, flavor pathFlavor) bool {
 
 // appendReadOnlyRootArgs emits one --add-read-dir per root — READ access only, the
 // read counterpart of appendExtraWriteRootArgs. Same skips (the child's own
-// workspace, blank entries) for the same reasons.
+// workspace, blank entries) for the same reasons, plus any root the args
+// already grant: a write root already confers read, and a second read flag for
+// the same path says nothing new.
 func appendReadOnlyRootArgs(args []string, roots []string, cwd string) []string {
 	workspace := strings.TrimSpace(cwd)
 	for _, root := range roots {
 		root = strings.TrimSpace(root)
-		if root == "" || root == workspace {
+		if root == "" || root == workspace || rootArgPresent(args, root) {
 			continue
 		}
 		args = append(args, "--add-read-dir", root)
 	}
 	return args
+}
+
+// rootArgPresent reports whether args already pass root as --add-dir or
+// --add-read-dir.
+func rootArgPresent(args []string, root string) bool {
+	for index := 0; index+1 < len(args); index++ {
+		if (args[index] == "--add-dir" || args[index] == "--add-read-dir") && args[index+1] == root {
+			return true
+		}
+	}
+	return false
 }
 
 // extraWriteRoots reports the run's non-workspace roots, or none when the caller
@@ -729,6 +756,14 @@ func (executor Executor) extraWriteRoots(withinTurn bool) []string {
 		return nil
 	}
 	return executor.ExtraWriteRoots(withinTurn)
+}
+
+// extraReadRoots is extraWriteRoots for the read supplier: none when unwired.
+func (executor Executor) extraReadRoots(withinTurn bool) []string {
+	if executor.ExtraReadRoots == nil {
+		return nil
+	}
+	return executor.ExtraReadRoots(withinTurn)
 }
 
 func (executor Executor) BuildResumeArgs(input BuildResumeArgsInput) (BuildArgsResult, error) {
@@ -787,6 +822,9 @@ func (executor Executor) BuildResumeArgs(input BuildResumeArgsInput) (BuildArgsR
 	// confined more tightly than the task it resumes would fail on files it had
 	// already read.
 	args = appendExtraWriteRootArgs(args, executor.extraWriteRoots(input.WithinTurn), input.Cwd, executor.WorkspaceRoot)
+	// And the same READ grants, read-only: a resumed task must still be able to
+	// read the external path the fresh launch could.
+	args = appendReadOnlyRootArgs(args, executor.extraReadRoots(input.WithinTurn), input.Cwd)
 	return BuildArgsResult{Args: args, SessionID: sessionID, PromptFile: promptFile}, nil
 }
 

@@ -884,8 +884,10 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 			// The read counterpart: a request_permissions READ grant lands in the
 			// scope's readRoots, which ExtraRoots (write grants) does not return, so
 			// without this a plan auditing a granted path failed "outside the
-			// workspace" in every task. LIVE scope, read at dispatch, same as above.
-			ExtraReadRoots: scope.ExtraReadRoots,
+			// workspace" in every task. LIVE scope, read at dispatch, same as above,
+			// and handed to the executor too so an ordinary Task and a resume can
+			// read the same grant. Same withinTurn rule as the write roots.
+			ExtraReadRoots: func(withinTurn bool) []string { return childReadRoots(scope, withinTurn) },
 			ProbeModel:     planModelProber(workspaceRoot, resolved.Provider, deps.newProvider),
 			ProbeIdentity:  planModelProbeIdentity(workspaceRoot, resolved.Provider),
 			ModelPrefs:     planModelPreferences(resolved.Profiles.PlanModels),
@@ -1393,7 +1395,9 @@ type orchestrateWiring struct {
 	// granted external path instead of failing "outside the workspace". The read
 	// counterpart of ExtraWriteRoots: a read grant lands in a separate scope list
 	// that ExtraWriteRoots does not cover. nil means workspace-only reads.
-	ExtraReadRoots func() []string
+	// withinTurn: see specialist.Executor.ExtraReadRoots. It reaches both the
+	// executor (every Task, resume and plan task) and the orchestrate tool.
+	ExtraReadRoots func(withinTurn bool) []string
 	// ProbeModel proves a model will actually run before any task is assigned it.
 	// nil skips proving, which is what every plan did before this existed.
 	ProbeModel specialist.ModelProber
@@ -1457,6 +1461,20 @@ func wireChildRoots(executor *specialist.Executor, workspaceRoot string, wiring 
 	// The parent's own tree, so a child isolated in a worktree is never handed
 	// a write root that overlaps it (an ancestor --add-dir, say).
 	executor.WorkspaceRoot = workspaceRoot
+	// The run's READ grants, for every child and not only plan tasks: an
+	// ordinary Task or a resume must be able to read what the parent was just
+	// granted to read. Emitted by the executor as --add-read-dir only.
+	executor.ExtraReadRoots = wiring.ExtraReadRoots
+}
+
+// orchestrateReadRoots adapts the run's read supplier to the orchestrate tool,
+// which snapshots it when a plan starts. The plan tool has always passed every
+// live read grant, turn-scoped ones included, and that is unchanged here.
+func orchestrateReadRoots(supplier func(withinTurn bool) []string) func() []string {
+	if supplier == nil {
+		return nil
+	}
+	return func() []string { return supplier(true) }
 }
 
 // registerSpecialistTools registers the specialist, swarm and orchestrate tools.
@@ -1545,7 +1563,7 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, max
 		Isolate:            wiring.Isolate,
 		DiscoverModels:     wiring.DiscoverModels,
 		ContextWindows:     wiring.ContextWindows,
-		ExtraReadRoots:     wiring.ExtraReadRoots,
+		ExtraReadRoots:     orchestrateReadRoots(wiring.ExtraReadRoots),
 		ProbeModel:         wiring.ProbeModel,
 		ProbeIdentity:      wiring.ProbeIdentity,
 		ModelPrefs:         wiring.ModelPrefs,

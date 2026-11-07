@@ -87,3 +87,77 @@ func TestTheCLIExecutorWithholdsAnAncestorRootFromAnIsolatedChild(t *testing.T) 
 		t.Fatalf("an ordinary child lost the run's ancestor root: --add-dir %v", added)
 	}
 }
+
+// THE CLI EXECUTOR CARRIES THE RUN'S READ GRANTS to ordinary and resumed
+// children, read-only. The live read supplier was wired into the orchestrate
+// tool only, so a Task or a resume could not read what the parent was just
+// granted to read.
+func TestTheCLIExecutorPassesReadGrantsReadOnlyToTaskAndResume(t *testing.T) {
+	workspace, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope, err := sandbox.NewScope(workspace, nil)
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	// Outside the temp roots NewScope seeds as permanent WRITE roots, which
+	// would cover a t.TempDir() grant and record nothing.
+	readRoot, err := scope.AddRead(tempDirOutsideDefaultTemp(t))
+	if err != nil {
+		t.Fatalf("AddRead: %v", err)
+	}
+	executor := specialist.Executor{
+		NewSessionID: func() (string, error) { return "specialist_00000000000000000000000a", nil },
+	}
+	wireChildRoots(&executor, workspace, orchestrateWiring{
+		ExtraWriteRoots: func(withinTurn bool) []string { return childWriteRoots(scope, withinTurn) },
+		ExtraReadRoots:  func(withinTurn bool) []string { return childReadRoots(scope, withinTurn) },
+	})
+	manifest := specialist.Manifest{Metadata: specialist.Metadata{Name: "explorer"}}
+	fresh, err := executor.BuildArgs(specialist.BuildArgsInput{Manifest: manifest, Prompt: "p", Cwd: workspace, WithinTurn: true})
+	if err != nil {
+		t.Fatalf("BuildArgs: %v", err)
+	}
+	resumed, err := executor.BuildResumeArgs(specialist.BuildResumeArgsInput{
+		SessionID: "specialist_00000000000000000000000a", Manifest: manifest, Prompt: "p", Cwd: workspace, WithinTurn: true,
+	})
+	if err != nil {
+		t.Fatalf("BuildResumeArgs: %v", err)
+	}
+	for label, args := range map[string][]string{"fresh": fresh.Args, "resume": resumed.Args} {
+		if !containsValue(flagValues(args, "--add-read-dir"), readRoot) {
+			t.Errorf("%s: the read grant %q never reached the child as --add-read-dir: %v", label, readRoot, args)
+		}
+		if containsValue(flagValues(args, "--add-dir"), readRoot) {
+			t.Errorf("%s: the read grant %q was emitted as --add-dir — a read grant escalated to write", label, readRoot)
+		}
+	}
+}
+
+// childReadRoots applies the write side's lifetime rule: a turn-scoped read
+// grant only for a child that ends within the turn.
+func TestChildReadRootsWithholdATurnGrantFromAChildThatOutlivesTheTurn(t *testing.T) {
+	workspace, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope, err := sandbox.NewScope(workspace, nil)
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	root, release, err := scope.AddTemporaryRead(tempDirOutsideDefaultTemp(t))
+	if err != nil {
+		t.Fatalf("AddTemporaryRead: %v", err)
+	}
+	defer release()
+	if !containsValue(childReadRoots(scope, true), root) {
+		t.Fatalf("a child inside the turn lost the turn's read grant: %v", childReadRoots(scope, true))
+	}
+	if containsValue(childReadRoots(scope, false), root) {
+		t.Fatalf("a child that may outlive the turn was handed the turn-scoped read grant %q", root)
+	}
+	if childReadRoots(nil, true) != nil {
+		t.Fatal("a nil scope must yield no roots")
+	}
+}
