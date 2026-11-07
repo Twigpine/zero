@@ -313,6 +313,12 @@ func ParsePlan(args map[string]any, limits Limits) (Plan, error) {
 	}
 
 	seen := map[string]bool{}
+	// UNIQUE IGNORING CASE, too. A task id becomes the scratchpad filename, and
+	// on a case-insensitive filesystem "Alpha" and "alpha" are one file — one
+	// task's answer silently served as the other's. They would also read as the
+	// same task to a person scanning the event log or the plan panel, so the
+	// plan is refused rather than the ids quietly disambiguated.
+	folded := map[string]string{}
 	for index, raw := range rawTasks {
 		task, err := planTask(raw, index)
 		if err != nil {
@@ -321,7 +327,11 @@ func ParsePlan(args map[string]any, limits Limits) (Plan, error) {
 		if seen[task.ID] {
 			return Plan{}, fmt.Errorf("task id %q appears more than once; ids must be unique", task.ID)
 		}
+		if prior, clash := folded[strings.ToLower(task.ID)]; clash {
+			return Plan{}, fmt.Errorf("task ids %q and %q differ only in case; ids must be unique ignoring case", prior, task.ID)
+		}
 		seen[task.ID] = true
+		folded[strings.ToLower(task.ID)] = task.ID
 		if err := validateTaskTools(task, limits); err != nil {
 			return Plan{}, err
 		}
