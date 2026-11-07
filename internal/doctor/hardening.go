@@ -99,11 +99,77 @@ func windowsSandboxSetupCheck(goos string, backend sandbox.Backend, workspaceRoo
 		return &result
 	}
 	profile := sandbox.PermissionProfileFromPolicy(workspaceRoot, doctorSandboxPolicy(sandboxConfig), scope)
+	// A RECORDED ROOT IS HISTORY, NOT PROOF. Doctor pins the marker's runtime
+	// root so the stamp check can run without taking a lease, but a command does
+	// not pin blindly: it derives the current cache and fallback candidates and
+	// honours the marker only when its root is one of them. Run setup with the
+	// cache at A, relocate the cache so commands derive B, and the stamped A tree
+	// remains: pinning A here reported a healthy sandbox immediately before every
+	// real command rejected A and failed on the out-of-date marker.
+	//
+	// So ask the command's own question first, through the command's own
+	// function. Only a root a command would still select is used to validate
+	// the marker; anything else is reported as out of date, with the remedy.
+	//
+	// THREE STATES, NOT TWO. The helper answers current, stale, or "I could not
+	// tell", and the last one used to fall through to the pinned branch: a valid
+	// old marker then made doctor report healthy while selectSandboxRuntimeRoot,
+	// reached by BuildCommandPlan, propagated the same resolution error and stopped
+	// every command from launching. Historical state is not a substitute for a
+	// failed current selection, so an error is surfaced as its own warning with the
+	// cause, and the pinned validation profile is built only once currentness has
+	// actually been established.
+	recorded, current, rootErr := sandbox.WindowsSandboxRecordedRuntimeRootIsCurrent(sandboxHome, workspaceRoot)
+	if rootErr != nil {
+		result := check("sandbox.backend", "Sandbox backend", StatusWarn, fmt.Sprintf("Native sandbox backend %s is installed, but the runtime root a command would select cannot be resolved (%s), so the recorded setup cannot be trusted and commands are likely to fail to launch.", backend.Name, rootErr.Error()), map[string]any{
+			"backend":      string(backend.Name),
+			"platform":     goos,
+			"supportLevel": string(backend.SupportLevel()),
+			"setupStatus":  "runtime-root-unresolved",
+			"error":        rootErr.Error(),
+			"remedy":       "run `zero sandbox setup` to prepare the Windows native sandbox for the current cache location",
+		})
+		return &result
+	}
+	if recorded != "" && !current {
+		result := check("sandbox.backend", "Sandbox backend", StatusWarn, fmt.Sprintf("Native sandbox backend %s is installed, but the runtime root setup recorded (%s) is not one a command would select now, so the setup is out of date.", backend.Name, recorded), map[string]any{
+			"backend":      string(backend.Name),
+			"platform":     goos,
+			"supportLevel": string(backend.SupportLevel()),
+			"setupStatus":  "runtime-root-stale",
+			"runtimeRoot":  recorded,
+			"remedy":       "run `zero sandbox setup` to prepare the Windows native sandbox for the current cache location",
+		})
+		return &result
+	}
 	setupConfig := sandbox.WindowsSandboxSetupConfig{
-		SandboxHome:       sandboxHome,
-		CommandCWD:        workspaceRoot,
-		WorkspaceRoots:    []string{workspaceRoot},
-		PermissionProfile: profile,
+		SandboxHome:    sandboxHome,
+		CommandCWD:     workspaceRoot,
+		WorkspaceRoots: []string{workspaceRoot},
+		// The same augmentation setup and the command plan apply, so doctor
+		// fingerprints what a real command fingerprints. Checking the bare profile
+		// made doctor call a correctly prepared machine "out of date", which is the
+		// mismatch this pairing exists to close. Safe to resolve in this process:
+		// doctor runs in the operator's shell, not behind the sandbox TEMP
+		// redirection that stops the runner deriving these for itself.
+		//
+		// The RECORDED runtime root goes on the profile as well, because that is
+		// what makes the stamp check run at all. Without it profile.Runtime is nil,
+		// validateWindowsSandboxRuntimeStamp returns nil early, and doctor reported
+		// a healthy sandbox on a machine whose runtime tree had been evicted and
+		// silently recreated without the capability ACE -- precisely the state the
+		// stamp exists to catch, and the state where every sandboxed command then
+		// fails with nothing explaining why.
+		//
+		// Read from the marker rather than selected, so doctor takes no lease and
+		// creates nothing, and read ONCE: this is the root whose currentness was
+		// checked above, not a second read that a rewritten marker could change. A
+		// marker from an older schema records no root, which leaves this exactly as
+		// it was.
+		PermissionProfile: sandbox.WindowsSandboxProfileWithRuntimeRoots(
+			sandbox.PermissionProfileWithRuntimeRoot(profile, recorded),
+			[]string{workspaceRoot},
+		),
 	}
 	if err := sandbox.ValidateWindowsSandboxSetupMarker(setupConfig); err != nil {
 		result := check("sandbox.backend", "Sandbox backend", StatusWarn, fmt.Sprintf("Native sandbox backend %s is installed, but Windows sandbox setup is missing or out of date: %v.", backend.Name, err), map[string]any{

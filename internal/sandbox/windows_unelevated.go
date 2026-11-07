@@ -47,6 +47,11 @@ func WindowsUnelevatedSetupMarkerPath(sandboxHome string) string {
 // output later feeds the apply step, so the fingerprint and the applied grants
 // can never drift apart.
 func buildWindowsUnelevatedAppliedPlan(config WindowsSandboxCommandConfig) (WindowsUnelevatedAppliedPlan, WindowsACLPlan, error) {
+	// No provisioning here, deliberately. This tier applies a plan whose runtime
+	// write roots were derived and created by the PARENT, because this process runs
+	// re-exec'd with TEMP redirected into the runtime tree and would derive a
+	// different temp-side spelling than the one the plan names. See the note at the
+	// windowsSandboxProfileWithProvisionedRuntime call in BuildCommandPlan.
 	plan, err := BuildWindowsACLPlan(config)
 	if err != nil {
 		return WindowsUnelevatedAppliedPlan{}, WindowsACLPlan{}, err
