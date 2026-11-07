@@ -362,3 +362,59 @@ func TestRecordRefusesAnythingAlreadyAtTheDestination(t *testing.T) {
 	refuses("via_file")
 	assertUntouched(planted)
 }
+
+// THE PAD FOLLOWS THE BRIEFING. A failed task's output is a diagnostic or an
+// answer already judged wrong, and the briefing refuses to pass it on; writing
+// it to a directory every task can list handed it on anyway. Succeeded and
+// cancelled outputs — the ones the briefing does show — are still recorded.
+func TestAFailedTasksOutputIsNotRecordedToThePad(t *testing.T) {
+	plan := mustParsePlan(t, map[string]any{
+		"name": "mixed",
+		"tasks": []any{
+			map[string]any{"id": "good", "prompt": "a"},
+			map[string]any{"id": "broken", "prompt": "b"},
+			map[string]any{"id": "stopped", "prompt": "c"},
+			map[string]any{"id": "other", "prompt": "d"},
+		},
+		"budget": map[string]any{"max_workers": float64(1)},
+	}, Limits{MaxTasks: 20, ParentTools: PlanReadOnlyToolNames()})
+
+	var listed []string
+	var listErr error
+	run := func(_ context.Context, req PlanTaskRequest) (TaskResult, error) {
+		switch req.Task.ID {
+		case "good":
+			return TaskResult{Outcome: TaskSucceeded, Output: "a real finding"}, nil
+		case "broken":
+			return TaskResult{Outcome: TaskFailed, Output: "harness diagnostic, judged wrong", Err: "boom"}, nil
+		case "stopped":
+			return TaskResult{Outcome: TaskCancelled, Output: "partial evidence"}, nil
+		default:
+			// An unrelated task looks at what the pad holds while the plan runs.
+			if len(req.ReadRoots) != 1 {
+				listErr = os.ErrNotExist
+				break
+			}
+			var entries []os.DirEntry
+			entries, listErr = os.ReadDir(req.ReadRoots[0])
+			for _, entry := range entries {
+				listed = append(listed, entry.Name())
+			}
+		}
+		return TaskResult{Outcome: TaskSucceeded, Output: "done"}, nil
+	}
+	report := ExecutePlan(context.Background(), plan, PlanReadOnlyToolNames(), run, nil, WithScratchpad())
+	if report.Failed != 1 || report.Cancelled != 1 || report.Succeeded != 2 {
+		t.Fatalf("unexpected outcomes: %+v", report)
+	}
+	if listErr != nil {
+		t.Fatalf("could not list the pad: %v", listErr)
+	}
+	got := strings.Join(listed, ",")
+	if strings.Contains(got, "broken.md") {
+		t.Fatalf("a failed task's output reached the shared pad: %v", listed)
+	}
+	if !strings.Contains(got, "good.md") || !strings.Contains(got, "stopped.md") {
+		t.Fatalf("succeeded/cancelled outputs must still be recorded, pad holds %v", listed)
+	}
+}
