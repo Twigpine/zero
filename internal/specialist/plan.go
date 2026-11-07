@@ -5,6 +5,7 @@ import (
 	"math"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -706,19 +707,33 @@ func planBudget(args map[string]any, limits Limits) (Budget, error) {
 	if !ok {
 		return Budget{}, fmt.Errorf("plan requires a budget object with max_workers")
 	}
-	budget := Budget{
-		MaxWorkers:       planInt(raw, "max_workers"),
-		MaxTokens:        planInt(raw, "max_tokens"),
-		MaxTokensPerTask: planInt(raw, "max_tokens_per_task"),
+	// EVERY INTEGER FIELD IS DECODED ONCE, by planIntField, before any rule
+	// reads it. A present value that is not a whole number is refused here
+	// rather than truncated or read as absent: max_wall_seconds 0.9 truncated
+	// to 0 and disabled the wall bound, and max_tokens "500000" read as absent
+	// and erased the very spending limit it was sent to set.
+	ints := map[string]int{}
+	present := map[string]bool{}
+	for _, key := range planBudgetIntFields {
+		value, set, err := planIntField(raw, key)
+		if err != nil {
+			return Budget{}, fmt.Errorf("budget.%w", err)
+		}
+		ints[key], present[key] = value, set
 	}
-	// Rejected rather than read as "unset". planInt returns 0 for both an absent
-	// key and a present-but-negative one, so a bare `seconds > 0` let a
+	budget := Budget{
+		MaxWorkers:       ints["max_workers"],
+		MaxTokens:        ints["max_tokens"],
+		MaxTokensPerTask: ints["max_tokens_per_task"],
+	}
+	// Rejected rather than read as "unset". An absent key and a present-but-
+	// negative one both used to decode to 0, so a bare `seconds > 0` let a
 	// model-supplied -60 vanish and the plan run unbounded with no error. Every
 	// other numeric here refuses a negative — max_retries and max_tokens
 	// explicitly, max_stall_seconds even refuses positive values under its floor
 	// — so silently accepting this one was the odd case out, and the failure is
 	// the worst kind: a budget the caller asked for that is not applied.
-	if seconds, set := planIntSet(raw, "max_wall_seconds"); set {
+	if seconds, set := ints["max_wall_seconds"], present["max_wall_seconds"]; set {
 		if seconds < 0 {
 			return Budget{}, fmt.Errorf("budget.max_wall_seconds must not be negative; %d was requested", seconds)
 		}
@@ -729,7 +744,7 @@ func planBudget(args map[string]any, limits Limits) (Budget, error) {
 			budget.MaxWall = time.Duration(seconds) * time.Second
 		}
 	}
-	if seconds, set := planIntSet(raw, "max_stall_seconds"); set {
+	if seconds, set := ints["max_stall_seconds"], present["max_stall_seconds"]; set {
 		if seconds < 0 {
 			return Budget{}, fmt.Errorf("budget.max_stall_seconds must not be negative; %d was requested", seconds)
 		}
@@ -747,12 +762,12 @@ func planBudget(args map[string]any, limits Limits) (Budget, error) {
 		}
 	}
 	// max_retries needs PRESENCE, not a value: an explicit 0 means "do not retry
-	// this plan" and an absent key means "use the default", and planInt cannot
-	// tell them apart — it returns 0 for both. An unset value that reads as an
+	// this plan" and an absent key means "use the default", and the value alone
+	// cannot tell them apart — both are 0. An unset value that reads as an
 	// explicit one is invariant 2, the defect that made an empty tool grant
 	// expand to the full read-only category.
 	budget.MaxRetries = defaultPlanRetries
-	if retries, set := planIntSet(raw, "max_retries"); set {
+	if retries, set := ints["max_retries"], present["max_retries"]; set {
 		if retries < 0 || retries > maxPlanRetries {
 			return Budget{}, fmt.Errorf(
 				"budget.max_retries must be between 0 and %d; a task that stalls repeatedly is a provider or network condition, not something more attempts will fix",
@@ -954,15 +969,95 @@ func planStrings(args map[string]any, key string) []string {
 	return out
 }
 
-// planInt accepts the float64 a JSON number decodes to, as well as an int.
+// planBudgetIntFields is every integer-valued budget field. planBudget decodes
+// each through planIntField before applying any rule, so a field added here
+// cannot be read by a second, laxer conversion.
+var planBudgetIntFields = []string{
+	"max_workers",
+	"max_tokens",
+	"max_tokens_per_task",
+	"max_wall_seconds",
+	"max_stall_seconds",
+	"max_retries",
+}
+
+// planInt is planIntField for a reader that only needs a best-effort value
+// BEFORE admission (the verify stage sizes itself from the raw budget). An
+// absent or undecodable value reads as 0; ParsePlan, which decodes the same
+// field with the same function, still refuses the undecodable one.
 func planInt(args map[string]any, key string) int {
-	value, _ := planIntSet(args, key)
+	value, _, _ := planIntField(args, key)
 	return value
 }
 
-// planIntSet also reports whether the key was PRESENT, for the settings where
-// an explicit 0 and an absent key mean different things. planInt is this
-// function with the answer discarded, so the two can never decode differently.
+// planIntField is THE integer decoder for plan arguments. It reports the value,
+// whether the key was PRESENT (an explicit 0 and an absent key mean different
+// things for several budget fields), and an error for a present value that is
+// not a whole number.
+//
+// Accepted: an int, the float64 a JSON number decodes to when it is finite,
+// whole and representable, and a numeric STRING holding such a number. The
+// string case follows the repo's own tool-argument rule (intArg in
+// internal/tools/args.go: "Some models send numbers as strings"), because
+// nothing between the provider and this parser coerces arguments to the
+// declared schema, and reading "500000" as absent silently erased a spending
+// limit.
+//
+// Refused, never truncated or treated as absent: a fraction (0.9 would become
+// 0 and disable a bound; 1.9 workers would become 1), NaN, ±Inf, a value out
+// of int range, a non-numeric string, null, and any other type. Only omission
+// means omission.
+func planIntField(args map[string]any, key string) (int, bool, error) {
+	value, present := args[key]
+	if !present {
+		return 0, false, nil
+	}
+	invalid := func(got any) (int, bool, error) {
+		if got == nil {
+			return 0, false, fmt.Errorf("%s must be a whole number, got null; omit it to leave it unset", key)
+		}
+		return 0, false, fmt.Errorf("%s must be a whole number, got %v", key, got)
+	}
+	switch typed := value.(type) {
+	case int:
+		return typed, true, nil
+	case float64:
+		number, ok := planWholeFloat(typed)
+		if !ok {
+			return invalid(typed)
+		}
+		return number, true, nil
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if number, err := strconv.Atoi(trimmed); err == nil {
+			return number, true, nil
+		}
+		parsed, err := strconv.ParseFloat(trimmed, 64)
+		if err != nil {
+			return invalid(fmt.Sprintf("%q", typed))
+		}
+		number, ok := planWholeFloat(parsed)
+		if !ok {
+			return invalid(fmt.Sprintf("%q", typed))
+		}
+		return number, true, nil
+	default:
+		return invalid(value)
+	}
+}
+
+// planWholeFloat converts f to an int only when it is finite, integral and in
+// range, before any implementation-defined float-to-int conversion can run.
+// The upper comparison is >= because float64(math.MaxInt) rounds UP to 2^63,
+// which is itself out of range.
+func planWholeFloat(f float64) (int, bool) {
+	if math.IsNaN(f) || math.IsInf(f, 0) || math.Trunc(f) != f ||
+		f >= float64(math.MaxInt) || f < float64(math.MinInt) {
+		return 0, false
+	}
+	return int(f), true
+}
+
 // planBoolSet reports a boolean argument AND whether it was supplied at all.
 //
 // planBool cannot distinguish false from absent, which is fine when absent means
@@ -972,17 +1067,6 @@ func planInt(args map[string]any, key string) int {
 func planBoolSet(args map[string]any, key string) (bool, bool) {
 	value, ok := args[key].(bool)
 	return value, ok
-}
-
-func planIntSet(args map[string]any, key string) (int, bool) {
-	switch value := args[key].(type) {
-	case float64:
-		return int(value), true
-	case int:
-		return value, true
-	default:
-		return 0, false
-	}
 }
 
 // planBool reads a boolean argument. Absent, or any other type, is false — a
