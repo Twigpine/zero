@@ -501,3 +501,63 @@ func TestRunDetailsFileMouseBlockedBehindHigherPriorityOverlays(t *testing.T) {
 		}
 	})
 }
+
+// TestRunDetailsEnterBlockedWhenRunDetailsHidden pins the keyboard twin of the
+// mouse gate above: runDetailsOpen can outlive the visible overlay, and Enter
+// must not drill into a FILES row the user can no longer see.
+func TestRunDetailsEnterBlockedWhenRunDetailsHidden(t *testing.T) {
+	// setup returns a model with Run details visible and a FILES row selected
+	// that Enter would open (verified on a copy), so a later denial can only
+	// come from the visibility gate.
+	setup := func(t *testing.T, m model) (model, string) {
+		t.Helper()
+		m.transcript = append(m.transcript, transcriptRow{kind: rowToolResult, tool: "write_file", id: "f1",
+			status: tools.StatusOK, changedFiles: []string{"web/app.js"}})
+		m.runDetailsOpen = true
+		layout := m.runDetailsLayout(m.runDetailsInnerWidth())
+		if !m.runDetailsVisible() || len(layout.fileHits) == 0 {
+			t.Fatalf("precondition: Run details must be visible with FILES hits, visible=%v hits=%d", m.runDetailsVisible(), len(layout.fileHits))
+		}
+		path := layout.fileHits[0].path
+		m, _ = m.selectFile(path)
+		if m.selectedFile != path || m.fileView.active {
+			t.Fatalf("precondition: first activation must only select %q, got selected=%q fileView=%v", path, m.selectedFile, m.fileView.active)
+		}
+		control, _ := m.Update(testKey(tea.KeyEnter))
+		if fv := control.(model).fileView; !fv.active || fv.path != path {
+			t.Fatalf("precondition: Enter on visible Run details must open %q, got active=%v path=%q", path, fv.active, fv.path)
+		}
+		return m, path
+	}
+	assertEnterIgnored := func(t *testing.T, m model, path string) {
+		t.Helper()
+		if !m.runDetailsOpen || m.runDetailsVisible() {
+			t.Fatalf("expected runDetailsOpen=true with Run details hidden, got open=%v visible=%v", m.runDetailsOpen, m.runDetailsVisible())
+		}
+		updated, cmd := m.Update(testKey(tea.KeyEnter))
+		m = updated.(model)
+		if m.fileView.active || cmd != nil {
+			t.Fatalf("Enter behind hidden Run details opened %q: fileView.active=%v path=%q cmd=%v", path, m.fileView.active, m.fileView.path, cmd != nil)
+		}
+	}
+
+	t.Run("specialist_card_click_enters_subchat", func(t *testing.T) {
+		m, path := setup(t, specialistClickTestModel(t, "child-sess-1"))
+		x, y, ok := specialistCardClickPoint(m, 2)
+		if !ok {
+			t.Fatal("expected a specialist card selectable line in the layout")
+		}
+		updated, _ := m.Update(testMouseClick(tea.MouseLeft, x, y))
+		m = updated.(model)
+		if !m.subchat.active {
+			t.Fatal("clicking the specialist card beside Run details must enter the subchat")
+		}
+		assertEnterIgnored(t, m, path)
+	})
+
+	t.Run("detailed_transcript", func(t *testing.T) {
+		m, path := setup(t, filesPanelTestModel())
+		m.transcriptDetailed = true
+		assertEnterIgnored(t, m, path)
+	})
+}

@@ -1780,10 +1780,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.runDetailsOpen = false
 				return m, nil
 			}
-			if keyIs(msg, tea.KeyEnter) && m.selectedFile != "" {
-				overlayWidth := minInt(72, maxInt(40, m.width-8))
-				inner := maxInt(12, overlayWidth-4)
-				layout := m.runDetailsLayout(inner)
+			// Enter drills into the selected FILES row only while Run details is
+			// the overlay on screen, the same gate mouse picks use. The flag can
+			// outlive the visible overlay (e.g. a click entered a subchat).
+			if keyIs(msg, tea.KeyEnter) && m.selectedFile != "" && m.runDetailsVisible() {
+				layout := m.runDetailsLayout(m.runDetailsInnerWidth())
 				for _, h := range layout.fileHits {
 					if h.path == m.selectedFile {
 						return m.selectFile(m.selectedFile)
