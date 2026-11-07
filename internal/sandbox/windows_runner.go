@@ -173,6 +173,12 @@ type WindowsSandboxCommandConfig struct {
 	Env               map[string]string
 	SandboxLevel      WindowsSandboxLevel
 	Command           []string
+	// CallerSID names the Windows user whose sandbox principal this config plans
+	// against. Empty — the case for every ordinary command — means the process
+	// running it, which is already the invoking user. It is set only by the
+	// elevated setup half, which runs as somebody else under over-the-shoulder UAC
+	// and would otherwise provision an account the caller can never find.
+	CallerSID string
 }
 
 func BuildWindowsSandboxCommandArgs(options WindowsSandboxCommandArgsOptions) ([]string, error) {
@@ -340,15 +346,41 @@ func windowsRestrictedTokenCommandPlan(execRequest SandboxExecutionRequest, poli
 	level := WindowsSandboxLevelRestrictedToken
 	if execRequest.EnforcementLevel == EnforcementUnelevated {
 		level = WindowsSandboxLevelUnelevated
+		// THE UNELEVATED PLAN GRANTS BOTH RUNTIME CANDIDATES, SO BOTH HAVE TO EXIST.
+		// Elevated setup creates them before it applies; this tier has no setup
+		// step, and preparation below creates only the candidate this process
+		// selects. With a fresh usable cache the unused fallback was absent, the
+		// runner refused its own plan with "windows ACL target does not exist",
+		// and the command never launched, on every retry. Derived and created here
+		// in the parent, where TEMP is still the operator's: the runner's TEMP is
+		// already redirected into the runtime tree, so it cannot name the
+		// temp-derived candidate correctly itself.
+		if err := ensureMissingWindowsSandboxRuntimeCandidates([]string{execRequest.WorkspaceRoot}); err != nil {
+			return CommandPlan{}, err
+		}
 	}
 	args, err := BuildWindowsSandboxCommandArgs(WindowsSandboxCommandArgsOptions{
-		SandboxHome:       sandboxHome,
-		CommandCWD:        spec.Dir,
-		WorkspaceRoots:    []string{execRequest.WorkspaceRoot},
-		PermissionProfile: execRequest.PermissionProfile,
-		Env:               childEnv,
-		SandboxLevel:      level,
-		Command:           append([]string{spec.Name}, spec.Args...),
+		SandboxHome:    sandboxHome,
+		CommandCWD:     spec.Dir,
+		WorkspaceRoots: []string{execRequest.WorkspaceRoot},
+		// Augmented HERE, in the parent, because this is the last process whose
+		// TEMP is the operator's.
+		//
+		// The runner cannot derive the runtime candidates itself: the child env it
+		// runs with has TEMP and TMP pointed at the sandbox runtime temp, so
+		// os.TempDir() inside it returns the redirected value and the temp-derived
+		// candidate comes out rooted under the runtime tree instead of under the
+		// real temp. Setup, whose TEMP is untouched, derived the other spelling —
+		// same number of roots, different paths — and every command died on
+		// "permission roots or deny lists changed" with two 12-entry plans that
+		// disagreed.
+		PermissionProfile: windowsSandboxProfileWithRuntime(
+			execRequest.PermissionProfile,
+			[]string{execRequest.WorkspaceRoot},
+		),
+		Env:          childEnv,
+		SandboxLevel: level,
+		Command:      append([]string{spec.Name}, spec.Args...),
 	})
 	if err != nil {
 		return CommandPlan{}, err
@@ -448,6 +480,20 @@ type WindowsCapabilitySIDs struct {
 	// commands include it and are blocked; online (approved) commands omit it and
 	// reach the network — both still write-jailed by the capability SIDs.
 	Offline string `json:"offline,omitempty"`
+	// ReadAllow carries the principal's READ grants, and exists because a strict
+	// (non-WRITE_RESTRICTED) token runs the restricted-SID check over reads too.
+	//
+	// A profile with DenyRead drops WRITE_RESTRICTED, so every read has to satisfy
+	// the restricting set as well as the normal token. Read roots were granted
+	// only to the principal's own account SID, which the write jail deliberately
+	// keeps OUT of that set, so the normal check passed and the restricted check
+	// matched nothing: the whole disk became unreadable, down to the executable
+	// the command was trying to start.
+	//
+	// Synthetic and held by nobody. An ACE naming it grants access only to a token
+	// the sandbox itself composed, and restricting SIDs can only narrow a token,
+	// never widen it, so publishing this grant on the read roots hands out nothing.
+	ReadAllow string `json:"readAllow,omitempty"`
 }
 
 func ResolveWindowsSandboxHome(env map[string]string) (string, error) {
@@ -484,8 +530,13 @@ func LoadOrCreateWindowsCapabilitySIDs(sandboxHome string) (WindowsCapabilitySID
 			// Back-compat: an older (schema 1) file has no offline-marker SID.
 			// Mint one and persist so the setup helper and the runner agree on a
 			// single value for the WFP filter scope across processes.
-			if caps.Offline == "" {
-				caps.Offline = randomWindowsCapabilitySID()
+			if caps.Offline == "" || caps.ReadAllow == "" {
+				if caps.Offline == "" {
+					caps.Offline = randomWindowsCapabilitySID()
+				}
+				if caps.ReadAllow == "" {
+					caps.ReadAllow = randomWindowsCapabilitySID()
+				}
 				caps.SchemaVersion = windowsCapabilitySIDSchemaVersion
 				if err := saveWindowsCapabilitySIDs(path, caps); err != nil {
 					return WindowsCapabilitySIDs{}, err
@@ -500,6 +551,7 @@ func LoadOrCreateWindowsCapabilitySIDs(sandboxHome string) (WindowsCapabilitySID
 		SchemaVersion:      windowsCapabilitySIDSchemaVersion,
 		ReadOnly:           randomWindowsCapabilitySID(),
 		Offline:            randomWindowsCapabilitySID(),
+		ReadAllow:          randomWindowsCapabilitySID(),
 		WorkspaceByRoot:    map[string]string{},
 		WritableRootByPath: map[string]string{},
 	}
@@ -691,4 +743,20 @@ func randomWindowsCapabilitySID() string {
 		}
 	}
 	return fmt.Sprintf("S-1-5-21-%d-%d-%d-%d", words[0], words[1], words[2], words[3])
+}
+
+// WindowsReadAllowSID returns the sandbox home's read-capability SID, minting and
+// persisting it on first use. Both halves of the setup protocol ask for it: the
+// capability ACL plan grants it on every read root, and the principal's strict
+// token carries it as a restricting SID, so the read allow-list and the
+// restriction come from one value instead of two that can drift.
+func WindowsReadAllowSID(sandboxHome string) (string, error) {
+	caps, err := LoadOrCreateWindowsCapabilitySIDs(sandboxHome)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(caps.ReadAllow) == "" {
+		return "", errors.New("windows sandbox read-capability SID is missing")
+	}
+	return caps.ReadAllow, nil
 }

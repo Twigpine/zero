@@ -158,7 +158,7 @@ func New(options Options) (*Service, error) {
 }
 
 // canonicalRuntimePath normalizes aliases in the existing prefix. It does not
-// establish a security boundary; ensurePrivateDir validates that boundary when
+// establish a security boundary; EnsurePrivateDir validates that boundary when
 // the service starts.
 func canonicalRuntimePath(path string) (string, error) {
 	missing := make([]string, 0, 4)
@@ -219,10 +219,10 @@ func (service *Service) Start(handler Handler) error {
 	if service.closed {
 		return errors.New("peer messaging: service is closed")
 	}
-	if err := ensurePrivateDir(service.root); err != nil {
+	if err := EnsurePrivateDir(service.root); err != nil {
 		return fmt.Errorf("peer messaging: create runtime directory: %w", err)
 	}
-	if err := ensurePrivateDir(service.registryDir()); err != nil {
+	if err := EnsurePrivateDir(service.registryDir()); err != nil {
 		return fmt.Errorf("peer messaging: create registry: %w", err)
 	}
 	endpoint, err := service.transport.Endpoint(service.root, service.nonce, service.pid)
