@@ -1442,6 +1442,19 @@ func planParentTools(registry *tools.Registry, enabledTools, disabledTools []str
 	return grant
 }
 
+// wireChildRoots gives the executor what every child it launches (Task, resume,
+// swarm member, plan task) may inherit from this run's sandbox scope.
+func wireChildRoots(executor *specialist.Executor, workspaceRoot string, wiring orchestrateWiring) {
+	// The run's own roots, read at every launch. Without this a child is
+	// confined more tightly than its parent: a run granted a directory
+	// outside its workspace could create and populate it, then watch every
+	// plan task be refused at that same directory.
+	executor.ExtraWriteRoots = wiring.ExtraWriteRoots
+	// The parent's own tree, so a child isolated in a worktree is never handed
+	// a write root that overlaps it (an ancestor --add-dir, say).
+	executor.WorkspaceRoot = workspaceRoot
+}
+
 // registerSpecialistTools registers the specialist, swarm and orchestrate tools.
 // The wiring argument carries what the orchestrate tool needs; a zero value
 // leaves it registered but permanently off, which is the posture-off behaviour.
@@ -1468,11 +1481,6 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, max
 		// Dispatches specialistStart/specialistStop hooks once the session's
 		// hook dispatcher is attached (attachLifecycleHooks).
 		LifecycleHooks: lifecycleHooks,
-		// The run's own roots, read at every launch. Without this a child is
-		// confined more tightly than its parent: a run granted a directory
-		// outside its workspace could create and populate it, then watch every
-		// plan task be refused at that same directory.
-		ExtraWriteRoots: wiring.ExtraWriteRoots,
 		// So a delegated Task that names no model is routed to a role-appropriate
 		// pin under the zeromaxing posture, the same way a plan task is. Off unless
 		// the posture is active and auto-assign is configured. The discoverer is
@@ -1484,6 +1492,7 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, max
 		DiscoverModels: wiring.DiscoverModels,
 		ServeCache:     &specialist.ModelServeCache{},
 	}
+	wireChildRoots(&executor, workspaceRoot, wiring)
 	runtime, err := specialist.RegisterTools(registry, executor)
 	if err != nil {
 		return nil, err
