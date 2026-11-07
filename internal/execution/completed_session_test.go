@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -197,5 +198,117 @@ func TestASessionNobodyPolledIsStillAnswerable(t *testing.T) {
 	}
 	if result.ExitCode != 3 {
 		t.Errorf("exit code = %d, want 3", result.ExitCode)
+	}
+}
+
+// manualExpiry captures the expiry each completed record schedules so a test can
+// fire it at a chosen moment instead of sleeping past a real deadline.
+type manualExpiry struct {
+	mu     sync.Mutex
+	delays []time.Duration
+	fires  []func()
+}
+
+func installManualExpiry(manager *ProcessManager) *manualExpiry {
+	expiry := &manualExpiry{}
+	manager.afterFunc = func(delay time.Duration, fire func()) {
+		expiry.mu.Lock()
+		defer expiry.mu.Unlock()
+		expiry.delays = append(expiry.delays, delay)
+		expiry.fires = append(expiry.fires, fire)
+	}
+	return expiry
+}
+
+func (expiry *manualExpiry) fire(t *testing.T, index int) {
+	t.Helper()
+	expiry.mu.Lock()
+	if index >= len(expiry.fires) {
+		expiry.mu.Unlock()
+		t.Fatalf("expiry %d was never scheduled; %d scheduled", index, len(expiry.fires))
+	}
+	fire := expiry.fires[index]
+	expiry.mu.Unlock()
+	fire()
+}
+
+// RETENTION IS A PROMISE IN BOTH DIRECTIONS. A late poll inside the window gets
+// the result; once the window ends the record, with its output, request, and
+// enforcement evidence, is gone rather than surviving until 64 newer
+// completions happen to push it out.
+func TestACompletedRecordExpiresWhenItsRetentionEnds(t *testing.T) {
+	const retention = 50 * time.Millisecond
+	manager := NewProcessManager(ProcessManagerOptions{CompletedRetention: retention})
+	expiry := installManualExpiry(manager)
+	manager.remember(ProcessResult{ProcessID: 1001, Exited: true, Output: "FINAL"})
+
+	if len(expiry.delays) != 1 || expiry.delays[0] != retention {
+		t.Fatalf("scheduled expiries = %v, want one after the configured %s", expiry.delays, retention)
+	}
+	before, err := manager.Continue(t.Context(), ProcessContinue{ProcessID: 1001})
+	if err != nil || before.Output != "FINAL" {
+		t.Fatalf("late poll before expiry = %+v, %v; want the remembered result", before, err)
+	}
+
+	expiry.fire(t, 0)
+	if _, err := manager.Continue(t.Context(), ProcessContinue{ProcessID: 1001}); err != ErrProcessNotFound {
+		t.Fatalf("late poll after expiry returned %v, want ErrProcessNotFound", err)
+	}
+	if _, ok := manager.Snapshot(1001); ok {
+		t.Fatal("snapshot still answers an expired record")
+	}
+	if len(manager.completed) != 0 || len(manager.completedOrder) != 0 {
+		t.Fatalf("expired record left state behind: completed=%d order=%v", len(manager.completed), manager.completedOrder)
+	}
+}
+
+// An expiry belongs to the publication that scheduled it. A timer for a record
+// the count bound already evicted must not remove a later record stored under
+// the same id.
+func TestAStaleExpiryDoesNotRemoveAReplacementRecord(t *testing.T) {
+	manager := NewProcessManager(ProcessManagerOptions{CompletedRetention: time.Minute})
+	expiry := installManualExpiry(manager)
+	manager.remember(ProcessResult{ProcessID: 1000, Exited: true, Output: "first"})
+	for i := 1; i <= maxRememberedCompletions; i++ {
+		manager.remember(ProcessResult{ProcessID: 5000 + i, Exited: true})
+	}
+	if _, ok := manager.Completed(1000); ok {
+		t.Fatal("the count bound did not evict the oldest record")
+	}
+	manager.remember(ProcessResult{ProcessID: 1000, Exited: true, Output: "replacement"})
+
+	expiry.fire(t, 0) // the evicted publication's timer
+	got, ok := manager.Completed(1000)
+	if !ok || got.Output != "replacement" {
+		t.Fatalf("stale expiry removed the replacement record: %+v, %v", got, ok)
+	}
+}
+
+// Expiry and the count bound are independent: expiring one record frees its
+// slot, so the bound does not then evict a record that is still in its window.
+func TestExpiryAndTheCountBoundStayIndependent(t *testing.T) {
+	manager := NewProcessManager(ProcessManagerOptions{CompletedRetention: time.Minute})
+	expiry := installManualExpiry(manager)
+	for i := 0; i < maxRememberedCompletions; i++ {
+		manager.remember(ProcessResult{ProcessID: 1000 + i, Exited: true})
+	}
+	expiry.fire(t, 10) // record 1010's own window ends
+	if _, ok := manager.Completed(1010); ok {
+		t.Fatal("record 1010 survived its expiry")
+	}
+	manager.remember(ProcessResult{ProcessID: 2000, Exited: true})
+	if _, ok := manager.Completed(1000); !ok {
+		t.Fatal("the count bound evicted the oldest record although expiry had already freed a slot")
+	}
+	if got := len(manager.completed); got != maxRememberedCompletions {
+		t.Fatalf("kept %d records, want %d", got, maxRememberedCompletions)
+	}
+
+	manager.remember(ProcessResult{ProcessID: 2001, Exited: true})
+	if _, ok := manager.Completed(1000); ok {
+		t.Fatal("the count bound stopped evicting oldest-first after an expiry")
+	}
+	if _, ok := manager.Completed(2001); !ok {
+		t.Fatal("the newest record was dropped")
 	}
 }

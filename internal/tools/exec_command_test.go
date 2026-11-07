@@ -420,9 +420,13 @@ func parseListeningAddress(output string) string {
 	return ""
 }
 
+// The production write_stdin path honours completed-result retention in both
+// directions: a re-poll after the session was reaped is answered from the
+// completed store inside the window, and refused once the window ends.
 func TestWriteStdinReturnsAReapedSessionThroughTheCompletedStore(t *testing.T) {
 	root := execTestRoot(t)
-	manager := execution.NewProcessManager(execution.ProcessManagerOptions{CompletedRetention: 10 * time.Millisecond})
+	const retention = time.Second
+	manager := execution.NewProcessManager(execution.ProcessManagerOptions{CompletedRetention: retention})
 	execTool := NewScopedExecCommandTool(root, nil, manager)
 	writeTool := NewWriteStdinTool(manager)
 
@@ -438,12 +442,15 @@ func TestWriteStdinReturnsAReapedSessionThroughTheCompletedStore(t *testing.T) {
 		t.Fatalf("session_id is not numeric: %v", err)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
-	for manager.Len() != 0 {
-		if time.Now().After(deadline) {
-			t.Fatalf("session %d was not reaped; manager has %d sessions", sessionID, manager.Len())
-		}
-		time.Sleep(10 * time.Millisecond)
+	finished := writeTool.Run(context.Background(), map[string]any{
+		"session_id":    sessionID,
+		"yield_time_ms": 5000,
+	})
+	if finished.Status != StatusOK || finished.Meta["exit_code"] != "0" {
+		t.Fatalf("poll did not observe the exit: status=%s meta=%#v output=%q", finished.Status, finished.Meta, finished.Output)
+	}
+	if manager.Len() != 0 {
+		t.Fatalf("session %d was not reaped after its exit was observed; manager has %d sessions", sessionID, manager.Len())
 	}
 
 	late := writeTool.Run(context.Background(), map[string]any{
@@ -461,6 +468,23 @@ func TestWriteStdinReturnsAReapedSessionThroughTheCompletedStore(t *testing.T) {
 	}
 	if late.ExecutionRequest == nil || late.ExecutionRequest.WorkingDirectory != canonicalRoot || len(late.ExecutionRequest.WorkspaceRoots) != 1 || late.ExecutionRequest.WorkspaceRoots[0] != canonicalRoot {
 		t.Fatalf("late result lost its execution request: %#v", late.ExecutionRequest)
+	}
+
+	deadline := time.Now().Add(retention + 5*time.Second)
+	for {
+		if _, remembered := manager.Completed(sessionID); !remembered {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("session %d is still answerable %s after its %s retention ended", sessionID, 5*time.Second, retention)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	expired := writeTool.Run(context.Background(), map[string]any{
+		"session_id": sessionID,
+	})
+	if expired.Status != StatusError || expired.Output != UnknownExecSessionError(sessionID) {
+		t.Fatalf("write_stdin after retention = status %s output %q; want the unknown-session error", expired.Status, expired.Output)
 	}
 }
 
