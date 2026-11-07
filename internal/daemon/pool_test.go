@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -41,6 +42,10 @@ type fakeWorker struct {
 	exitCode int
 	killed   int32
 	waitCh   chan struct{} // when non-nil, Wait blocks until closed (drain tests)
+	killCh   chan struct{} // when non-nil, Kill signals before any blocked Wait returns
+	// waitAfterKill keeps Wait blocked after Kill so drain tests can prove the
+	// pool waits for reaping rather than merely dispatching a kill signal.
+	waitAfterKill bool
 }
 
 func (w *fakeWorker) Stdout() Lines { return &fakeLines{lines: w.out, err: w.outErr} }
@@ -52,7 +57,14 @@ func (w *fakeWorker) Wait() (int, error) {
 }
 func (w *fakeWorker) Kill() error {
 	atomic.StoreInt32(&w.killed, 1)
-	if w.waitCh != nil {
+	if w.killCh != nil {
+		select {
+		case <-w.killCh:
+		default:
+			close(w.killCh)
+		}
+	}
+	if w.waitCh != nil && !w.waitAfterKill {
 		select {
 		case <-w.waitCh:
 		default:
@@ -256,7 +268,8 @@ func TestPoolDrainKillsStraggler(t *testing.T) {
 		_, _ = pool.Run(context.Background(), WorkerSpec{Session: "a"}, &collectSink{})
 		close(runDone)
 	}()
-	testutil.WaitFor(t, "queue depth 1", func() bool { return pool.QueueDepth() == 1 })
+	// Wait until the worker is tracked; Drain reads the active set, not slot occupancy.
+	testutil.WaitFor(t, "worker tracked", func() bool { return len(pool.WorkerStats()) == 1 })
 
 	pool.Drain() // KillTimeout elapses, straggler is force-killed
 	if atomic.LoadInt32(&straggler.killed) != 1 {
@@ -271,6 +284,182 @@ func TestPoolDrainKillsStraggler(t *testing.T) {
 	// A new Run after drain is refused.
 	if _, err := pool.Run(context.Background(), WorkerSpec{Session: "b"}, &collectSink{}); !errors.Is(err, ErrPoolDraining) {
 		t.Fatalf("Run after drain err = %v, want ErrPoolDraining", err)
+	}
+}
+
+func TestPoolDrainKillsWorkerLaunchedAfterDrainStarts(t *testing.T) {
+	launchStarted := make(chan struct{})
+	releaseLaunch := make(chan struct{})
+	releaseWait := make(chan struct{})
+	straggler := &fakeWorker{pid: 1, waitCh: releaseWait, killCh: make(chan struct{}), waitAfterKill: true}
+	pool, _ := NewPool(PoolOptions{Size: 1, MaxAttempts: 1, KillTimeout: 2 * time.Second, Backoff: func(int) time.Duration { return 0 }, Launcher: func(context.Context, WorkerSpec) (WorkerHandle, error) {
+		close(launchStarted)
+		<-releaseLaunch
+		return straggler, nil
+	}})
+	runResult := make(chan error, 1)
+	go func() {
+		_, err := pool.Run(context.Background(), WorkerSpec{Session: "a"}, &collectSink{})
+		runResult <- err
+	}()
+	select {
+	case <-launchStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not start the launcher")
+	}
+	drained := make(chan struct{})
+	go func() { pool.Drain(); close(drained) }()
+	testutil.WaitFor(t, "pool draining", pool.isDraining)
+	select {
+	case <-drained:
+		t.Fatal("Drain returned while a launcher was still in progress")
+	default:
+	}
+	close(releaseLaunch)
+	select {
+	case <-straggler.killCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Drain did not kill the worker launched after draining began")
+	}
+	select {
+	case <-drained:
+		t.Fatal("Drain returned before the late worker was reaped")
+	default:
+	}
+	close(releaseWait)
+	select {
+	case <-drained:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Drain did not finish")
+	}
+	select {
+	case err := <-runResult:
+		if !errors.Is(err, ErrPoolDraining) {
+			t.Fatalf("Run error = %v, want ErrPoolDraining", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not finish after Drain")
+	}
+	if atomic.LoadInt32(&straggler.killed) != 1 {
+		t.Fatal("Drain must kill a worker whose launch completed after draining began")
+	}
+}
+
+func TestPoolDrainBoundsBlockedLauncher(t *testing.T) {
+	const killTimeout = 100 * time.Millisecond
+	launchStarted := make(chan struct{})
+	releaseLaunch := make(chan struct{})
+	lateWorker := &fakeWorker{pid: 1}
+	pool, err := NewPool(PoolOptions{
+		Size:        1,
+		MaxAttempts: 1,
+		KillTimeout: killTimeout,
+		Backoff:     func(int) time.Duration { return 0 },
+		Launcher: func(context.Context, WorkerSpec) (WorkerHandle, error) {
+			close(launchStarted)
+			<-releaseLaunch
+			return lateWorker, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+	runResult := make(chan error, 1)
+	go func() {
+		_, err := pool.Run(context.Background(), WorkerSpec{Session: "a"}, &collectSink{})
+		runResult <- err
+	}()
+	select {
+	case <-launchStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not start the launcher")
+	}
+	drainElapsed := make(chan time.Duration, 1)
+	go func() {
+		start := time.Now()
+		pool.Drain()
+		drainElapsed <- time.Since(start)
+	}()
+	// The first timeout accounts for the launch in progress. The second, separate
+	// timeout is what keeps Drain bounded once no handle exists to kill yet.
+	select {
+	case elapsed := <-drainElapsed:
+		if elapsed < 2*killTimeout {
+			t.Fatalf("Drain returned after %s, want at least both bounded waits (%s)", elapsed, 2*killTimeout)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Drain did not return after the bounded blocked-launch wait")
+	}
+	close(releaseLaunch)
+	select {
+	case err := <-runResult:
+		if !errors.Is(err, ErrPoolDraining) {
+			t.Fatalf("Run error = %v, want ErrPoolDraining", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not finish after releasing the blocked launcher")
+	}
+	if atomic.LoadInt32(&lateWorker.killed) != 1 {
+		t.Fatal("late worker was not killed after the bounded Drain return")
+	}
+}
+
+func TestPoolDrainInterruptsRetryDelays(t *testing.T) {
+	cases := []struct {
+		name        string
+		exitCode    int
+		maxAttempts int
+	}{
+		{name: "backoff", exitCode: 1, maxAttempts: 2},
+		{name: "tempfail", exitCode: ExitTempfail, maxAttempts: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			delaying := make(chan struct{})
+			pool, err := NewPool(PoolOptions{
+				Size:          1,
+				MaxAttempts:   tc.maxAttempts,
+				KillTimeout:   time.Second,
+				TempfailDelay: time.Hour,
+				Backoff: func(int) time.Duration {
+					return time.Hour
+				},
+				Log: func(message string) {
+					if strings.Contains(message, "retry after") || strings.Contains(message, "restart") {
+						select {
+						case <-delaying:
+						default:
+							close(delaying)
+						}
+					}
+				},
+				Launcher: func(context.Context, WorkerSpec) (WorkerHandle, error) {
+					return &fakeWorker{pid: 1, exitCode: tc.exitCode}, nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("NewPool: %v", err)
+			}
+			result := make(chan error, 1)
+			go func() {
+				_, err := pool.Run(context.Background(), WorkerSpec{Session: "a"}, &collectSink{})
+				result <- err
+			}()
+			select {
+			case <-delaying:
+			case <-time.After(2 * time.Second):
+				t.Fatal("Run did not enter the retry delay")
+			}
+			pool.Drain()
+			select {
+			case err := <-result:
+				if !errors.Is(err, ErrPoolDraining) {
+					t.Fatalf("Run error = %v, want ErrPoolDraining", err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("Run remained in retry delay after Drain")
+			}
+		})
 	}
 }
 
@@ -289,5 +478,71 @@ func TestPoolRunSurfacesStdoutReadError(t *testing.T) {
 	}
 	if atomic.LoadInt32(&w.killed) != 1 {
 		t.Error("the worker should be killed on a read error to avoid a pipe-block hang")
+	}
+}
+
+// Drain must preserve work that finished cleanly, while failed or killed workers
+// still report shutdown rather than a retryable or permanent worker failure.
+func TestPoolDrainClassifiesCompletedWorker(t *testing.T) {
+	for _, code := range []int{0, -1, ExitPermanent} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			releaseWait := make(chan struct{})
+			release := sync.OnceFunc(func() { close(releaseWait) })
+			worker := &fakeWorker{pid: 1, exitCode: code, waitCh: releaseWait}
+			launcher, _ := seqLauncher(worker)
+			pool, err := NewPool(PoolOptions{Size: 1, Launcher: launcher})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { release(); pool.Drain() })
+			result := make(chan error, 1)
+			go func() {
+				_, err := pool.Run(context.Background(), WorkerSpec{Session: "a"}, nil)
+				result <- err
+			}()
+			testutil.WaitFor(t, "worker tracked", func() bool { return len(pool.WorkerStats()) == 1 })
+			pool.beginDrain()
+			release()
+			select {
+			case err := <-result:
+				if code == 0 && err != nil {
+					t.Fatalf("completed worker error = %v, want nil", err)
+				}
+				if code != 0 && !errors.Is(err, ErrPoolDraining) {
+					t.Fatalf("failed worker error = %v, want ErrPoolDraining", err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("Run did not finish after worker exit")
+			}
+		})
+	}
+}
+
+func TestPoolDrainDuringFinalTempfailDelay(t *testing.T) {
+	// An expired timer and the drain channel may both be ready. Exercise both
+	// select outcomes: exhausting the last attempt must not turn drain permanent.
+	for iteration := 0; iteration < 100; iteration++ {
+		var pool *Pool
+		launcher, calls := seqLauncher(&fakeWorker{pid: 1, exitCode: ExitTempfail})
+		var err error
+		pool, err = NewPool(PoolOptions{
+			Size: 1, Launcher: launcher, MaxAttempts: 1, TempfailDelay: time.Nanosecond,
+			Log: func(message string) {
+				if strings.Contains(message, "retry after") {
+					pool.beginDrain()
+				}
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = pool.Run(context.Background(), WorkerSpec{Session: "a"}, nil)
+		pool.Drain()
+		if !errors.Is(err, ErrPoolDraining) {
+			t.Fatalf("iteration %d: Run error = %v, want ErrPoolDraining", iteration, err)
+		}
+		if atomic.LoadInt32(calls) != 1 {
+			t.Fatal("Run retried after drain began")
+		}
 	}
 }
