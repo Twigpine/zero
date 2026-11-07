@@ -88,6 +88,26 @@ func (s *Scope) SessionExtraRoots() []string {
 	return roots
 }
 
+// SessionExtraReadRoots is ExtraReadRoots without the turn-scoped grants, read
+// or write: what a child that may outlive the current turn may be handed to
+// READ. The read counterpart of SessionExtraRoots, for the same reason.
+func (s *Scope) SessionExtraReadRoots() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	roots := make([]string, 0, len(s.extraRoots)+len(s.readRoots))
+	for _, root := range s.extraRoots {
+		if !s.temporaryWriteLocked(root) {
+			roots = append(roots, root)
+		}
+	}
+	for _, root := range s.readRoots {
+		if !s.temporaryReadLocked(root) {
+			roots = append(roots, root)
+		}
+	}
+	return dedupeScopeRoots(roots)
+}
+
 // Roots returns the workspace root first, then the extra roots, as a copy.
 func (s *Scope) Roots() []string {
 	s.mu.RLock()

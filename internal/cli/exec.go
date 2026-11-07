@@ -340,11 +340,8 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 				// separate scope list the write roots above do not cover, so without
 				// this a plan auditing a granted path fails "outside the workspace" in
 				// every task. Same live-scope closure, same reason.
-				ExtraReadRoots: func() []string {
-					if execScope == nil {
-						return nil
-					}
-					return execScope.ExtraReadRoots()
+				ExtraReadRoots: func(withinTurn bool) []string {
+					return childReadRoots(execScope, withinTurn)
 				},
 				// Proves a model will actually run before a task is assigned it,
 				// so the plan never dispatches onto something the provider only
@@ -1762,4 +1759,18 @@ func childWriteRoots(scope *sandbox.Scope, withinTurn bool) []string {
 		return scope.ExtraRoots()
 	}
 	return scope.SessionExtraRoots()
+}
+
+// childReadRoots is childWriteRoots for READ grants: every path the run may
+// read beyond its workspace (write roots included, since they confer read),
+// turn-scoped grants only for a child that ends within the turn. The executor
+// emits these as --add-read-dir only.
+func childReadRoots(scope *sandbox.Scope, withinTurn bool) []string {
+	if scope == nil {
+		return nil
+	}
+	if withinTurn {
+		return scope.ExtraReadRoots()
+	}
+	return scope.SessionExtraReadRoots()
 }
