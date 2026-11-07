@@ -65,8 +65,14 @@ type ProcessManagerOptions struct {
 // UnknownExecSessionError — which tells the caller not to probe ids, having just
 // handed it that id and instructed it to poll. The result is a re-run of work
 // already done.
+//
+// THE RECORD OWNS ITS OWN EXPIRY. It is published once, by remember, and the
+// same call schedules its removal after completedRetention. The generation
+// stamps which publication a timer belongs to, so a timer can only remove the
+// record it was scheduled for, never a later record stored under the same id.
 type completedProcess struct {
-	result ProcessResult
+	result     ProcessResult
+	generation uint64
 }
 
 type ProcessManager struct {
@@ -79,8 +85,12 @@ type ProcessManager struct {
 	startTransport     processTransportStarter
 	// completed remembers finished sessions after their process is evicted, in
 	// arrival order so the oldest is dropped first.
-	completed      map[int]completedProcess
-	completedOrder []int
+	completed           map[int]completedProcess
+	completedOrder      []int
+	completedGeneration uint64
+	// afterFunc schedules a completed record's expiry. Tests replace it to
+	// fire expiry deterministically; production uses time.AfterFunc.
+	afterFunc func(time.Duration, func())
 }
 
 type ProcessStart struct {
@@ -149,6 +159,7 @@ func NewProcessManager(options ProcessManagerOptions) *ProcessManager {
 		completedRetention: retention,
 		maxProcesses:       maxProcesses,
 		startTransport:     startProcessTransport,
+		afterFunc:          func(delay time.Duration, expire func()) { time.AfterFunc(delay, expire) },
 	}
 }
 
@@ -418,23 +429,50 @@ func (manager *ProcessManager) Remove(id int) {
 }
 
 // remember records a finished session so a late poll gets its result rather than
-// an error telling it not to probe ids.
+// an error telling it not to probe ids. The record lives for completedRetention
+// from its publication, or until the count bound evicts it, whichever is first.
 func (manager *ProcessManager) remember(result ProcessResult) {
 	if !result.Exited || result.ProcessID == 0 {
 		return
 	}
 	manager.mu.Lock()
-	defer manager.mu.Unlock()
 	if _, seen := manager.completed[result.ProcessID]; seen {
+		manager.mu.Unlock()
 		return
-	} else {
-		manager.completedOrder = append(manager.completedOrder, result.ProcessID)
-		for len(manager.completedOrder) > maxRememberedCompletions {
-			delete(manager.completed, manager.completedOrder[0])
-			manager.completedOrder = manager.completedOrder[1:]
+	}
+	manager.completedOrder = append(manager.completedOrder, result.ProcessID)
+	for len(manager.completedOrder) > maxRememberedCompletions {
+		delete(manager.completed, manager.completedOrder[0])
+		manager.completedOrder = manager.completedOrder[1:]
+	}
+	manager.completedGeneration++
+	generation := manager.completedGeneration
+	manager.completed[result.ProcessID] = completedProcess{result: cloneProcessResult(result), generation: generation}
+	afterFunc := manager.afterFunc
+	manager.mu.Unlock()
+	// Scheduled only after the record is published, so expiry can never run
+	// ahead of the publication it removes.
+	id := result.ProcessID
+	afterFunc(max(manager.completedRetention, 0), func() { manager.expireCompleted(id, generation) })
+}
+
+// expireCompleted removes the completed record for id only when it is still the
+// publication the expiring timer was scheduled for. A record already evicted by
+// the count bound, or replaced by a later publication, is left alone.
+func (manager *ProcessManager) expireCompleted(id int, generation uint64) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	record, ok := manager.completed[id]
+	if !ok || record.generation != generation {
+		return
+	}
+	delete(manager.completed, id)
+	for index, ordered := range manager.completedOrder {
+		if ordered == id {
+			manager.completedOrder = append(manager.completedOrder[:index], manager.completedOrder[index+1:]...)
+			break
 		}
 	}
-	manager.completed[result.ProcessID] = completedProcess{result: cloneProcessResult(result)}
 }
 
 // Completed reports a finished session's result when the id ran in this process
