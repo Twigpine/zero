@@ -49,7 +49,7 @@ const taskSuiteOutput = `{"Action":"pass","Package":"github.com/x/y","Test":"Tes
 // invents was caught by neither — which is the gap this closes. The child's tool
 // results do stream to the parent, which is what makes the check possible.
 func TestATaskReportingAFigureItsCommandsContradictIsFlagged(t *testing.T) {
-	run := childRunner(t, taskSuiteOutput, "TestChattyChild took 4.20s, well within budget.")
+	run := childRunner(t, taskSuiteOutput, "github.com/x/y took 4.20s, well within budget.")
 	result, err := run(context.Background(), PlanTaskRequest{
 		Task:  Task{ID: "bench", Prompt: "measure it"},
 		Tools: []string{"read_file"},
@@ -61,7 +61,7 @@ func TestATaskReportingAFigureItsCommandsContradictIsFlagged(t *testing.T) {
 		t.Fatalf("got %d conflicts, want 1: %+v", len(result.MeasurementConflicts), result.MeasurementConflicts)
 	}
 	got := result.MeasurementConflicts[0]
-	for _, required := range []string{"TestChattyChild", "4.2s", "0.86s"} {
+	for _, required := range []string{"github.com/x/y", "4.2s", "0.86s"} {
 		if !strings.Contains(got, required) {
 			t.Errorf("the conflict does not mention %q: %s", required, got)
 		}
@@ -72,9 +72,9 @@ func TestATaskReportingAFigureItsCommandsContradictIsFlagged(t *testing.T) {
 // worse than no check: it gets ignored, and then it catches nothing.
 func TestATaskReportingWhatItMeasuredIsNotFlagged(t *testing.T) {
 	for name, answer := range map[string]string{
-		"the figure as measured": "TestChattyChild took 0.86s.",
-		"ordinary variation":     "TestChattyChild took 0.91s.",
-		"no figure at all":       "TestChattyChild passes.",
+		"the figure as measured": "github.com/x/y took 0.86s.",
+		"ordinary variation":     "github.com/x/y took 0.91s.",
+		"no figure at all":       "github.com/x/y passes.",
 		"a name never measured":  "TestSomethingElse took 99.0s.",
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -100,11 +100,11 @@ func TestTheReportNamesAnUnverifiedFigure(t *testing.T) {
 		Status: PlanCompleted, Succeeded: 1, TokensUsed: 10,
 		Tasks: []TaskResult{{
 			ID: "bench", Outcome: TaskSucceeded,
-			MeasurementConflicts: []string{"TestChattyChild: reported 4.2s, but this task's own commands printed 0.86s"},
+			MeasurementConflicts: []string{"github.com/x/y: reported 4.2s, but this task's own commands printed 0.86s"},
 		}},
 	}
 	summary := report.Summary()
-	for _, required := range []string{"unverified figure", "bench", "TestChattyChild", "4.2s", "0.86s"} {
+	for _, required := range []string{"unverified figure", "bench", "github.com/x/y", "4.2s", "0.86s"} {
 		if !strings.Contains(summary, required) {
 			t.Errorf("the summary does not carry %q:\n%s", required, summary)
 		}
