@@ -3,8 +3,11 @@ package specialist
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/Twigpine/zero/internal/streamjson"
 	"github.com/Twigpine/zero/internal/tools"
 )
 
@@ -162,5 +165,77 @@ func (s *preflightSpy) TaskFailed(TaskResult)    {}
 func (s *preflightSpy) PlanPreflight(status string) {
 	if strings.TrimSpace(status) != "" && s.onStatus != nil {
 		s.onStatus(status)
+	}
+}
+
+// THE PER-TASK CAP BOUNDS THE TASK, NOT ONE ATTEMPT. Real runner, real retry
+// loop: a child that spends 50,000 of a 60,000 cap and then goes silent is
+// retried, and the retry used to start with the whole cap again — four
+// children and 200,000 tokens at max_retries 3. The retry now starts its meter
+// at 50,000, so its first usage event trips the cap and nothing further runs.
+func TestThePerTaskCapBoundsATaskAcrossItsRetries(t *testing.T) {
+	var mu sync.Mutex
+	children := 0
+	exec := Executor{
+		BinaryPath:   "/bin/true",
+		NewSessionID: func() (string, error) { return "specialist_00000000000000000000000a", nil },
+		Load:         func(LoadOptions) (LoadResult, error) { return LoadResult{}, nil },
+		RunChild: func(ctx context.Context, _ string, _ []string, progress func(streamjson.Event)) (ChildRunResult, error) {
+			mu.Lock()
+			children++
+			mu.Unlock()
+			events := usageEvents(50_000)
+			progress(events[0])
+			<-ctx.Done() // then silence, until the watchdog or the cap stops it
+			// The real child runner returns the events it collected even when
+			// cancelled; the executor bills the attempt from them.
+			return ChildRunResult{Started: true, ExitCode: -1, Events: events}, ctx.Err()
+		},
+	}
+	inner := NewPlanRunner(PlanTaskContext{Executor: exec, Cwd: t.TempDir(), SpecialistName: "explorer"})
+	// The admitted floor for max_stall_seconds is 30s; shrink only the clock so
+	// the real watchdog fires within the test.
+	run := func(ctx context.Context, req PlanTaskRequest) (TaskResult, error) {
+		req.StallTimeout, req.StallPoll = 50*time.Millisecond, 5*time.Millisecond
+		return inner(ctx, req)
+	}
+	plan := mustPlan(t, []any{task("a", "x")}, map[string]any{
+		"max_workers": float64(1), "max_tokens_per_task": float64(60_000), "max_retries": float64(3),
+	}, readOnlyLimits())
+
+	report := ExecutePlan(context.Background(), plan, []string{"read_file"}, run, nil)
+
+	if children != 2 {
+		t.Fatalf("%d children ran; the retry must inherit the 50000 already spent and be stopped by the cap", children)
+	}
+	got := report.Tasks[0]
+	if got.Outcome != TaskCancelled || !strings.Contains(got.Err, "max_tokens_per_task") {
+		t.Fatalf("the retry was not stopped by the per-task cap: %s / %q", got.Outcome, got.Err)
+	}
+	if !strings.Contains(got.Err, "100000 tokens") {
+		t.Errorf("the stop does not report the task's spend across attempts: %q", got.Err)
+	}
+}
+
+// A TASK WITH NOTHING LEFT IS NOT RETRIED AT ALL. A stall after the whole cap
+// is spent must not launch another child to overspend it.
+func TestATaskThatSpentItsWholeCapIsNotRetried(t *testing.T) {
+	plan := mustPlan(t, []any{task("a", "x")}, map[string]any{
+		"max_workers": float64(1), "max_tokens_per_task": float64(60_000), "max_retries": float64(3),
+	}, readOnlyLimits())
+	attempts := 0
+	report := ExecutePlan(context.Background(), plan, []string{"read_file"},
+		func(_ context.Context, req PlanTaskRequest) (TaskResult, error) {
+			attempts++
+			if req.TaskTokensSpent != 0 {
+				t.Errorf("attempt %d was told %d tokens were already spent", attempts, req.TaskTokensSpent)
+			}
+			return TaskResult{ID: "a", Outcome: TaskFailed, Stalled: true, Err: "no output", Tokens: 60_000}, nil
+		}, nil)
+	if attempts != 1 {
+		t.Fatalf("%d attempts; a task that spent its whole cap must not be retried", attempts)
+	}
+	if got := report.Tasks[0].Err; !strings.Contains(got, "not retried") || !strings.Contains(got, "max_tokens_per_task") {
+		t.Errorf("the failure does not say why it was not retried: %q", got)
 	}
 }
