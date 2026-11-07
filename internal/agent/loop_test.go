@@ -2458,27 +2458,38 @@ func TestRunPersistentCommandPrefixStillPromptsForNetwork(t *testing.T) {
 	}
 }
 
-func TestRunApprovedNetworkBashPromptAppliesTurnNetworkGrant(t *testing.T) {
+func TestRunApprovedGitPushPromptAppliesTurnNetworkGrant(t *testing.T) {
 	root := t.TempDir()
-	command := "PATH=.:$PATH curl https://example.com"
+	command := "PATH=.:$PATH git push gitlawb://example.com/repo.git main"
 	if runtime.GOOS == "windows" {
 		if windowsTestUsesPowerShell() {
-			command = `$env:PATH = '.;' + $env:PATH; curl.cmd https://example.com`
+			command = `$env:PATH = '.;' + $env:PATH; git.cmd push gitlawb://example.com/repo.git main`
 		} else {
-			command = "set PATH=.;%PATH% && curl https://example.com"
+			command = "set PATH=.;%PATH% && git push gitlawb://example.com/repo.git main"
 		}
-		fakeCurl := filepath.Join(root, "curl.cmd")
-		if err := os.WriteFile(fakeCurl, []byte("@echo fake curl %*\r\n"), 0o755); err != nil {
+		fakeGit := filepath.Join(root, "git.cmd")
+		if err := os.WriteFile(fakeGit, []byte("@echo fake git %*\r\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	} else {
-		fakeCurl := filepath.Join(root, "curl")
-		if err := os.WriteFile(fakeCurl, []byte("#!/bin/sh\necho fake curl \"$@\"\n"), 0o755); err != nil {
+		fakeGit := filepath.Join(root, "git")
+		if err := os.WriteFile(fakeGit, []byte("#!/bin/sh\necho fake git \"$@\"\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
+	engine := sandbox.NewEngine(sandbox.EngineOptions{
+		WorkspaceRoot: root,
+		Policy:        sandbox.DefaultPolicy(),
+		Backend:       sandbox.Backend{Name: sandbox.BackendUnavailable, Message: "native sandbox unavailable"},
+	})
+	var overlay []sandbox.NetworkMode
 	registry := tools.NewRegistry()
-	registry.Register(tools.NewScopedBashTool(root, nil))
+	registry.Register(&networkOverlayProbeTool{
+		delegate: tools.NewScopedBashTool(root, nil),
+		engine:   engine,
+		observed: &overlay,
+		t:        t,
+	})
 	provider := &mockProvider{
 		turns: [][]zeroruntime.StreamEvent{
 			{
@@ -2495,15 +2506,11 @@ func TestRunApprovedNetworkBashPromptAppliesTurnNetworkGrant(t *testing.T) {
 	}
 	var requests []PermissionRequest
 	var events []PermissionEvent
-	result, err := Run(context.Background(), "curl", provider, Options{
+	result, err := Run(context.Background(), "push changes", provider, Options{
 		Registry:       registry,
 		PermissionMode: PermissionModeAsk,
 		Autonomy:       "medium",
-		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
-			WorkspaceRoot: root,
-			Policy:        sandbox.DefaultPolicy(),
-			Backend:       sandbox.Backend{Name: sandbox.BackendUnavailable, Message: "native sandbox unavailable"},
-		}),
+		Sandbox:        engine,
 		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
 			requests = append(requests, request)
 			return PermissionDecision{Action: PermissionDecisionAllow, Reason: "approve network once"}, nil
@@ -2537,9 +2544,62 @@ func TestRunApprovedNetworkBashPromptAppliesTurnNetworkGrant(t *testing.T) {
 		t.Fatalf("expected tool result to be sent back to provider, got %d requests", len(provider.requests))
 	}
 	lastMessage := provider.requests[1].Messages[len(provider.requests[1].Messages)-1]
-	if !strings.Contains(lastMessage.Content, "fake curl https://example.com") {
+	if !strings.Contains(lastMessage.Content, "fake git push gitlawb://example.com/repo.git main") {
 		t.Fatalf("expected approved network command output after degraded execution, got %q", lastMessage.Content)
 	}
+	// The command running is not proof the GRANT was applied: under
+	// BackendUnavailable the degraded path executes regardless. Assert the turn
+	// overlay itself — the approval must have widened the plan's policy to
+	// NetworkAllow while the tool ran, and must not outlive the turn.
+	if len(overlay) != 1 {
+		t.Fatalf("expected one recorded overlay observation, got %#v", overlay)
+	}
+	if overlay[0] != sandbox.NetworkAllow {
+		t.Fatalf("plan policy network = %q during the approved call, want %q", overlay[0], sandbox.NetworkAllow)
+	}
+	if after := planNetworkMode(t, engine); after == sandbox.NetworkAllow {
+		t.Fatalf("turn network grant outlived the turn: policy network = %q", after)
+	}
+}
+
+// planNetworkMode reads the network mode the engine would actually build a
+// command plan with, which is where a turn grant's overlay becomes observable.
+func planNetworkMode(t *testing.T, engine *sandbox.Engine) sandbox.NetworkMode {
+	t.Helper()
+
+	plan, err := engine.BuildCommandPlan(sandbox.CommandSpec{Name: "git", Args: []string{"push"}})
+	if err != nil {
+		t.Fatalf("BuildCommandPlan returned error: %v", err)
+	}
+	return sandbox.NormalizeNetworkMode(plan.Policy.Network)
+}
+
+// networkOverlayProbeTool is a bash-named shell tool that records the network
+// mode in effect at the moment the approved call runs, then delegates to the
+// real scoped bash tool so the command still executes.
+type networkOverlayProbeTool struct {
+	delegate tools.Tool
+	engine   *sandbox.Engine
+	observed *[]sandbox.NetworkMode
+	t        *testing.T
+}
+
+func (tool *networkOverlayProbeTool) Name() string        { return tool.delegate.Name() }
+func (tool *networkOverlayProbeTool) Description() string { return tool.delegate.Description() }
+func (tool *networkOverlayProbeTool) Parameters() tools.Schema {
+	return tool.delegate.Parameters()
+}
+
+func (tool *networkOverlayProbeTool) Safety() tools.Safety {
+	if safe, ok := tool.delegate.(interface{ Safety() tools.Safety }); ok {
+		return safe.Safety()
+	}
+	return tools.Safety{SideEffect: tools.SideEffectShell, Permission: tools.PermissionPrompt}
+}
+
+func (tool *networkOverlayProbeTool) Run(ctx context.Context, args map[string]any) tools.Result {
+	*tool.observed = append(*tool.observed, planNetworkMode(tool.t, tool.engine))
+	return tool.delegate.Run(ctx, args)
 }
 
 func TestRunDoesNotOfferPrefixApprovalForUnsafeBashCommand(t *testing.T) {
@@ -2582,6 +2642,62 @@ func TestRunDoesNotOfferPrefixApprovalForUnsafeBashCommand(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRunDoesNotOfferPrefixApprovalForCaseDistinctGitAlias(t *testing.T) {
+	root := t.TempDir()
+	command := `make test && git -c alias.STATUS=!curl STATUS https://example.invalid`
+	retryTool := &sandboxDeniedRetryTool{}
+	registry := tools.NewRegistry()
+	registry.Register(retryTool)
+	provider := &mockProvider{
+		turns: [][]zeroruntime.StreamEvent{
+			{
+				{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "bash"},
+				{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{"command":` + quoteJSONString(command) + `}`},
+				{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+			{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			},
+		},
+	}
+	requestCount := 0
+
+	_, err := Run(context.Background(), "inspect status", provider, Options{
+		Registry:       registry,
+		PermissionMode: PermissionModeAsk,
+		Autonomy:       "medium",
+		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
+			WorkspaceRoot: root,
+			Policy:        sandbox.DefaultPolicy(),
+			Backend:       sandbox.Backend{Name: sandbox.BackendUnavailable, Message: "native sandbox unavailable"},
+		}),
+		OnPermissionRequest: func(_ context.Context, request PermissionRequest) (PermissionDecision, error) {
+			requestCount++
+			if len(request.CommandPrefix) != 0 {
+				t.Fatalf("case-distinct alias must not have a command prefix: %#v", request.CommandPrefix)
+			}
+			if containsPermissionDecision(request.AvailableDecisions, PermissionDecisionAllowPrefix) ||
+				containsPermissionDecision(request.AvailableDecisions, PermissionDecisionAlwaysAllowPrefix) {
+				t.Fatalf("case-distinct alias must not offer reusable prefix approval: %#v", request.AvailableDecisions)
+			}
+			return PermissionDecision{Action: PermissionDecisionDeny, Reason: "deny alias execution"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requestCount != 1 {
+		t.Fatalf("permission requests = %d, want one non-prefix request", requestCount)
+	}
+	for index, call := range retryTool.calls {
+		if shellCommandRequiresEscalated(call) {
+			t.Fatalf("call %d received require_escalated: %#v", index, call)
+		}
 	}
 }
 

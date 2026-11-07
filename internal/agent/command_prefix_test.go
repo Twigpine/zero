@@ -35,6 +35,36 @@ func TestProposedCommandPrefixHonorsValidatedRequestedPrefix(t *testing.T) {
 	}
 }
 
+func TestSafeGitCommandConsumesAttrSourceOptionValue(t *testing.T) {
+	for _, command := range [][]string{
+		{"git", "--attr-source", "HEAD", "status"},
+		{"git", "--attr-source=HEAD", "status"},
+	} {
+		if !safeGitCommand(command) {
+			t.Errorf("safeGitCommand(%q) = false; want true", command)
+		}
+	}
+}
+
+func TestSafeGitCommandRejectsCaseDistinctAliasSubcommand(t *testing.T) {
+	for _, command := range [][]string{
+		{"git", "-c", "alias.STATUS=!curl", "STATUS", "https://example.invalid"},
+		{"git", "-c", "alias.Status=!curl", "Status", "https://example.invalid"},
+	} {
+		if safeGitCommand(command) {
+			t.Errorf("safeGitCommand(%q) = true; case-distinct aliases must not receive reusable prefixes", command)
+		}
+	}
+	if prefix := proposedCommandPrefix("bash", map[string]any{
+		"command": `make test && git -c alias.STATUS=!curl STATUS https://example.invalid`,
+	}); prefix != nil {
+		t.Fatalf("case-distinct alias was accepted as a safe tail and exposed prefix %#v", prefix)
+	}
+	if !safeGitCommand([]string{"git", "--attr-source", "HEAD", "status"}) {
+		t.Fatal("ordinary lowercase status with a vetted global option must remain approvable")
+	}
+}
+
 func TestProposedCommandPrefixSupportsSegmentedCommands(t *testing.T) {
 	got := proposedCommandPrefix("bash", map[string]any{"command": "ps aux | head -5"})
 	if runtime.GOOS == "windows" {
@@ -229,5 +259,84 @@ func TestProposedCommandPrefixRejectsRequestedUnsafeLauncherPrefix(t *testing.T)
 	})
 	if got != nil {
 		t.Fatalf("unsafe requested launcher prefix should be rejected, got %#v", got)
+	}
+}
+
+// A terminal global makes git print and exit, so nothing after it is a
+// subcommand. The sandbox classifier already stopped there; this parser walked
+// past it and resolved `git --help status` to the read-only prefix
+// `git status`, auto-approving a command the user never ran. The two scans read
+// one option grammar (sandbox.GitTerminalGlobalOption) so they cannot drift.
+func TestSafeGitCommandStopsAtTerminalGlobalOptions(t *testing.T) {
+	for _, command := range [][]string{
+		{"git", "--help", "status"},
+		{"git", "-h", "status"},
+		{"git", "--version", "log"},
+		{"git", "--exec-path", "status"},
+		{"git", "-C", "repo", "--help", "diff"},
+	} {
+		if safeGitCommand(command) {
+			t.Errorf("safeGitCommand(%q) = true; a terminal global ends the subcommand scan", command)
+		}
+	}
+	// An inline --exec-path=<path> is a value-carrying global, not terminal, so
+	// the subcommand after it is still real.
+	for _, command := range [][]string{
+		{"git", "--exec-path=/usr/libexec/git-core", "status"},
+		{"git", "--namespace", "ns", "status"},
+	} {
+		if !safeGitCommand(command) {
+			t.Errorf("safeGitCommand(%q) = false; want true", command)
+		}
+	}
+}
+
+// TestSafeGitCommandRejectsDashCEvenWithAnApprovableSubcommand isolates the
+// -C rejection from the terminal-global short circuit above (`-C repo --help
+// diff` never reaches gitHasUnsafeGlobalOption's -C case at all, because
+// --help stops the scan first). -C changes which repository the read-only
+// subcommand inspects, so an approval for the workspace repo must not extend
+// to a different one named this way — even for status/log/diff/show/branch,
+// which are otherwise auto-approved.
+func TestSafeGitCommandRejectsDashCEvenWithAnApprovableSubcommand(t *testing.T) {
+	for _, command := range [][]string{
+		{"git", "-C", "repo", "status"},
+		{"git", "-Crepo", "status"},
+		{"git", "-C", "repo", "branch"},
+	} {
+		if safeGitCommand(command) {
+			t.Errorf("safeGitCommand(%q) = true; -C must never be auto-approved", command)
+		}
+	}
+}
+
+// TestSafeGitCommandRejectsSubcommandsOutsideTheApprovedList proves the
+// refactor onto sandbox.GitSubcommand (a shared reader that resolves ANY
+// subcommand, not just the five this matcher approves) did not widen what
+// gets auto-approved: a resolvable-but-unapproved subcommand, and no
+// subcommand at all, both stay rejected.
+func TestSafeGitCommandRejectsSubcommandsOutsideTheApprovedList(t *testing.T) {
+	for _, command := range [][]string{
+		{"git", "push", "origin", "main"},
+		{"git", "commit", "-m", "msg"},
+		{"git", "fetch", "origin"},
+		{"git"},
+		{"git", "-C", "repo"},
+	} {
+		if safeGitCommand(command) {
+			t.Errorf("safeGitCommand(%q) = true; want rejected", command)
+		}
+	}
+	// The approved subcommands still resolve correctly through the same shared
+	// reader, with a global option in front — end-to-end proof the subIndex
+	// arithmetic across the sandbox.GitSubcommand boundary is still right.
+	for _, command := range [][]string{
+		{"git", "status"},
+		{"git", "--git-dir", "/repo/.git", "log"},
+		{"git", "branch"},
+	} {
+		if !safeGitCommand(command) {
+			t.Errorf("safeGitCommand(%q) = false; want approved", command)
+		}
 	}
 }
