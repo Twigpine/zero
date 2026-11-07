@@ -1,0 +1,1174 @@
+// Package memory is a durable, scoped note store that survives a session.
+//
+// WHAT IT IS FOR. A session ends and everything it worked out goes with it —
+// the convention this repo actually follows, the decision behind a strange-
+// looking guard, the finding an audit already confirmed. AGENTS.md holds what
+// someone sat down and wrote; this holds what accumulates, and it is scoped so
+// the two do not become one file nobody prunes.
+//
+// NOT A SECOND PLAN STORE. The "no new store" invariant is about PLAN STATE —
+// "plan state is session events", ARCHITECTURE.md — because two stores for one
+// fact eventually disagree. Notes are not derivable from any event log, so there
+// is nothing here for a second store to contradict.
+//
+// THE SAFETY RULES ARE PLAN_STORE'S, deliberately reused rather than rewritten:
+// an allow-list name that cannot spell a traversal component, containment of
+// every operation to a handle on the workspace (internal/pathjail), and an
+// O_EXCL temp file renamed into place. A note store is a write primitive pointed
+// at a path the model chooses, which is the same shape as "save my plan" and
+// needs the same answers.
+package memory
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/Gitlawb/zero/internal/pathjail"
+)
+
+// Scope is where a note lives, and who else sees it.
+type Scope string
+
+const (
+	// ScopeProject is checked in beside the repo: shared with everyone who clones
+	// it, and therefore reviewed like any other file in the tree.
+	ScopeProject Scope = "project"
+	// ScopeLocal is this machine only. The natural home for anything specific to
+	// one checkout, one operator, or one afternoon.
+	ScopeLocal Scope = "local"
+)
+
+// fileExt is the stored extension. Markdown with frontmatter, because a note is
+// meant to be readable by the person whose repo it is sitting in.
+const fileExt = ".md"
+
+// gitignoreName and localIgnoreContent are what makes the local store private.
+const gitignoreName = ".gitignore"
+
+const localIgnoreContent = "# Notes saved to the local scope stay on this machine.\n*\n"
+
+// gitDirName is the entry whose presence at a directory makes that directory a
+// repository. A FILE by this name counts as much as a directory: that is what a
+// linked worktree and a submodule carry, and both track their files exactly like
+// an ordinary checkout.
+const gitDirName = ".git"
+
+// gitIndexTimeout bounds the one subprocess this package runs. Reading an index
+// is local and takes milliseconds; the bound is here so a wedged or
+// filesystem-blocked git cannot hold a note write open forever.
+const gitIndexTimeout = 15 * time.Second
+
+// maxTrackedNamed is how many tracked entries a refusal spells out. A store with
+// hundreds of them is still one refusal, and the first few name the problem.
+const maxTrackedNamed = 5
+
+// tempExt is what an in-progress write carries. Deliberately not fileExt, so a
+// temp file a crash left behind is never listed as a note.
+const tempExt = ".tmp"
+
+// maxNoteBytes bounds one note. Generous for prose, small enough that a runaway
+// write cannot quietly fill a repo.
+const maxNoteBytes = 64 << 10
+
+// maxDescriptionBytes bounds the ONE-LINE summary, separately from the note.
+//
+// The listing prints every note's description, so the field is shared screen
+// space: the total-size check alone let a single note carry a 60 KiB single-line
+// description and consume the listing everyone else has to fit in. A description
+// is a sentence telling a reader whether to open the note — anything past this is
+// the note's own body in the wrong field, so it is truncated rather than refused.
+const maxDescriptionBytes = 200
+
+// namePattern is an ALLOW-LIST, the same rule plan names use
+// (specialist/manifest.go): enumerate what is permitted rather than forbidding
+// traversal, because every deny-list in this repo has leaked at least once.
+//
+// LOWERCASE ONLY, and that is the point rather than a style choice. Windows and
+// a default APFS volume fold case, so "Findings" and "findings" are one file
+// there: writing the second silently replaced the first's body, a read could
+// hand the model a note under a name it does not hold, and deleting one removed
+// the other. Refusing the second spelling makes the collision unrepresentable
+// rather than resolving it after the damage.
+var namePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,63}$`)
+
+// reservedDeviceNames are the DOS device names Win32 resolves ahead of any file
+// with the same stem. os.Root addresses a note relative to a directory handle
+// and bypasses that parsing entirely, so "con.md" is created, listed and read
+// like any other note — which is exactly what makes this easy to miss.
+//
+// GIT is what breaks on them. `git add -A` fails outright on such a path and
+// stages NOTHING, including the user's unrelated edits, while `git status` never
+// names the file, so there is no route from the symptom back to the cause. The
+// other direction is worse: a note committed from macOS makes the repo
+// un-checkoutable on Windows — the clone fails and leaves an empty tree, so a
+// Windows contributor gets no repository at all, not merely no note.
+var reservedDeviceNames = map[string]bool{
+	"con": true, "prn": true, "aux": true, "nul": true,
+	"com0": true, "com1": true, "com2": true, "com3": true, "com4": true,
+	"com5": true, "com6": true, "com7": true, "com8": true, "com9": true,
+	"lpt0": true, "lpt1": true, "lpt2": true, "lpt3": true, "lpt4": true,
+	"lpt5": true, "lpt6": true, "lpt7": true, "lpt8": true, "lpt9": true,
+}
+
+var (
+	ErrBadName  = errors.New("a memory name must be lowercase, start with a letter, use only letters, digits and hyphen, be at most 64 characters, and not be a reserved device name")
+	ErrNoStore  = errors.New("memory is not available in this run")
+	ErrTooLarge = fmt.Errorf("a memory note may be at most %d bytes", maxNoteBytes)
+	ErrNotFound = errors.New("no such memory")
+	ErrBadScope = errors.New(`scope must be "project" or "local"`)
+	// ErrNameClash is a note whose stored spelling differs from the one asked
+	// for. On a case-insensitive filesystem the two are the same file, so writing
+	// the second destroys the first — and List, which matches the extension
+	// exactly, does not show it, so the model is told the store is empty right
+	// before it overwrites something.
+	ErrNameClash = errors.New("a differently spelled note already occupies this name")
+	// ErrUnreadable is a path the confined handle will not open while it is
+	// plainly present on disk. Distinct from ErrNotFound, which is the answer
+	// that let a tampered store present as an empty one, and distinct from
+	// ErrIsSymlink, which names a reparse point this process could actually
+	// identify as one — a junction is not identifiable that way, and neither is
+	// a directory the process may not enter.
+	ErrUnreadable = errors.New("the memory store exists but could not be read")
+	// ErrNotPrivate is returned rather than writing a local note the repository
+	// would then track. The local scope's whole promise is that the note stays on
+	// this machine, and a promise that degrades quietly is worse than one that
+	// refuses. It covers both ways the promise can fail: an ignore rule that does
+	// not cover the store, and a store git already tracks — where no ignore rule
+	// applies at all.
+	ErrNotPrivate = errors.New("a note saved to the local memory store would not stay on this machine")
+	// ErrIsSymlink is pathjail's refusal, kept under this package's own name so
+	// callers testing for it keep working. It now covers a Windows junction as
+	// well as a symlink, which the old ModeSymlink-only check did not.
+	ErrIsSymlink = pathjail.ErrReparse
+)
+
+// Paths locates the two scopes. An empty directory means that scope is simply
+// unavailable, and a write to it is refused with a reason rather than silently
+// written somewhere else.
+type Paths struct {
+	// Root is the containment boundary. Every operation below is performed
+	// relative to a handle on it, so no component of ProjectDir or LocalDir can
+	// redirect a write or a delete outside the tree. Empty means no store: a
+	// boundary is not optional, because without one the directories below are
+	// just strings the filesystem re-resolves on every syscall.
+	Root       string
+	ProjectDir string
+	LocalDir   string
+}
+
+// DefaultPaths puts project memory beside the repo and local memory in a
+// subdirectory of it.
+//
+// The local store makes itself private on first write (keepLocalScopePrivate)
+// rather than relying on a line in the workspace's .gitignore: this runs in
+// whatever repository the user opened, and a rule that lives in one repo's
+// ignore file protects only that repo.
+func DefaultPaths(workspaceRoot string) Paths {
+	if strings.TrimSpace(workspaceRoot) == "" {
+		return Paths{}
+	}
+	base := filepath.Join(workspaceRoot, ".zero", "memory")
+	return Paths{Root: workspaceRoot, ProjectDir: base, LocalDir: filepath.Join(base, "local")}
+}
+
+// Available reports whether this run has a usable store.
+//
+// ROOT COUNTS, and that is the fix rather than a nicety. openScope refuses a
+// blank Root with ErrNoStore, and List treats ErrNoStore as "that scope is not
+// configured" and moves on — so a Paths carrying both directories and no Root
+// produced an empty listing, and the caller told the user there were no notes
+// when the store was in fact switched off. Callers ask here instead of testing
+// the fields themselves, so the rule has one home and cannot drift.
+func (paths Paths) Available() bool {
+	if strings.TrimSpace(paths.Root) == "" {
+		return false
+	}
+	return paths.ProjectDir != "" || paths.LocalDir != ""
+}
+
+func (paths Paths) dirFor(scope Scope) (string, error) {
+	switch scope {
+	case ScopeProject:
+		if paths.ProjectDir == "" {
+			return "", ErrNoStore
+		}
+		return paths.ProjectDir, nil
+	case ScopeLocal:
+		if paths.LocalDir == "" {
+			return "", ErrNoStore
+		}
+		return paths.LocalDir, nil
+	default:
+		return "", ErrBadScope
+	}
+}
+
+// openScope opens a handle on the containment root and returns the scope's
+// store directory relative to it. The caller closes the handle.
+//
+// Every filesystem operation in this file goes through here. The store used to
+// Lstat its own directory and file and then hand those same strings to
+// MkdirAll, CreateTemp, Rename and Remove, which re-resolve every ancestor: a
+// link anywhere above the store redirected the write, and the checks passed
+// because they were looking at the wrong components. On Windows they also
+// missed a junction outright, since a junction is a reparse point but not a
+// symlink.
+func (paths Paths) openScope(scope Scope) (*os.Root, string, error) {
+	dir, err := paths.dirFor(scope)
+	if err != nil {
+		return nil, "", err
+	}
+	if strings.TrimSpace(paths.Root) == "" {
+		return nil, "", ErrNoStore
+	}
+	handle, relative, err := pathjail.Open(paths.Root, dir)
+	if err != nil {
+		return nil, "", err
+	}
+	// EVERY COMPONENT, not only the note. os.Root refuses to traverse OUT of the
+	// workspace, which is what the comment above was relying on — but it happily
+	// follows a link that resolves back INSIDE it, and the store path is checked
+	// in. A repository shipping ".zero -> redirected" redirected every read and
+	// write to another directory in the same tree while each individual check
+	// passed, because the only component ever inspected was the note file at the
+	// end.
+	if err := refuseReparseChain(handle, paths.Root, relative); err != nil {
+		handle.Close()
+		return nil, "", err
+	}
+	return handle, relative, nil
+}
+
+// storedEntryName returns the spelling the store actually holds for a note, and
+// whether anything holds it at all.
+//
+// LIST AND READ HAVE TO ANSWER THE SAME QUESTION. List matches the extension
+// exactly; Read reopens name+".md", and on a case-insensitive filesystem that
+// opens "findings.MD" — a file the listing never showed. The model is told the
+// store is empty, writes, and a hand-authored checked-in note is destroyed.
+// Reading the directory is what lets both sides agree on one spelling.
+func storedEntryName(handle *os.Root, relative, name string) (string, bool, error) {
+	dir, err := handle.Open(relative)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	defer dir.Close()
+	entries, err := dir.ReadDir(-1)
+	if err != nil {
+		return "", false, err
+	}
+	want := name + fileExt
+	for _, entry := range entries {
+		if entry.Name() == want {
+			return entry.Name(), true, nil
+		}
+	}
+	for _, entry := range entries {
+		if strings.EqualFold(entry.Name(), want) {
+			return entry.Name(), true, nil
+		}
+	}
+	return "", false, nil
+}
+
+// presentOnDisk reports whether relative exists under root by ordinary pathname.
+//
+// Deliberately NOT through the confined handle — the whole point is to ask a
+// different question than the handle answers, so that "the handle will not open
+// this" can be told apart from "there is nothing here". It stats and never opens
+// or reads, so nothing is traversed on the strength of this answer; it only
+// decides which ERROR the caller is given.
+func presentOnDisk(root string, relative string) bool {
+	if strings.TrimSpace(root) == "" {
+		return false
+	}
+	_, err := os.Lstat(filepath.Join(root, relative))
+	return err == nil
+}
+
+// refuseReparseChain refuses a link or reparse point at every component of
+// relative, outermost first.
+//
+// Built on pathjail.RefuseReparse rather than reimplementing the test, so the
+// Windows junction handling and the trailing-separator care stay in one place.
+// Outermost first because that is the component whose redirection decides where
+// everything below it lands, and it makes the error name the link the caller can
+// actually act on.
+func refuseReparseChain(handle *os.Root, root string, relative string) error {
+	relative = filepath.Clean(relative)
+	if relative == "." || relative == string(filepath.Separator) {
+		return nil
+	}
+	parts := strings.Split(relative, string(filepath.Separator))
+	for i := range parts {
+		component := filepath.Join(parts[:i+1]...)
+		if err := pathjail.RefuseReparse(handle, component); err != nil {
+			return err
+		}
+		// OPENABLE, NOT MERELY PRESENT. A path the confined handle will not open
+		// while it is plainly present on disk has been REFUSED; a path absent from
+		// both is simply not there yet, which is what a first write is for.
+		//
+		// WHAT THIS ACTUALLY COVERS, corrected. This was written as a junction
+		// fix, and it is not one: @Vasanthdev2004 re-measured and every junction
+		// placement is already refused one layer earlier, because os.Root.Lstat
+		// reports a junction as ModeIrregular and pathjail.RefuseReparse rejects
+		// it on the first component — with that neutered, os.Root still refuses
+		// with "path escapes from parent". Two layers stand in front of this
+		// branch, and the tampered-store-reads-as-empty outcome it was built for
+		// does not occur.
+		//
+		// What it does cover is a store that is present and cannot be opened for
+		// an ordinary reason — a directory this process may not enter. That used
+		// to surface as "no such memory", and a caller cannot tell an empty store
+		// from an unreadable one on that answer. It is a smaller claim than the
+		// one this comment used to make, and it is the true one.
+		//
+		// RACE: between the open failing and presentOnDisk succeeding, a store
+		// being created concurrently reads as refused rather than absent. The
+		// caller is told to look rather than told nothing is there, so the
+		// direction is the safe one, but it is a real window.
+		opened, openErr := handle.Open(component)
+		if openErr == nil {
+			opened.Close()
+			continue
+		}
+		if presentOnDisk(root, component) {
+			return fmt.Errorf("%w: %s cannot be opened inside the workspace: %v", ErrUnreadable, component, openErr)
+		}
+		// Absent to both. Nothing below it can exist either, so there is nothing
+		// further to inspect.
+		return nil
+	}
+	return nil
+}
+
+// Note is one stored memory.
+type Note struct {
+	Name string
+	// Description is the one-line summary from frontmatter. It is what a listing
+	// shows, so a reader can decide what to open WITHOUT reading everything —
+	// which is the whole reason notes carry frontmatter at all.
+	Description string
+	Scope       Scope
+	Body        string
+}
+
+// ValidName reports whether a name is storable.
+//
+// The reserved check is separate from the pattern because it is a different kind
+// of rule: the pattern says which characters may appear, this says which
+// otherwise-legal spellings the platform will not let git carry.
+func ValidName(name string) bool {
+	return name != "" && len(name) <= 64 &&
+		namePattern.MatchString(name) && !reservedDeviceNames[name]
+}
+
+// DefaultScopeOrder is the ONE order an unscoped operation uses, and every tool
+// that takes an optional scope must use it.
+//
+// LOCAL FIRST, because local is where an unscoped WRITE lands. It used to be
+// project first while memory_write and memory_forget defaulted to local, so a
+// model that omitted the scope — which every schema allows — could not read back
+// what it had just written:
+//
+//	memory_write{name, content}   -> Saved "findings" (local).
+//	memory_read{name}             -> memory "findings" (project) ... someone else's
+//	memory_forget{name}           -> Forgot "findings" (local).
+//	memory_read{name}             -> memory "findings" (project) ... still there
+//
+// Every one of those messages is accurate about the scope it acted on, and the
+// round trip is still broken: the model is handed content it never wrote, and
+// told a note was deleted after which the name still reads. A checked-in project
+// note is the ordinary way that happens, since it arrives with a clone and the
+// model has no reason to expect it. The tool's own approval text says future
+// sessions will read and believe these notes, which is exactly what fails.
+//
+// A project note is still found when no local one shadows it, so nothing becomes
+// unreachable — the ordering only decides which wins when both exist.
+var defaultScopeOrder = []Scope{ScopeLocal, ScopeProject}
+
+// DefaultScopeOrder returns a COPY. Handing out the backing slice would let a
+// caller reorder the resolution every other caller depends on.
+func DefaultScopeOrder() []Scope { return append([]Scope(nil), defaultScopeOrder...) }
+
+// listingScopeOrder is the order a LISTING presents scopes in, which is not the
+// order an unscoped lookup resolves them in. Named rather than left as a literal
+// so the difference from DefaultScopeOrder is a stated decision instead of
+// something a later reader tidies away.
+var listingOrder = []Scope{ScopeProject, ScopeLocal}
+
+func listingScopeOrder() []Scope { return append([]Scope(nil), listingOrder...) }
+
+// ResolveScopes turns a requested scope into the scopes to search.
+//
+// ONE place decides, because there were two and they disagreed: the write path
+// validated through memory.Scope and refused an unknown value, while the read
+// path mapped every unrecognised spelling to BOTH stores. A typo therefore
+// widened access on the only path where widening matters, and a perfectly valid
+// "project" was ignored on the listing path, which always read both. An empty
+// request means "search everywhere"; anything non-empty must be a scope this
+// package knows.
+func ResolveScopes(requested string) ([]Scope, error) {
+	trimmed := strings.TrimSpace(requested)
+	if trimmed == "" {
+		return DefaultScopeOrder(), nil
+	}
+	switch scope := Scope(strings.ToLower(trimmed)); scope {
+	case ScopeProject, ScopeLocal:
+		return []Scope{scope}, nil
+	default:
+		return nil, ErrBadScope
+	}
+}
+
+// List returns every note in the given scopes, project first, each sorted by
+// name, along with any store that could not be read.
+//
+// LOCAL SHADOWS NOTHING. Unlike saved plans, where project shadows user because
+// a repo's own plan is what its contributors should get, both scopes are listed:
+// they hold different KINDS of thing, and hiding one behind the other would lose
+// a note rather than resolve a conflict.
+//
+// The error is JOINED rather than returned in place of the notes: a store that
+// cannot be read must be reported, but the notes that did read are still the
+// best answer available, and dropping them would turn one unreadable file into
+// an empty memory.
+func List(paths Paths, scopes ...Scope) ([]Note, error) {
+	if len(scopes) == 0 {
+		// DELIBERATELY NOT DefaultScopeOrder. These are two different decisions
+		// and the review that flagged the duplication read them as one:
+		//
+		//	resolution order decides which note WINS when both scopes hold the
+		//	  name, and must be local-first or an unscoped write cannot be read
+		//	  back
+		//	listing order decides only what a reader sees FIRST — both scopes are
+		//	  shown and neither shadows the other, so nothing is being resolved
+		//
+		// Project first here puts the checked-in, team-facing notes at the top of
+		// a long listing, which is what a reader scanning it wants. Making this
+		// follow the resolution order would change that for no gain, and
+		// TestListingShowsBothScopesWithoutShadowing asserts it on purpose.
+		scopes = listingScopeOrder()
+	}
+	var out []Note
+	var problems []error
+	for _, scope := range scopes {
+		handle, relative, err := paths.openScope(scope)
+		if err != nil {
+			// A scope this store is not configured for is not a failure to
+			// report; a bad scope name is.
+			if !errors.Is(err, ErrNoStore) {
+				problems = append(problems, err)
+			}
+			continue
+		}
+		directory, err := handle.Open(relative)
+		if err != nil {
+			handle.Close()
+			// A store that has never been written to has no directory yet, and
+			// that is an empty list rather than a failure. Anything else is an
+			// operational error and is reported.
+			if !os.IsNotExist(err) {
+				problems = append(problems, fmt.Errorf("open %s store: %w", scope, err))
+			}
+			continue
+		}
+		entries, err := directory.ReadDir(-1)
+		directory.Close()
+		handle.Close()
+		if err != nil {
+			problems = append(problems, fmt.Errorf("read %s store: %w", scope, err))
+			continue
+		}
+		var scoped []Note
+		for _, entry := range entries {
+			// The extension is matched EXACTLY, not case-insensitively. Read
+			// reopens name+fileExt, which is always lowercase, so accepting
+			// "notes.MD" here listed an entry that the very next Read could not
+			// open on a case-sensitive filesystem — and the error was swallowed
+			// below, so the note vanished from the listing with no explanation.
+			// This store only ever writes lowercase, so an exact match is the
+			// spelling that keeps List and Read agreeing.
+			if entry.IsDir() || filepath.Ext(entry.Name()) != fileExt {
+				continue
+			}
+			name := strings.TrimSuffix(entry.Name(), fileExt)
+			note, err := Read(paths, scope, name)
+			if err != nil {
+				// A name the store would not accept, or a note deleted between
+				// the ReadDir and the read, is legitimately not listable. A
+				// refused link, an oversized file or a permission error is a
+				// problem the caller needs told about rather than a note that
+				// silently vanishes from the listing.
+				if !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrBadName) {
+					problems = append(problems, fmt.Errorf("read %s/%s: %w", scope, name, err))
+				}
+				continue
+			}
+			scoped = append(scoped, note)
+		}
+		sort.Slice(scoped, func(i, j int) bool { return scoped[i].Name < scoped[j].Name })
+		out = append(out, scoped...)
+	}
+	return out, errors.Join(problems...)
+}
+
+// Read returns one note.
+func Read(paths Paths, scope Scope, name string) (Note, error) {
+	if !ValidName(name) {
+		return Note{}, ErrBadName
+	}
+	handle, relative, err := paths.openScope(scope)
+	if err != nil {
+		return Note{}, err
+	}
+	defer handle.Close()
+	relativePath := filepath.Join(relative, name+fileExt)
+	// Reads are confined by the same rule as writes. A note read through a link
+	// is an exfiltration primitive in a tool the model can call by name — the
+	// write hole with the arrow reversed — and Write and Forget both refuse a
+	// reparse point at this position, so a read that did not was the asymmetry.
+	//
+	// WHAT THIS COVERS, PRECISELY. os.Root already refuses a link whose target
+	// leaves the root, so what this adds is refusing one that stays INSIDE it:
+	// ".zero/memory/linked.md -> ../../secret.txt" resolves to a path still under
+	// Paths.Root and was served happily. It is a REPARSE-POINT guard, not an
+	// identity check — a HARD LINK carries no reparse bit, so neither this nor
+	// os.Root can see one, and a hard link at a note position still reads through
+	// to its target. Closing that needs identity (st_dev/st_ino, or the Windows
+	// file id), which is deliberately not attempted here so that the claim in
+	// this comment matches what the code actually does.
+	if err := pathjail.RefuseReparse(handle, relativePath); err != nil {
+		return Note{}, err
+	}
+	// AGREE WITH LIST. List matches the extension exactly, so a differently
+	// spelled entry is one it never showed — and opening it here would hand back
+	// a note the caller was told does not exist.
+	stored, found, entryErr := storedEntryName(handle, relative, name)
+	if entryErr != nil {
+		return Note{}, entryErr
+	}
+	if found && stored != name+fileExt {
+		return Note{}, clashError(name, stored)
+	}
+	body, err := readBounded(handle, relativePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Note{}, ErrNotFound
+		}
+		// Anything else is an operational failure — a permission error, an
+		// oversized file, a corrupt store — and reaches the caller as itself.
+		// Reporting it as "no such note" tells the model the note is absent, and
+		// the next thing it does is write the note again over whatever is there.
+		return Note{}, err
+	}
+	description, text := splitFrontmatter(string(body))
+	return Note{Name: name, Description: description, Scope: scope, Body: text}, nil
+}
+
+// keepLocalScopePrivate establishes that a local note will not enter the
+// repository: git must be tracking nothing in the store, and the ignore that
+// keeps future notes out of it must be installed or already in force.
+//
+// "local" promises the note stays on this machine, and it did not: the store
+// lives at <workspace>/.zero/memory/local, inside the working tree, so a default
+// write showed up in git status and could be committed — and the local scope is
+// the DEFAULT, so that is the ordinary path rather than a corner.
+//
+// The ignore file lives INSIDE the store rather than as a line in the repo's
+// .gitignore, because this tool runs in whatever workspace the user opened. A
+// line in zero's own .gitignore would protect exactly one repository; a store
+// that makes itself private travels with every one. "*" covers the notes and the
+// ignore file itself, so the directory contributes nothing to the index.
+//
+// IT FAILS CLOSED, and used to fail open. This was best-effort with no error
+// return, on the reasoning that a store which cannot hold an ignore file is
+// still a working store and failing the write would trade privacy for an outage.
+// That reasoning is wrong for this particular function, because O_EXCL cannot
+// tell "a previous run wrote the ignore" from "something else is already there":
+// precreating an empty .gitignore made every subsequent local write succeed with
+// the store fully tracked. The promise is the feature here — a note the user was
+// told stays on this machine, sitting in git status, is worse than a refused
+// write, because the refusal is visible and the leak is not.
+func keepLocalScopePrivate(handle *os.Root, scope Scope, relative, dir string) error {
+	if scope != ScopeLocal {
+		return nil
+	}
+	// THE INDEX DECIDES, NOT THE IGNORE FILE, and the ignore file used to be the
+	// only thing consulted. Git applies no ignore rule to a path already in the
+	// index, so "*" proves privacy for an UNTRACKED path and for nothing else: a
+	// clone, an earlier `git add -f`, or a hand-authored repository restores both
+	// the ignore AND local/<note>.md as TRACKED files, and the rename below then
+	// replaced a tracked file with a body the user was told stays on this
+	// machine — sitting in git status, one `git commit -a` from being shared.
+	// Reported by @jatmn.
+	//
+	// It gates BOTH branches below, deliberately. Refusing only where an existing
+	// ignore is accepted leaves the same leak reachable by deleting the ignore
+	// from the worktree: O_EXCL would then create a fresh one, report a clean
+	// first write, and overwrite the tracked note anyway.
+	if err := refuseTrackedLocalStore(handle, relative, dir); err != nil {
+		return err
+	}
+	ignorePath := filepath.Join(relative, gitignoreName)
+	// O_EXCL still decides whether this is the first write, in one syscall — but
+	// now the "already exists" answer leads to a check rather than to silence.
+	file, err := handle.OpenFile(ignorePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	switch {
+	case err == nil:
+		if writeErr := writeLocalIgnore(file); writeErr != nil {
+			_ = file.Close()
+			// Do not leave the exclusive-create placeholder behind. An empty or
+			// partial ignore makes every retry take the existing-file branch and
+			// fail as ErrNotPrivate instead of retrying the installation.
+			return removeIncompleteLocalIgnore(handle, ignorePath, fmt.Errorf("write %s: %w", ignorePath, writeErr))
+		}
+		if closeErr := closeLocalIgnore(file); closeErr != nil {
+			// A failed close does not establish that the ignore reached disk. Remove
+			// it for the same reason as a failed write so the next call can retry. If
+			// cleanup also fails, preserve both errors: callers must know that an
+			// incomplete placeholder remains and needs manual recovery.
+			return removeIncompleteLocalIgnore(handle, ignorePath, fmt.Errorf("close %s: %w", ignorePath, closeErr))
+		}
+		return nil
+	case !errors.Is(err, fs.ErrExist):
+		return fmt.Errorf("create %s: %w", ignorePath, err)
+	}
+	// THE IGNORE FILE ITSELF MUST NOT BE A LINK. git does not follow a symlinked
+	// .gitignore — it warns and treats the rule as absent — so reading through
+	// one and accepting the target's "*" certified a privacy rule that is not in
+	// force. An in-workspace RELATIVE link is followed by os.Root (an absolute
+	// one is refused, which is why an earlier check of this looked clean), so the
+	// bypass needed nothing outside the workspace.
+	if err := pathjail.RefuseReparse(handle, ignorePath); err != nil {
+		return fmt.Errorf("%w: %s is a link, and git does not read one: %v", ErrNotPrivate, ignorePath, err)
+	}
+	existing, err := readBounded(handle, ignorePath)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", ignorePath, err)
+	}
+	if !ignoresEverything(string(existing)) {
+		return fmt.Errorf("%w: %s does not ignore the whole store", ErrNotPrivate, ignorePath)
+	}
+	return nil
+}
+
+var writeLocalIgnore = func(file *os.File) error {
+	_, err := file.WriteString(localIgnoreContent)
+	return err
+}
+
+var closeLocalIgnore = func(file *os.File) error {
+	return file.Close()
+}
+
+var removeLocalIgnore = func(handle *os.Root, path string) error {
+	return handle.Remove(path)
+}
+
+func removeIncompleteLocalIgnore(handle *os.Root, path string, cause error) error {
+	if err := removeLocalIgnore(handle, path); err != nil {
+		return errors.Join(cause, fmt.Errorf("remove incomplete %s: %w", path, err))
+	}
+	return cause
+}
+
+// ignoresEverything reports whether an existing ignore file actually excludes the
+// whole directory.
+//
+// A bare "*" is what this store writes, so that is what is recognised; anything
+// narrower is treated as not covering, because guessing at the effect of an
+// arbitrary pattern set is how a privacy check ends up agreeing with a file that
+// does not protect anything. A re-inclusion line cancels the cover no matter
+// where it sits, so one "!" is enough to fail the whole file.
+//
+// IT FOLLOWS GIT'S WHITESPACE RULES, and trimming each line got both of them
+// backwards. Verified against git 2.55.0 rather than read off the spec:
+//
+//	"  *"    gate said covered; git does NOT ignore, because LEADING whitespace
+//	         is part of the pattern — so a note the user was told stays on this
+//	         machine was picked up by a routine `git add -A`, which is the exact
+//	         outcome this function exists to prevent, arrived at silently
+//	"\ufeff*"  gate said not covered; git strips a UTF-8 BOM and honours the rule
+//	         — so an ignore written by an ordinary editor failed every local write
+//
+// Leading whitespace is therefore significant and is NOT stripped; trailing
+// whitespace is not significant to git and is; a BOM is stripped once, at the
+// start of the file, exactly as git does.
+func ignoresEverything(content string) bool {
+	content = strings.TrimPrefix(content, "\ufeff")
+	covered := false
+	for _, line := range strings.Split(content, "\n") {
+		// TrimRight, not TrimSpace: git drops trailing whitespace from a pattern
+		// and keeps leading whitespace as part of it.
+		line = strings.TrimRight(strings.TrimSuffix(line, "\r"), " \t")
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "!") {
+			return false
+		}
+		if line == "*" {
+			covered = true
+		}
+	}
+	return covered
+}
+
+// refuseTrackedLocalStore refuses a local write whose store git already TRACKS.
+//
+// Filesystem discovery first excludes inert .git markers without requiring a
+// git installation. A marker containing repository metadata is only a candidate:
+// git must then answer the index question. A damaged repository or an unavailable
+// index remains a refusal; an empty directory or broken gitdir stub is not by
+// itself evidence that the store belongs to a repository.
+func refuseTrackedLocalStore(handle *os.Root, relative, dir string) error {
+	// The physical path, because that is the one git will see: os/exec chdirs
+	// into it, and git discovers the repository from the resulting getcwd. A
+	// lexical walk up a symlinked workspace looks at ancestors the child process
+	// never has, and can find no repository where git finds one.
+	//
+	// THIS BRANCH AND THE ONE BELOW ARE DEFENCE IN DEPTH, not live paths, and
+	// that is worth writing down because a reviewer will otherwise read them as
+	// untested. Neither is reachable through Write: refuseReparseChain has
+	// already refused every link in the chain, and opening the rooted handle has
+	// already failed on an unreadable ancestor, so by the time control arrives
+	// here the path resolves and the walk can read. Verified by trying both — a
+	// self-referential store link is refused as a link, and a 000 ancestor fails
+	// at mkdir, neither reaching this function.
+	//
+	// They stay because the reachability is a property of the CALLERS, not of
+	// this function, and this function's contract is that an unanswerable
+	// privacy question is a refusal. A future caller that skips the earlier
+	// guards would otherwise inherit a silent fail-open.
+	resolved, err := resolvePhysicalPath(handle, relative, dir)
+	if err != nil {
+		return fmt.Errorf("%w: cannot resolve %s to ask git about it: %v", ErrNotPrivate, dir, err)
+	}
+	repo, err := enclosingGitRepo(resolved)
+	if err != nil {
+		return fmt.Errorf("%w: cannot tell whether %s is inside a git repository: %v", ErrNotPrivate, dir, err)
+	}
+	if repo == "" {
+		// Nothing encloses the store, so nothing can be tracked and there is
+		// nothing to ask. This is also where a machine with no git at all lands,
+		// which is why the question above is not a subprocess.
+		return nil
+	}
+	tracked, err := trackedStoreEntries(resolved)
+	if err != nil {
+		return fmt.Errorf("%w: %s is inside the git repository at %s, and git could not say which files there are tracked: %v",
+			ErrNotPrivate, dir, repo, err)
+	}
+	offenders := make([]string, 0, len(tracked))
+	for _, entry := range tracked {
+		// The store's own ignore file is the one tracked entry that is not a leak:
+		// it carries no note, and a repository that checks it in hands every clone
+		// the rule before the first write. Anything else under this directory is a
+		// note the local scope promised would not be in the repository.
+		if entry == gitignoreName {
+			continue
+		}
+		offenders = append(offenders, entry)
+	}
+	if len(offenders) == 0 {
+		return nil
+	}
+	sort.Strings(offenders)
+	return fmt.Errorf("%w: the repository at %s tracks %s in %s, and git applies no ignore rule to a path already in the index; remove it with `git rm --cached` before saving a local note",
+		ErrNotPrivate, repo, namedEntries(offenders), dir)
+}
+
+// enclosingGitRepo returns the nearest ancestor of dir, dir itself included,
+// carrying possible repository metadata, or "" when none does. Inert markers
+// do not stop the walk: a real enclosing checkout may still track the store.
+func enclosingGitRepo(dir string) (string, error) {
+	for current := filepath.Clean(dir); ; {
+		candidate, err := gitMarkerHasMetadata(filepath.Join(current, gitDirName))
+		if err != nil {
+			return "", err
+		}
+		if candidate {
+			return current, nil
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", nil
+		}
+		current = parent
+	}
+}
+
+// gitMarkerHasMetadata only rules out markers that cannot name a repository.
+// It does not certify one: even partial/corrupt metadata must reach git and fail
+// closed if the index cannot be read. Following a gitdir reference is read-only;
+// it never grants filesystem access for a note operation.
+func gitMarkerHasMetadata(marker string) (bool, error) {
+	info, err := os.Stat(marker)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	dir := marker
+	if !info.IsDir() {
+		if !info.Mode().IsRegular() || info.Size() > 4096 {
+			return false, fmt.Errorf("cannot classify git marker %s", marker)
+		}
+		file, err := os.Open(marker)
+		if err != nil {
+			return false, err
+		}
+		content, readErr := io.ReadAll(io.LimitReader(file, 4097))
+		closeErr := file.Close()
+		if err := errors.Join(readErr, closeErr); err != nil {
+			return false, err
+		}
+		if len(content) > 4096 {
+			return false, fmt.Errorf("git marker %s exceeds 4096 bytes", marker)
+		}
+		if !strings.HasPrefix(string(content), "gitdir: ") {
+			return false, nil
+		}
+		dir = strings.TrimRight(string(content[len("gitdir: "):]), "\r\n")
+		if dir == "" {
+			return false, nil
+		}
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(filepath.Dir(marker), dir)
+		}
+		info, err = os.Stat(dir)
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if !info.IsDir() {
+			return false, nil
+		}
+	}
+	for _, name := range []string{"HEAD", "objects", "refs", "index", "commondir", "config"} {
+		if _, err := os.Lstat(filepath.Join(dir, name)); err == nil {
+			return true, nil
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return false, err
+		}
+	}
+	return false, nil
+}
+
+// trackedStoreEntries lists what git's index holds under dir, named relative to
+// it.
+//
+// The store directory goes in as the WORKING DIRECTORY and nothing goes in as an
+// argument: `git ls-files` run inside a subdirectory already lists that
+// subdirectory and names its paths relative to it, so there is no pathspec for a
+// note name to reach, and no path for this side to spell differently from the
+// way the kernel just resolved it. -z because a tracked path may hold anything a
+// filename can and git quotes such a name in its default output. Both the
+// subcommand and the flag predate any version this project could plausibly meet.
+func trackedStoreEntries(dir string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), gitIndexTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "ls-files", "-z")
+	cmd.Dir = dir
+	// Cancelling the context does not by itself return control here: WaitDelay is
+	// what stops a git holding its pipes open from outliving the deadline.
+	cmd.WaitDelay = gitIndexTimeout
+	cmd.Env = gitDiscoveryEnv(os.Environ())
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if detail := singleLine(stderr.String()); detail != "" {
+			return nil, fmt.Errorf("%w: %s", err, detail)
+		}
+		return nil, err
+	}
+	entries := make([]string, 0, 4)
+	for _, entry := range strings.Split(stdout.String(), "\x00") {
+		if entry != "" {
+			entries = append(entries, entry)
+		}
+	}
+	return entries, nil
+}
+
+// gitDiscoveryEnv drops the variables that would point git at an index other
+// than the one belonging to the checkout the store sits in.
+//
+// A hook, a rebase, or any `git` wrapper exports GIT_DIR and GIT_INDEX_FILE into
+// the environment its children inherit, and zero inherits them like anything
+// else. Left in place they answer this question about a different index — during
+// a rebase, one holding none of the worktree's paths — and the answer is
+// "nothing is tracked", which is precisely the fail-open being closed here. The
+// repository was located from the filesystem at the store, so the index is
+// looked up the same way.
+func gitDiscoveryEnv(environ []string) []string {
+	redirects := []string{"GIT_DIR=", "GIT_COMMON_DIR=", "GIT_WORK_TREE=", "GIT_INDEX_FILE="}
+	filtered := make([]string, 0, len(environ))
+	for _, entry := range environ {
+		redirected := false
+		for _, prefix := range redirects {
+			if strings.HasPrefix(entry, prefix) {
+				redirected = true
+				break
+			}
+		}
+		if !redirected {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
+}
+
+// namedEntries spells out at most maxTrackedNamed of them and counts the rest.
+func namedEntries(entries []string) string {
+	if len(entries) <= maxTrackedNamed {
+		return strings.Join(entries, ", ")
+	}
+	return fmt.Sprintf("%s and %d more", strings.Join(entries[:maxTrackedNamed], ", "), len(entries)-maxTrackedNamed)
+}
+
+// readBounded reads at most maxNoteBytes, refusing anything larger rather than
+// allocating it.
+//
+// The ceiling used to be enforced only on the way IN, so a note that arrived by
+// hand or through a clone — project scope is checked in — was read whole however
+// large, and List did that for every note in the store. A memory bound has to
+// hold on the path that allocates.
+func readBounded(handle *os.Root, relativePath string) ([]byte, error) {
+	file, err := handle.Open(relativePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	// One byte past the ceiling, so a note exactly at the limit still reads and
+	// only a genuinely oversized one is refused.
+	body, err := io.ReadAll(io.LimitReader(file, maxNoteBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxNoteBytes {
+		return nil, fmt.Errorf("%w: %s", ErrTooLarge, relativePath)
+	}
+	return body, nil
+}
+
+// Write stores a note, replacing any note of the same name in the same scope.
+//
+// Every step runs against a handle on the containment root, so the directory
+// this lands in cannot be changed underneath it: create the tree, refuse a link
+// at the destination, write an O_EXCL temp file with an unpredictable name,
+// rename into place. An edit is therefore atomic, and a crash mid-write leaves
+// the previous note rather than a half-written one.
+func Write(paths Paths, scope Scope, name, description, body string) (string, error) {
+	if !ValidName(name) {
+		return "", ErrBadName
+	}
+	dir, err := paths.dirFor(scope)
+	if err != nil {
+		return "", err
+	}
+	content := renderNote(name, description, body)
+	if len(content) > maxNoteBytes {
+		return "", ErrTooLarge
+	}
+	handle, relative, err := paths.openScope(scope)
+	if err != nil {
+		return "", err
+	}
+	defer handle.Close()
+	if err := handle.MkdirAll(relative, 0o700); err != nil {
+		return "", fmt.Errorf("create %s: %w", dir, err)
+	}
+	if err := keepLocalScopePrivate(handle, scope, relative, dir); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, name+fileExt)
+	relativePath := filepath.Join(relative, name+fileExt)
+	if err := pathjail.RefuseReparse(handle, relativePath); err != nil {
+		return "", err
+	}
+	// A REAL CLASH GUARD. On a case-insensitive filesystem "findings.md" and
+	// "findings.MD" are one file, so writing the first destroys the second — and
+	// List never showed it, so the model had every reason to think the name was
+	// free. Refusing names the occupant instead of silently taking its place.
+	if stored, found, entryErr := storedEntryName(handle, relative, name); entryErr != nil {
+		return "", entryErr
+	} else if found && stored != name+fileExt {
+		return "", clashError(name, stored)
+	}
+	file, temp, err := pathjail.CreateTemp(handle, relative, name, tempExt)
+	if err != nil {
+		return "", fmt.Errorf("create a temporary file in %s: %w", dir, err)
+	}
+	writeErr := func() error {
+		if _, err := file.WriteString(content); err != nil {
+			return err
+		}
+		return file.Close()
+	}()
+	if writeErr != nil {
+		_ = file.Close()
+		_ = handle.Remove(temp)
+		return "", fmt.Errorf("write %s: %w", path, writeErr)
+	}
+	if err := handle.Rename(temp, relativePath); err != nil {
+		_ = handle.Remove(temp)
+		return "", fmt.Errorf("save %s: %w", path, err)
+	}
+	return path, nil
+}
+
+// Forget removes a note. Missing is not an error: the caller asked for it to be
+// gone, and it is.
+func Forget(paths Paths, scope Scope, name string) error {
+	if !ValidName(name) {
+		return ErrBadName
+	}
+	handle, relative, err := paths.openScope(scope)
+	if err != nil {
+		return err
+	}
+	defer handle.Close()
+	// A delete is the sharpest of these: a write lands a file, a delete removes
+	// somebody else's. Same handle, same reason.
+	relativePath := filepath.Join(relative, name+fileExt)
+	if err := pathjail.RefuseReparse(handle, relativePath); err != nil {
+		return err
+	}
+	// THE SAME CLASH GUARD READ AND WRITE ALREADY HAVE. It belongs here most of
+	// all: on a case-insensitive filesystem "findings.md" and "findings.MD" are
+	// one file, so a delete addressed to the first removes the second — and this
+	// is the operation with nothing left to inspect afterwards. Two doors were
+	// closed and this one, the sharpest, was open; worse, the refusal the other
+	// two return said "rename or remove it first", and removing is what this
+	// function did. The clash message no longer points at a door that destroys
+	// the file it is describing. Reported by @Vasanthdev2004.
+	//
+	// Absence is still not an error. A name nobody has stored has no occupant to
+	// clash with, so the idempotence this function documents is unchanged.
+	if stored, found, entryErr := storedEntryName(handle, relative, name); entryErr != nil {
+		return entryErr
+	} else if found && stored != name+fileExt {
+		return clashError(name, stored)
+	}
+	if err := handle.Remove(relativePath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// clashError is the one wording for all three doors. It names the occupant and
+// then says the only thing that actually resolves the clash: the stored file has
+// a spelling this package cannot address, so it has to be renamed in the store
+// directory. It deliberately does NOT suggest deleting the note through this
+// package — that was the previous advice, and the delete took the occupant with
+// it.
+func clashError(name, stored string) error {
+	return fmt.Errorf("%w: %s is stored as %s; rename that file to %s in the store directory to manage it here",
+		ErrNameClash, name+fileExt, stored, name+fileExt)
+}
+
+func renderNote(name, description, body string) string {
+	var b strings.Builder
+	b.WriteString("---\nname: ")
+	b.WriteString(name)
+	if trimmed := strings.TrimSpace(description); trimmed != "" {
+		b.WriteString("\ndescription: ")
+		b.WriteString(boundedDescription(singleLine(trimmed)))
+	}
+	b.WriteString("\n---\n\n")
+	b.WriteString(strings.TrimRight(body, "\n"))
+	b.WriteString("\n")
+	return b.String()
+}
+
+// boundedDescription caps the summary so one note cannot crowd out the listing.
+// Truncated on a rune boundary with an ellipsis, so the result stays readable and
+// is visibly cut rather than looking like the whole of a short description.
+func boundedDescription(text string) string {
+	if len(text) <= maxDescriptionBytes {
+		return text
+	}
+	const ellipsis = "…"
+	// WALK FORWARD ONCE. The first version dropped a rune per iteration and
+	// re-encoded the whole slice each time to measure it, which is quadratic in
+	// the input — and maxNoteBytes lets a 64 KiB description through the write
+	// path, so the cap was at its slowest on exactly the input it exists for:
+	//
+	//	 1 KiB ->   1.6ms      16 KiB -> 381ms      64 KiB -> 13.3s
+	//
+	// Ranging over the string yields rune boundaries with their byte offsets
+	// directly, so the cut point is found in one pass and no intermediate string
+	// is built.
+	budget := maxDescriptionBytes - len(ellipsis)
+	cut := 0
+	for index := range text {
+		if index > budget {
+			break
+		}
+		cut = index
+	}
+	return text[:cut] + ellipsis
+}
+
+// splitFrontmatter returns the description and the body. A note without
+// frontmatter is not an error — it is a file someone wrote by hand, and losing
+// it because it lacks a header would be the store punishing the reader it exists
+// to serve.
+//
+// CRLF is accepted as well as LF. Project-scope notes are checked in, and Git for
+// Windows defaults to autocrlf=true, so a note that merely round-trips through a
+// clone comes back with "---\r\n" — under an LF-only split the whole header,
+// delimiters included, fell through into the body and the description was lost.
+//
+// LINE ENDINGS ARE NORMALISED TO LF in what this returns, on every path. The
+// earlier version normalised only for the split and then returned the body from
+// whichever string that path happened to hold, so a note WITH frontmatter came
+// back as LF and one WITHOUT kept its CRLF — a difference no caller asked for and
+// nothing documented. The file on disk is untouched either way; this is only
+// what the reader is handed.
+func splitFrontmatter(content string) (description string, body string) {
+	normalized := strings.ReplaceAll(content, "\r\n", "\n")
+	if !strings.HasPrefix(normalized, "---\n") {
+		return "", normalized
+	}
+	rest := normalized[len("---\n"):]
+	end := strings.Index(rest, "\n---\n")
+	if end < 0 {
+		return "", normalized
+	}
+	for _, line := range strings.Split(rest[:end], "\n") {
+		if value, ok := strings.CutPrefix(strings.TrimSpace(line), "description:"); ok {
+			// Bounded HERE, not only where a note is written. A project-scope
+			// note arrives with a clone, so its description never passed through
+			// this process's write path — leaving the listing crowdable by a file
+			// nobody here created.
+			description = boundedDescription(strings.TrimSpace(value))
+		}
+	}
+	return description, strings.TrimLeft(rest[end+len("\n---\n"):], "\n")
+}
+
+func singleLine(text string) string {
+	return strings.Join(strings.Fields(text), " ")
+}
