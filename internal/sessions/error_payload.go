@@ -22,8 +22,9 @@ const errorCauseTruncationMarker = "… [truncated]"
 // call failed from the CLI or its logs — only the generic top-level message
 // was ever recorded (#674). Cause has already been redacted for secrets by
 // the provider before reaching here (see zeroruntime.StreamEvent.Cause) — it
-// is never re-scrubbed or stored raw at this layer. Cause is cut to
-// maxErrorCauseBytes (on a rune boundary) with a truncation marker appended.
+// is never re-scrubbed or stored raw at this layer. A longer cause is cut on a
+// rune boundary and marked, and the marked result, marker included, stays
+// within maxErrorCauseBytes.
 func ErrorEventPayload(err error) map[string]any {
 	payload := map[string]any{"message": err.Error()}
 	var streamErr *zeroruntime.StreamError
@@ -42,5 +43,6 @@ func boundErrorCause(cause string) string {
 	if len(cause) <= maxErrorCauseBytes {
 		return cause
 	}
-	return truncateUTF8(cause, maxErrorCauseBytes) + errorCauseTruncationMarker
+	// The marker counts toward the bound, so the cut leaves room for it.
+	return truncateUTF8(cause, maxErrorCauseBytes-len(errorCauseTruncationMarker)) + errorCauseTruncationMarker
 }
