@@ -1324,7 +1324,7 @@ func resolveAgentContextWindow(ctx context.Context, registry modelregistry.Regis
 	if window := modelContextWindow(registry, profile.Model); window > 0 {
 		return window
 	}
-	if window := discoveredModelContextWindow(ctx, profile); window > 0 {
+	if window := discoveredModelContextWindow(ctx, profile, providermodeldiscovery.Options{}); window > 0 {
 		return window
 	}
 	return modelregistry.AgentContextWindow(0)
@@ -1333,7 +1333,9 @@ func resolveAgentContextWindow(ctx context.Context, registry modelregistry.Regis
 // discoveredModelContextWindow queries the provider's live model list for the
 // active model's context window. Returns 0 when the provider isn't catalogued, the
 // credential can't be resolved, discovery fails, or the model reports no window.
-func discoveredModelContextWindow(ctx context.Context, profile config.ProviderProfile) int {
+// options carries transport overrides (HTTP client, catalog URLs); the credential
+// resolvers are always derived here from the authenticated profile.
+func discoveredModelContextWindow(ctx context.Context, profile config.ProviderProfile, options providermodeldiscovery.Options) int {
 	descriptor, ok := providercatalog.Get(strings.TrimSpace(profile.CatalogID))
 	if !ok {
 		return 0
@@ -1348,9 +1350,17 @@ func discoveredModelContextWindow(ctx context.Context, profile config.ProviderPr
 	if strings.TrimSpace(authed.APIKey) == "" && strings.TrimSpace(authed.APIKeyEnv) != "" {
 		authed.APIKey = strings.TrimSpace(os.Getenv(authed.APIKeyEnv))
 	}
+	if providercatalog.NormalizeID(descriptor.ID) == "chatgpt" {
+		// ChatGPT discovery is a live account probe that fails without the stored
+		// OAuth bearer, so a keyless subscription profile needs the same login the
+		// runtime provider uses; a profile with its own key keeps that key instead.
+		resolver, loginKey := oauthLoginForProfile(authed)
+		options.OAuthResolver = resolver
+		options.CodexAccountResolver = providers.CodexAccountResolverForLogin(loginKey)
+	}
 	dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	models, err := providermodeldiscovery.DiscoverCatalog(dctx, descriptor, authed, providermodeldiscovery.Options{})
+	models, err := providermodeldiscovery.DiscoverCatalog(dctx, descriptor, authed, options)
 	if err != nil {
 		return 0
 	}
