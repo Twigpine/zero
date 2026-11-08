@@ -190,21 +190,27 @@ func (s Schedule) Next(after time.Time) time.Time {
 		case !has(s.minute, t.Minute()):
 			t = t.Add(time.Minute)
 		default:
-			// DST fall-back guard: if the match has the SAME local wall-clock
-			// minute as `after` but a later absolute time, it is the repeated
-			// hour's duplicate of a minute `after` already represents (e.g. 01:30
-			// EST right after 01:30 EDT). Returning it would fire the same
-			// scheduled minute twice, so step past it and keep searching. Normal
-			// forward search always advances the wall-clock, so this only triggers
-			// on the fall-back repeat — when `after` is the last fire time the
-			// scheduler passes in, this collapses the repeated hour to one fire.
+			// DST fall-back guard: on a fall-back day one wall-clock hour
+			// occurs twice (01:00-01:59 EDT, then again as EST). If the match
+			// is the SECOND occurrence of its wall-clock minute and `after`
+			// is at or past the first occurrence, that minute has already had
+			// its fire, so returning it would run the same scheduled minute
+			// twice. Step past it and keep searching. This covers more than
+			// a candidate identical to `after`: when the scheduler chains
+			// Next calls (claimFire feeds each fire back in as `after`), a
+			// stepped schedule such as "5/1" crosses into the repeated hour
+			// at its first stepped minute of the second pass, which need not
+			// equal the last fire's minute, and would otherwise re-run every
+			// stepped minute of that hour.
 			//
-			// Only collapse when `after` sits exactly on the minute boundary (its
-			// "last fire time" form). If `after` carries sub-minute precision
-			// (e.g. 01:30:30 EDT), the first 01:30 fire already preceded it, so the
-			// repeated 01:30 EST is the legitimate next fire and must NOT be skipped
-			// — skipping it would violate the strictly-after contract.
-			if sameWallClockMinute(t, after) && after.Truncate(time.Minute).Equal(after) {
+			// Only collapse when `after` sits exactly on the minute boundary
+			// (its "last fire time" form). If `after` carries sub-minute
+			// precision (e.g. 01:30:30 EDT), the first 01:30 fire already
+			// preceded it, so the repeated 01:30 EST is the legitimate next
+			// fire and must NOT be skipped — skipping it would violate the
+			// strictly-after contract.
+			if first, repeated := fallBackFirstOccurrence(t); repeated &&
+				after.Truncate(time.Minute).Equal(after) && !after.Before(first) {
 				t = t.Add(time.Minute)
 			} else {
 				return t
@@ -218,6 +224,20 @@ func (s Schedule) Next(after time.Time) time.Time {
 		}
 	}
 	return time.Time{}
+}
+
+// fallBackFirstOccurrence reports whether t is the second occurrence of an
+// ambiguous wall-clock minute (a DST fall-back repeat) and, if so, returns
+// the first occurrence. time.Date resolves an ambiguous wall time to its
+// first occurrence, so re-dating t's wall fields lands on the first pass; an
+// unambiguous t re-dates to itself.
+func fallBackFirstOccurrence(t time.Time) (time.Time, bool) {
+	y, mo, d := t.Date()
+	first := time.Date(y, mo, d, t.Hour(), t.Minute(), 0, 0, t.Location())
+	if first.Before(t) && sameWallClockMinute(first, t) {
+		return first, true
+	}
+	return time.Time{}, false
 }
 
 // sameWallClockMinute reports whether two instants share the same local
