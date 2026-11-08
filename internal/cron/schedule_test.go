@@ -29,6 +29,8 @@ func TestParseValidFields(t *testing.T) {
 		// not its size, is what extends the range.
 		{"5/1 * * * *", full(5, 59), full(0, 23), full(1, 31), full(1, 12), full(0, 6), true, true},
 		{"0 9/1 * * *", bits(0), full(9, 23), full(1, 31), full(1, 12), full(0, 6), true, true},
+		{"0 0 1/1 * *", bits(0), bits(0), full(1, 31), full(1, 12), full(0, 6), false, true},
+		{"0 0 * 1/1 *", bits(0), bits(0), full(1, 31), full(1, 12), full(0, 6), true, true},
 		{"5/2 * * * *", bits(5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 33, 35, 37, 39, 41, 43, 45, 47, 49, 51, 53, 55, 57, 59), full(0, 23), full(1, 31), full(1, 12), full(0, 6), true, true},
 	}
 	for _, c := range cases {
