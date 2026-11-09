@@ -85,6 +85,68 @@ func installWritePreimageBeforeObserve(t *testing.T, hook func(string)) {
 	t.Cleanup(func() { writePreimageBeforeObserve = prior })
 }
 
+func installFileCreateRace(t *testing.T, mutate func(string)) {
+	t.Helper()
+	prior := fileCreateBeforeExclusivePublish
+	fileCreateBeforeExclusivePublish = mutate
+	t.Cleanup(func() { fileCreateBeforeExclusivePublish = prior })
+}
+
+// The window named by the review: the path was observed missing by
+// commitFileContents's own Lstat, then a file appeared before the exclusive
+// publication. The creation must be refused, not silently converted into an
+// overwrite.
+func TestCommitFileContentsRefusesCreateRaceAfterObservationLstat(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "created.txt")
+	installFileCreateRace(t, func(path string) {
+		if err := os.WriteFile(path, []byte("other writer\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	warning, err := commitFileContents(target, nil, nil, "zero\n")
+	if err == nil || !errors.Is(err, errFileChangedDuringWrite) {
+		t.Fatalf("raced create = warning %q, error %v; want errFileChangedDuringWrite", warning, err)
+	}
+	if got, readErr := os.ReadFile(target); readErr != nil || string(got) != "other writer\n" {
+		t.Fatalf("raced create content = %q, err=%v", got, readErr)
+	}
+}
+
+// commitFileContents must bind its publication to the object it validated. A
+// symlink observed as its target (what the old Stat-based observation produced)
+// must be refused, leaving both the link and the pointed-to file untouched.
+func TestCommitFileContentsRefusesSymlinkDestination(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real.txt")
+	if err := os.WriteFile(real, []byte("target bytes\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.txt")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	observed, err := os.Stat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := commitFileContents(link, observed, strPtr("target bytes\n"), "new bytes\n"); err == nil {
+		t.Fatal("commit must refuse a symlink destination")
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("symlink destination was replaced by a regular file")
+	}
+	if got, err := os.ReadFile(real); err != nil || string(got) != "target bytes\n" {
+		t.Fatalf("symlink target mutated: %q, err=%v", got, err)
+	}
+}
+
 func installFileWriteStat(t *testing.T, stat func(*os.File) (os.FileInfo, error)) {
 	t.Helper()
 	prior := fileWriteStat
