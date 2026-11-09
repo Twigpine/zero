@@ -166,3 +166,48 @@ func TestErrorEventPayloadKeepsCauseAtCap(t *testing.T) {
 		t.Fatalf("cause at exactly the cap was altered (len %d)", len(got.(string)))
 	}
 }
+
+// The bound holds for the cause as it reads back from events.jsonl, not only
+// for the string handed to AppendEvent. JSON turns each invalid byte into a
+// three-byte U+FFFD, so an error body of invalid bytes cut to the limit came
+// back at up to three times it.
+func TestAnInvalidUTF8CauseStaysWithinTheBoundAfterTheStoreRoundTrip(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cause string
+	}{
+		{"invalid bytes between ASCII", strings.Repeat("\xffa", maxErrorCauseBytes)},
+		{"a run of invalid bytes", strings.Repeat("\xfe", maxErrorCauseBytes) + "tail"},
+		{"short and invalid", "status \xff\xfe body"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: fixedClock("2026-11-09T12:00:00Z")})
+			session, err := store.Create(CreateInput{SessionID: "invalid_cause"})
+			if err != nil {
+				t.Fatalf("Create returned error: %v", err)
+			}
+			streamErr := &zeroruntime.StreamError{Message: "provider error", StatusCode: 502, Cause: tc.cause}
+			if _, err := store.AppendEvent(session.SessionID, AppendEventInput{Type: EventError, Payload: ErrorEventPayload(streamErr)}); err != nil {
+				t.Fatalf("AppendEvent returned error: %v", err)
+			}
+			events, err := store.ReadEvents(session.SessionID)
+			if err != nil || len(events) != 1 {
+				t.Fatalf("ReadEvents = %d events, %v", len(events), err)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(events[0].Payload, &payload); err != nil {
+				t.Fatalf("unmarshal persisted payload: %v", err)
+			}
+			got, ok := payload["cause"].(string)
+			if !ok {
+				t.Fatalf("persisted cause = %#v, want a string", payload["cause"])
+			}
+			if len(got) > maxErrorCauseBytes {
+				t.Fatalf("persisted cause reads back at %d bytes, want <= %d", len(got), maxErrorCauseBytes)
+			}
+			if !utf8.ValidString(got) {
+				t.Fatal("persisted cause is not valid UTF-8")
+			}
+		})
+	}
+}

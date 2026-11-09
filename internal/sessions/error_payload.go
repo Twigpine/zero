@@ -2,6 +2,7 @@ package sessions
 
 import (
 	"errors"
+	"strings"
 
 	"github.com/Gitlawb/zero/internal/zeroruntime"
 )
@@ -22,9 +23,10 @@ const errorCauseTruncationMarker = "… [truncated]"
 // call failed from the CLI or its logs — only the generic top-level message
 // was ever recorded (#674). Cause has already been redacted for secrets by
 // the provider before reaching here (see zeroruntime.StreamEvent.Cause) — it
-// is never re-scrubbed or stored raw at this layer. A longer cause is cut on a
-// rune boundary and marked, and the marked result, marker included, stays
-// within maxErrorCauseBytes.
+// is never re-scrubbed or stored raw at this layer. Invalid UTF-8 in the cause
+// is replaced with U+FFFD, and a longer cause is cut on a rune boundary and
+// marked; the marked result, marker included, stays within maxErrorCauseBytes
+// as it reads back from the store.
 func ErrorEventPayload(err error) map[string]any {
 	payload := map[string]any{"message": err.Error()}
 	var streamErr *zeroruntime.StreamError
@@ -40,6 +42,11 @@ func ErrorEventPayload(err error) map[string]any {
 }
 
 func boundErrorCause(cause string) string {
+	// Made valid first, so the bound applies to what the store keeps. The
+	// payload is written as JSON, which turns every invalid byte into a
+	// three-byte U+FFFD, so a body of invalid bytes cut to the limit here came
+	// back from events.jsonl at up to three times it.
+	cause = strings.ToValidUTF8(cause, "\uFFFD")
 	if len(cause) <= maxErrorCauseBytes {
 		return cause
 	}
