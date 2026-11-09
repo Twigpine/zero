@@ -85,11 +85,13 @@ func (m model) modelContextWindow(modelName string) int {
 	if entry, ok := m.modelCatalog.Resolve(trimmed); ok && entry.ContextLimits.ContextWindow > 0 {
 		return entry.ContextLimits.ContextWindow
 	}
-	// Live-discovered window, preferring the ACTIVE provider's models so a model ID
-	// shared across providers resolves to the provider actually in use; only then
-	// fall back to other providers that surfaced the same ID.
-	if descriptor, ok := m.activeProviderDescriptor(); ok {
-		if window := discoveredContextWindow(m.modelPickerLiveByProvider[descriptor.ID], trimmed); window > 0 {
+	// Live-discovered window, preferring the ACTIVE route's models in the same key
+	// order model switching uses (discoveredModelsForActiveRoute), so a model ID
+	// shared across providers, or across two ChatGPT accounts whose catalogs are
+	// cached under their own profile keys, resolves to the account actually in
+	// use; only then fall back to other entries that surfaced the same ID.
+	for _, key := range m.activeDiscoveryKeys() {
+		if window := discoveredContextWindow(m.modelPickerLiveByProvider[key], trimmed); window > 0 {
 			return window
 		}
 	}
