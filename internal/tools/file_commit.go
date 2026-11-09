@@ -14,6 +14,10 @@ import (
 
 var errFileChangedDuringWrite = errors.New("file changed on disk before the write committed")
 
+// errFilePublishedWithCleanupFailure marks an error after publication. Callers
+// must record the committed bytes while still reporting the cleanup failure.
+var errFilePublishedWithCleanupFailure = errors.New("file published, but staging cleanup failed")
+
 // fileWriteBeforeCommit is a deterministic test hook. Production leaves it
 // nil; tests use it to replace a path after observation but before opening the
 // object that will actually be mutated.
@@ -42,7 +46,7 @@ var fileWriteTempWrite = func(file *os.File, content string) error {
 }
 
 // fileWriteRename publishes the staged side file over the destination.
-// Tests replace it to exercise the in-place fallback deterministically.
+// Tests replace it to exercise refused atomic publication deterministically.
 var fileWriteRename = func(root *os.Root, oldName, newName string) error {
 	return root.Rename(oldName, newName)
 }
@@ -51,6 +55,12 @@ var fileWriteRename = func(root *os.Root, oldName, newName string) error {
 // name. Tests replace it to exercise the hard-link fallback that filesystems
 // without a no-replace rename use.
 var fileWriteNoReplaceRename = publishRootedNoReplace
+
+// fileWriteRemove removes a staging name. Tests inject cleanup failures after
+// publication to distinguish a committed create from a failed write.
+var fileWriteRemove = func(root *os.Root, name string) error {
+	return root.Remove(name)
+}
 
 // commitRootedFileContents binds an overwrite to the file identity and bytes
 // that the caller observed, opening every component through an already-open
@@ -74,10 +84,8 @@ var fileWriteNoReplaceRename = publishRootedNoReplace
 //
 // A final-component symlink keeps main's behaviour: the link stays a link and
 // the resolved file is what is replaced. A hard link is detached by the rename
-// instead of rewritten through the shared inode. Where the platform refuses a
-// rename (notably Windows with an open reader), the write falls back to the
-// previous in-place publish through a freshly validated handle; that is the
-// only case in which the preimage is not protected by staging.
+// instead of rewritten through the shared inode. If the platform refuses the
+// rename, the overwrite fails and the observed file remains intact.
 //
 // relativePath is the target expressed relative to root; absolutePath is
 // retained only for the test hooks and error reporting.
@@ -151,7 +159,7 @@ func commitRootedFileContents(root *os.Root, absolutePath, relativePath string, 
 	if err := file.Close(); err != nil {
 		return err
 	}
-	return commitRootedFileOverwrite(root, absolutePath, relativePath, publishPath, openedInfo, mode, expectedContent, content)
+	return commitRootedFileOverwrite(root, absolutePath, relativePath, publishPath, openedInfo, mode, content)
 }
 
 // commitRootedFileCreate publishes a brand-new file whose absence the caller
@@ -165,6 +173,9 @@ func commitRootedFileCreate(root *os.Root, relativePath, content string) error {
 		return err
 	}
 	if err := publishRootedCreate(root, tempName, relativePath); err != nil {
+		if errors.Is(err, errFilePublishedWithCleanupFailure) {
+			return err
+		}
 		return errors.Join(err, removeWriteSideFile(root, tempName))
 	}
 	return nil
@@ -189,8 +200,10 @@ func publishRootedCreate(root *os.Root, tempName, relativePath string) error {
 	if linkErr := root.Link(tempName, relativePath); linkErr != nil {
 		return fmt.Errorf("creating %s: %w", relativePath, errors.Join(renameErr, linkErr))
 	}
-	if cleanupErr := removeWriteSideFile(root, tempName); cleanupErr != nil {
-		return fmt.Errorf("creating %s: published, but removing the staging name failed: %w", relativePath, cleanupErr)
+	// The staging name now shares the published inode. Remove only the name,
+	// without chmod-based retries that could change the published file's mode.
+	if cleanupErr := fileWriteRemove(root, tempName); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
+		return fmt.Errorf("creating %s: %w: %w", relativePath, errFilePublishedWithCleanupFailure, cleanupErr)
 	}
 	return nil
 }
@@ -228,12 +241,10 @@ func renameNoReplaceUnsupported(err error) bool {
 // step. A failure while the side file is being written — ENOSPC, a failing
 // device — therefore costs a removed side file, not the observed file.
 //
-// If the platform refuses the rename (most commonly a Windows reader holding
-// the destination open), the previous in-place publish is used after reopening
-// and re-validating the same object. That fallback cannot be atomic, but it is
-// the only way to write a file another process has open without delete
-// sharing, and it is what this tool did before staging existed.
-func commitRootedFileOverwrite(root *os.Root, absolutePath, relativePath, publishPath string, openedInfo os.FileInfo, mode os.FileMode, expectedContent *string, content string) error {
+// Refused renames fail without mutating the observed inode. Writing in place
+// here would expose partial content and rewrite hard-link siblings, defeating
+// the guarantees that staging provides.
+func commitRootedFileOverwrite(root *os.Root, absolutePath, relativePath, publishPath string, openedInfo os.FileInfo, mode os.FileMode, content string) error {
 	tempName, err := writeRootedSideFile(root, publishPath, mode, false, content)
 	if err != nil {
 		return err
@@ -242,20 +253,11 @@ func commitRootedFileOverwrite(root *os.Root, absolutePath, relativePath, publis
 		fileWriteBeforePublish(absolutePath)
 	}
 	if err := verifyRootedPublishTarget(root, publishPath, openedInfo); err != nil {
-		_ = removeWriteSideFile(root, tempName)
-		return err
+		return errors.Join(err, removeWriteSideFile(root, tempName))
 	}
 	if err := fileWriteRename(root, tempName, publishPath); err != nil {
 		renameErr := fmt.Errorf("writing %s: atomic replacement refused: %w", relativePath, err)
-		fallbackErr := rewriteRootedFileInPlace(root, relativePath, openedInfo, expectedContent, content)
-		cleanupErr := removeWriteSideFile(root, tempName)
-		if fallbackErr == nil {
-			if cleanupErr != nil {
-				return fmt.Errorf("%w: the file was written in place, but removing the staged replacement failed: %v", renameErr, cleanupErr)
-			}
-			return nil
-		}
-		return errors.Join(renameErr, fmt.Errorf("writing %s: in-place fallback failed: %w", relativePath, fallbackErr), cleanupErr)
+		return errors.Join(renameErr, removeWriteSideFile(root, tempName))
 	}
 	return nil
 }
@@ -350,9 +352,8 @@ func writeRootedSideFile(root *os.Root, relativePath string, mode os.FileMode, u
 }
 
 // writeRootedFileInPlace publishes through an already-validated handle. It is
-// the non-regular and rename-refused fallback, so it keeps the previous
-// truncate-and-write behaviour and restores the observed bytes if a write
-// fails and the preimage is available.
+// the non-regular path, so it keeps the previous truncate-and-write behaviour
+// and restores the observed bytes if a write fails and the preimage is available.
 func writeRootedFileInPlace(root *os.Root, relativePath string, file *os.File, openedInfo os.FileInfo, expectedContent *string, content string) error {
 	if err := file.Truncate(0); err != nil {
 		_ = file.Close()
@@ -377,47 +378,6 @@ func writeRootedFileInPlace(root *os.Root, relativePath string, file *os.File, o
 	return nil
 }
 
-// rewriteRootedFileInPlace reopens the observed path, re-validates identity
-// and preimage through that handle, and only then falls back to an in-place
-// write. A replacement installed during the refused publish is therefore not
-// touched.
-func rewriteRootedFileInPlace(root *os.Root, relativePath string, expectedInfo os.FileInfo, expectedContent *string, content string) error {
-	flags := os.O_WRONLY
-	if expectedContent != nil {
-		flags = os.O_RDWR
-	}
-	file, err := root.OpenFile(relativePath, flags, 0)
-	if err != nil {
-		return err
-	}
-	openedInfo, err := file.Stat()
-	if err != nil {
-		_ = file.Close()
-		return err
-	}
-	if !os.SameFile(expectedInfo, openedInfo) {
-		_ = file.Close()
-		return errFileChangedDuringWrite
-	}
-	pathInfo, err := root.Stat(relativePath)
-	if err != nil || !os.SameFile(openedInfo, pathInfo) {
-		_ = file.Close()
-		return errFileChangedDuringWrite
-	}
-	if expectedContent != nil {
-		current, readErr := io.ReadAll(file)
-		if readErr != nil {
-			_ = file.Close()
-			return readErr
-		}
-		if string(current) != *expectedContent {
-			_ = file.Close()
-			return errFileChangedDuringWrite
-		}
-	}
-	return writeRootedFileInPlace(root, relativePath, file, openedInfo, expectedContent, content)
-}
-
 // restoreRootedFile puts the observed bytes back after a failed in-place
 // write. The write already truncated the file, so this is best effort: the
 // caller receives both the original failure and any restore failure.
@@ -440,7 +400,7 @@ func restoreRootedFile(file *os.File, preimage *string) error {
 // removeWriteSideFile removes a staged replacement that never reached (or did
 // not survive) its publish, through the root handle.
 func removeWriteSideFile(root *os.Root, name string) error {
-	err := root.Remove(name)
+	err := fileWriteRemove(root, name)
 	if err == nil || errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -449,7 +409,7 @@ func removeWriteSideFile(root *os.Root, name string) error {
 	// and retry. The name belongs to a random side file this commit created.
 	if errors.Is(err, os.ErrPermission) {
 		if chmodErr := root.Chmod(name, 0o600); chmodErr == nil {
-			err = root.Remove(name)
+			err = fileWriteRemove(root, name)
 			if err == nil || errors.Is(err, os.ErrNotExist) {
 				return nil
 			}

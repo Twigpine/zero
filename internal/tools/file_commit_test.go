@@ -400,6 +400,9 @@ func TestOverwriteKeepsTheObservedPermissionBits(t *testing.T) {
 	if err := os.WriteFile(target, []byte("observed\n"), want); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(target, want); err != nil {
+		t.Fatal(err)
+	}
 
 	result := NewScopedWriteFileTool(root, nil).Run(context.Background(), map[string]any{
 		"path": "existing.txt", "content": "zero\n", "overwrite": true,
