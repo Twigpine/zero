@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -172,5 +173,78 @@ func TestBareResumeWithoutAnEventLogRefuses(t *testing.T) {
 	}
 	if !strings.Contains(transcriptText(updated.(model).transcript), "no event log") {
 		t.Fatalf("expected a no-event-log refusal:\n%s", transcriptText(updated.(model).transcript))
+	}
+}
+
+// Exercise the executor, durable bridge, reducer and saved command together.
+// A terminal event closes stopped runs too; it does not prove graph exhaustion.
+func TestSavedResumeReportsTheRecordedTerminalStatus(t *testing.T) {
+	for _, scenario := range []string{"cancelled", "stopped-partial", "failed-partial"} {
+		t.Run(scenario, func(t *testing.T) {
+			m, paths := savedPlanModel(t)
+			store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+			session, err := store.Create(sessions.CreateInput{Cwd: t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.sessionStore, m.activeSession = store, session
+			m.planProgress.Attach(func(tea.Msg) {}, 1, store, session.SessionID)
+			plan := samplePlan(t)
+			if _, err := specialist.SavePlan(paths.ProjectRoot, paths.ProjectDir, "audit", plan); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			m.planProgress.PlanRunning(cancel)
+			m.planProgress.PlanAdmitted(plan)
+			if scenario == "cancelled" {
+				m.orchestrateControlText("stop")
+			}
+			report := specialist.ExecutePlanIn(ctx, plan, specialist.PlanWorkspace{}, []string{"read_file"},
+				func(runCtx context.Context, req specialist.PlanTaskRequest) (specialist.TaskResult, error) {
+					if req.Task.ID == "a" {
+						return specialist.TaskResult{Outcome: specialist.TaskSucceeded, Output: "dependency finding"}, nil
+					}
+					if scenario == "stopped-partial" {
+						m.orchestrateControlText("stop")
+						return specialist.TaskResult{Outcome: specialist.TaskFailed, Err: "context canceled"}, runCtx.Err()
+					}
+					return specialist.TaskResult{Outcome: specialist.TaskFailed, Err: "task failed"}, nil
+				}, m.planProgress)
+			m.planProgress.PlanCompleted(plan, report)
+			wantStatus := specialist.PlanPartial
+			wantLeft := 1
+			if scenario == "cancelled" {
+				wantStatus, wantLeft = specialist.PlanCancelled, 2
+			}
+			if report.Status != wantStatus {
+				t.Fatalf("status = %q, want %q", report.Status, wantStatus)
+			}
+			if scenario == "stopped-partial" && report.Cancelled != 1 {
+				t.Fatalf("cancelled = %d, want 1", report.Cancelled)
+			}
+			if scenario == "failed-partial" && report.Failed != 1 {
+				t.Fatalf("failed = %d, want 1", report.Failed)
+			}
+			updated, _ := m.handlePlansCommand("resume audit")
+			notice := transcriptText(updated.(model).transcript)
+			if !strings.Contains(notice, "ended with status \""+string(wantStatus)+"\"") || strings.Contains(notice, "ran to the end") {
+				t.Fatalf("resume misreported the prior run:\n%s", notice)
+			}
+			staged, err := specialist.FindSavedPlan(paths, "audit_resume")
+			if err != nil {
+				t.Fatal(err)
+			}
+			remaining, err := specialist.ParsePlan(staged.Args, m.savedPlanLimits())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if remaining.TaskCount() != wantLeft {
+				t.Fatalf("remaining = %d, want %d", remaining.TaskCount(), wantLeft)
+			}
+			if wantLeft == 1 && !strings.Contains(remaining.Tasks()[0].Prompt, "dependency finding") {
+				t.Fatal("resume lost the succeeded dependency's finding")
+			}
+		})
 	}
 }

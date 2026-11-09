@@ -489,6 +489,9 @@ func TestASecondPlanIsRefusedWhileOneIsRunning(t *testing.T) {
 	if !strings.Contains(result.Output, "sweep") {
 		t.Errorf("the refusal must name the plan that is running: %q", result.Output)
 	}
+	if !strings.Contains(result.Output, "later turn in this session") {
+		t.Fatalf("the busy response must scope background delivery to this session: %q", result.Output)
+	}
 	if len(surface.admitted) != 0 {
 		t.Errorf("a refused plan must leave no record of having started, got %v", surface.admitted)
 	}

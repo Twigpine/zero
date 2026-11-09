@@ -725,7 +725,7 @@ func (tool *OrchestrateTool) RunWithOptions(ctx context.Context, args map[string
 			Status: tools.StatusError,
 			Output: fmt.Sprintf(
 				"Error: plan %q is still running, and a session shows one plan at a time. "+
-					"Wait for it to finish — its result arrives on a later turn if it is a background plan — "+
+					"Wait for it to finish — its result arrives on a later turn in this session if it is a background plan — "+
 					"or stop it with /plans stop, then run this one.", running),
 		}
 	}
@@ -777,7 +777,8 @@ func (tool *OrchestrateTool) RunWithOptions(ctx context.Context, args map[string
 		return tools.Result{
 			Status: tools.StatusOK,
 			Output: fmt.Sprintf(
-				"Plan %q started in the background with %d tasks. It is NOT finished — its result will arrive on a later turn. "+
+				"Plan %q started in the background with %d tasks. It is NOT finished — its result will arrive on a later turn in this session. "+
+					"If you leave this conversation, use /resume to return to the originating session for its result. "+
 					"Carry on with other work; do not wait for it and do not report it as done.",
 				plan.Name(), plan.TaskCount()),
 			Meta: map[string]string{"plan_status": "background"},

@@ -517,7 +517,7 @@ func TestABackgroundPlanReturnsWithoutRunningAndSaysSo(t *testing.T) {
 	if launched == nil {
 		t.Fatal("nothing was handed to the launcher")
 	}
-	for _, want := range []string{"background", "NOT finished", "later turn"} {
+	for _, want := range []string{"background", "NOT finished", "later turn in this session", "/resume", "originating session"} {
 		if !strings.Contains(result.Output, want) {
 			t.Errorf("the result must say %q: %q", want, result.Output)
 		}

@@ -378,3 +378,48 @@ func TestAConcurrentPlanIsRecordedCompletely(t *testing.T) {
 		}
 	}
 }
+
+// /new leaves the completed plan with its origin. /resume restores the same
+// session's delivery route, rather than moving foreign results into a new turn.
+func TestBackgroundCompletionSurvivesNewAndResume(t *testing.T) {
+	m, _ := savedPlanModel(t)
+	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
+	first, err := store.Create(sessions.CreateInput{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.sessionStore, m.activeSession, m.cwd = store, first, first.Cwd
+	m.planProgress.Attach(func(tea.Msg) {}, 1, store, first.SessionID)
+	m.planProgress.SetBackground(true)
+	plan := samplePlan(t)
+	m.planProgress.PlanAdmitted(plan)
+	m.planProgress.PlanCompleted(plan, specialist.PlanReport{Status: specialist.PlanCompleted, Succeeded: 2})
+
+	m = m.startNewSession()
+	if !strings.Contains(transcriptText(m.transcript), "/resume "+first.SessionID) {
+		t.Fatal("/new omitted the recovery command")
+	}
+	if got := m.planProgress.DrainCompletedPlans(); got != "" {
+		t.Fatalf("fresh session received a foreign completion: %q", got)
+	}
+	m, err = m.ensureActiveSession("new work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.activeSession.SessionID == first.SessionID {
+		t.Fatal("/new did not create a different session")
+	}
+	if got := m.planProgress.DrainCompletedPlans(); got != "" {
+		t.Fatalf("second session received a foreign completion: %q", got)
+	}
+	m, notice := m.handleResumeCommand(first.SessionID)
+	if notice != "" {
+		t.Fatalf("/resume refused: %s", notice)
+	}
+	if got := m.planProgress.DrainCompletedPlans(); !strings.Contains(got, plan.Name()) {
+		t.Fatalf("origin session lost its completion: %q", got)
+	}
+	if got := m.planProgress.DrainCompletedPlans(); got != "" {
+		t.Fatalf("completion delivered twice: %q", got)
+	}
+}
