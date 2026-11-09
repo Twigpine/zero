@@ -1357,6 +1357,74 @@ func TestResolveAppliesProviderCatalogDefaults(t *testing.T) {
 	}
 }
 
+func TestResolveAppliesOpenGatewayCatalogDefaults(t *testing.T) {
+	path := writeConfig(t, `{
+		"activeProvider": "gitlawb-opengateway",
+		"providers": [{
+			"name": "gitlawb-opengateway",
+			"catalogID": "gitlawb-opengateway"
+		}]
+	}`)
+
+	resolved, err := Resolve(ResolveOptions{
+		UserConfigPath: path,
+		Env: map[string]string{
+			"GITLAWB_OPENGATEWAY_API_KEY": "ogw_live_test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.Provider.BaseURL != "https://api.twigpine.com/v1" {
+		t.Fatalf("BaseURL = %q, want https://api.twigpine.com/v1", resolved.Provider.BaseURL)
+	}
+	if resolved.Provider.Model != "xiaomi/mimo-v2.6-pro" {
+		t.Fatalf("Model = %q, want xiaomi/mimo-v2.6-pro", resolved.Provider.Model)
+	}
+	if resolved.Provider.APIKeyEnv != "GITLAWB_OPENGATEWAY_API_KEY" || resolved.Provider.APIKey != "ogw_live_test" {
+		t.Fatalf("credential = (%q, %q), want GITLAWB_OPENGATEWAY_API_KEY env-resolved key", resolved.Provider.APIKeyEnv, resolved.Provider.APIKey)
+	}
+}
+
+// Profiles saved before the Twigpine rename persist the catalog's old base URL
+// (https://opengateway.gitlawb.com/v1) explicitly. That host still serves the
+// gateway, so those configs must keep resolving exactly as before: same host,
+// same model, catalog env var still bound, credential still picked up.
+func TestResolveKeepsLegacyOpenGatewayHostProfiles(t *testing.T) {
+	path := writeConfig(t, `{
+		"activeProvider": "gitlawb-opengateway",
+		"providers": [{
+			"name": "gitlawb-opengateway",
+			"catalogID": "gitlawb-opengateway",
+			"providerKind": "openai-compatible",
+			"baseURL": "https://opengateway.gitlawb.com/v1",
+			"model": "mimo-v2.5-pro"
+		}]
+	}`)
+
+	resolved, err := Resolve(ResolveOptions{
+		UserConfigPath: path,
+		Env: map[string]string{
+			"GITLAWB_OPENGATEWAY_API_KEY": "ogw_live_test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.Provider.BaseURL != "https://opengateway.gitlawb.com/v1" {
+		t.Fatalf("BaseURL = %q, want the saved legacy host kept", resolved.Provider.BaseURL)
+	}
+	if resolved.Provider.Model != "mimo-v2.5-pro" {
+		t.Fatalf("Model = %q, want the saved model kept", resolved.Provider.Model)
+	}
+	if resolved.Provider.APIKeyEnv != "GITLAWB_OPENGATEWAY_API_KEY" {
+		t.Fatalf("APIKeyEnv = %q, want GITLAWB_OPENGATEWAY_API_KEY", resolved.Provider.APIKeyEnv)
+	}
+	if resolved.Provider.APIKey != "ogw_live_test" {
+		t.Fatalf("APIKey = %q, want env-resolved key", resolved.Provider.APIKey)
+	}
+}
+
 func TestResolveAppliesMiniMaxCNCatalogDefaults(t *testing.T) {
 	path := writeConfig(t, `{
 		"activeProvider": "mini-cn",

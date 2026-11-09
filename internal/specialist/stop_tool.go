@@ -6,20 +6,26 @@ import (
 	"strings"
 
 	"github.com/Twigpine/zero/internal/background"
+	"github.com/Twigpine/zero/internal/sessions"
 	"github.com/Twigpine/zero/internal/tools"
 )
 
 type StopTool struct {
 	manager     *background.Manager
 	managerFunc BackgroundManagerFunc
+	// SessionStore and LifecycleHooks participate in the shared, deduped stop
+	// transition so an explicitly stopped recovered task produces exactly one
+	// specialistStop hook, the same as a launcher-owned exit.
+	SessionStore   *sessions.Store
+	LifecycleHooks *LifecycleHooks
 }
 
 type stopParameters struct {
 	TaskID string
 }
 
-func newStopToolWithManagerFunc(managerFunc BackgroundManagerFunc) *StopTool {
-	return &StopTool{managerFunc: managerFunc}
+func newStopToolWithManagerFunc(managerFunc BackgroundManagerFunc, sessionStore *sessions.Store, lifecycleHooks *LifecycleHooks) *StopTool {
+	return &StopTool{managerFunc: managerFunc, SessionStore: sessionStore, LifecycleHooks: lifecycleHooks}
 }
 
 func (tool *StopTool) Name() string {
@@ -64,6 +70,18 @@ func (tool *StopTool) Run(ctx context.Context, args map[string]any) tools.Result
 	}
 	if err := manager.Kill(params.TaskID); err != nil {
 		return taskError(err)
+	}
+	// A recovered task (launcher process gone) may only ever be reaped here: the
+	// in-memory onExit callback does not exist in this process, and a later
+	// TaskOutput poll is optional. Record the terminal transition now so the
+	// specialistStop hook fires exactly once through the shared durable claim.
+	// recordBackgroundTaskAccounting is a no-op for non-specialist tasks and for
+	// tasks that are still running (Kill raced a status change).
+	if task, ok := manager.Get(params.TaskID); ok && task.Type == specialistTaskType {
+		Executor{
+			SessionStore:   tool.SessionStore,
+			LifecycleHooks: tool.LifecycleHooks,
+		}.recordBackgroundTaskAccounting(task, taskStreamSummary(task))
 	}
 	return tools.Result{
 		Status: tools.StatusOK,

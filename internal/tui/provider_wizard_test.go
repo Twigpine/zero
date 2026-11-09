@@ -58,7 +58,7 @@ func TestProviderCommandOpensOnboardingWizard(t *testing.T) {
 	updated, _ = next.Update(testKey(tea.KeyEnter))
 	next = updated.(model)
 	listView := plainRender(t, next.View())
-	for _, want := range []string{"Choose provider", "aimlapi.com", "GitLawb OpenGateway", "OpenAI", "Anthropic", "Google", "OpenRouter", "Ollama"} {
+	for _, want := range []string{"Choose provider", "aimlapi.com", "Twigpine OpenGateway", "OpenAI", "Anthropic", "Google", "OpenRouter", "Ollama"} {
 		assertContains(t, listView, want)
 	}
 }
