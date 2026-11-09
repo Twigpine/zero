@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -86,7 +87,12 @@ type pauseAtRecorder struct {
 func (r *pauseAtRecorder) PlanRunning(context.CancelFunc) {}
 func (r *pauseAtRecorder) WaitWhilePaused(context.Context) {
 	if r.seen.Add(1) == r.boundary {
+		// Settle the watcher while dispatch is still held, then keep the pause
+		// in place until it has processed any timer fired by the clock jump.
+		// Without the idle hold, that timer cancels the plan before resume.
+		synctest.Wait()
 		r.clock.Advance(r.pauseFor)
+		synctest.Wait()
 	}
 }
 
@@ -98,6 +104,10 @@ func (r *pauseAtRecorder) WaitWhilePaused(context.Context) {
 // now holds the clock BEFORE the executor blocks; after resume the next task
 // runs, and the four seconds that were genuinely left are still enforced.
 func TestAPauseLongerThanTheRemainingWallBudgetDoesNotKillThePlan(t *testing.T) {
+	synctest.Test(t, testPauseLongerThanRemainingWallBudget)
+}
+
+func testPauseLongerThanRemainingWallBudget(t *testing.T) {
 	plan := mustPlan(t, []any{task("a", "x"), task("b", "y"), task("c", "z")},
 		map[string]any{"max_workers": float64(1), "max_wall_seconds": float64(10)}, readOnlyLimits())
 
@@ -135,6 +145,7 @@ func TestAPauseLongerThanTheRemainingWallBudgetDoesNotKillThePlan(t *testing.T) 
 			}
 			// Three of the four remaining seconds: still inside the budget.
 			clock.Advance(3 * time.Second)
+			synctest.Wait()
 			bLiveAt3s.Store(ctx.Err() == nil)
 			// Two more: real running time crosses the budget and the watcher
 			// must stop this task exactly as it would without any pause.
