@@ -247,6 +247,33 @@ func TestSubscriptionModelsDoNotCrossAccountProfiles(t *testing.T) {
 	}
 }
 
+// Two ChatGPT accounts can report different context windows for the same model
+// ID. The gauges and compaction must size from the active account's catalog,
+// which is cached under its profile key, not from the shared "chatgpt" entry
+// another account filled.
+func TestSubscriptionContextWindowUsesActiveAccount(t *testing.T) {
+	m := subscriptionTestModel(t)
+	m = m.applyModelPickerModelsDiscovered(modelPickerModelsDiscoveredMsg{
+		providerID: "chatgpt", endpointKey: "chatgpt",
+		models: []providermodeldiscovery.Model{
+			{ID: "gpt-shared-window", ContextWindow: 111111},
+			{ID: "gpt-other-account-only", ContextWindow: 333333},
+		},
+	})
+	m = m.applyModelPickerModelsDiscovered(modelPickerModelsDiscoveredMsg{
+		providerID: "chatgpt", endpointKey: m.providerProfile.Name,
+		models: []providermodeldiscovery.Model{{ID: "gpt-shared-window", ContextWindow: 222222}},
+	})
+	if got := m.modelContextWindow("gpt-shared-window"); got != 222222 {
+		t.Fatalf("context window = %d, want the active account's 222222 rather than another account's entry", got)
+	}
+	// A model the active account never surfaced still learns its window from
+	// another entry, as before.
+	if got := m.modelContextWindow("gpt-other-account-only"); got != 333333 {
+		t.Fatalf("fallback context window = %d, want 333333 from the other entry", got)
+	}
+}
+
 func TestSubscriptionPickerRetriesFromKeyboard(t *testing.T) {
 	m := subscriptionTestModel(t)
 	m.picker = m.newModelPicker()
