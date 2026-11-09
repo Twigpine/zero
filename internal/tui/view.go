@@ -1114,7 +1114,9 @@ func (m model) renderModelPickerOverlay(width, start, count int) string {
 
 // Share wrapped notice rows with mouse hit testing so both agree where models
 // start. Rows are capped so several failing accounts cannot push the model
-// rows and footer out of the overlay; /model list prints every notice.
+// rows and footer out of the overlay. Hidden notices mostly belong to other
+// accounts, and /model list reports only the active profile, so the summary
+// row states what was cut without pointing anywhere.
 func (m model) modelPickerDiscoveryNoticeLines(innerWidth int) []string {
 	width := maxInt(1, innerWidth-lipgloss.Width("❯ "))
 	var wrapped [][]string
@@ -1139,9 +1141,9 @@ func (m model) modelPickerDiscoveryNoticeLines(innerWidth int) []string {
 		lines = wrapped[0][:modelPickerMaxNoticeLines-1]
 		shown = 1
 	}
-	more := "… /model list shows the full notice."
+	more := "… notice truncated."
 	if hidden := len(wrapped) - shown; hidden > 0 {
-		more = fmt.Sprintf("+%d more discovery notices; /model list shows all.", hidden)
+		more = fmt.Sprintf("+%d more discovery notices not shown.", hidden)
 	}
 	return append(lines, ansi.Truncate(more, width, "…"))
 }

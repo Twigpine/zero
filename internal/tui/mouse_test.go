@@ -1182,7 +1182,12 @@ func TestModelPickerCapsDiscoveryNoticesFromManyAccounts(t *testing.T) {
 	}
 	overlay := m.modelPickerOverlay(80)
 	text := plainRender(t, overlay)
-	for _, want := range []string{"target-row", "Esc close", "more discovery notices; /model list shows all."} {
+	// The hidden notices belong to other accounts, which /model list does not
+	// report, so the summary row must not send the user there.
+	if strings.Contains(text, "/model list") {
+		t.Fatalf("picker points hidden notices at /model list:\n%s", text)
+	}
+	for _, want := range []string{"target-row", "Esc close", "more discovery notices not shown."} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("picker lacks %q with many failing accounts:\n%s", want, text)
 		}
@@ -1195,5 +1200,31 @@ func TestModelPickerCapsDiscoveryNoticesFromManyAccounts(t *testing.T) {
 				t.Fatalf("click on rendered model selected %#v, ok=%v; want target", target, ok)
 			}
 		}
+	}
+}
+
+// A single notice longer than the cap is cut rather than hidden; the summary
+// row says so without pointing at /model list, which would show the active
+// profile's notice only when the cut one belongs to it.
+func TestModelPickerTruncatesLongDiscoveryNotice(t *testing.T) {
+	m := subscriptionTestModel(t)
+	m.width, m.height = 80, 24
+	m.savedProviders = append(m.savedProviders, config.ProviderProfile{
+		Name: "other-account", CatalogID: "chatgpt", BaseURL: m.providerProfile.BaseURL,
+		ProviderKind: config.ProviderKindOpenAICompatible,
+	})
+	m.modelPickerErrorsByProvider = map[string]string{
+		"other-account": strings.Repeat("login expired; authenticate again before refreshing account models. ", 12),
+	}
+	lines := m.modelPickerDiscoveryNoticeLines(76)
+	if len(lines) != modelPickerMaxNoticeLines {
+		t.Fatalf("long notice uses %d rows, want exactly the cap %d", len(lines), modelPickerMaxNoticeLines)
+	}
+	text := plainRender(t, strings.Join(lines, "\n"))
+	if strings.Contains(text, "/model list") {
+		t.Fatalf("truncated notice points at /model list:\n%s", text)
+	}
+	if !strings.Contains(text, "notice truncated") {
+		t.Fatalf("truncated notice lacks the summary row:\n%s", text)
 	}
 }
