@@ -355,6 +355,7 @@ type modelsResponseItem struct {
 	Name               string   `json:"name"`
 	Description        string   `json:"description"`
 	Visibility         string   `json:"visibility"`
+	Status             string   `json:"status"`
 	ContextWindow      int      `json:"context_window"`
 	ContextWindowAlt   int      `json:"contextWindow"`
 	ContextLength      int      `json:"context_length"`
@@ -410,6 +411,11 @@ func parseModelsResponse(body []byte) ([]Model, error) {
 		// The ChatGPT catalog includes hidden/internal entries alongside picker
 		// models. Generic OpenAI-compatible responses omit visibility entirely.
 		if visibility := strings.ToLower(strings.TrimSpace(item.Visibility)); visibility != "" && visibility != "list" {
+			continue
+		}
+		// OpenGateway marks lifecycle with status "active" | "retired" (retired
+		// entries only appear with ?status=all). Never offer a retired model.
+		if strings.EqualFold(strings.TrimSpace(item.Status), "retired") {
 			continue
 		}
 		seen[id] = true

@@ -67,6 +67,58 @@ func TestParseModelsDevProviderScopesAndMapsMetadata(t *testing.T) {
 	}
 }
 
+func TestParseOpenGatewayCatalogSkipsRetiredModels(t *testing.T) {
+	// Mirrors GET https://api.twigpine.com/v1/models?status=all once the gateway
+	// retires models: an active entry plus a retired one carrying a successor.
+	body := []byte(`{
+		"object": "list",
+		"data": [
+			{
+				"id": "xiaomi/mimo-v2.6-pro",
+				"object": "model",
+				"name": "MiMo V2.6-Pro",
+				"description": "flagship omnimodal agent model",
+				"aliases": ["xiaomi/mimo-v2.5-pro", "mimo-v2.5-pro"],
+				"context_window": 262144,
+				"pricing": {"prompt": "0.000001", "completion": "0.000003"},
+				"supports_tools": true,
+				"status": "active"
+			},
+			{
+				"id": "qwen/qwen-plus",
+				"object": "model",
+				"name": "Qwen Plus",
+				"description": "retired general model",
+				"context_window": 131072,
+				"status": "retired",
+				"successor": "qwen/qwen3.7-max"
+			}
+		]
+	}`)
+
+	models, err := ParseOpenGatewayCatalog(body)
+	if err != nil {
+		t.Fatalf("ParseOpenGatewayCatalog returned error: %v", err)
+	}
+	if got := strings.Join(modelIDs(models), ","); got != "xiaomi/mimo-v2.6-pro" {
+		t.Fatalf("models = %q, want only the active entry", got)
+	}
+	descriptor, ok := providercatalog.Get("gitlawb-opengateway")
+	if !ok {
+		t.Fatal("gitlawb-opengateway missing from catalog")
+	}
+	// Onboarding keeps the default selected only on an exact id match against
+	// the live list, so the default must be a real active id, not an alias.
+	if !containsModelID(models, descriptor.DefaultModel) {
+		t.Fatalf("default model %q missing from live list %v", descriptor.DefaultModel, modelIDs(models))
+	}
+
+	// A list made only of retired entries is treated as empty, not offered.
+	if _, err := ParseOpenGatewayCatalog([]byte(`{"data":[{"id":"old/model","status":"retired"}]}`)); err == nil {
+		t.Fatal("expected an error when every entry is retired")
+	}
+}
+
 func TestParseOpenGatewayCatalogSupportsRichModelJSON(t *testing.T) {
 	body := []byte(`{
 		"models": [

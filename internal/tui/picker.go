@@ -839,7 +839,9 @@ func providerDescriptorByBaseURL(baseURL string) (providercatalog.Descriptor, bo
 		if genericProviderCatalogID(descriptor.ID) {
 			continue
 		}
-		if normalizeProviderBaseURL(descriptor.DefaultBaseURL) == normalized {
+		// Includes legacy catalog hosts, so a profile saved against a provider's
+		// earlier default base URL still maps to its catalog entry.
+		if providercatalog.IsCatalogBaseURL(descriptor, normalized) {
 			return descriptor, true
 		}
 	}
@@ -1019,8 +1021,7 @@ func (m model) normalizeProfileForProvider(provider providercatalog.Descriptor) 
 }
 
 func profileMatchesProviderBaseURL(profile config.ProviderProfile, provider providercatalog.Descriptor) bool {
-	baseURL := normalizeProviderBaseURL(profile.BaseURL)
-	return baseURL != "" && baseURL == normalizeProviderBaseURL(provider.DefaultBaseURL)
+	return providercatalog.IsCatalogBaseURL(provider, profile.BaseURL)
 }
 
 func (m model) applyModelPickerModelsDiscovered(msg modelPickerModelsDiscoveredMsg) model {
