@@ -455,7 +455,7 @@ func projectAPIKeyEnvAllowed(profile ProviderProfile, envName string) bool {
 	if baseURL == "" {
 		baseURL = descriptor.DefaultBaseURL
 	}
-	if !sameBaseURL(baseURL, descriptor.DefaultBaseURL) {
+	if !providercatalog.IsCatalogBaseURL(descriptor, baseURL) {
 		return false
 	}
 	return containsStringFold(descriptor.AuthEnvVars, envName)
@@ -463,7 +463,7 @@ func projectAPIKeyEnvAllowed(profile ProviderProfile, envName string) bool {
 
 func projectBaseURLAllowed(profile ProviderProfile) bool {
 	descriptor, ok := catalogDescriptorForProfile(profile)
-	return ok && sameBaseURL(profile.BaseURL, descriptor.DefaultBaseURL)
+	return ok && providercatalog.IsCatalogBaseURL(descriptor, profile.BaseURL)
 }
 
 func hasInheritedProviderCredentialMaterial(project ProviderProfile, candidate ProviderProfile) bool {
@@ -1128,10 +1128,13 @@ func applyCatalogDescriptor(profile *ProviderProfile, descriptor providercatalog
 	if profile.Model == "" {
 		profile.Model = descriptor.DefaultModel
 	}
-	if profile.APIKeyEnv == "" && len(descriptor.AuthEnvVars) > 0 && (!explicitBaseURL || sameBaseURL(profile.BaseURL, descriptor.DefaultBaseURL)) {
+	// A legacy catalog base URL (an earlier default that still serves the
+	// provider, e.g. a profile saved before a host move) counts as the catalog
+	// endpoint, so it keeps the catalog env var binding.
+	canonicalCatalogEndpoint := !explicitBaseURL || providercatalog.IsCatalogBaseURL(descriptor, profile.BaseURL)
+	if profile.APIKeyEnv == "" && len(descriptor.AuthEnvVars) > 0 && canonicalCatalogEndpoint {
 		profile.APIKeyEnv = descriptor.AuthEnvVars[0]
 	}
-	canonicalCatalogEndpoint := !explicitBaseURL || sameBaseURL(profile.BaseURL, descriptor.DefaultBaseURL)
 	if len(descriptor.CustomHeaders) > 0 && canonicalCatalogEndpoint {
 		catalogHeaders := descriptor.CustomHeaders
 		if strings.EqualFold(strings.TrimSpace(descriptor.ID), "aimlapi") {

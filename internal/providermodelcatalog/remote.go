@@ -19,7 +19,7 @@ import (
 
 const (
 	DefaultModelsDevURL   = "https://models.dev/api.json"
-	defaultOpenGatewayURL = "https://opengateway.gitlawb.com/v1/models"
+	defaultOpenGatewayURL = "https://api.twigpine.com/v1/models"
 	defaultOpenRouterURL  = "https://openrouter.ai/api/v1/models"
 	modelsDevSource       = "models.dev"
 	openGatewaySource     = "opengateway"
@@ -120,6 +120,8 @@ func ParseModelsDevProvider(body []byte, providerID string) ([]Model, error) {
 // ParseOpenGatewayCatalog parses OpenGateway's live GET /v1/models payload (or the
 // older {models:[...]} shape). The gateway already curates what it exposes, so
 // every non-empty id is accepted rather than applying the coding-model heuristic.
+// Retired entries (status "retired", listed by ?status=all) are skipped so a
+// picker never offers a model the gateway no longer serves.
 func ParseOpenGatewayCatalog(body []byte) ([]Model, error) {
 	items, err := parseOpenAIStyleModelList(body)
 	if err != nil {
@@ -127,6 +129,9 @@ func ParseOpenGatewayCatalog(body []byte) ([]Model, error) {
 	}
 	models := make([]Model, 0, len(items))
 	for _, item := range items {
+		if item.retired() {
+			continue
+		}
 		model := item.toModel("", openGatewaySource)
 		if model.ID == "" {
 			continue
@@ -224,6 +229,7 @@ func PublicLiveCatalog(providerID string) bool {
 type remoteModel struct {
 	ID                 string `json:"id"`
 	Name               string `json:"name"`
+	Status             string `json:"status"` // OpenGateway: "active" | "retired"; absent means active
 	Description        string `json:"description"`
 	ContextWindow      int    `json:"context_window"`
 	ContextWindowCamel int    `json:"contextWindow"`
@@ -346,6 +352,11 @@ func (model remoteModel) toModel(key string, source string) Model {
 		Tags:                   cleanStrings(model.Tags),
 		Source:                 source,
 	}
+}
+
+// retired reports whether the catalog marks this entry as retired.
+func (model remoteModel) retired() bool {
+	return strings.EqualFold(strings.TrimSpace(model.Status), "retired")
 }
 
 func normalizedServiceTiers(tiers []string, legacy []string) []string {

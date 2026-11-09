@@ -154,6 +154,11 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if next, cmd, handled := m.handlePetMouse(msg); handled {
 		return next, cmd
 	}
+	if mouseLeftPress(msg) && m.runDetailsVisible() {
+		if path, ok := m.runDetailsFileAtMouse(msg); ok {
+			return m.selectFile(path)
+		}
+	}
 	if mouseLeftPress(msg) {
 		switch {
 		case m.providerWizard != nil:
