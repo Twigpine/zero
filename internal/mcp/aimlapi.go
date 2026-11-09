@@ -2,12 +2,14 @@ package mcp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 
 	"github.com/Twigpine/zero/internal/aimlapi"
 	"github.com/Twigpine/zero/internal/config"
@@ -24,12 +26,16 @@ import (
 // config.LoadAIMLAPIServiceKey, which in the same call decides whether it may
 // be sent (no proxy profile, a single token), so a provider change applies to
 // the next request and a withheld or invalid key means no Authorization
-// header. It lives only in that request's headers: never in Server, its
-// Identity (OAuth token binding), config.json, list output, errors or tool
-// output. An error status to such a request is reported without its body, and
-// any other response to it has the key scrubbed from its error text, method
-// and result before anything reads them (scrubAIMLAPIKeys), since that text is
-// the server's own. A user-configured Authorization header, OAuth, or a
+// header. It lives only in that request's headers, and for the length of the
+// call in the collector its context carries (aimlapiSentKeys), so the reply can
+// be scrubbed: never in Server, its Identity (OAuth token binding), config.json,
+// list output, errors or tool output. Every key the call sent, redirect hops
+// included, and on the SSE transport the keys the stream request sent, is
+// scrubbed from the response's error text, method and result before anything
+// reads them (scrubAIMLAPIKeys) and from any error the call returns, a
+// transport error quoting a URL the server chose among them
+// (scrubAIMLAPIKeyError). An error status to such a request is also reported
+// without its body. A user-configured Authorization header, OAuth, or a
 // project-touched server always goes without it.
 var loadAIMLAPIServiceKey = config.LoadAIMLAPIServiceKey
 
@@ -62,6 +68,9 @@ func applyAIMLAPIRequestHeaders(server Server, request *http.Request) {
 		return
 	}
 	request.Header.Set("Authorization", "Bearer "+key)
+	if sent, ok := request.Context().Value(aimlapiSentKeysContextKey{}).(*aimlapiSentKeys); ok {
+		sent.add(key)
+	}
 }
 
 // reapplyAIMLAPIRedirectHeaders gives a redirect hop the automatic headers its
@@ -107,19 +116,40 @@ func hasUserAuthorizationHeader(server Server) bool {
 	return false
 }
 
-// injectedAIMLAPIKey returns the key applyAIMLAPIRequestHeaders put on request,
-// or "" when request went out without it. Pass the request a response answers
-// (response.Request, the last hop of any redirect): that is what the responding
-// server was sent.
-func injectedAIMLAPIKey(server Server, request *http.Request) string {
-	if !sentAIMLAPIServiceKey(server, request) {
-		return ""
+// aimlapiSentKeys collects every key applyAIMLAPIRequestHeaders puts on the
+// requests of one call. The first request's context carries it, and net/http
+// gives each redirect hop that same context, so a key resolved again for a later
+// hop is collected too. The final hop's key alone is not enough: a same-origin
+// server answering the last hop has seen every earlier one.
+type aimlapiSentKeys struct {
+	mu   sync.Mutex
+	keys []string
+}
+
+type aimlapiSentKeysContextKey struct{}
+
+// withAIMLAPISentKeys returns ctx carrying a fresh collector for one call.
+func withAIMLAPISentKeys(ctx context.Context) (context.Context, *aimlapiSentKeys) {
+	sent := &aimlapiSentKeys{}
+	return context.WithValue(ctx, aimlapiSentKeysContextKey{}, sent), sent
+}
+
+func (sent *aimlapiSentKeys) add(key string) {
+	sent.mu.Lock()
+	defer sent.mu.Unlock()
+	for _, existing := range sent.keys {
+		if existing == key {
+			return
+		}
 	}
-	value := strings.TrimSpace(request.Header.Get("Authorization"))
-	if scheme, key, ok := strings.Cut(value, " "); ok && strings.EqualFold(scheme, "Bearer") {
-		value = strings.TrimSpace(key)
-	}
-	return value
+	sent.keys = append(sent.keys, key)
+}
+
+// list returns a copy of the keys collected so far.
+func (sent *aimlapiSentKeys) list() []string {
+	sent.mu.Lock()
+	defer sent.mu.Unlock()
+	return append([]string(nil), sent.keys...)
 }
 
 // scrubAIMLAPIKeys removes the injected keys from a response before any of it
@@ -205,19 +235,39 @@ func scrubAIMLAPIKeysFromValue(value any, keys []string) (any, bool) {
 }
 
 // scrubAIMLAPIKeyError returns err with the injected keys removed from its text.
-// An error the keys do not appear in keeps its chain; one they do appear in is
-// replaced by its scrubbed text, because its chain still holds the key.
+// An error the keys do not appear in keeps its chain. One they do appear in is
+// replaced by its scrubbed text, because its chain still holds the key (a
+// *url.Error keeps the URL the server chose); the replacement unwraps only to
+// the context sentinel the original matched, so a cancellation still reads as
+// one.
 func scrubAIMLAPIKeyError(err error, keys ...string) error {
-	if err == nil {
-		return nil
+	if err == nil || len(keys) == 0 {
+		return err
 	}
 	text := err.Error()
 	scrubbed := redaction.RedactSecretValues(text, keys...)
 	if scrubbed == text {
 		return err
 	}
-	return errors.New(scrubbed)
+	replacement := &aimlapiScrubbedError{text: scrubbed}
+	for _, sentinel := range []error{context.Canceled, context.DeadlineExceeded} {
+		if errors.Is(err, sentinel) {
+			replacement.cause = sentinel
+			break
+		}
+	}
+	return replacement
 }
+
+// aimlapiScrubbedError is an error whose text had an injected key removed.
+type aimlapiScrubbedError struct {
+	text  string
+	cause error
+}
+
+func (scrubbed *aimlapiScrubbedError) Error() string { return scrubbed.text }
+
+func (scrubbed *aimlapiScrubbedError) Unwrap() error { return scrubbed.cause }
 
 // aimlapiUnauthorizedHint explains how to authenticate when the AI/ML API MCP
 // server rejects a request without OAuth. It names no key material.

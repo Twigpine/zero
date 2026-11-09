@@ -3,8 +3,11 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -243,6 +246,11 @@ func TestAIMLAPIMCPLeavesResponsesAloneWithoutTheInjectedKey(t *testing.T) {
 type aimlapiSSEEcho struct {
 	endpoint string
 	reply    func(method string, id json.RawMessage) string
+	// postErr, when set, fails every POST at the transport.
+	postErr error
+	// rawEvent, when set, writes its whole event to the stream instead of a
+	// message event built from reply.
+	rawEvent func(method string, id json.RawMessage) string
 	events   chan string
 	mu       sync.Mutex
 	auth     []string
@@ -279,6 +287,9 @@ func (echo *aimlapiSSEEcho) RoundTrip(request *http.Request) (*http.Response, er
 		response.Body = reader
 		return response, nil
 	}
+	if echo.postErr != nil {
+		return nil, echo.postErr
+	}
 	var body []byte
 	if request.Body != nil {
 		body, _ = io.ReadAll(request.Body)
@@ -290,9 +301,31 @@ func (echo *aimlapiSSEEcho) RoundTrip(request *http.Request) (*http.Response, er
 	}
 	_ = json.Unmarshal(body, &message)
 	if len(message.ID) > 0 {
-		echo.events <- "event: message\ndata: " + echo.reply(message.Method, message.ID) + "\n\n"
+		if echo.rawEvent != nil {
+			echo.events <- echo.rawEvent(message.Method, message.ID)
+		} else {
+			echo.events <- "event: message\ndata: " + echo.reply(message.Method, message.ID) + "\n\n"
+		}
 	}
 	return fakeHTTPResponse(request, http.StatusAccepted, ""), nil
+}
+
+// rotateAIMLAPIKeys makes the key resolver hand out keys in order, repeating the
+// last, the way a provider change between two requests of one call would.
+func rotateAIMLAPIKeys(t *testing.T, keys ...string) {
+	t.Helper()
+	var mu sync.Mutex
+	previous := loadAIMLAPIServiceKey
+	loadAIMLAPIServiceKey = func() (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		key := keys[0]
+		if len(keys) > 1 {
+			keys = keys[1:]
+		}
+		return key, nil
+	}
+	t.Cleanup(func() { loadAIMLAPIServiceKey = previous })
 }
 
 func (echo *aimlapiSSEEcho) assertSent(t *testing.T, want string, requests int) {
@@ -357,16 +390,7 @@ func TestAIMLAPIMCPSSEScrubsTheStreamKeyAndThePostKey(t *testing.T) {
 	// the stream comes from a server that was sent both.
 	const streamKey = "strm9f8e7d6c5b4a39281706f5e4d3c2b1"
 	const postKey = "post1a2b3c4d5e6f708192a3b4c5d6e7f8"
-	keys := []string{streamKey, postKey}
-	previous := loadAIMLAPIServiceKey
-	loadAIMLAPIServiceKey = func() (string, error) {
-		key := keys[0]
-		if len(keys) > 1 {
-			keys = keys[1:]
-		}
-		return key, nil
-	}
-	t.Cleanup(func() { loadAIMLAPIServiceKey = previous })
+	rotateAIMLAPIKeys(t, streamKey, postKey)
 
 	echo := newAIMLAPISSEEcho("/messages", func(_ string, id json.RawMessage) string {
 		return rpcReply(id, "error", map[string]any{"code": -32001, "message": "stream key " + streamKey + ", post key " + postKey})
@@ -411,4 +435,224 @@ func TestAIMLAPIMCPSSEScrubsTheInjectedKeyFromAnEndpointError(t *testing.T) {
 		t.Fatalf("openStream error = %v, want the endpoint parse failure", err)
 	}
 	assertKeyScrubbed(t, err.Error())
+}
+
+// aimlapiHopEcho answers the first request with a 307 to location and hands the
+// second hop to second, recording the Authorization each hop carried.
+type aimlapiHopEcho struct {
+	location string
+	second   func(request *http.Request, id json.RawMessage) (*http.Response, error)
+	mu       sync.Mutex
+	auth     []string
+}
+
+func (echo *aimlapiHopEcho) RoundTrip(request *http.Request) (*http.Response, error) {
+	var body []byte
+	if request.Body != nil {
+		body, _ = io.ReadAll(request.Body)
+		_ = request.Body.Close()
+	}
+	echo.mu.Lock()
+	echo.auth = append(echo.auth, request.Header.Get("Authorization"))
+	hop := len(echo.auth)
+	echo.mu.Unlock()
+	if hop == 1 {
+		response := fakeHTTPResponse(request, http.StatusTemporaryRedirect, "")
+		response.Header.Set("Location", echo.location)
+		return response, nil
+	}
+	var message struct {
+		ID json.RawMessage `json:"id"`
+	}
+	_ = json.Unmarshal(body, &message)
+	return echo.second(request, message.ID)
+}
+
+func TestAIMLAPIMCPScrubsEveryKeySentAcrossRedirectHops(t *testing.T) {
+	// The key is resolved again for a redirect hop, so the hops of one call can
+	// carry different keys, and the same-origin server answering the last hop
+	// has seen them all.
+	const first = "aimlfirst0123456789abcdef01234567"
+	const second = "aimlsecond0123456789abcdef0123456"
+	for _, tc := range []struct {
+		name     string
+		location string
+		// hopKey is the key the redirect hop must carry, "" for none.
+		hopKey string
+		second func(*http.Request, json.RawMessage) (*http.Response, error)
+	}{
+		{
+			name:     "error echoes the first hop's key",
+			location: "https://mcp.aimlapi.com/mcp/",
+			hopKey:   second,
+			second: func(request *http.Request, id json.RawMessage) (*http.Response, error) {
+				return fakeHTTPResponse(request, http.StatusOK, rpcReply(id, "error", map[string]any{"code": -32001, "message": "stale " + first})), nil
+			},
+		},
+		{
+			name:     "status body after a hop that dropped the key",
+			location: "https://user@mcp.aimlapi.com/mcp",
+			second: func(request *http.Request, _ json.RawMessage) (*http.Response, error) {
+				return fakeHTTPResponse(request, http.StatusPaymentRequired, `{"error":"invalid credential `+first+`"}`), nil
+			},
+		},
+		{
+			name:     "transport error quoting the redirect target",
+			location: "https://mcp.aimlapi.com/mcp?session=" + first,
+			hopKey:   second,
+			second: func(*http.Request, json.RawMessage) (*http.Response, error) {
+				return nil, errors.New("connection reset by peer")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rotateAIMLAPIKeys(t, first, second)
+			echo := &aimlapiHopEcho{location: tc.location, second: tc.second}
+			server := aimlapiTestServer("aimlapi", aimlapi.MCPServerURL)
+			client := &networkClient{server: server, client: mcpHTTPClient(server, echo), nextID: 1}
+			err := client.initialize(context.Background())
+
+			echo.mu.Lock()
+			auth := append([]string(nil), echo.auth...)
+			echo.mu.Unlock()
+			if len(auth) != 2 || auth[0] != "Bearer "+first {
+				t.Fatalf("Authorization per hop = %q, want the first key on the first request and a redirect hop", auth)
+			}
+			if tc.hopKey != "" && auth[1] != "Bearer "+tc.hopKey {
+				t.Fatalf("redirect hop Authorization = %q, want the key resolved again for it", auth[1])
+			}
+			// With no key, net/http fills Basic auth from the hop's own userinfo.
+			if tc.hopKey == "" && (strings.Contains(auth[1], first) || strings.Contains(auth[1], second)) {
+				t.Fatalf("redirect hop Authorization = %q, want no automatic key", auth[1])
+			}
+			if err == nil {
+				t.Fatal("initialize succeeded against a failing server")
+			}
+			assertNoPartOf(t, err.Error(), first)
+			assertNoPartOf(t, err.Error(), second)
+			if !strings.Contains(err.Error(), "[REDACTED]") {
+				t.Fatalf("error = %q, want the echoed key replaced", err)
+			}
+		})
+	}
+}
+
+func TestAIMLAPIMCPSSEScrubsTheStreamKeyFromAFailedPost(t *testing.T) {
+	// The server chose an endpoint holding the key its stream request carried.
+	// A POST to it that fails at the transport quotes that URL, and the POST
+	// itself carried a different key, so only the stream's keys can scrub it.
+	const streamKey = "strm0a1b2c3d4e5f60718293a4b5c6d7e8"
+	const postKey = "post9e8d7c6b5a4f30291807f6e5d4c3b2"
+	rotateAIMLAPIKeys(t, streamKey, postKey)
+	echo := newAIMLAPISSEEcho("/messages/"+streamKey, func(string, json.RawMessage) string { return "" })
+	echo.postErr = errors.New("connection reset by peer")
+	client := newEchoSSEClient(echo)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.openStream(ctx); err != nil {
+		t.Fatalf("openStream: %v", err)
+	}
+	_, err := client.ListTools(ctx)
+	_ = client.Close()
+
+	echo.mu.Lock()
+	auth := append([]string(nil), echo.auth...)
+	echo.mu.Unlock()
+	if len(auth) != 2 || auth[0] != "Bearer "+streamKey || auth[1] != "Bearer "+postKey {
+		t.Fatalf("Authorization headers = %q, want the stream key and then the post key", auth)
+	}
+	if err == nil || !strings.Contains(err.Error(), "post MCP SSE message") {
+		t.Fatalf("ListTools error = %v, want the failed POST", err)
+	}
+	assertNoPartOf(t, err.Error(), streamKey)
+	assertNoPartOf(t, err.Error(), postKey)
+	if !strings.Contains(err.Error(), "/messages/[REDACTED]") {
+		t.Fatalf("error = %q, want the endpoint quoted with the key replaced", err)
+	}
+}
+
+func TestAIMLAPIMCPSSEScrubsTheKeyFromALaterEndpointError(t *testing.T) {
+	// An endpoint event can arrive after the stream is open. Its parse error
+	// then fails the pending requests directly rather than returning from
+	// openStream, so it has to be scrubbed where it is made.
+	isolateAIMLAPIKeyLookup(t, scrubTestKey)
+	echo := newAIMLAPISSEEcho("/messages", nil)
+	echo.rawEvent = func(string, json.RawMessage) string {
+		return "event: endpoint\ndata: /messages/" + scrubTestKey + "%zz\n\n"
+	}
+	client := newEchoSSEClient(echo)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client.openStream(ctx); err != nil {
+		t.Fatalf("openStream: %v", err)
+	}
+	_, err := client.ListTools(ctx)
+	_ = client.Close()
+	echo.assertSent(t, "Bearer "+scrubTestKey, 2)
+	if err == nil || !strings.Contains(err.Error(), "endpoint") {
+		t.Fatalf("ListTools error = %v, want the later endpoint's parse failure", err)
+	}
+	assertKeyScrubbed(t, err.Error())
+}
+
+func TestAIMLAPIMCPSSEScrubsKeysFromAFailedStreamRedirect(t *testing.T) {
+	// The stream request follows redirects like any other, so a hop that fails
+	// at the transport quotes the target the server chose, which can hold the
+	// key the first hop carried.
+	const first = "strmfirst0123456789abcdef01234567"
+	const second = "strmsecond0123456789abcdef0123456"
+	rotateAIMLAPIKeys(t, first, second)
+	echo := &aimlapiHopEcho{
+		location: "https://mcp.aimlapi.com/mcp?session=" + first,
+		second: func(*http.Request, json.RawMessage) (*http.Response, error) {
+			return nil, errors.New("connection reset by peer")
+		},
+	}
+	server := Server{Name: "aimlapi", Type: ServerTypeSSE, URL: aimlapi.MCPServerURL}
+	client := &remoteSSEClient{server: server, client: mcpHTTPClient(server, echo), nextID: 1, pending: map[string]chan ssePendingResponse{}}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := client.openStream(ctx)
+	_ = client.Close()
+
+	echo.mu.Lock()
+	auth := append([]string(nil), echo.auth...)
+	echo.mu.Unlock()
+	if len(auth) != 2 || auth[0] != "Bearer "+first || auth[1] != "Bearer "+second {
+		t.Fatalf("Authorization per hop = %q, want the first key and then the second", auth)
+	}
+	if err == nil || !strings.Contains(err.Error(), "open MCP SSE stream") {
+		t.Fatalf("openStream error = %v, want the failed stream request", err)
+	}
+	assertNoPartOf(t, err.Error(), first)
+	assertNoPartOf(t, err.Error(), second)
+	if !strings.Contains(err.Error(), "session=[REDACTED]") {
+		t.Fatalf("error = %q, want the redirect target quoted with the key replaced", err)
+	}
+}
+
+func TestScrubAIMLAPIKeyErrorKeepsOnlyTheContextSentinel(t *testing.T) {
+	for _, sentinel := range []error{context.Canceled, context.DeadlineExceeded} {
+		original := fmt.Errorf("post MCP SSE message to aimlapi: %w", &url.Error{Op: "Post", URL: "https://mcp.aimlapi.com/messages/" + scrubTestKey, Err: sentinel})
+		scrubbed := scrubAIMLAPIKeyError(original, scrubTestKey)
+		assertKeyScrubbed(t, scrubbed.Error())
+		if !errors.Is(scrubbed, sentinel) {
+			t.Fatalf("scrubbed error %q no longer reads as %v", scrubbed, sentinel)
+		}
+		if unwrapped := errors.Unwrap(scrubbed); unwrapped != sentinel {
+			t.Fatalf("scrubbed error unwraps to %v, want only %v", unwrapped, sentinel)
+		}
+		var urlErr *url.Error
+		if errors.As(scrubbed, &urlErr) {
+			t.Fatalf("scrubbed error still exposes the *url.Error holding the key: %v", urlErr.URL)
+		}
+	}
+
+	if scrubbed := scrubAIMLAPIKeyError(fmt.Errorf("decode: %s", scrubTestKey), scrubTestKey); errors.Unwrap(scrubbed) != nil {
+		t.Fatalf("scrubbed error without a context sentinel unwraps to %v, want nothing", errors.Unwrap(scrubbed))
+	}
+	untouched := fmt.Errorf("call MCP: %w", context.Canceled)
+	if got := scrubAIMLAPIKeyError(untouched, scrubTestKey); got != untouched {
+		t.Fatalf("an error without the key was replaced: %v", got)
+	}
 }

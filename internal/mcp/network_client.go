@@ -35,10 +35,11 @@ type remoteSSEClient struct {
 	pending      map[string]chan ssePendingResponse
 	streamErr    error
 	closed       bool
-	// streamKey is the injected AI/ML API key the stream request carried, if
-	// any. openStream sets it once, before the reader starts; the messages on
-	// the stream are answers from a server that was sent it.
-	streamKey string
+	// streamKeys are the injected AI/ML API keys the stream request carried,
+	// redirect hops included. openStream sets them once, before the reader
+	// starts; the endpoint and the messages on the stream come from a server
+	// that was sent them.
+	streamKeys []string
 }
 
 type ssePendingResponse struct {
@@ -263,7 +264,7 @@ func (client *remoteSSEClient) request(ctx context.Context, method string, param
 	client.pending[key] = responseChannel
 	client.mu.Unlock()
 
-	sentKey, err := client.post(ctx, rpcMessage{
+	sentKeys, err := client.post(ctx, rpcMessage{
 		JSONRPC: "2.0",
 		ID:      id,
 		Method:  method,
@@ -279,7 +280,7 @@ func (client *remoteSSEClient) request(ctx context.Context, method string, param
 		if response.err != nil {
 			return response.err
 		}
-		message := scrubAIMLAPIKeys(response.message, client.streamKey, sentKey)
+		message := scrubAIMLAPIKeys(response.message, append(append([]string(nil), client.streamKeys...), sentKeys...)...)
 		if !rpcIDMatches(message.ID, id) {
 			return fmt.Errorf("MCP %s response id mismatch for server %s", method, client.server.Name)
 		}
@@ -339,6 +340,11 @@ func (client *networkClient) post(ctx context.Context, message rpcMessage, expec
 	if err != nil {
 		return rpcMessage{}, err
 	}
+	ctx, sent := withAIMLAPISentKeys(ctx)
+	// From here an error can quote the server or a URL it chose, a redirect
+	// target among them, so every key the call sent, on any hop, is scrubbed
+	// from it. This runs last, after the body is closed.
+	defer func() { err = scrubAIMLAPIKeyError(err, sent.list()...) }()
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, client.server.URL, bytes.NewReader(body))
 	if err != nil {
 		return rpcMessage{}, fmt.Errorf("create MCP %s request for %s: %w", client.server.Type, client.server.Name, err)
@@ -368,12 +374,14 @@ func (client *networkClient) post(ctx context.Context, message rpcMessage, expec
 	if err != nil {
 		return rpcMessage{}, err
 	}
-	return scrubAIMLAPIKeys(decoded, injectedAIMLAPIKey(client.server, response.Request)), nil
+	return scrubAIMLAPIKeys(decoded, sent.list()...), nil
 }
 
-func (client *remoteSSEClient) openStream(ctx context.Context) error {
+func (client *remoteSSEClient) openStream(ctx context.Context) (err error) {
 	streamCtx, cancel := context.WithCancel(ctx)
 	client.streamCancel = cancel
+	streamCtx, sent := withAIMLAPISentKeys(streamCtx)
+	defer func() { err = scrubAIMLAPIKeyError(err, sent.list()...) }()
 
 	request, err := http.NewRequestWithContext(streamCtx, http.MethodGet, client.server.URL, nil)
 	if err != nil {
@@ -391,7 +399,7 @@ func (client *remoteSSEClient) openStream(ctx context.Context) error {
 		return err
 	}
 	client.streamBody = response.Body
-	client.streamKey = injectedAIMLAPIKey(client.server, response.Request)
+	client.streamKeys = sent.list()
 
 	ready := make(chan error, 1)
 	go client.readStream(response.Body, ready)
@@ -403,34 +411,41 @@ func (client *remoteSSEClient) openStream(ctx context.Context) error {
 	}
 }
 
-// post sends message to the endpoint and returns the injected AI/ML API key the
-// request carried, if any, since the answer arrives on the stream from a server
-// that was sent it.
-func (client *remoteSSEClient) post(ctx context.Context, message rpcMessage) (sentKey string, err error) {
+// post sends message to the endpoint and returns the injected AI/ML API keys the
+// request carried, redirect hops included, since the answer arrives on the
+// stream from a server that was sent them. The endpoint is the server's own
+// choice and can hold one of the stream's keys, and a transport error quotes it,
+// so the stream's keys are scrubbed from any error as well as the POST's.
+func (client *remoteSSEClient) post(ctx context.Context, message rpcMessage) (sentKeys []string, err error) {
+	ctx, sent := withAIMLAPISentKeys(ctx)
+	defer func() {
+		sentKeys = sent.list()
+		err = scrubAIMLAPIKeyError(err, append(append([]string(nil), client.streamKeys...), sentKeys...)...)
+	}()
 	endpointURL, err := client.currentEndpoint()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	body, err := json.Marshal(message)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("create MCP SSE post for %s: %w", client.server.Name, err)
+		return nil, fmt.Errorf("create MCP SSE post for %s: %w", client.server.Name, err)
 	}
 	client.applyPostHeaders(request)
 
 	response, err := client.client.Do(request)
 	if err != nil {
-		return "", fmt.Errorf("post MCP SSE message to %s: %w", client.server.Name, err)
+		return nil, fmt.Errorf("post MCP SSE message to %s: %w", client.server.Name, err)
 	}
 	defer closeResponseBody(&err, client.server, response.Body)
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return "", httpStatusError(client.server, response)
+		return nil, httpStatusError(client.server, response)
 	}
 	_, _ = io.Copy(io.Discard, response.Body)
-	return injectedAIMLAPIKey(client.server, response.Request), nil
+	return nil, nil
 }
 
 func (client *networkClient) applyHeaders(request *http.Request) {
@@ -542,7 +557,7 @@ func (client *remoteSSEClient) setEndpoint(value string) error {
 	endpointURL, err := resolveSSEEndpointURL(client.server.URL, strings.TrimSpace(value))
 	if err != nil {
 		// A URL parse error quotes the endpoint, which is the server's text.
-		return scrubAIMLAPIKeyError(err, client.streamKey)
+		return scrubAIMLAPIKeyError(err, client.streamKeys...)
 	}
 	client.mu.Lock()
 	client.endpointURL = endpointURL
