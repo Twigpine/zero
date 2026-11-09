@@ -160,7 +160,7 @@ func TestNewPassesOpenGatewayHY3ModelThrough(t *testing.T) {
 	for range stream {
 	}
 
-	if transport.request.URL.String() != "https://opengateway.gitlawb.com/v1/chat/completions" {
+	if transport.request.URL.String() != "https://api.twigpine.com/v1/chat/completions" {
 		t.Fatalf("request URL = %q, want OpenGateway chat completions", transport.request.URL.String())
 	}
 	var body map[string]any

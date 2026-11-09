@@ -75,6 +75,12 @@ type Descriptor struct {
 	// catalog-ordered lists and pickers. The recommended descriptors are the first
 	// entries in the catalog, in order.
 	Recommended bool
+
+	// LegacyBaseURLs lists earlier DefaultBaseURL values that still address
+	// this provider's own endpoint. Profiles saved against one keep catalog
+	// endpoint treatment (catalog env var binding, base-URL matching) after the
+	// default moves; see IsCatalogBaseURL.
+	LegacyBaseURLs []string
 }
 
 func RuntimeSupported(descriptor Descriptor) bool {
@@ -99,11 +105,17 @@ func RuntimeUnsupportedReason(descriptor Descriptor) string {
 }
 
 var descriptors = []Descriptor{
-	// GitLawb OpenGateway — the recommended default. An OpenAI-compatible gateway
-	// that smart-routes by model id across upstream providers (xiaomi-mimo,
-	// minimax, qwen, google, nvidia, tencent, z-ai). Flat /v1/chat/completions
-	// with a Bearer ogw_live_… key; listed first and badged in every picker.
-	recommended(openAICompat("gitlawb-opengateway", "GitLawb OpenGateway", "https://opengateway.gitlawb.com/v1", "mimo-v2.5-pro", []string{"GITLAWB_OPENGATEWAY_API_KEY"}, "gitlawb opengateway", "opengateway")),
+	// Twigpine OpenGateway (formerly GitLawb OpenGateway) — the recommended
+	// default. An OpenAI-compatible gateway at api.twigpine.com that smart-routes
+	// by model id across upstream providers. Flat /v1/chat/completions with a
+	// Bearer ogw_live_… key; listed first and badged in every picker. The public
+	// GET /v1/models lists only active models and is what pickers show when
+	// reachable. DefaultModel must be an exact id from that list (not an alias)
+	// so onboarding keeps it selected after live discovery. The id and env var
+	// keep their gitlawb names so saved configs keep resolving; the old host
+	// (opengateway.gitlawb.com) still serves clients and stays a legacy catalog
+	// endpoint so profiles saved against it resolve unchanged.
+	recommended(withLegacyBaseURLs(openAICompat("gitlawb-opengateway", "Twigpine OpenGateway", "https://api.twigpine.com/v1", "xiaomi/mimo-v2.6-pro", []string{"GITLAWB_OPENGATEWAY_API_KEY"}, "gitlawb opengateway", "opengateway", "twigpine opengateway", "twigpine"), "https://opengateway.gitlawb.com/v1")),
 	// aimlapi.com — OpenAI-compatible aggregating gateway, also badged as
 	// recommended (second, right after the OpenGateway default). The built-in TUI
 	// onboarding can register/top up an account and save the issued key; the partner
@@ -307,6 +319,37 @@ func recommended(descriptor Descriptor) Descriptor {
 	return descriptor
 }
 
+// withLegacyBaseURLs records earlier default base URLs that still serve the
+// provider, so profiles saved before a host move keep resolving as the catalog
+// endpoint.
+func withLegacyBaseURLs(descriptor Descriptor, baseURLs ...string) Descriptor {
+	descriptor.LegacyBaseURLs = append(descriptor.LegacyBaseURLs, baseURLs...)
+	return descriptor
+}
+
+// IsCatalogBaseURL reports whether baseURL addresses the descriptor's own
+// endpoint: its DefaultBaseURL or one of its LegacyBaseURLs, ignoring case,
+// surrounding space, and a trailing slash. An empty baseURL never matches.
+func IsCatalogBaseURL(descriptor Descriptor, baseURL string) bool {
+	normalized := normalizeBaseURL(baseURL)
+	if normalized == "" {
+		return false
+	}
+	if normalized == normalizeBaseURL(descriptor.DefaultBaseURL) {
+		return true
+	}
+	for _, legacy := range descriptor.LegacyBaseURLs {
+		if normalized == normalizeBaseURL(legacy) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeBaseURL(baseURL string) string {
+	return strings.ToLower(strings.TrimRight(strings.TrimSpace(baseURL), "/"))
+}
+
 // oauthProvider marks a descriptor as OAuth-capable. mintsKey => the flow returns
 // an API key (OpenRouter); deviceFlow => RFC 8628 device code is also supported.
 func oauthProvider(descriptor Descriptor, mintsKey bool, deviceFlow bool) Descriptor {
@@ -382,6 +425,9 @@ func cloneDescriptor(descriptor Descriptor) Descriptor {
 	descriptor.AuthEnvVars = append([]string{}, descriptor.AuthEnvVars...)
 	descriptor.SupportedAPIFormats = append([]APIFormat{}, descriptor.SupportedAPIFormats...)
 	descriptor.Aliases = append([]string{}, descriptor.Aliases...)
+	if descriptor.LegacyBaseURLs != nil {
+		descriptor.LegacyBaseURLs = append([]string{}, descriptor.LegacyBaseURLs...)
+	}
 	if descriptor.CustomHeaders != nil {
 		descriptor.CustomHeaders = copyStringMap(descriptor.CustomHeaders)
 	}

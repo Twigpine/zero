@@ -203,7 +203,11 @@ Events the agent emits (in dispatch order):
 | `specialistStart` | A sub-agent is spawned | yes (specialist name) |
 | `specialistStop` | A sub-agent ends | yes (specialist name) |
 
-A hook's exit code decides what happens next: `0` continues, non-zero blocks the tool call (`beforeTool`) or surfaces an error (`afterTool`). Hook execution is recorded in the audit log; the audit is reachable from the agent's view of past actions, not from a dedicated `zero doctor` check.
+For swarm members the matcher subject is the **agent type** (`subagent`, `teammate`, …), not a registered specialist profile name — swarm members run from an inline manifest keyed by agent type.
+
+`specialistStart` fires once the child process has actually started; a launch that fails before exec (missing binary, spawn error) records no public lifecycle hooks. `specialistStop` fires once per terminal stop: completion, error, explicit stop of a recovered task, and a background task reaped by a later `TaskOutput` all share one durable claim, so a hook that notifies or cleans up does not run twice for the same sub-agent run.
+
+A hook's exit code decides what happens next: `0` continues, non-zero blocks the tool call (`beforeTool`) or surfaces an error (`afterTool`). `sessionStart` / `sessionEnd` / `specialistStart` / `specialistStop` hooks are advisory (failures are audited but do not interrupt the run). Hook execution is recorded in the audit log; the audit is reachable from the agent's view of past actions, not from a dedicated `zero doctor` check.
 
 > **Roadmap.** An in-UI hooks manager is on the backlog. Today you edit the JSON directly.
 
@@ -351,10 +355,12 @@ Install and manage:
 zero plugins add ./github-pr-review      # copy into ~/.config/zero/plugins/ or ./.zero/plugins/
 zero plugins list
 zero plugins info github-pr-review       # show manifest path, enabled state, lock metadata
+zero plugins disable github-pr-review   # sets "enabled": false in plugin.json
+zero plugins enable github-pr-review    # sets "enabled": true in plugin.json
 zero plugins remove github-pr-review    # alias: rm
 ```
 
-A plugin is enabled by being present in the plugins directory and disabled by removing it (or by the user setting `"enabled": false` in its `plugin.json`). Plugins are not enabled or disabled by a CLI subcommand today.
+A plugin is active when it is present under a plugins directory and its `plugin.json` has `"enabled": true` (the default when the field is omitted). Use `zero plugins disable <id>` / `zero plugins enable <id>` to toggle that field without removing the plugin. Pass `--user` to target only user plugins and ignore `./.zero/plugins`; without it, a project plugin with the same id takes precedence. The toggle edits the `enabled` value in place — the rest of the manifest keeps its formatting, field order, and numeric literals — and serializes with `plugins add` / `plugins remove` on the same plugins root. Zero reads plugins when it starts, so the change applies to the next `zero exec` run or interactive session; an interactive session that is already running keeps the plugin tools, hooks, and skills it started with until you restart it.
 
 Plugin commands run with the plugin directory as their working directory. Use relative paths; the loader resolves them at activation time.
 
