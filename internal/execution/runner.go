@@ -24,6 +24,12 @@ type PreparedCommand struct {
 	Enforcement Enforcement
 	Report      func() (AdapterReport, error)
 	Cleanup     func()
+	// ChildLaunchOwnedByAdapter marks a plan where Command is a WRAPPER and the
+	// requested process is created inside it, so exec.Cmd.Process says nothing
+	// about whether the sandboxed child ever existed. The adapter must state the
+	// fact in its report; if it does not, the runner treats the child as not
+	// launched rather than crediting the wrapper's start.
+	ChildLaunchOwnedByAdapter bool
 }
 
 type CapturedRequest struct {
@@ -90,10 +96,25 @@ func (runner *Runner) ExecuteCaptured(ctx context.Context, input CapturedRequest
 	prepared.Command.Stdout = stdout
 	prepared.Command.Stderr = stderr
 	runErr := prepared.Command.Run()
+	// Observed HERE, from the only thing that knows: exec.Cmd sets Process only
+	// once os.StartProcess has succeeded, so this is false for a missing
+	// executable and for a context cancelled before Start, and true for anything
+	// that ran, including a later timeout or cancellation.
+	launched := prepared.Command.Process != nil
 	report, reportErr := AdapterReport{}, error(nil)
 	if prepared.Report != nil {
 		report, reportErr = prepared.Report()
 	}
+	// A WRAPPED PLAN'S LAUNCH BIT BELONGS TO THE ADAPTER. The line above observes
+	// the process THIS command started, which for a Windows restricted-token plan
+	// is the helper, not the requested executable: the helper validates the setup
+	// marker, applies ACLs, checks the network policy, builds capability SIDs and
+	// mints the restricted token after it is already running, and any of those can
+	// fail with no sandboxed child ever created. Believing the outer bit there
+	// reports that reads were denied as requested when only the unsandboxed
+	// adapter ran. An adapter that owns the inner transition overrides it; one
+	// that stays silent leaves the direct-command observation alone.
+	launched = ResolveChildLaunched(launched, prepared.ChildLaunchOwnedByAdapter, report)
 	result := CapturedResult{
 		Stdout:    stdout.String(),
 		Stderr:    stderr.String(),
@@ -101,6 +122,7 @@ func (runner *Runner) ExecuteCaptured(ctx context.Context, input CapturedRequest
 		Err:       runErr,
 		Outcome: Outcome{
 			Enforcement: prepared.Enforcement,
+			Launched:    launched,
 		},
 	}
 	exitCode := commandExitCode(runErr)
@@ -155,6 +177,28 @@ func (runner *Runner) Prepare(ctx context.Context, request Request) (PreparedCom
 		return PreparedCommand{}, errors.New("execution adapter is not configured")
 	}
 	return preparer.PrepareExecution(ctx, request)
+}
+
+// ResolveChildLaunched decides whether the REQUESTED process launched.
+//
+// ONE IMPLEMENTATION, because every launcher needs the same answer and each one
+// that re-derived it got a different one. observed is what the caller saw of the
+// process IT started, which for a wrapped plan is the helper and not the
+// requested child.
+//
+//   - the adapter stated the fact: believe the adapter, in both directions.
+//   - the adapter owns the fact and stayed silent: not launched. An absent report
+//     must not be read as proof that enforcement applied.
+//   - nobody owns it but the caller: keep the direct observation, which is
+//     correct for a direct command and for bwrap.
+func ResolveChildLaunched(observed bool, ownedByAdapter bool, report AdapterReport) bool {
+	if report.ChildLaunched != nil {
+		return *report.ChildLaunched
+	}
+	if ownedByAdapter {
+		return false
+	}
+	return observed
 }
 
 func capturedSetupFailure(message string, err error, enforcement Enforcement) CapturedResult {

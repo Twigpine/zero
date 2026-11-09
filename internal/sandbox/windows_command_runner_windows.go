@@ -8,6 +8,20 @@ import (
 )
 
 func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writer) int {
+	// OWN THE CHILDREN BEFORE ANY CHILD CAN EXIST, so one created later inherits
+	// job membership at creation and a forcibly terminated helper cannot leave a
+	// suspended one behind. A failure here is not fatal: it costs the
+	// kill-on-close guarantee, not the sandbox, and the ordinary unwind paths
+	// still run.
+	//
+	// THE HANDLE IS NEVER CLOSED, and that is the contract rather than a leak.
+	// Closing it IS the kill: this process is a member of the job, so releasing
+	// the last handle terminates it where it stands. A deferred close therefore
+	// killed this helper during its own return, before the exit code below could
+	// be handed back, and every sandboxed command reported 0 however it really
+	// ended. Process exit releases the handle, which is exactly the event the
+	// guarantee is built on.
+	_, _ = windowsJoinChildKillJob()
 	// Fully restricted DenyRead tokens cannot load ordinary Users-granted
 	// system binaries without SID broadening; broadening is permanently off
 	// because it admits write grants outside WriteRoots. Reject on both the
@@ -98,6 +112,11 @@ func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writ
 	return exitCode
 }
 
+// applyWindowsUnelevatedACLPlanFn is a seam. The failure branch below builds
+// the guidance an operator acts on, and that text is only correct by
+// inspection until something drives the branch and reads it back.
+var applyWindowsUnelevatedACLPlanFn = applyWindowsACLPlan
+
 // ensureWindowsUnelevatedSetup applies the workspace ACL plan from the current
 // (non-elevated) process so the write-restricted token has somewhere its
 // capability SIDs are granted. DACL edits on user-owned workspace and temp
@@ -120,9 +139,16 @@ func ensureWindowsUnelevatedSetup(config WindowsSandboxCommandConfig) error {
 	if marker.contains(applied) {
 		return nil
 	}
-	if _, err := applyWindowsACLPlan(plan); err != nil {
+	if _, err := applyWindowsUnelevatedACLPlanFn(plan); err != nil {
+		// Both remedies below are real. An earlier version offered `--sandbox
+		// forbid`, which is not: SandboxPreferenceForbid is an internal engine
+		// state with no flag behind it, so following that advice produced an
+		// unknown option and left the reader stuck on a failure they had just been
+		// told how to clear. A recovery instruction that does not work is worse
+		// than none, because it costs the reader the time to discover that.
 		return fmt.Errorf("apply unelevated workspace ACLs: %w — the workspace may be on a filesystem the current user does not own; "+
-			"run `zero sandbox setup` from an elevated (Administrator) terminal, or re-run with `--sandbox forbid` to skip OS sandboxing", err)
+			"run `zero sandbox setup` from an elevated (Administrator) terminal, "+
+			`or turn the sandbox off in your user config with "sandbox": {"enabled": false}`, err)
 	}
 	return recordWindowsUnelevatedAppliedPlan(config.SandboxHome, applied)
 }
