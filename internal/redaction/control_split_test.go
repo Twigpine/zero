@@ -105,6 +105,114 @@ func TestRedactStringCoversTheSeparatorsInsideASplitSecret(t *testing.T) {
 	}
 }
 
+// A CALLER-SUPPLIED SECRET IS A CREDENTIAL TOO.
+//
+// ExtraSecretValues names a value the caller knows is secret, whatever its
+// shape: an opaque provider key matches none of the shape matchers, so the
+// split pass above never saw it, and a separator inside it left both fragments
+// in the output. It has to be matched across the same separators, cover them in
+// its replacement, and leave the separators beside it where they were.
+func TestRedactStringRedactsExtraSecretValuesSplitByInvisibleCharacters(t *testing.T) {
+	const secret = "zq7Mv2Lp9Xr4Tn8Wk3"
+	options := Options{ExtraSecretValues: []string{secret}}
+	if out := RedactString("key "+secret, Options{}); !strings.Contains(out, secret) {
+		t.Fatalf("SETUP INVALID: a shape matcher already redacts %q, so this would not reach the explicit-value pass: %q", secret, out)
+	}
+	for _, testCase := range []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{"NUL", "key " + secret[:6] + "\x00" + secret[6:], "key [REDACTED]"},
+		{"zero width space", "key " + secret[:1] + "\u200b" + secret[1:], "key [REDACTED]"},
+		{"soft hyphen near the end", "key " + secret[:len(secret)-1] + "\u00ad" + secret[len(secret)-1:], "key [REDACTED]"},
+		{"every gap", "key " + strings.Join(strings.Split(secret, ""), "\x1b"), "key [REDACTED]"},
+		{"adjacent separators", "key " + secret[:9] + "\x00\x1b\u2060" + secret[9:], "key [REDACTED]"},
+		{"twice", secret[:3] + "\x00" + secret[3:] + " and " + secret[:12] + "\ufeff" + secret[12:], "[REDACTED] and [REDACTED]"},
+		{"separators beside it stay", "\x00" + secret[:5] + "\u200b" + secret[5:] + "\x00", "\x00[REDACTED]\x00"},
+		{"a line break is not a gap", secret[:5] + "\n" + secret[5:], secret[:5] + "\n" + secret[5:]},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := RedactString(testCase.value, options); got != testCase.want {
+				t.Errorf("RedactString(%q) = %q, want %q", testCase.value, got, testCase.want)
+			}
+		})
+	}
+	// A SHORTER SECRET MUST NOT CLAIM PART OF A SPLIT LONGER ONE. Longest first
+	// has to hold across the contiguous and split matches together: replacing
+	// a contiguous shorter value first left the rest of the split longer one
+	// ("[REDACTED]\x00Lp9Xr4Tn8Wk3") visible.
+	for _, testCase := range []struct {
+		name    string
+		secrets []string
+		value   string
+		want    string
+	}{
+		{"prefix", []string{secret[:6], secret}, "key " + secret[:6] + "\x00" + secret[6:], "key [REDACTED]"},
+		{"suffix", []string{secret[9:], secret}, "key " + secret[:9] + "\u200b" + secret[9:], "key [REDACTED]"},
+		{"inside", []string{secret[4:10], secret}, "key " + secret[:2] + "\x00" + secret[2:], "key [REDACTED]"},
+		{"shorter alone too", []string{secret, secret[:6]}, secret[:6] + " and " + secret[:6] + "\x00" + secret[6:], "[REDACTED] and [REDACTED]"},
+	} {
+		t.Run("overlap "+testCase.name, func(t *testing.T) {
+			if got := RedactString(testCase.value, Options{ExtraSecretValues: testCase.secrets}); got != testCase.want {
+				t.Errorf("RedactString(%q, %q) = %q, want %q", testCase.value, testCase.secrets, got, testCase.want)
+			}
+		})
+	}
+	// OVERLAPPING OCCURRENCES ARE ONE SPAN. Replacing one occurrence (either
+	// form) and then looking for the next consumed bytes the other needed:
+	// "abc\x00abcabc" holds a split "abc\x00abc" overlapping a whole "abcabc",
+	// and replacing the whole one first left "abc\x00" in front of it. Every
+	// occurrence of every value, in either form, has to be found in the same
+	// text and overlapping ones replaced together.
+	for _, testCase := range []struct {
+		name    string
+		secrets []string
+		value   string
+		want    string
+	}{
+		{"split then whole, periodic secret", []string{"abcabc"}, "abc\x00abcabc", "[REDACTED]"},
+		{"whole then split, periodic secret", []string{"abcabc"}, "abcabc\x00abc", "[REDACTED]"},
+		{"shared first and last character", []string{"xY7qx"}, "key xY7q\u200bxY7qx", "key [REDACTED]"},
+		{"two secrets overlapping across a split", []string{"zq7Mv2Lp", "Lp9Xr4Tn"}, "key zq7Mv2L\x00p9Xr4Tn", "key [REDACTED]"},
+		{"whole occurrences overlapping", []string{"xY7qx"}, "xY7qxY7qx", "[REDACTED]"},
+		{"adjacent occurrences stay two", []string{"abc"}, "abc\x00abc", "[REDACTED]\x00[REDACTED]"},
+	} {
+		t.Run("overlapping occurrences "+testCase.name, func(t *testing.T) {
+			if got := RedactString(testCase.value, Options{ExtraSecretValues: testCase.secrets}); got != testCase.want {
+				t.Errorf("RedactString(%q, %q) = %q, want %q", testCase.value, testCase.secrets, got, testCase.want)
+			}
+		})
+	}
+	// A SECRET AS WRITTEN IS ALWAYS REDACTED. The split match compares the text
+	// and the value with separators removed; it adds to the whole match and
+	// must never replace it. Once the text held any separator, a value made only
+	// of separators compacted to nothing and was skipped, and separators at
+	// either end of a value fell outside its compacted match, so both stayed
+	// visible where a plain replacement had always caught them.
+	for _, testCase := range []struct {
+		name    string
+		secrets []string
+		value   string
+		want    string
+	}{
+		{"separator-only secret", []string{"\x00"}, "a\x00b", "a[REDACTED]b"},
+		{"separator-only secret beside another separator", []string{"\u200b"}, "a\u200bb\x00", "a[REDACTED]b\x00"},
+		{"separators at both ends", []string{"\u200babc\x00"}, "x\u200babc\x00y", "x[REDACTED]y"},
+	} {
+		t.Run("as written "+testCase.name, func(t *testing.T) {
+			if got := RedactString(testCase.value, Options{ExtraSecretValues: testCase.secrets}); got != testCase.want {
+				t.Errorf("RedactString(%q, %q) = %q, want %q", testCase.value, testCase.secrets, got, testCase.want)
+			}
+		})
+	}
+	// A value the caller names that is NOT in the text leaves the text alone,
+	// separators and all.
+	if value := "unrelated\x00text \u200bhere"; RedactString(value, options) != value {
+		t.Errorf("RedactString rewrote text without the secret in it: %q", RedactString(value, options))
+	}
+}
+
 // NOTHING ELSE MOVES. The compaction exists to find a match; it must never
 // reach text that has no secret in it, and text with no invisible character at
 // all must take exactly the path it took before.

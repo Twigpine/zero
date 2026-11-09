@@ -1837,3 +1837,20 @@ func TestSwitchProviderModelStillRejectsProviderWithNoCredential(t *testing.T) {
 		t.Fatalf("expected the credential gate to refuse, got %q (ok=%v)", text, ok)
 	}
 }
+
+func TestProviderDescriptorByBaseURLMapsLegacyOpenGatewayHost(t *testing.T) {
+	// A catalog-less profile saved against the gateway's earlier default host
+	// still maps to the Twigpine OpenGateway catalog entry, as does the new host.
+	for _, baseURL := range []string{"https://opengateway.gitlawb.com/v1", "https://api.twigpine.com/v1/"} {
+		descriptor, ok := providerDescriptorByBaseURL(baseURL)
+		if !ok || descriptor.ID != "gitlawb-opengateway" {
+			t.Fatalf("providerDescriptorByBaseURL(%q) = (%q, %v), want gitlawb-opengateway", baseURL, descriptor.ID, ok)
+		}
+		if !profileMatchesProviderBaseURL(config.ProviderProfile{BaseURL: baseURL}, descriptor) {
+			t.Fatalf("profileMatchesProviderBaseURL(%q) = false, want true", baseURL)
+		}
+	}
+	if _, ok := providerDescriptorByBaseURL("https://gateway.example.com/v1"); ok {
+		t.Fatal("an unknown host must not map to a catalog entry")
+	}
+}

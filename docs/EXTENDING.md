@@ -203,7 +203,11 @@ Events the agent emits (in dispatch order):
 | `specialistStart` | A sub-agent is spawned | yes (specialist name) |
 | `specialistStop` | A sub-agent ends | yes (specialist name) |
 
-A hook's exit code decides what happens next: `0` continues, non-zero blocks the tool call (`beforeTool`) or surfaces an error (`afterTool`). Hook execution is recorded in the audit log; the audit is reachable from the agent's view of past actions, not from a dedicated `zero doctor` check.
+For swarm members the matcher subject is the **agent type** (`subagent`, `teammate`, …), not a registered specialist profile name — swarm members run from an inline manifest keyed by agent type.
+
+`specialistStart` fires once the child process has actually started; a launch that fails before exec (missing binary, spawn error) records no public lifecycle hooks. `specialistStop` fires once per terminal stop: completion, error, explicit stop of a recovered task, and a background task reaped by a later `TaskOutput` all share one durable claim, so a hook that notifies or cleans up does not run twice for the same sub-agent run.
+
+A hook's exit code decides what happens next: `0` continues, non-zero blocks the tool call (`beforeTool`) or surfaces an error (`afterTool`). `sessionStart` / `sessionEnd` / `specialistStart` / `specialistStop` hooks are advisory (failures are audited but do not interrupt the run). Hook execution is recorded in the audit log; the audit is reachable from the agent's view of past actions, not from a dedicated `zero doctor` check.
 
 > **Roadmap.** An in-UI hooks manager is on the backlog. Today you edit the JSON directly.
 
@@ -257,6 +261,52 @@ or use a new server name. OAuth tokens are bound to the resolved server identity
 so changing a server target can require `zero mcp oauth login <server>` again.
 OAuth server names ending in `.<32 hex chars>` are reserved for token storage.
 
+#### Built-in servers
+
+Zero seeds two MCP servers before your config is merged. Both show up in
+`zero mcp list`, and any field can be overridden in your user config.
+
+- `exa` (`https://mcp.exa.ai/mcp`) is on by default for keyless web search.
+  `zero mcp disable exa` turns it off.
+- `aimlapi` (`https://mcp.aimlapi.com/mcp`, the AI/ML API Toolbox, model
+  discovery, image/video/audio generation, chat, embeddings and balance tools)
+  is **off by default**, because its tool runs and generations are billed to
+  your AI/ML API balance. Turn it on with `zero mcp enable aimlapi`, which
+  writes only `"disabled": false` to your user config, and off again with
+  `zero mcp disable aimlapi`. A project config cannot turn it on.
+
+When `aimlapi` connects, Zero sends your AI/ML API key as
+`Authorization: Bearer <key>`. The key is resolved again on every request and
+is never written to `config.json`. With an aimlapi.com provider profile
+(`zero providers setup aimlapi`), the key is chosen in this order:
+
+1. An inline key on the profile (if set in config).
+2. Otherwise the environment variable named by the profile's `apiKeyEnv`
+   (the catalog default is `AIMLAPI_API_KEY`).
+3. Otherwise the key held in the credential store when the profile uses
+   `apiKeyStored`.
+
+When there is no aimlapi profile, Zero uses `AIMLAPI_API_KEY` alone. If both
+`AIMLAPI_API_KEY` and a stored profile key exist, step 2 wins over the store
+whenever the inline key is empty — MCP requests may bill the environment key's
+account, not the stored key.
+
+No automatic key is sent when an aimlapi profile, or any profile reading
+`AIMLAPI_API_KEY`, uses a base URL other than `https://api.aimlapi.com/v1`, or
+when `AIMLAPI_INFERENCE_URL` is overridden, because that credential may belong
+to a proxy. No key is sent when the resolved value is not a single token (for
+example a comma- or newline-separated pool), when you set your own
+non-empty `Authorization` header, when the server uses `"auth": "oauth"`, or
+when project config touched the server. Without a key the server answers 401.
+To sign in with your aimlapi.com account instead, set `"auth": "oauth"` on the
+server and run `zero mcp oauth login aimlapi`.
+
+Every request to exactly `https://mcp.aimlapi.com` (https, default port,
+whatever the server is named, including one you add by hand) also carries the
+attribution headers `X-AIMLAPI-Source: agent/zero` and `X-AIMLAPI-Partner-ID`,
+and gets the key under the rules above. Other MCP servers never receive these
+headers or the key.
+
 ### As a server — expose Zero's tools to another agent
 
 ```bash
@@ -301,10 +351,12 @@ Install and manage:
 zero plugins add ./github-pr-review      # copy into ~/.config/zero/plugins/ or ./.zero/plugins/
 zero plugins list
 zero plugins info github-pr-review       # show manifest path, enabled state, lock metadata
+zero plugins disable github-pr-review   # sets "enabled": false in plugin.json
+zero plugins enable github-pr-review    # sets "enabled": true in plugin.json
 zero plugins remove github-pr-review    # alias: rm
 ```
 
-A plugin is enabled by being present in the plugins directory and disabled by removing it (or by the user setting `"enabled": false` in its `plugin.json`). Plugins are not enabled or disabled by a CLI subcommand today.
+A plugin is active when it is present under a plugins directory and its `plugin.json` has `"enabled": true` (the default when the field is omitted). Use `zero plugins disable <id>` / `zero plugins enable <id>` to toggle that field without removing the plugin. Pass `--user` to target only user plugins and ignore `./.zero/plugins`; without it, a project plugin with the same id takes precedence. The toggle edits the `enabled` value in place — the rest of the manifest keeps its formatting, field order, and numeric literals — and serializes with `plugins add` / `plugins remove` on the same plugins root. Zero reads plugins when it starts, so the change applies to the next `zero exec` run or interactive session; an interactive session that is already running keeps the plugin tools, hooks, and skills it started with until you restart it.
 
 Plugin commands run with the plugin directory as their working directory. Use relative paths; the loader resolves them at activation time.
 

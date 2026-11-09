@@ -74,13 +74,15 @@ func TestModelsAreProviderScoped(t *testing.T) {
 			notWant:  []string{"gpt-4.1", "claude-sonnet-4.5"},
 		},
 		{
+			// Offline fallback only; the live /v1/models list is shown when reachable.
 			provider: "gitlawb-opengateway",
-			want: []string{
-				"mimo-v2.5-pro", "tencent/hy3",
-				"xiaomi/mimo-v2.5-pro", "xiaomi/mimo-v2.5", "minimax/minimax-m3", "qwen/qwen3.7-max",
-				"google/gemini-3.1-flash-lite", "z-ai/glm-5.2", "nvidia/nemotron-3-ultra-550b-a55b:free",
+			want:     []string{"xiaomi/mimo-v2.6-pro", "auto", "xiaomi/mimo-v2.6-flash"},
+			notWant: []string{
+				"openai/gpt-4.1", "claude-sonnet-4.5",
+				"mimo-v2.5-pro", "xiaomi/mimo-v2.5-pro", "qwen-plus", "glm-4.6", "gemini-2.5-pro",
+				"MiniMax-M3", "nvidia/llama-3.1-nemotron-70b-instruct",
+				"qwen/qwen3.8-max", "qwen/qwen3.8-flash",
 			},
-			notWant: []string{"openai/gpt-4.1", "claude-sonnet-4.5"},
 		},
 		{
 			provider: "opencode-go-anthropic-compatible",

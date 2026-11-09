@@ -463,15 +463,7 @@ func RedactString(value string, options Options) string {
 	replacement := replacement(options)
 	redacted := value
 	if len(options.ExtraSecretValues) > 0 {
-		secrets := append([]string{}, options.ExtraSecretValues...)
-		sort.SliceStable(secrets, func(i, j int) bool {
-			return len(secrets[i]) > len(secrets[j])
-		})
-		for _, secret := range secrets {
-			if strings.TrimSpace(secret) != "" {
-				redacted = strings.ReplaceAll(redacted, secret, replacement)
-			}
-		}
+		redacted = redactExtraSecretValues(redacted, options.ExtraSecretValues, replacement)
 	}
 
 	if strings.Contains(redacted, "-----BEGIN ") && strings.Contains(redacted, "PRIVATE KEY") {

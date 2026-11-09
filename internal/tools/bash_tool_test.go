@@ -35,6 +35,10 @@ func TestMain(m *testing.M) {
 		return
 	}
 
+	// A developer's ZERO_WEBFETCH_PROVIDER would route every web_fetch test
+	// through the billed Toolbox backend and its real key lookup; tests that
+	// need it set it with t.Setenv.
+	_ = os.Unsetenv("ZERO_WEBFETCH_PROVIDER")
 	os.Exit(m.Run())
 }
 
