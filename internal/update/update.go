@@ -386,6 +386,10 @@ func fetchRelease(ctx context.Context, endpoint string) (release Release, err er
 					}
 				}
 			}
+			// net/http also forwards Authorization to subdomains; keep the exact-host boundary.
+			if req.URL.Scheme != "https" || !strings.EqualFold(req.URL.Hostname(), "api.github.com") {
+				req.Header.Del("Authorization")
+			}
 			return nil
 		},
 	}

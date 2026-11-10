@@ -427,6 +427,7 @@ func TestFetchReleaseAuthenticatedHTTPSRedirects(t *testing.T) {
 	}{
 		{"same host", "https://api.github.com/redirected", "Bearer secret"},
 		{"other host", "https://mirror.example.test/redirected", ""},
+		{"subdomain", "https://sub.api.github.com/redirected", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var urls, auth []string
