@@ -1601,22 +1601,9 @@ func TestRunUpdateHelpDocumentsCheckFlag(t *testing.T) {
 			t.Fatalf("expected update help to document %s, got %q", want, stdout.String())
 		}
 	}
-	// GITHUB_TOKEN must appear as a standalone token, not as a substring of ZERO_GITHUB_TOKEN.
-	out := stdout.String()
-	if idx := strings.Index(out, "GITHUB_TOKEN"); idx < 0 {
-		t.Fatalf("expected update help to document GITHUB_TOKEN, got %q", out)
-	} else if idx >= 5 && out[idx-5:idx] == "ZERO_" {
-		// Check after the ZERO_GITHUB_TOKEN occurrence too.
-		rest := out[idx+len("GITHUB_TOKEN"):]
-		if !strings.Contains(rest, "GITHUB_TOKEN") {
-			// Only ZERO_GITHUB_TOKEN matched; GITHUB_TOKEN is missing as a standalone entry.
-			// Find the first occurrence for the error message.
-			firstIdx := strings.Index(out, "ZERO_GITHUB_TOKEN")
-			after := out[firstIdx+len("ZERO_GITHUB_TOKEN"):]
-			if !strings.Contains(after, "GITHUB_TOKEN") {
-				t.Fatalf("expected update help to document GITHUB_TOKEN (standalone), got %q", out)
-			}
-		}
+	// The fallback entry must have its own line, apart from the precedence prose.
+	if !strings.Contains(stdout.String(), "\n  GITHUB_TOKEN ") {
+		t.Fatalf("expected update help to document a standalone GITHUB_TOKEN entry, got %q", stdout.String())
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("expected empty stderr, got %q", stderr.String())

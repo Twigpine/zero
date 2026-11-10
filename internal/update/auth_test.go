@@ -95,6 +95,37 @@ func TestFetchReleaseFallsBackToGithubToken(t *testing.T) {
 	}
 }
 
+func TestFetchReleaseNormalizesTokens(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		updateToken string
+		githubToken string
+		wantAuth    string
+	}{
+		{"blank preferred falls back", " \t\n", "fallback_token", "Bearer fallback_token"},
+		{"trim preferred", " \tzero_token\r\n", "fallback_token", "Bearer zero_token"},
+		{"trim fallback", "", " \tfallback_token\r\n", "Bearer fallback_token"},
+		{"both blank", " \t\n", "\r\n ", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ft := &fakeTransport{}
+			old := httpClient
+			httpClient = &http.Client{Transport: ft}
+			t.Cleanup(func() { httpClient = old })
+			t.Setenv(EnvUpdateToken, tc.updateToken)
+			t.Setenv(EnvGitHubToken, tc.githubToken)
+
+			_, err := fetchRelease(context.Background(), "https://api.github.com/repos/Gitlawb/zero/releases/latest")
+			if err != nil {
+				t.Fatalf("fetchRelease error: %v", err)
+			}
+			if ft.gotAuth != tc.wantAuth {
+				t.Fatalf("Authorization = %q, want %q", ft.gotAuth, tc.wantAuth)
+			}
+		})
+	}
+}
+
 func TestFetchReleaseNoAuthToCustomEndpoint(t *testing.T) {
 	var gotAuth string
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -385,6 +416,56 @@ func TestHTTPSSameHostRedirectAllowed(t *testing.T) {
 	}
 	if gotPath != "/repos/Gitlawb/zero/releases/latest" {
 		t.Fatalf("expected final path /repos/Gitlawb/zero/releases/latest, got %q", gotPath)
+	}
+}
+
+func TestFetchReleaseAuthenticatedHTTPSRedirects(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		location string
+		wantAuth string
+	}{
+		{"same host", "https://api.github.com/redirected", "Bearer secret"},
+		{"other host", "https://mirror.example.test/redirected", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var urls, auth []string
+			tr := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				urls = append(urls, req.URL.String())
+				auth = append(auth, req.Header.Get("Authorization"))
+				response := &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(releaseJSON("v0.2.0"))),
+					Request:    req,
+				}
+				if len(urls) == 1 {
+					response.StatusCode = http.StatusFound
+					response.Header.Set("Location", tc.location)
+				}
+				return response, nil
+			})
+			old := httpClient
+			httpClient = &http.Client{Transport: tr}
+			t.Cleanup(func() { httpClient = old })
+			t.Setenv(EnvUpdateToken, "secret")
+			t.Setenv(EnvGitHubToken, "")
+
+			const endpoint = "https://api.github.com/repos/Gitlawb/zero/releases/latest"
+			release, err := fetchRelease(context.Background(), endpoint)
+			if err != nil {
+				t.Fatalf("fetchRelease error: %v", err)
+			}
+			if len(urls) != 2 || urls[0] != endpoint || urls[1] != tc.location {
+				t.Fatalf("unexpected redirect route: %v", urls)
+			}
+			if auth[0] != "Bearer secret" || auth[1] != tc.wantAuth {
+				t.Fatalf("Authorization per hop = %q, want [%q %q]", auth, "Bearer secret", tc.wantAuth)
+			}
+			if release.TagName != "v0.2.0" {
+				t.Fatalf("release tag = %q, want v0.2.0", release.TagName)
+			}
+		})
 	}
 }
 

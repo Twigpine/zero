@@ -352,14 +352,12 @@ func upgradeGuidance(asset AssetCheck, sourceFlag string, installMethod InstallM
 	return "Run `zero upgrade` to download, verify, and install the latest release."
 }
 
+// githubAPIToken selects a trimmed token only for HTTPS GitHub API URLs.
 func githubAPIToken(u *url.URL) string {
 	if u.Scheme != "https" || !strings.EqualFold(u.Hostname(), "api.github.com") {
 		return ""
 	}
-	if token := os.Getenv(EnvUpdateToken); token != "" {
-		return token
-	}
-	return os.Getenv(EnvGitHubToken)
+	return firstNonEmpty(os.Getenv(EnvUpdateToken), os.Getenv(EnvGitHubToken))
 }
 
 func fetchRelease(ctx context.Context, endpoint string) (release Release, err error) {

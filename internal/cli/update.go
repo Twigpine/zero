@@ -210,9 +210,9 @@ Flags:
 
 Environment:
   ZERO_GITHUB_TOKEN     Token for update checks (takes precedence over GITHUB_TOKEN)
-                        Only sent to https://api.github.com over HTTPS; never sent to custom endpoints
-                        or on redirect to plain HTTP
-  GITHUB_TOKEN          Fallback token for update checks
+                        Only sent to HTTPS URLs on api.github.com, including endpoint overrides;
+                        never sent to other hosts or plain HTTP
+  GITHUB_TOKEN          Fallback token when ZERO_GITHUB_TOKEN is empty after trimming
   ZERO_UPDATE_RELEASE_URL  Override the release API URL (same as --endpoint)
 `)
 	return err
