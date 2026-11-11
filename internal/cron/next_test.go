@@ -37,6 +37,10 @@ func TestNext(t *testing.T) {
 		{"0 0 * * MON", time.Date(2026, 6, 9, 12, 0, 0, 0, utc), time.Date(2026, 6, 15, 0, 0, 0, 0, utc)}, // 2026-06-09 is a Tue
 		// DOM/DOW OR: fires on the 1st OR any Monday
 		{"0 0 1 * MON", time.Date(2026, 6, 9, 0, 0, 0, 0, utc), time.Date(2026, 6, 15, 0, 0, 0, 0, utc)}, // next Monday before next 1st
+		// bare "n/1" runs every minute from n on: 10:05:30 -> 10:06, not 11:05
+		{"5/1 * * * *", time.Date(2026, 6, 9, 10, 5, 30, 0, utc), time.Date(2026, 6, 9, 10, 6, 0, 0, utc)},
+		// ... and wraps to the next hour's first stepped minute (11:05)
+		{"5/1 * * * *", time.Date(2026, 6, 9, 10, 59, 30, 0, utc), time.Date(2026, 6, 9, 11, 5, 0, 0, utc)},
 	}
 	for _, c := range cases {
 		got := mustParse(t, c.expr).Next(c.after)
@@ -125,6 +129,43 @@ func TestNextDSTFallBackReturnsRepeatedMinuteWhenAfterHasSubMinutePrecision(t *t
 	want := time.Date(2026, 11, 1, 6, 30, 0, 0, time.UTC)
 	if !got.Equal(want) {
 		t.Fatalf("sub-minute after: Next = %v, want %v (must return the repeated 01:30 EST, not skip to the next day)", got.UTC(), want)
+	}
+}
+
+func TestNextDSTFallBackSteppedChainDoesNotRepeatWallClockMinutes(t *testing.T) {
+	// Walk a bare stepped "5/1" schedule through the 2026-11-01 America/New_York
+	// fall-back the way the scheduler drives it: each fire's instant feeds the
+	// next Next call via claimFire's Next(fired.Truncate(time.Minute)). The
+	// 01:00-01:59 hour occurs twice (EDT then EST), so a chain of Next calls
+	// must not emit the same wall-clock minute twice: the repeated hour
+	// collapses to a single pass of 55 stepped fires, not two.
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skip("tzdata unavailable")
+	}
+	sched := mustParse(t, "5/1 * * * *")
+
+	fired := time.Date(2026, 10, 31, 23, 59, 0, 0, ny) // just before the fall-back day
+	end := time.Date(2026, 11, 1, 3, 30, 0, 0, ny)     // 03:30 EST, past the repeat
+	seen := make(map[string]time.Time)
+	fires := 0
+	for {
+		next := sched.Next(fired.Truncate(time.Minute))
+		if next.IsZero() || !next.Before(end) {
+			break
+		}
+		key := next.Format("2006-01-02 15:04")
+		if prev, dup := seen[key]; dup {
+			t.Fatalf("wall-clock minute %s fired twice: %v and %v", key, prev, next)
+		}
+		seen[key] = next
+		fired = next
+		fires++
+	}
+	// One fire per stepped wall-clock minute from 00:05 through 03:29:
+	// 55 each for the 00, 01 and 02 hours, plus 03:05..03:29 (25).
+	if want := 190; fires != want {
+		t.Fatalf("chain produced %d fires, want %d (one per stepped wall-clock minute 00:05..03:29)", fires, want)
 	}
 }
 
