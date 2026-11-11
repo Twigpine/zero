@@ -628,6 +628,19 @@ func secretMatchHasDigit(s string) bool {
 	return false
 }
 
+// RedactSecretValues replaces every occurrence of each of secrets in value with
+// RedactedSecret, whole or split by invisible separators, exactly as
+// RedactString treats Options.ExtraSecretValues. Unlike RedactString it runs
+// none of the shape patterns, so text that does not contain one of the values
+// comes back unchanged. That suits content where only known values must go,
+// such as tool output, which a shape pattern could otherwise rewrite.
+func RedactSecretValues(value string, secrets ...string) string {
+	if len(secrets) == 0 {
+		return value
+	}
+	return redactExtraSecretValues(value, secrets, RedactedSecret)
+}
+
 func RedactValue(value any, options Options) any {
 	return redactReflect(reflect.ValueOf(value), redactionContext{
 		options:     options,

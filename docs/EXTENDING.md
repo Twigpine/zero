@@ -307,6 +307,10 @@ attribution headers `X-AIMLAPI-Source: agent/zero` and `X-AIMLAPI-Partner-ID`,
 and gets the key under the rules above. Other MCP servers never receive these
 headers or the key.
 
+If the server echoes back the key Zero sent it, Zero replaces the key with
+`[REDACTED]` in that server's error messages and tool results before anything
+reads them, and reports an HTTP error status without the response body.
+
 ### As a server — expose Zero's tools to another agent
 
 ```bash

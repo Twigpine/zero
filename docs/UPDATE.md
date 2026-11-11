@@ -75,6 +75,31 @@ Installer scripts download the matching release asset for the local platform and
 verify its `.sha256` file. If Zero is already installed, run `zero upgrade`
 instead of reinstalling.
 
+## Authentication
+
+Unauthenticated GitHub API requests are subject to strict
+[rate limits](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api).
+If you see `403 Forbidden` during update checks, set a GitHub personal access token:
+
+| Environment variable | Role |
+|---|---|
+| `ZERO_GITHUB_TOKEN` | Used for update checks (takes precedence) |
+| `GITHUB_TOKEN` | Fallback when `ZERO_GITHUB_TOKEN` is empty after trimming |
+
+Surrounding whitespace is removed from both token values before use.
+
+Note: `GITHUB_TOKEN` is also used by the GitHub Models provider
+(the `github` descriptor in `internal/providercatalog/catalog.go`); both
+recipients are GitHub so no trust boundary is crossed, but a token set for
+the provider will also be sent on update checks.
+
+Tokens are only sent to HTTPS URLs with the hostname `api.github.com`, including
+URLs selected through `--endpoint` or `ZERO_UPDATE_RELEASE_URL`. Other hosts
+and plain HTTP URLs never receive credentials. Redirects that downgrade to
+`http` after a token-eligible GitHub API request are refused, so the bearer
+token is never sent in cleartext (Go's standard library would otherwise copy
+`Authorization` on same-host redirects based on host alone).
+
 ## Windows recovery state (standalone installs)
 
 This section describes Windows only. On Linux and macOS a standalone update

@@ -242,12 +242,12 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 		})
 		sandboxDecision = &d
 		if d.Action == sandbox.ActionDeny {
-			res := errorResult(d.ErrorString())
+			res := refusalResult(d.ErrorString(), PolicyRefusalSandboxDenied)
 			res.SandboxDecision = sandboxDecision
 			return res
 		}
 		if d.Action == sandbox.ActionPrompt && !options.PermissionGranted {
-			res := errorResult("Error: Sandbox approval required for " + name + ": " + d.Reason)
+			res := refusalResult("Error: Sandbox approval required for "+name+": "+d.Reason, PolicyRefusalSandboxApproval)
 			res.SandboxDecision = sandboxDecision
 			return res
 		}
@@ -261,18 +261,22 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 	case PermissionAllow:
 	case PermissionPrompt:
 		if !options.PermissionGranted && !sandboxGrantAuthorized {
-			res := errorResult("Error: Permission required for " + name + ": " + tool.Safety().Reason + ` The tool is marked "prompt" and was not executed.`)
+			res := refusalResult("Error: Permission required for "+name+": "+tool.Safety().Reason+` The tool is marked "prompt" and was not executed.`, PolicyRefusalPermissionRequired)
 			res.SandboxDecision = sandboxDecision
 			return res
 		}
 	default:
-		res := errorResult("Error: Permission denied for " + name + ": " + tool.Safety().Reason)
+		res := refusalResult("Error: Permission denied for "+name+": "+tool.Safety().Reason, PolicyRefusalPermissionDenied)
 		res.SandboxDecision = sandboxDecision
 		return res
 	}
 
+	// Past this point the tool RUNS, so every result below is an executed one and
+	// passes through executedToolResult. See its comment: the refusal marker is a
+	// claim about the registry, and a result that came back from the tool is proof
+	// the opposite happened.
 	if optioned, ok := tool.(optionsAwareTool); ok {
-		res := optioned.RunWithOptions(ctx, args, options)
+		res := executedToolResult(optioned.RunWithOptions(ctx, args, options))
 		if res.SandboxDecision == nil {
 			res.SandboxDecision = sandboxDecision
 		}
@@ -281,12 +285,12 @@ func (registry *Registry) RunWithOptions(ctx context.Context, name string, args 
 
 	if options.Sandbox != nil {
 		if sandboxed, ok := tool.(sandboxAwareTool); ok {
-			res := sandboxed.RunWithSandbox(ctx, args, options.Sandbox)
+			res := executedToolResult(sandboxed.RunWithSandbox(ctx, args, options.Sandbox))
 			res.SandboxDecision = sandboxDecision
 			return res
 		}
 	}
-	res := tool.Run(ctx, args)
+	res := executedToolResult(tool.Run(ctx, args))
 	res.SandboxDecision = sandboxDecision
 	return res
 }
