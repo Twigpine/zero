@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -49,11 +50,13 @@ func resolveTrust(trustRoot string) (excludeProject bool, trustCheckErrored bool
 }
 
 // newHookDispatcher builds the per-session hooks dispatcher for a workspace,
-// merging user + project hooks.json and wiring the audit store. It fails OPEN:
-// any load or setup error yields a nil dispatcher, which Dispatch treats as a
-// no-op, so a malformed hooks config can never wedge tool execution. With no
-// hooks configured the dispatcher selects nothing and runs no commands, so the
-// hot path stays free of overhead until a user opts in via hooks.json.
+// merging user + project hooks.json and wiring the audit store. A missing
+// config yields an empty dispatcher; an existing but unreadable or unparseable
+// hooks.json yields a dispatcher whose beforeTool gate fails closed. Other
+// setup errors keep the historical fail-open behaviour (nil dispatcher), so a
+// broken audit store cannot wedge tool execution. With no hooks configured the
+// dispatcher selects nothing and runs no commands, so the hot path stays free
+// of overhead until a user opts in via hooks.json.
 //
 // trustRoot is the original launch directory (resolved before any --worktree
 // reassignment); the project layer loads only when that root is trusted.
@@ -81,8 +84,12 @@ func newHookDispatcherWithExtra(workspaceRoot string, extra []hooks.Definition, 
 	}
 
 	loaded, err := hooks.LoadConfig(hooks.LoadOptions{Cwd: workspaceRoot, ExcludeProject: excludeProject})
+	configError := ""
 	if err != nil {
-		return nil, skip
+		if !errors.Is(err, hooks.ErrInvalidConfig) {
+			return nil, skip
+		}
+		configError = err.Error()
 	}
 	var audit *hooks.AuditStore
 	if store, err := hooks.NewAuditStore(hooks.AuditStoreOptions{}); err == nil {
@@ -112,10 +119,11 @@ func newHookDispatcherWithExtra(workspaceRoot string, extra []hooks.Definition, 
 		runner = runners[0]
 	}
 	return hooks.NewDispatcher(hooks.DispatcherOptions{
-		Config:    config,
-		Audit:     audit,
-		Cwd:       workspaceRoot,
-		Execution: runner,
+		Config:      config,
+		ConfigError: configError,
+		Audit:       audit,
+		Cwd:         workspaceRoot,
+		Execution:   runner,
 	}), skip
 }
 

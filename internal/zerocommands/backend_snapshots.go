@@ -82,10 +82,49 @@ type PluginSnapshot struct {
 // the operator a single payload describing the full extensibility
 // surface. The three inner slices are always non-nil so JSON
 // output is `[]` and never `null`.
+// BackendLifecycleSnapshot bundles the typed snapshots for the three backend
+// surfaces that the WorkSplit PRD places in Gnanam's lane: MCP servers, hooks,
+// and plugins. `zero doctor` and the headless `zero config` command can return
+// one of these to give the operator a single payload describing the full
+// extensibility surface. The three inner slices are always non-nil so JSON
+// output is `[]` and never `null`.
+//
+// HooksIncomplete is true when hooks.json could not be fully loaded and the
+// hook list is only the valid remainder.
 type BackendLifecycleSnapshot struct {
-	MCPServers []MCPServerSnapshot `json:"mcpServers"`
-	Hooks      []HookSnapshot      `json:"hooks"`
-	Plugins    []PluginSnapshot    `json:"plugins"`
+	MCPServers       []MCPServerSnapshot      `json:"mcpServers"`
+	Hooks            []HookSnapshot           `json:"hooks"`
+	Plugins          []PluginSnapshot         `json:"plugins"`
+	HooksIncomplete  bool                     `json:"hooksIncomplete,omitempty"`
+	HooksDiagnostics []HookDiagnosticSnapshot `json:"hooksDiagnostics,omitempty"`
+}
+
+// HookDiagnosticSnapshot is a redacted projection of a hooks loader
+// diagnostic, safe to include in the backends --json lifecycle report.
+type HookDiagnosticSnapshot struct {
+	Kind      string `json:"kind,omitempty"`
+	Source    string `json:"source,omitempty"`
+	Path      string `json:"path,omitempty"`
+	HookID    string `json:"hookId,omitempty"`
+	FieldPath string `json:"fieldPath,omitempty"`
+	Message   string `json:"message,omitempty"`
+}
+
+// HookDiagnosticSnapshots redacts and copies loader diagnostics for reporting.
+// It never returns nil so JSON output is [] rather than null.
+func HookDiagnosticSnapshots(diagnostics []hooks.Diagnostic) []HookDiagnosticSnapshot {
+	out := make([]HookDiagnosticSnapshot, 0, len(diagnostics))
+	for _, diagnostic := range diagnostics {
+		out = append(out, HookDiagnosticSnapshot{
+			Kind:      string(diagnostic.Kind),
+			Source:    string(diagnostic.Source),
+			Path:      redactSnapshotString(diagnostic.Path),
+			HookID:    redactSnapshotString(diagnostic.HookID),
+			FieldPath: redactSnapshotString(diagnostic.FieldPath),
+			Message:   redactSnapshotString(diagnostic.Message),
+		})
+	}
+	return out
 }
 
 // MCPServerSnapshotFromServer converts a single mcp.Server into its
