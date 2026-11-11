@@ -76,7 +76,7 @@ func TestModelsAreProviderScoped(t *testing.T) {
 		{
 			// Offline fallback only; the live /v1/models list is shown when reachable.
 			provider: "gitlawb-opengateway",
-			want:     []string{"xiaomi/mimo-v2.6-pro", "auto", "xiaomi/mimo-v2.6-flash"},
+			want:     []string{"auto", "xiaomi/mimo-v2.6-pro", "xiaomi/mimo-v2.6-flash"},
 			notWant: []string{
 				"openai/gpt-4.1", "claude-sonnet-4.5",
 				"mimo-v2.5-pro", "xiaomi/mimo-v2.5-pro", "qwen-plus", "glm-4.6", "gemini-2.5-pro",
@@ -113,6 +113,24 @@ func TestModelsAreProviderScoped(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The offline OpenGateway list leads with the smart router, the catalog
+// default. The gateway reports no context window for it (the serving model
+// varies per request), so the curated entry must not invent one: an unknown
+// window sizes compaction from modelregistry.FallbackContextWindow.
+func TestOpenGatewayModelsLeadWithAutoDefault(t *testing.T) {
+	descriptor, ok := providercatalog.Get("gitlawb-opengateway")
+	if !ok {
+		t.Fatal("provider gitlawb-opengateway missing from catalog")
+	}
+	models := Models(descriptor)
+	if len(models) == 0 || models[0].ID != "auto" || models[0].ID != descriptor.DefaultModel {
+		t.Fatalf("OpenGateway models = %#v, want the auto default first", modelIDs(models))
+	}
+	if models[0].ContextWindow != 0 {
+		t.Fatalf("auto context window = %d, want unknown (0)", models[0].ContextWindow)
 	}
 }
 

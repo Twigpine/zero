@@ -1378,11 +1378,40 @@ func TestResolveAppliesOpenGatewayCatalogDefaults(t *testing.T) {
 	if resolved.Provider.BaseURL != "https://api.twigpine.com/v1" {
 		t.Fatalf("BaseURL = %q, want https://api.twigpine.com/v1", resolved.Provider.BaseURL)
 	}
-	if resolved.Provider.Model != "xiaomi/mimo-v2.6-pro" {
-		t.Fatalf("Model = %q, want xiaomi/mimo-v2.6-pro", resolved.Provider.Model)
+	if resolved.Provider.Model != "auto" {
+		t.Fatalf("Model = %q, want auto", resolved.Provider.Model)
 	}
 	if resolved.Provider.APIKeyEnv != "GITLAWB_OPENGATEWAY_API_KEY" || resolved.Provider.APIKey != "ogw_live_test" {
 		t.Fatalf("credential = (%q, %q), want GITLAWB_OPENGATEWAY_API_KEY env-resolved key", resolved.Provider.APIKeyEnv, resolved.Provider.APIKey)
+	}
+}
+
+// The catalog default only fills a profile that names no model. A profile saved
+// while MiMo V2.6 Pro was the default persisted that id, and must keep it now
+// that the default is the smart router.
+func TestResolveKeepsSavedOpenGatewayModel(t *testing.T) {
+	path := writeConfig(t, `{
+		"activeProvider": "gitlawb-opengateway",
+		"providers": [{
+			"name": "gitlawb-opengateway",
+			"catalogID": "gitlawb-opengateway",
+			"providerKind": "openai-compatible",
+			"baseURL": "https://api.twigpine.com/v1",
+			"model": "xiaomi/mimo-v2.6-pro"
+		}]
+	}`)
+
+	resolved, err := Resolve(ResolveOptions{
+		UserConfigPath: path,
+		Env: map[string]string{
+			"GITLAWB_OPENGATEWAY_API_KEY": "ogw_live_test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.Provider.Model != "xiaomi/mimo-v2.6-pro" {
+		t.Fatalf("Model = %q, want the saved model kept", resolved.Provider.Model)
 	}
 }
 

@@ -347,11 +347,13 @@ func TestDiscoverCatalogOpenGatewayUsesLiveListWithoutKey(t *testing.T) {
 }
 
 func TestDiscoverCatalogOpenGatewayDropsRetiredAndKeepsDefault(t *testing.T) {
-	// Both the catalog fetch and the live /v1/models probe return one active and
-	// one retired entry. Users must only ever see the active one, and the
-	// catalog's default model must be among the ids discovery returns (onboarding
-	// keeps the default selected only on an exact id match).
+	// Both the catalog fetch and the live /v1/models probe return the smart
+	// router, one active and one retired entry. Users must only ever see the
+	// active ones, and the catalog's default model must be among the ids
+	// discovery returns (onboarding keeps the default selected only on an exact
+	// id match).
 	const body = `{"object":"list","data":[
+		{"id":"auto","name":"Auto (smart routing)","context_window":null,"pricing":null,"supports_tools":null,"status":"active"},
 		{"id":"xiaomi/mimo-v2.6-pro","name":"MiMo V2.6-Pro","context_window":262144,"supports_tools":true,"status":"active"},
 		{"id":"qwen/qwen-plus","name":"Qwen Plus","context_window":131072,"status":"retired","successor":"qwen/qwen3.7-max"}
 	]}`
@@ -385,8 +387,8 @@ func TestDiscoverCatalogOpenGatewayDropsRetiredAndKeepsDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DiscoverCatalog: %v", err)
 	}
-	if got := strings.Join(modelIDs(models), ","); got != "xiaomi/mimo-v2.6-pro" {
-		t.Fatalf("models = %q, want only the active entry", got)
+	if got := strings.Join(modelIDs(models), ","); got != "auto,xiaomi/mimo-v2.6-pro" {
+		t.Fatalf("models = %q, want only the active entries", got)
 	}
 	if models[0].ID != descriptor.DefaultModel {
 		t.Fatalf("default model %q missing from discovered %v", descriptor.DefaultModel, modelIDs(models))
