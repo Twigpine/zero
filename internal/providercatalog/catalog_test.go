@@ -115,10 +115,11 @@ func TestRecommendedProviderEndpoint(t *testing.T) {
 		t.Fatalf("OpenGateway base URL = %q, want %q", descriptor.DefaultBaseURL, "https://api.twigpine.com/v1")
 	}
 	// The default must be an exact id from the live /v1/models list (not a
-	// gateway alias such as the bare "mimo-v2.6-pro"): onboarding keeps the
-	// default selected after live discovery only on an exact id match.
-	if descriptor.DefaultModel != "xiaomi/mimo-v2.6-pro" {
-		t.Fatalf("OpenGateway default model = %q, want %q", descriptor.DefaultModel, "xiaomi/mimo-v2.6-pro")
+	// gateway alias such as "twigpine/auto"): onboarding keeps the default
+	// selected after live discovery only on an exact id match. It is the smart
+	// router so a new account with no credits is routed to a free model.
+	if descriptor.DefaultModel != "auto" {
+		t.Fatalf("OpenGateway default model = %q, want %q", descriptor.DefaultModel, "auto")
 	}
 	if descriptor.Transport != TransportOpenAICompatible {
 		t.Fatalf("OpenGateway transport = %q, want %q", descriptor.Transport, TransportOpenAICompatible)

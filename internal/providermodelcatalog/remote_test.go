@@ -69,10 +69,23 @@ func TestParseModelsDevProviderScopesAndMapsMetadata(t *testing.T) {
 
 func TestParseOpenGatewayCatalogSkipsRetiredModels(t *testing.T) {
 	// Mirrors GET https://api.twigpine.com/v1/models?status=all once the gateway
-	// retires models: an active entry plus a retired one carrying a successor.
+	// retires models: the smart router (listed with null metadata, since the
+	// serving model varies per request), an active entry, plus a retired one
+	// carrying a successor.
 	body := []byte(`{
 		"object": "list",
 		"data": [
+			{
+				"id": "auto",
+				"object": "model",
+				"name": "Auto (smart routing)",
+				"description": "picks the cheapest capable model",
+				"aliases": ["twigpine/auto", "gitlawb/auto"],
+				"context_window": null,
+				"pricing": null,
+				"supports_tools": null,
+				"status": "active"
+			},
 			{
 				"id": "xiaomi/mimo-v2.6-pro",
 				"object": "model",
@@ -100,8 +113,14 @@ func TestParseOpenGatewayCatalogSkipsRetiredModels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseOpenGatewayCatalog returned error: %v", err)
 	}
-	if got := strings.Join(modelIDs(models), ","); got != "xiaomi/mimo-v2.6-pro" {
-		t.Fatalf("models = %q, want only the active entry", got)
+	// Sorted by description label (flagship…, picks…).
+	if got := strings.Join(modelIDs(models), ","); got != "xiaomi/mimo-v2.6-pro,auto" {
+		t.Fatalf("models = %q, want only the active entries", got)
+	}
+	// The router's null context window and pricing parse as unknown (0), not
+	// as an error or a guessed value.
+	if auto := models[1]; auto.ContextWindow != 0 || auto.InputCost != 0 || auto.OutputCost != 0 {
+		t.Fatalf("auto metadata = %#v, want unknown context window and pricing", auto)
 	}
 	descriptor, ok := providercatalog.Get("gitlawb-opengateway")
 	if !ok {
