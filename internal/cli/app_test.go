@@ -22,6 +22,7 @@ import (
 	"github.com/Twigpine/zero/internal/tui"
 	"github.com/Twigpine/zero/internal/update"
 	"github.com/Twigpine/zero/internal/workspacetrust"
+	"github.com/Twigpine/zero/internal/worktrees"
 	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
@@ -1236,6 +1237,20 @@ func TestRunNoArgsReportsConfigErrorsWithoutLaunchingTUI(t *testing.T) {
 }
 
 func TestRunCommandsDoNotLaunchTUI(t *testing.T) {
+	// THESE COMMANDS RUN FOR REAL. runWithDeps fills every dependency left out
+	// here with the production one, and bare `worktrees` and `worktree` default
+	// to `prepare`. With the real working directory and state roots, each run
+	// of this test registered two locked worktrees of the repository it ran in,
+	// under the developer's real per-user state directory, and nothing ever
+	// released them.
+	isolateCLIUserState(t)
+	cwd := t.TempDir()
+	cwdInfo, err := os.Stat(cwd)
+	if err != nil {
+		t.Fatalf("stat working directory: %v", err)
+	}
+	var prepareCalls []worktrees.Options
+
 	for _, args := range [][]string{
 		{"--help"},
 		{"-h"},
@@ -1272,6 +1287,11 @@ func TestRunCommandsDoNotLaunchTUI(t *testing.T) {
 			launchCalled := false
 
 			_ = runWithDeps(args, &stdout, &stderr, appDeps{
+				getwd: func() (string, error) { return cwd, nil },
+				prepareWorktree: func(_ context.Context, options worktrees.Options) (worktrees.Result, error) {
+					prepareCalls = append(prepareCalls, options)
+					return worktrees.Result{}, errors.New("worktree preparation is stubbed in this test")
+				},
 				runTUI: func(ctx context.Context, options tui.Options) int {
 					launchCalled = true
 					return 0
@@ -1282,6 +1302,18 @@ func TestRunCommandsDoNotLaunchTUI(t *testing.T) {
 				t.Fatalf("TUI launcher should not be called for args %#v", args)
 			}
 		})
+	}
+
+	// Both spellings reached prepare, and only through the stub, for the
+	// temporary directory rather than the repository the test runs in.
+	if len(prepareCalls) != 2 {
+		t.Fatalf("prepareWorktree stub called %d times, want 2 (worktrees, worktree)", len(prepareCalls))
+	}
+	for _, options := range prepareCalls {
+		info, err := os.Stat(options.Cwd)
+		if err != nil || !os.SameFile(info, cwdInfo) {
+			t.Errorf("prepare ran for %q, want the test's temporary directory %q (stat err %v)", options.Cwd, cwd, err)
+		}
 	}
 }
 
