@@ -96,6 +96,10 @@ func TestRunPassesSkippedMCPServersToTheTUI(t *testing.T) {
 		launchedOptions.MCPSkipped[0].Name != "docs" {
 		t.Fatalf("MCPSkipped = %#v, want the failure startup recorded", launchedOptions.MCPSkipped)
 	}
+	// The error is the reason /mcp renders, so the name alone is not enough.
+	if err := launchedOptions.MCPSkipped[0].Err; err == nil || !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("MCPSkipped[0].Err = %v, want the error startup recorded", err)
+	}
 	// The stderr warning stays: it is what a non-interactive user sees, and the
 	// panel is an addition to it, not a replacement.
 	if !strings.Contains(stderr.String(), "docs") {

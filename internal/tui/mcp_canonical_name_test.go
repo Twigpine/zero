@@ -6,6 +6,7 @@ import (
 
 	"github.com/Twigpine/zero/internal/config"
 	"github.com/Twigpine/zero/internal/mcp"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 // ONE SERVER IDENTITY, AND IT IS THE REGISTRY'S.
@@ -43,6 +44,18 @@ func TestFailedServerIsMatchedByItsCanonicalName(t *testing.T) {
 			}
 			if server.Error == "" {
 				t.Errorf("no failure reason rendered, so the operator is not told why it did not start")
+			}
+
+			// The tool count is keyed the same way: a running server registers its
+			// tools under the canonical name, so a raw-key lookup reports none.
+			registry := tools.NewRegistry()
+			registry.Register(commandTestMCPTool{name: "mcp_docs_search", serverName: "docs", description: "search docs"})
+			running := BuildMCPViewState(MCPStateOptions{Config: cfg, Registry: registry})
+			if len(running.Servers) != 1 {
+				t.Fatalf("expected one server view, got %d", len(running.Servers))
+			}
+			if got := running.Servers[0]; got.State != "enabled" || got.ToolCount != 1 {
+				t.Errorf("server %q rendered as %q with %d tools, want enabled with 1", testCase.configKey, got.State, got.ToolCount)
 			}
 		})
 	}
