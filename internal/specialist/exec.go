@@ -151,6 +151,11 @@ type BuildResumeArgsInput struct {
 	ParentModel           string
 	ParentReasoningEffort string
 	PermissionMode        string
+	// ParentSessionID is the session resuming the child. exec resumes a child
+	// session only for its recorded parent (sessions.PrepareExec), so without
+	// it every Task resume is refused as "not resumable".
+	ParentSessionID string
+	ParentToolUseID string
 }
 
 type BuildArgsResult struct {
@@ -440,6 +445,12 @@ func (executor Executor) BuildResumeArgs(input BuildResumeArgsInput) (BuildArgsR
 	}
 	args = append(args, "--enabled-tools", strings.Join(toolAllowlist, ","))
 	args = append(args, "--depth", strconv.Itoa(input.CurrentDepth+1), "--tag", sessionTagSpecialist)
+	if parentSessionID := strings.TrimSpace(input.ParentSessionID); parentSessionID != "" {
+		args = append(args, "--calling-session-id", parentSessionID)
+	}
+	if parentToolUseID := strings.TrimSpace(input.ParentToolUseID); parentToolUseID != "" {
+		args = append(args, "--calling-tool-use-id", parentToolUseID)
+	}
 	if cwd := strings.TrimSpace(input.Cwd); cwd != "" {
 		args = append(args, "--cwd", cwd)
 	}
@@ -513,6 +524,8 @@ func (executor Executor) runResume(ctx context.Context, params TaskParameters, o
 		ParentModel:           options.ParentModel,
 		ParentReasoningEffort: options.ParentReasoningEffort,
 		PermissionMode:        options.PermissionMode,
+		ParentSessionID:       options.ParentSessionID,
+		ParentToolUseID:       options.ToolCallID,
 	})
 	if err != nil {
 		return ExecResult{}, err

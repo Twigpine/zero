@@ -109,7 +109,7 @@ func PrepareExec(options PrepareExecOptions) (PreparedExec, error) {
 		if session == nil {
 			return PreparedExec{}, ExecError{"Zero session not found: " + sessionID}
 		}
-		if !IsResumableKind(session.SessionKind) {
+		if !ExecResumable(*session, options.CallingSessionID, options.Tag) {
 			return PreparedExec{}, ExecError{"Zero session is not resumable: " + sessionID}
 		}
 		contextEvents, err := readExecContextEvents(store, session.SessionID)
@@ -149,6 +149,29 @@ func PrepareExec(options PrepareExecOptions) (PreparedExec, error) {
 		return PreparedExec{}, err
 	}
 	return PreparedExec{Mode: ModeNew, Session: session, ContextEvents: []Event{}, Store: store}, nil
+}
+
+// ExecResumable reports whether `zero exec --resume` may continue session when
+// it runs with the given --calling-session-id and --tag. The exec preflight and
+// PrepareExec both ask this, so they cannot disagree.
+//
+// Any kind IsResumableKind accepts is resumable. A child session is hidden from
+// user-facing resume, but the Task tool continues a specialist by resuming the
+// child it created, so refusing every child made Task resume fail every time.
+// A child is resumable only when the resume names the child's recorded parent
+// as its calling session and carries the child's own tag. The Task tool passes
+// both. A plain `zero exec --resume <id>` passes neither and is still refused,
+// and side sessions such as /btw are never children, so they stay out too.
+func ExecResumable(session Metadata, callingSessionID string, tag string) bool {
+	if IsResumableKind(session.SessionKind) {
+		return true
+	}
+	if session.SessionKind != SessionKindChild {
+		return false
+	}
+	parent := strings.TrimSpace(callingSessionID)
+	tag = strings.TrimSpace(tag)
+	return parent != "" && parent == session.ParentSessionID && tag != "" && tag == session.Tag
 }
 
 func readExecContextEvents(store *Store, sessionID string) ([]Event, error) {
