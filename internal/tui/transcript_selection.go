@@ -175,6 +175,18 @@ func shiftSelectableX(lines []transcriptSelectableLine, gutter int) []transcript
 // shifts its selectable spans to match, and THEN paints the selection highlight —
 // so the highlight is computed in the same shifted coordinate the mouse maps to
 // and lands exactly where the user selected (instead of gutter cells off).
+// cachedTranscriptBodyRender memoises a body item's display string and
+// selectable geometry (rendered at bodyY origin 0) in the shared
+// transcriptBodyRenderCache. A settled row on a throbber tick previously paid
+// a full markdown re-wrap, an ansi.Strip per line, and toggle-state
+// re-derivation; on a hit it pays a string copy and a selectable shift.
+// Selection highlight and hover are painted fresh on every frame from the
+// cached pre-highlight lines, so interaction state never leaks into the key.
+func (m model) cachedTranscriptBodyRender(key string, stable bool, startBodyY int, build func() (string, []transcriptSelectableLine), gutter int) transcriptBodyRenderedItem {
+	rendered, selectable := defaultTranscriptBodyRenders.render(key, stable, startBodyY, build)
+	return m.finalizeTranscriptBodyRow(rendered, selectable, gutter, startBodyY)
+}
+
 func (m model) finalizeTranscriptBodyRow(rendered string, selectable []transcriptSelectableLine, gutter int, startBodyY int) transcriptBodyRenderedItem {
 	if m.transcriptInteraction != nil {
 		m.transcriptSelection, m.hover = m.transcriptInteraction.get()
@@ -326,18 +338,20 @@ func (m model) buildTranscriptBodyItems(width int, emptyOverlay string, detailed
 						heightCacheKey:    transcriptBlockBodyHeightCacheKey(transcriptBodyItemRow, block),
 						heightCacheStable: true,
 						render: func(startBodyY int) transcriptBodyRenderedItem {
-							rendered := m.renderExploreResultGroup(groupRowsCopy, contentWidth, rc)
-							selectable := make([]transcriptSelectableLine, 0, len(groupIndicesCopy)+1)
-							for offset, line := range viewLines(rendered) {
-								rowIndex := firstRowIndex
-								if offset > 0 && offset-1 < len(groupIndicesCopy) {
-									rowIndex = groupIndicesCopy[offset-1]
+							return m.cachedTranscriptBodyRender(transcriptBlockBodyHeightCacheKey(transcriptBodyItemRow, block), true, startBodyY, func() (string, []transcriptSelectableLine) {
+								rendered := m.renderExploreResultGroup(groupRowsCopy, contentWidth, rc)
+								selectable := make([]transcriptSelectableLine, 0, len(groupIndicesCopy)+1)
+								for offset, line := range viewLines(rendered) {
+									rowIndex := firstRowIndex
+									if offset > 0 && offset-1 < len(groupIndicesCopy) {
+										rowIndex = groupIndicesCopy[offset-1]
+									}
+									if meta, ok := selectableLineFromRenderedLine(rowIndex, offset, line, false); ok {
+										selectable = append(selectable, meta)
+									}
 								}
-								if meta, ok := selectableLineFromRenderedLine(rowIndex, startBodyY+offset, line, false); ok {
-									selectable = append(selectable, meta)
-								}
-							}
-							return m.finalizeTranscriptBodyRow(rendered, selectable, gutter, startBodyY)
+								return rendered, selectable
+							}, gutter)
 						},
 					})
 					shownAny = true
@@ -412,8 +426,9 @@ func (m model) buildTranscriptBodyItems(width int, emptyOverlay string, detailed
 				heightCacheKey:    heightCacheKey,
 				heightCacheStable: heightCacheStable,
 				render: func(startBodyY int) transcriptBodyRenderedItem {
-					rendered, selectable := renderRowFn(rowIndex, transcriptRow, contentWidth, rc, startBodyY)
-					return m.finalizeTranscriptBodyRow(rendered, selectable, gutter, startBodyY)
+					return m.cachedTranscriptBodyRender(heightCacheKey, heightCacheStable, startBodyY, func() (string, []transcriptSelectableLine) {
+						return renderRowFn(rowIndex, transcriptRow, contentWidth, rc, 0)
+					}, gutter)
 				},
 			})
 			shownAny = true
@@ -465,8 +480,10 @@ func (m model) buildTranscriptBodyItems(width int, emptyOverlay string, detailed
 				rowIndex: -1,
 				render: func(startBodyY int) transcriptBodyRenderedItem {
 					// Streaming text shares the reading column so it doesn't snap
-					// width when the turn finalizes into a row.
-					return m.finalizeTranscriptBodyRow(m.interimBlock(contentWidth), m.renderSelectableStreamingReasoning(contentWidth, startBodyY), gutter, startBodyY)
+					// width when the turn finalizes into a row. One reasoning
+					// conversion serves both the block and its selectable lines.
+					reasoning := m.streamingReasoningString()
+					return m.finalizeTranscriptBodyRow(m.interimBlockWithReasoning(contentWidth, reasoning), m.renderSelectableStreamingReasoning(contentWidth, startBodyY, reasoning), gutter, startBodyY)
 				},
 			})
 		}
@@ -1019,8 +1036,8 @@ func (m model) renderSelectableReasoningRow(rowIndex int, row transcriptRow, wid
 	return strings.Join(lines, "\n"), selectable
 }
 
-func (m model) renderSelectableStreamingReasoning(width int, startBodyY int) []transcriptSelectableLine {
-	_, selectable := m.renderSelectableReasoningBlock(-1, m.streamingReasoningString(), m.streamingReasoningExpanded, true, 0, width, startBodyY)
+func (m model) renderSelectableStreamingReasoning(width int, startBodyY int, reasoningRaw string) []transcriptSelectableLine {
+	_, selectable := m.renderSelectableReasoningBlock(-1, reasoningRaw, m.streamingReasoningExpanded, true, 0, width, startBodyY)
 	for index := range selectable {
 		selectable[index].live = true
 	}
