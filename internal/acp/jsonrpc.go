@@ -18,6 +18,7 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // JSON-RPC 2.0 standard error codes.
@@ -27,6 +28,12 @@ const (
 	codeMethodNotFound = -32601
 	codeInvalidParams  = -32602
 	codeInternalError  = -32603
+	codeServerBusy     = -32000
+)
+
+var (
+	errFrameTooLarge = errors.New("acp: frame exceeds limit")
+	errBusyOverload  = errors.New("acp: busy-reply queue full")
 )
 
 // rpcError is a JSON-RPC 2.0 error object.
@@ -76,33 +83,80 @@ type HandlerFunc func(ctx context.Context, params json.RawMessage) (any, error)
 // NotifyFunc handles an inbound notification (no response is sent).
 type NotifyFunc func(ctx context.Context, params json.RawMessage)
 
+const (
+	// maxFrameBytes limits the maximum size of a single ndjson line including
+	// the trailing newline delimiter (effective maximum payload is limit - 1).
+	maxFrameBytes         = 64 * 1024 * 1024
+	maxConcurrentRequests = 128
+	maxInflightBytes      = 64 * 1024 * 1024
+	maxBusyReplies        = 1
+	maxNotifyActive       = 32
+	maxUpdateFIFO         = 32
+	maxSpecialNotify      = 256
+	overloadDrainTimeout  = 100 * time.Millisecond
+)
+
 // Conn is a JSON-RPC 2.0 peer over a single ndjson stream pair. It both serves
 // inbound requests/notifications (via registered handlers) and issues outbound
 // requests/notifications — needed because ACP is bidirectional (the agent calls
 // the client for session/request_permission, fs/*, terminal/*).
 type Conn struct {
-	rawReader    io.Reader // wrapped lazily in Serve, once ctx is known — see interruptibleReader
-	readerCloser io.Closer
-	w            io.Writer
+	rawReader      io.Reader // wrapped lazily in Serve, once ctx is known — see interruptibleReader
+	readerCloser   io.Closer
+	w              io.Writer
+	writerCloser   io.Closer
+	writeCloseOnce sync.Once
 
 	writeMu sync.Mutex // serializes all writes to w
 
 	handlers  map[string]HandlerFunc
 	notifiers map[string]NotifyFunc
-	// Notifications for one method are an ordered stream: session/update in
-	// particular is stateful, so dispatching every frame in an unrelated
-	// goroutine can make a later chunk overtake an earlier one. Different
-	// methods retain independent tails, keeping session/cancel responsive while
-	// an update handler is busy.
-	notifyMu    sync.Mutex
-	notifyTails map[string]chan struct{}
 
 	mu      sync.Mutex
 	nextID  int64
 	pending map[int64]chan rpcMessage
 	closed  bool
 
-	wg sync.WaitGroup // tracks in-flight inbound handlers
+	// frameLimit bounds inbound ndjson line size. If zero, maxFrameBytes is used.
+	// This field has no public setter and is set solely by tests.
+	frameLimit int64
+
+	sem chan struct{}
+	wg  sync.WaitGroup // tracks in-flight inbound handlers
+
+	busyCh       chan json.RawMessage
+	serveCancel  context.CancelFunc
+	overloaded   atomic.Bool
+	writeAbort   chan struct{}
+	writeWaiters atomic.Int32
+
+	notifyMu       sync.Mutex
+	notifyOn       map[notifyKey]bool
+	notifyQ        map[notifyKey]json.RawMessage
+	cancelOn       map[notifyKey]bool
+	updateOn       map[string]bool
+	sessionUpdateQ map[string][]json.RawMessage
+	admittedMu     sync.Mutex
+	admittedBytes  int64
+	inflightLimit  int64
+}
+
+type notifyKey struct {
+	method string
+	target string
+}
+
+func notifyTarget(params json.RawMessage) string {
+	if len(params) == 0 {
+		return ""
+	}
+	var header struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(params, &header); err == nil && header.SessionID != "" {
+		return header.SessionID
+	}
+	return ""
 }
 
 // NewConn builds a peer reading ndjson from r and writing ndjson to w. This
@@ -113,12 +167,19 @@ type Conn struct {
 // lifetime.
 func NewConn(r io.Reader, w io.Writer) *Conn {
 	return &Conn{
-		rawReader:   r,
-		w:           w,
-		handlers:    make(map[string]HandlerFunc),
-		notifiers:   make(map[string]NotifyFunc),
-		notifyTails: make(map[string]chan struct{}),
-		pending:     make(map[int64]chan rpcMessage),
+		rawReader:      r,
+		w:              w,
+		handlers:       make(map[string]HandlerFunc),
+		notifiers:      make(map[string]NotifyFunc),
+		pending:        make(map[int64]chan rpcMessage),
+		sem:            make(chan struct{}, maxConcurrentRequests),
+		busyCh:         make(chan json.RawMessage, maxBusyReplies),
+		writeAbort:     make(chan struct{}),
+		notifyOn:       make(map[notifyKey]bool),
+		notifyQ:        make(map[notifyKey]json.RawMessage),
+		cancelOn:       make(map[notifyKey]bool),
+		updateOn:       make(map[string]bool),
+		sessionUpdateQ: make(map[string][]json.RawMessage),
 	}
 }
 
@@ -131,7 +192,16 @@ func NewConn(r io.Reader, w io.Writer) *Conn {
 func NewOwnedConn(r io.Reader, w io.Writer) *Conn {
 	c := NewConn(r, w)
 	c.readerCloser, _ = r.(io.Closer)
+	c.writerCloser, _ = w.(io.Closer)
 	return c
+}
+
+func (c *Conn) closeWriter() {
+	c.writeCloseOnce.Do(func() {
+		if c.writerCloser != nil {
+			_ = c.writerCloser.Close()
+		}
+	})
 }
 
 // Handle registers a request handler for method.
@@ -146,12 +216,30 @@ func (c *Conn) HandleNotify(method string, fn NotifyFunc) { c.notifiers[method] 
 // blocks the loop from delivering session/cancel or a permission response.
 func (c *Conn) Serve(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
+	c.serveCancel = cancel
+	c.wg.Add(1)
+	go c.writeBusyLoop(ctx)
 	// On exit, cancel in-flight handlers (so a blocked outbound Call unblocks via
 	// ctx) and then wait for them to finish writing their responses. Without this,
 	// a finite input stream (e.g. piped ndjson that EOFs right after a request)
-	// would race the dispatch goroutine and drop the response.
+	// would race the dispatch goroutine and drop the response. Clean EOF/cancel
+	// waits for wg so admitted replies can flush. Overload keeps a bounded drain
+	// so a stalled Write cannot retain Serve indefinitely.
 	defer func() {
 		cancel()
+		if c.overloaded.Load() {
+			c.closeWriter()
+			done := make(chan struct{})
+			go func() {
+				c.wg.Wait()
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(overloadDrainTimeout):
+			}
+			return
+		}
 		c.wg.Wait()
 	}()
 
@@ -163,7 +251,7 @@ func (c *Conn) Serve(ctx context.Context) error {
 		// decoder) keeps a single malformed line from making the whole connection
 		// unrecoverable — we report -32700 and continue.
 		//
-		// generation brackets this SPECIFIC ReadBytes call: bufio may invoke
+		// generation brackets this SPECIFIC readNDJSONFrame call: bufio may invoke
 		// interruptible.Read zero or more times underneath it (zero when the
 		// answer is already sitting in bufio's own buffer — including a
 		// previously-buffered, not-yet-surfaced error: bufio can return a
@@ -175,12 +263,23 @@ func (c *Conn) Serve(ctx context.Context) error {
 		// didn't pass through that branch — whether because it was answered from
 		// the buffer or because it raced ctx.Done() and won. Only that proof
 		// makes it safe to call the outcome genuine.
+		limit := int64(maxFrameBytes)
+		if c.frameLimit > 0 {
+			limit = c.frameLimit
+		}
 		before := interruptible.generation()
-		line, err := reader.ReadBytes('\n')
+		line, err := readNDJSONFrame(reader, limit)
 		interrupted := interruptible.generation() != before
 
+		if errors.Is(err, errFrameTooLarge) {
+			c.failAllPending(err)
+			return err
+		}
 		if len(bytes.TrimSpace(line)) > 0 {
 			c.handleLine(ctx, line)
+		}
+		if c.overloaded.Load() {
+			return errBusyOverload
 		}
 		if err != nil {
 			c.failAllPending(err)
@@ -189,6 +288,28 @@ func (c *Conn) Serve(ctx context.Context) error {
 			}
 			return err
 		}
+	}
+}
+
+// readNDJSONFrame reads a single newline-terminated NDJSON frame from r,
+// bounded by limit bytes. The buffer includes the trailing newline delimiter,
+// so the maximum payload is limit - 1. If the frame exceeds limit before
+// encountering '\n', it returns the accumulated partial line alongside an error.
+func readNDJSONFrame(r *bufio.Reader, limit int64) ([]byte, error) {
+	var buf []byte
+	for {
+		chunk, err := r.ReadSlice('\n')
+		buf = append(buf, chunk...)
+		if limit > 0 && int64(len(buf)) > limit {
+			return buf, fmt.Errorf("%w of %d bytes", errFrameTooLarge, limit)
+		}
+		if err == nil {
+			return buf, nil
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		return buf, err
 	}
 }
 
@@ -291,12 +412,12 @@ func (r *interruptibleReader) Read(p []byte) (int, error) {
 func (c *Conn) handleLine(ctx context.Context, line []byte) {
 	var msg rpcMessage
 	if err := json.Unmarshal(bytes.TrimSpace(line), &msg); err != nil {
-		c.writeError(json.RawMessage("null"), &rpcError{Code: codeParseError, Message: "parse error"})
+		c.writeError(ctx, json.RawMessage("null"), &rpcError{Code: codeParseError, Message: "parse error"})
 		return
 	}
 	if msg.JSONRPC != "" && msg.JSONRPC != "2.0" {
 		if len(msg.ID) > 0 {
-			c.writeError(msg.ID, &rpcError{Code: codeInvalidRequest, Message: "unsupported jsonrpc version"})
+			c.writeError(ctx, msg.ID, &rpcError{Code: codeInvalidRequest, Message: "unsupported jsonrpc version"})
 		}
 		return
 	}
@@ -304,69 +425,233 @@ func (c *Conn) handleLine(ctx context.Context, line []byte) {
 	case msg.isResponse():
 		c.deliver(msg)
 	case msg.isRequest():
+		n := int64(len(line))
+		if !c.tryAdmit(n) {
+			id := append(json.RawMessage(nil), msg.ID...)
+			if !c.tryEnqueueBusy(id) {
+				c.tripOverload()
+			}
+			break
+		}
 		c.wg.Add(1)
-		go func(m rpcMessage) {
+		go func(m rpcMessage, bytes int64) {
 			defer c.wg.Done()
+			defer c.releaseAdmit(bytes)
 			c.dispatchRequest(ctx, m)
-		}(msg)
+		}(msg, n)
 	case msg.isNotify():
-		if fn := c.notifiers[msg.Method]; fn != nil {
-			c.dispatchNotification(ctx, msg, fn)
+		if !c.overloaded.Load() {
+			c.dispatchNotify(ctx, msg)
 		}
 	default:
 		// Malformed frame; reply only if we can identify a request id.
 		if len(msg.ID) > 0 {
-			c.writeError(msg.ID, &rpcError{Code: codeInvalidRequest, Message: "invalid request"})
+			c.writeError(ctx, msg.ID, &rpcError{Code: codeInvalidRequest, Message: "invalid request"})
 		}
 	}
 }
 
-// dispatchNotification preserves wire order within one method without making
-// unrelated notification methods wait for each other. The read loop installs
-// each tail before starting its goroutine, so goroutine scheduling cannot
-// reorder the chain it observes.
-func (c *Conn) dispatchNotification(ctx context.Context, msg rpcMessage, fn NotifyFunc) {
-	c.notifyMu.Lock()
-	previous := c.notifyTails[msg.Method]
-	done := make(chan struct{})
-	c.notifyTails[msg.Method] = done
-	c.notifyMu.Unlock()
+func (c *Conn) dispatchNotify(ctx context.Context, msg rpcMessage) {
+	fn := c.notifiers[msg.Method]
+	if fn == nil {
+		return
+	}
+	params := append(json.RawMessage(nil), msg.Params...)
+	switch msg.Method {
+	case MethodSessionUpdate:
+		c.dispatchSessionUpdate(ctx, fn, params)
+	case MethodSessionCancel:
+		c.dispatchCancel(ctx, fn, params)
+	default:
+		c.dispatchCoalescedNotify(ctx, msg.Method, fn, params)
+	}
+}
 
-	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
-		defer func() {
-			close(done)
-			c.notifyMu.Lock()
-			if c.notifyTails[msg.Method] == done {
-				delete(c.notifyTails, msg.Method)
-			}
+func (c *Conn) dispatchSessionUpdate(ctx context.Context, fn NotifyFunc, params json.RawMessage) {
+	target := notifyTarget(params)
+	c.notifyMu.Lock()
+	if c.updateOn[target] {
+		q := c.sessionUpdateQ[target]
+		if len(q) >= maxUpdateFIFO {
 			c.notifyMu.Unlock()
-		}()
-		if previous != nil {
-			<-previous
+			c.tripOverload()
+			return
 		}
-		fn(ctx, msg.Params)
-	}()
+		c.sessionUpdateQ[target] = append(q, params)
+		c.notifyMu.Unlock()
+		return
+	}
+	if c.specialNotifyBusyLocked() {
+		c.notifyMu.Unlock()
+		c.tripOverload()
+		return
+	}
+	c.updateOn[target] = true
+	c.notifyMu.Unlock()
+	c.wg.Add(1)
+	go c.runSessionUpdate(ctx, target, fn, params)
+}
+
+func (c *Conn) specialNotifyBusyLocked() bool {
+	return len(c.updateOn)+len(c.cancelOn) >= maxSpecialNotify
+}
+
+func (c *Conn) runSessionUpdate(ctx context.Context, target string, fn NotifyFunc, params json.RawMessage) {
+	defer c.wg.Done()
+	for {
+		fn(ctx, params)
+		c.notifyMu.Lock()
+		q := c.sessionUpdateQ[target]
+		if len(q) == 0 {
+			delete(c.updateOn, target)
+			delete(c.sessionUpdateQ, target)
+			c.notifyMu.Unlock()
+			return
+		}
+		params = q[0]
+		c.sessionUpdateQ[target] = q[1:]
+		c.notifyMu.Unlock()
+	}
+}
+
+func (c *Conn) dispatchCancel(ctx context.Context, fn NotifyFunc, params json.RawMessage) {
+	key := notifyKey{method: MethodSessionCancel, target: notifyTarget(params)}
+	c.notifyMu.Lock()
+	if c.cancelOn[key] {
+		c.notifyQ[key] = params
+		c.notifyMu.Unlock()
+		return
+	}
+	if c.specialNotifyBusyLocked() {
+		c.notifyMu.Unlock()
+		c.tripOverload()
+		return
+	}
+	c.cancelOn[key] = true
+	c.notifyMu.Unlock()
+	c.wg.Add(1)
+	go c.runCancel(ctx, key, fn, params)
+}
+
+func (c *Conn) runCancel(ctx context.Context, key notifyKey, fn NotifyFunc, params json.RawMessage) {
+	defer c.wg.Done()
+	for {
+		fn(ctx, params)
+		c.notifyMu.Lock()
+		next, ok := c.notifyQ[key]
+		if !ok {
+			delete(c.cancelOn, key)
+			c.notifyMu.Unlock()
+			return
+		}
+		delete(c.notifyQ, key)
+		c.notifyMu.Unlock()
+		params = next
+	}
+}
+
+func (c *Conn) dispatchCoalescedNotify(ctx context.Context, method string, fn NotifyFunc, params json.RawMessage) {
+	key := notifyKey{method: method, target: notifyTarget(params)}
+	c.notifyMu.Lock()
+	if c.notifyOn[key] {
+		c.notifyQ[key] = params
+		c.notifyMu.Unlock()
+		return
+	}
+	if len(c.notifyOn) >= maxNotifyActive {
+		c.notifyMu.Unlock()
+		return
+	}
+	c.notifyOn[key] = true
+	c.notifyMu.Unlock()
+	c.wg.Add(1)
+	go c.runNotify(ctx, key, fn, params)
+}
+
+func (c *Conn) tryAdmit(n int64) bool {
+	limit := int64(maxInflightBytes)
+	if c.inflightLimit > 0 {
+		limit = c.inflightLimit
+	}
+	c.admittedMu.Lock()
+	if c.admittedBytes+n > limit {
+		c.admittedMu.Unlock()
+		return false
+	}
+	c.admittedBytes += n
+	c.admittedMu.Unlock()
+	if c.sem == nil {
+		return true
+	}
+	select {
+	case c.sem <- struct{}{}:
+		return true
+	default:
+		c.admittedMu.Lock()
+		c.admittedBytes -= n
+		if c.admittedBytes < 0 {
+			c.admittedBytes = 0
+		}
+		c.admittedMu.Unlock()
+		return false
+	}
+}
+
+func (c *Conn) releaseAdmit(n int64) {
+	c.releaseSem()
+	c.admittedMu.Lock()
+	c.admittedBytes -= n
+	if c.admittedBytes < 0 {
+		c.admittedBytes = 0
+	}
+	c.admittedMu.Unlock()
+}
+
+func (c *Conn) runNotify(ctx context.Context, key notifyKey, fn NotifyFunc, params json.RawMessage) {
+	defer c.wg.Done()
+	for {
+		fn(ctx, params)
+		c.notifyMu.Lock()
+		next, ok := c.notifyQ[key]
+		if !ok {
+			delete(c.notifyOn, key)
+			c.notifyMu.Unlock()
+			return
+		}
+		delete(c.notifyQ, key)
+		c.notifyMu.Unlock()
+		params = next
+	}
+}
+
+func (c *Conn) releaseSem() {
+	if c.sem == nil {
+		return
+	}
+	select {
+	case <-c.sem:
+	default:
+	}
 }
 
 func (c *Conn) dispatchRequest(ctx context.Context, msg rpcMessage) {
 	fn := c.handlers[msg.Method]
+	writeCtx := context.Background()
 	if fn == nil {
-		c.writeError(msg.ID, &rpcError{Code: codeMethodNotFound, Message: "method not found: " + msg.Method})
+		c.writeError(writeCtx, msg.ID, &rpcError{Code: codeMethodNotFound, Message: "method not found: " + msg.Method})
 		return
 	}
 	result, err := fn(ctx, msg.Params)
 	if err != nil {
 		var re *rpcError
 		if errors.As(err, &re) {
-			c.writeError(msg.ID, re)
+			c.writeError(writeCtx, msg.ID, re)
 		} else {
-			c.writeError(msg.ID, &rpcError{Code: codeInternalError, Message: err.Error()})
+			c.writeError(writeCtx, msg.ID, &rpcError{Code: codeInternalError, Message: err.Error()})
 		}
 		return
 	}
-	c.writeResult(msg.ID, result)
+	c.writeResult(writeCtx, msg.ID, result)
 }
 
 // Call issues an outbound request and blocks until the response arrives, ctx is
@@ -395,7 +680,7 @@ func (c *Conn) Call(ctx context.Context, method string, params any, result any) 
 	}()
 
 	idRaw, _ := json.Marshal(id)
-	if err := c.write(rpcMessage{JSONRPC: "2.0", ID: idRaw, Method: method, Params: raw}); err != nil {
+	if err := c.write(ctx, rpcMessage{JSONRPC: "2.0", ID: idRaw, Method: method, Params: raw}); err != nil {
 		return err
 	}
 
@@ -419,7 +704,7 @@ func (c *Conn) Notify(method string, params any) error {
 	if err != nil {
 		return err
 	}
-	return c.write(rpcMessage{JSONRPC: "2.0", Method: method, Params: raw})
+	return c.write(context.Background(), rpcMessage{JSONRPC: "2.0", Method: method, Params: raw})
 }
 
 func (c *Conn) deliver(msg rpcMessage) {
@@ -457,27 +742,144 @@ func (c *Conn) failAllPending(err error) {
 	}
 }
 
-func (c *Conn) writeResult(id json.RawMessage, result any) {
+func (c *Conn) writeResult(ctx context.Context, id json.RawMessage, result any) {
 	raw, err := json.Marshal(result)
 	if err != nil {
-		c.writeError(id, &rpcError{Code: codeInternalError, Message: err.Error()})
+		c.writeError(ctx, id, &rpcError{Code: codeInternalError, Message: err.Error()})
 		return
 	}
-	_ = c.write(rpcMessage{JSONRPC: "2.0", ID: id, Result: raw})
+	_ = c.writeMsg(ctx, rpcMessage{JSONRPC: "2.0", ID: id, Result: raw}, c.overloaded.Load())
 }
 
-func (c *Conn) writeError(id json.RawMessage, e *rpcError) {
-	_ = c.write(rpcMessage{JSONRPC: "2.0", ID: id, Error: e})
+func (c *Conn) writeError(ctx context.Context, id json.RawMessage, e *rpcError) {
+	_ = c.writeMsg(ctx, rpcMessage{JSONRPC: "2.0", ID: id, Error: e}, c.overloaded.Load())
 }
 
-func (c *Conn) write(msg rpcMessage) error {
+func (c *Conn) tryEnqueueBusy(id json.RawMessage) bool {
+	if c.overloaded.Load() || c.busyCh == nil {
+		return false
+	}
+	select {
+	case c.busyCh <- id:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Conn) tripOverload() {
+	if !c.overloaded.CompareAndSwap(false, true) {
+		return
+	}
+	c.failAllPending(errBusyOverload)
+	if c.writeAbort != nil {
+		close(c.writeAbort)
+	}
+	if c.serveCancel != nil {
+		c.serveCancel()
+	}
+}
+
+func (c *Conn) writeBusyLoop(ctx context.Context) {
+	defer c.wg.Done()
+	busy := &rpcError{Code: codeServerBusy, Message: "server busy: max concurrent requests exceeded"}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case id := <-c.busyCh:
+			_ = c.writeMsg(ctx, rpcMessage{JSONRPC: "2.0", ID: id, Error: busy}, false)
+		}
+	}
+}
+
+func (c *Conn) lockWrite(ctx context.Context, persist bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !persist && c.overloaded.Load() {
+		return errBusyOverload
+	}
+	done := make(chan struct{})
+	c.writeWaiters.Add(1)
+	go func() {
+		c.writeMu.Lock()
+		close(done)
+	}()
+	releaseWait := func() { c.writeWaiters.Add(-1) }
+	abandon := func() {
+		go func() {
+			<-done
+			c.writeMu.Unlock()
+		}()
+	}
+	if persist {
+		select {
+		case <-done:
+			releaseWait()
+			return nil
+		case <-ctx.Done():
+			releaseWait()
+			abandon()
+			return ctx.Err()
+		case <-c.writeAbort:
+			releaseWait()
+			abandon()
+			return errBusyOverload
+		}
+	}
+	select {
+	case <-done:
+		releaseWait()
+		if err := ctx.Err(); err != nil {
+			c.writeMu.Unlock()
+			return err
+		}
+		if c.overloaded.Load() {
+			c.writeMu.Unlock()
+			return errBusyOverload
+		}
+		return nil
+	case <-ctx.Done():
+		releaseWait()
+		abandon()
+		return ctx.Err()
+	case <-c.writeAbort:
+		releaseWait()
+		abandon()
+		return errBusyOverload
+	}
+}
+
+func (c *Conn) write(ctx context.Context, msg rpcMessage) error {
+	return c.writeMsg(ctx, msg, false)
+}
+
+func (c *Conn) writeMsg(ctx context.Context, msg rpcMessage, persist bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !persist && c.overloaded.Load() {
+		return errBusyOverload
+	}
 	msg.JSONRPC = "2.0"
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}
-	c.writeMu.Lock()
+	if err := c.lockWrite(ctx, persist); err != nil {
+		return err
+	}
 	defer c.writeMu.Unlock()
+	if !persist && c.overloaded.Load() {
+		return errBusyOverload
+	}
 	if _, err := c.w.Write(append(data, '\n')); err != nil {
 		return err
 	}
