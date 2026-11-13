@@ -20,6 +20,10 @@ type AnalysisResult struct {
 	TooComplex bool
 	// Programs lists the distinct top-level command names found, for diagnostics.
 	Programs []string
+	// GitInit is set when the script would create a git repository. It is a
+	// separate signal from Destructive and Network because the decision it feeds
+	// depends on WHERE the workspace sits, which the analyzer cannot see.
+	GitInit bool
 }
 
 // destructivePrograms are commands that can irrecoverably destroy data.
@@ -183,6 +187,9 @@ func analyzeInto(script string, result *AnalysisResult, seen map[string]bool, de
 		if commandUsesNetwork(prog, rest) {
 			result.Network = true
 		}
+		if commandCreatesGitRepository(call, prog, rest) {
+			result.GitInit = true
+		}
 		if destructivePrograms[prog] ||
 			(prog == "rm" && hasRecursiveForce(rest)) ||
 			(powerShellRemoveItemPrograms[prog] && hasPowerShellRecursiveForce(rest)) ||
@@ -277,8 +284,77 @@ func packageManagerOffline(words []string) bool {
 	return false
 }
 
+// gitGlobalOptionsTakingValue are git's own options that consume the NEXT word.
+//
+// firstSubcommand skips words beginning with "-" but not the value that follows
+// one, so "git -C sub clone <url>" made it answer "sub" and the command was
+// classified as touching no network at all. The "--opt=value" spelling is one
+// token and needs no entry here.
+//
+// Keys are lowercase because the analyzer lowercases every word before it gets
+// here, which also means -C and -c arrive identically. That is fine: both
+// consume a value, and nothing below needs to tell them apart.
+var gitGlobalOptionsTakingValue = map[string]bool{
+	"-c": true, "-C": true,
+	"--git-dir": true, "--work-tree": true, "--namespace": true,
+	"--exec-path": true, "--config-env": true, "--super-prefix": true,
+	"--attr-source": true,
+}
+
+// gitSubcommand returns git's subcommand, skipping global options AND the values
+// they consume. Returns "" when the words carry no subcommand.
+func gitSubcommand(words []string) string {
+	for index := 0; index < len(words); index++ {
+		word := words[index]
+		if word == "" {
+			continue
+		}
+		if !strings.HasPrefix(word, "-") {
+			return word
+		}
+		// "--opt=value" is one token and carries its own value.
+		if strings.HasPrefix(word, "--") && strings.Contains(word, "=") {
+			continue
+		}
+		if gitGlobalOptionsTakingValue[word] {
+			index++
+		}
+	}
+	return ""
+}
+
+// commandCreatesGitRepository reports whether this call would create a git
+// repository. It shares gitSubcommand with the network gate deliberately, so the
+// global options that already bypassed that gate cannot bypass this one either:
+// "git -C sub init" and "git -c k=v init" both resolve to init.
+//
+// init-db is git's original spelling and still works today. clone creates a
+// repository as surely as init does, with its config and hooks written by the
+// fetch rather than by hand: "git clone <url> ." into a workspace governed by an
+// ancestor repository lands a root .git whose carveouts setup never planned, so
+// it is the same nested-repository decision. The network prompt is a separate
+// gate and granting it does not answer this one. Reported by @gnanam1990.
+//
+// The subcommand is the one git runs after alias resolution, which git_alias.go
+// models: definitions from the command line and from the environment the call
+// sets, expanded with git's own quoting and its in-alias option handling. A
+// definition this analyzer cannot read makes the command unclassifiable, and
+// under this guard that is a refusal.
+func commandCreatesGitRepository(call *syntax.CallExpr, prog string, args []*syntax.Word) bool {
+	if prog != "git" {
+		return false
+	}
+	words := literalWordTexts(args)
+	aliases := gitAliasTable{}
+	if !gitEnvironmentAliases(aliases, callAssignments(call, args)) {
+		return true
+	}
+	gitInlineAliases(aliases, words)
+	return gitSubcommandCreatesRepository(gitSubcommand(words), aliases)
+}
+
 func gitUsesNetwork(words []string) bool {
-	switch firstSubcommand(words, nil) {
+	switch gitSubcommand(words) {
 	case "clone", "fetch", "pull", "push", "ls-remote", "archive":
 		return true
 	default:

@@ -46,9 +46,14 @@ func TestBuildWindowsACLPlanForWorkspaceWriteProfile(t *testing.T) {
 
 	assertWindowsACLEntry(t, plan, WindowsACLAllowWrite, `C:\workspace`, workspaceSID, false)
 	assertWindowsACLEntry(t, plan, WindowsACLAllowWrite, `D:\cache`, cacheSID, false)
-	assertWindowsACLEntry(t, plan, WindowsACLDenyWrite, `C:\workspace\vendor`, workspaceSID, false)
-	assertWindowsACLEntry(t, plan, WindowsACLDenyWrite, `C:\workspace\.git`, workspaceSID, false)
-	assertWindowsACLEntry(t, plan, WindowsACLDenyWrite, `C:\workspace\.zero`, workspaceSID, false)
+	// Materialized, matching the principal plan. A guard attached to an object
+	// that does not exist yet is never applied: on a workspace with no .git at
+	// setup time both passes skipped these while setup still recorded success.
+	// Creating them is also what lets the deferred pass reach the deny-delete on
+	// .git, since config and hooks create .git as their parent.
+	assertWindowsACLEntry(t, plan, WindowsACLDenyWrite, `C:\workspace\vendor`, workspaceSID, true)
+	assertWindowsACLEntry(t, plan, WindowsACLDenyWrite, `C:\workspace\.git`, workspaceSID, true)
+	assertWindowsACLEntry(t, plan, WindowsACLDenyWrite, `C:\workspace\.zero`, workspaceSID, true)
 	assertWindowsACLEntry(t, plan, WindowsACLDenyWrite, `C:\workspace\secret-write`, workspaceSID, false)
 	assertWindowsACLEntry(t, plan, WindowsACLDenyWrite, `C:\workspace\secret-write`, cacheSID, false)
 	assertWindowsACLEntry(t, plan, WindowsACLDenyRead, `C:\workspace\secret-read`, workspaceSID, true)
@@ -353,4 +358,38 @@ func TestBuildWindowsACLPlanLeavesAnOutOfRootSubpathUnanchored(t *testing.T) {
 	if outsideAnchor != "" {
 		t.Errorf("out-of-root subpath carries anchor %q, want none: the apply would refuse a config that works today", outsideAnchor)
 	}
+}
+
+func TestBuildWindowsACLPlanUsesReadOnlySIDWithoutWriteRoots(t *testing.T) {
+	home := t.TempDir()
+	caps, err := LoadOrCreateWindowsCapabilitySIDs(home)
+	if err != nil {
+		t.Fatalf("LoadOrCreateWindowsCapabilitySIDs: %v", err)
+	}
+	plan, err := BuildWindowsACLPlan(WindowsSandboxCommandConfig{
+		SandboxHome: home,
+		PermissionProfile: PermissionProfile{
+			FileSystem: FileSystemPolicy{
+				Kind:     FileSystemRestricted,
+				DenyRead: []string{`C:\workspace\secret-read`},
+			},
+			Network: NetworkPolicy{Mode: NetworkDeny},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildWindowsACLPlan: %v", err)
+	}
+	// Two deny entries, one per SID the token can carry here. ReadOnly is the
+	// only capability a profile with no write roots gets, and ReadAllow is the
+	// read grant a DenyRead profile's strict token carries: denying just one of
+	// them leaves the carveout readable through the other.
+	if len(plan.Entries) != 2 {
+		t.Fatalf("ACL entries = %#v, want a deny-read entry per capability SID", plan.Entries)
+	}
+	assertWindowsACLEntry(t, plan, WindowsACLDenyRead, `C:\workspace\secret-read`, caps.ReadOnly, true)
+	readSID, err := WindowsReadAllowSID(home)
+	if err != nil {
+		t.Fatalf("WindowsReadAllowSID: %v", err)
+	}
+	assertWindowsACLEntry(t, plan, WindowsACLDenyRead, `C:\workspace\secret-read`, readSID, true)
 }
