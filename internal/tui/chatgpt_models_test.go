@@ -318,7 +318,7 @@ func TestSubscriptionPickerRedactsDiscoveryErrors(t *testing.T) {
 
 func TestSubscriptionPickerIgnoresSupersededRefresh(t *testing.T) {
 	m := subscriptionTestModel(t)
-	m.modelPickerDiscoveryGeneration = 2
+	m.modelPickerDiscoveryRequests = map[string]int{"subscription": 2}
 	m.picker = m.newModelPicker()
 	updated, _ := m.Update(modelPickerModelsDiscoveredMsg{
 		providerID: "chatgpt", endpointKey: "subscription", generation: 2,
@@ -330,6 +330,47 @@ func TestSubscriptionPickerIgnoresSupersededRefresh(t *testing.T) {
 	next := updated.(model)
 	if strings.Contains(next.modelPickerOverlay(100), "old refresh failed") {
 		t.Fatal("a superseded request overwrote the current discovery status")
+	}
+}
+
+// /model list refreshes only the active account. Another account's result from
+// the picker's refresh of every account may still be pending when the list
+// runs, and must land rather than be discarded as stale.
+func TestSubscriptionListRefreshKeepsOtherAccountResult(t *testing.T) {
+	m := subscriptionTestModel(t)
+	m.savedProviders = append(m.savedProviders, config.ProviderProfile{
+		Name: "other-account", CatalogID: "chatgpt", BaseURL: m.providerProfile.BaseURL,
+		ProviderKind: config.ProviderKindOpenAICompatible,
+	})
+	m.discoverProviderModels = func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+		return nil, errors.New("discovery commands are not run by this test")
+	}
+	m, cmd := m.openModelPicker()
+	if cmd == nil {
+		t.Fatal("opening the picker must refresh every account")
+	}
+	pickerGeneration := m.modelPickerDiscoveryGeneration
+	if got := m.modelPickerDiscoveryRequests["other-account"]; got != pickerGeneration {
+		t.Fatalf("other account request generation = %d, want %d", got, pickerGeneration)
+	}
+	m, cmd = m.modelListDiscoveryCmd()
+	if cmd == nil {
+		t.Fatal("/model list must refresh the active account")
+	}
+	updated, _ := m.Update(modelPickerModelsDiscoveredMsg{
+		providerID: "chatgpt", endpointKey: "other-account", generation: pickerGeneration,
+		models: []providermodeldiscovery.Model{{ID: "gpt-other-account"}},
+	})
+	next := updated.(model)
+	if models := next.modelPickerLiveByProvider["other-account"]; len(models) != 1 || models[0].ID != "gpt-other-account" {
+		t.Fatalf("refreshing the active account discarded the other account's pending result; cached = %#v", models)
+	}
+	// The active account's own older result is still superseded by the list refresh.
+	updated, _ = next.Update(modelPickerModelsDiscoveredMsg{
+		providerID: "chatgpt", endpointKey: "subscription", generation: pickerGeneration, err: errors.New("old refresh failed"),
+	})
+	if strings.Contains(updated.(model).modelPickerOverlay(100), "old refresh failed") {
+		t.Fatal("a superseded request for the active account overwrote its newer refresh")
 	}
 }
 
@@ -399,7 +440,7 @@ func TestSubscriptionSetupDiscoveryUsesOAuthAccount(t *testing.T) {
 
 func TestSubscriptionSupersededModelListStillPrints(t *testing.T) {
 	m := subscriptionTestModel(t)
-	m.modelPickerDiscoveryGeneration = 2
+	m.modelPickerDiscoveryRequests = map[string]int{"subscription": 2}
 	m.modelPickerLoading = true
 	m.modelPickerLiveByProvider = map[string][]providermodeldiscovery.Model{"subscription": {{ID: "gpt-current-result"}}}
 	updated, _ := m.Update(modelPickerModelsDiscoveredMsg{

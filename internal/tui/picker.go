@@ -388,40 +388,73 @@ func (m model) openModelPicker() (model, tea.Cmd) {
 	}
 	m.picker = picker
 	m.clearModelPickerLoadState()
-	m.modelPickerDiscoveryGeneration++
 	// Live-discover every usable provider's real models in the background. The list
 	// shows immediately from the static catalog and each provider's section refreshes
 	// as its discovery returns — no blocking overlay.
-	return m, m.modelPickerDiscoveryCmds()
+	return m.modelPickerDiscoveryCmds()
+}
+
+// modelPickerDiscoveryKey names the cache and request-tracking slot a discovery
+// result belongs to: the endpoint/profile key, or the catalog ID without one.
+func modelPickerDiscoveryKey(endpointKey, providerID string) string {
+	return firstProviderDisplayValue(endpointKey, providerID)
+}
+
+// requestModelPickerDiscovery starts a new refresh generation and records it
+// for every key about to be refreshed, so results for keys this refresh does
+// not touch keep their own pending request.
+func (m model) requestModelPickerDiscovery(keys ...string) model {
+	m.modelPickerDiscoveryGeneration++
+	requests := make(map[string]int, len(m.modelPickerDiscoveryRequests)+len(keys))
+	for k, v := range m.modelPickerDiscoveryRequests {
+		requests[k] = v
+	}
+	for _, key := range keys {
+		requests[key] = m.modelPickerDiscoveryGeneration
+	}
+	m.modelPickerDiscoveryRequests = requests
+	return m
 }
 
 // modelPickerDiscoveryCmds dispatches a live model-discovery command for each
 // usable provider (deduped by endpoint key), so /model shows the same real
-// models the provider-setup wizard discovers.
-func (m model) modelPickerDiscoveryCmds() tea.Cmd {
-	cmds := []tea.Cmd{}
+// models the provider-setup wizard discovers. The returned model records the
+// request for each dispatched key.
+func (m model) modelPickerDiscoveryCmds() (model, tea.Cmd) {
+	type request struct {
+		descriptor providercatalog.Descriptor
+		profile    config.ProviderProfile
+	}
+	var requests []request
+	var keys []string
 	seen := map[string]bool{}
 	for _, profile := range m.modelPickerProviders() {
 		descriptor, ok := m.descriptorForProfile(profile)
 		if !ok {
 			continue
 		}
-		endpointKey := providerEndpointKey(profile, descriptor)
-		if endpointKey == "" {
-			endpointKey = descriptor.ID
-		}
-		if seen[endpointKey] {
+		key := modelPickerDiscoveryKey(providerEndpointKey(profile, descriptor), descriptor.ID)
+		if seen[key] {
 			continue
 		}
-		seen[endpointKey] = true
-		if cmd := m.modelPickerProviderDiscoveryCmd(descriptor, profile); cmd != nil {
+		seen[key] = true
+		requests = append(requests, request{descriptor: descriptor, profile: profile})
+		keys = append(keys, key)
+	}
+	if len(requests) == 0 {
+		return m, nil
+	}
+	m = m.requestModelPickerDiscovery(keys...)
+	cmds := []tea.Cmd{}
+	for _, req := range requests {
+		if cmd := m.modelPickerProviderDiscoveryCmd(req.descriptor, req.profile); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	}
 	if len(cmds) == 0 {
-		return nil
+		return m, nil
 	}
-	return tea.Batch(cmds...)
+	return m, tea.Batch(cmds...)
 }
 
 // modelPickerProviderDiscoveryCmd discovers one provider's live models, resolving
@@ -471,16 +504,19 @@ func (m model) modelPickerProviderDiscoveryCmd(descriptor providercatalog.Descri
 
 // modelListDiscoveryCmd refreshes the active account before printing /model list.
 // The popup and text command share both the discovery path and its cached results.
-func (m model) modelListDiscoveryCmd() tea.Cmd {
+// Only the active account's request is renewed; other accounts' pending picker
+// results stay valid.
+func (m model) modelListDiscoveryCmd() (model, tea.Cmd) {
 	descriptor, ok := m.activeProviderDescriptor()
 	if !ok || !config.HasProviderProfile(m.providerProfile) {
-		return nil
+		return m, nil
 	}
+	m = m.requestModelPickerDiscovery(modelPickerDiscoveryKey(providerEndpointKey(m.providerProfile, descriptor), descriptor.ID))
 	cmd := m.modelPickerProviderDiscoveryCmd(descriptor, m.providerProfile)
 	if cmd == nil {
-		return nil
+		return m, nil
 	}
-	return func() tea.Msg {
+	return m, func() tea.Msg {
 		msg := cmd().(modelPickerModelsDiscoveredMsg)
 		msg.showList = true
 		return msg
@@ -1095,7 +1131,7 @@ func profileMatchesProviderBaseURL(profile config.ProviderProfile, provider prov
 func (m model) applyModelPickerModelsDiscovered(msg modelPickerModelsDiscoveredMsg) model {
 	m.modelPickerLoading = false
 	m.modelPickerLoadingProviderID = ""
-	key := firstProviderDisplayValue(msg.endpointKey, msg.providerID)
+	key := modelPickerDiscoveryKey(msg.endpointKey, msg.providerID)
 	errorsByProvider := make(map[string]string, len(m.modelPickerErrorsByProvider)+1)
 	for k, v := range m.modelPickerErrorsByProvider {
 		errorsByProvider[k] = v
