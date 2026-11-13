@@ -29,12 +29,20 @@ func TestBashEscapeGatedByPermissionMode(t *testing.T) {
 		if cmd != nil {
 			t.Fatalf("%s mode: !cmd must be gated (nil cmd), got a command to run", mode)
 		}
-		if msg := lastSystemText(updated.(model)); !strings.Contains(msg, "disabled") || !strings.Contains(msg, "unsafe") {
-			t.Fatalf("%s mode: expected a gate message naming unsafe, got %q", mode, msg)
+		// The message has to say it is blocked AND how to unblock it. Naming the
+		// mode is the point: a gate that only says "disabled" leaves the user
+		// guessing, and asserting the current name means the next rename cannot
+		// leave the instructions pointing at a mode that no longer exists.
+		msg := lastSystemText(updated.(model))
+		if !strings.Contains(msg, "disabled") || !strings.Contains(msg, "full-auto") {
+			t.Fatalf("%s mode: expected a gate message naming full-auto, got %q", mode, msg)
+		}
+		if strings.Contains(msg, "--skip-permissions-unsafe") {
+			t.Errorf("%s mode: gate message still directs users to the deprecated flag: %q", mode, msg)
 		}
 	}
 
-	m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeUnsafe})
+	m := newModel(context.Background(), Options{PermissionMode: agent.PermissionModeFullAuto})
 	m.input.SetValue("!echo hi")
 	_, cmd := m.handleSubmit()
 	if cmd == nil {

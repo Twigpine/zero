@@ -514,7 +514,7 @@ func TestResolveExecPermissionModeMember(t *testing.T) {
 		{"low", agent.PermissionModeAuto},
 		{"medium", agent.PermissionModeAuto},
 		{"member", agent.PermissionModeMemberAuto}, // headless members: write + sandboxed shell
-		{"high", agent.PermissionModeUnsafe},
+		{"high", agent.PermissionModeFullAuto},
 	}
 	for _, c := range cases {
 		got, err := resolveExecPermissionMode(execOptions{autonomy: c.autonomy})
@@ -785,8 +785,8 @@ func TestRunExecUnsafeTextModeWarns(t *testing.T) {
 	if !strings.Contains(stdout, "hello") {
 		t.Fatalf("expected prompt in stdout, got %q", stdout)
 	}
-	if got := stderr; !strings.Contains(got, "WARNING") || !strings.Contains(got, "--skip-permissions-unsafe") {
-		t.Fatalf("expected unsafe warning, got %q", got)
+	if got := stderr; !strings.Contains(got, "WARNING") || !strings.Contains(got, "full-auto") {
+		t.Fatalf("expected full-auto warning, got %q", got)
 	}
 }
 
@@ -935,8 +935,8 @@ func TestRunExecJSONUnsafeOutputsWarningEvent(t *testing.T) {
 	if !slices.Contains(eventTypes, "warning") {
 		t.Fatalf("expected JSON warning event in %v; output %q", eventTypes, stdout)
 	}
-	if got := events[0]["permission_mode"]; got != "unsafe" {
-		t.Fatalf("expected run_start permission_mode unsafe, got %v", got)
+	if got := events[0]["permission_mode"]; got != "full-auto" {
+		t.Fatalf("expected run_start permission_mode full-auto, got %v", got)
 	}
 }
 
@@ -1194,7 +1194,7 @@ func TestRunExecReasoningEffortNoticeUsesEffectiveModel(t *testing.T) {
 }
 
 // TestRunExecAutoHighEmitsUnsafeWarning asserts that --auto high (which resolves
-// to PermissionModeUnsafe) surfaces the same unsafe warning as
+// to PermissionModeFullAuto) surfaces the same unsafe warning as
 // --skip-permissions-unsafe.
 func TestRunExecAutoHighEmitsUnsafeWarning(t *testing.T) {
 	exitCode, stdout, stderr := runExecWithEcho(t, []string{
@@ -1212,8 +1212,8 @@ func TestRunExecAutoHighEmitsUnsafeWarning(t *testing.T) {
 	if !slices.Contains(jsonEventTypes(events), "warning") {
 		t.Fatalf("expected JSON warning event for --auto high, got %v; output %q", jsonEventTypes(events), stdout)
 	}
-	if got := events[0]["permission_mode"]; got != "unsafe" {
-		t.Fatalf("expected run_start permission_mode unsafe, got %v", got)
+	if got := events[0]["permission_mode"]; got != "full-auto" {
+		t.Fatalf("expected run_start permission_mode full-auto, got %v", got)
 	}
 }
 

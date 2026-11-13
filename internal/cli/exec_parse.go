@@ -33,7 +33,7 @@ func parseExecArgs(args []string) (execOptions, bool, error) {
 				return options, false, err
 			}
 			options.permissionMode = value
-		case arg == "--skip-permissions-unsafe":
+		case arg == "--skip-permissions-unsafe", arg == "--full-auto":
 			options.skipPermissionsUnsafe = true
 		case arg == "--list-tools":
 			options.listTools = true
