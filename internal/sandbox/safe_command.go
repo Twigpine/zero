@@ -147,6 +147,18 @@ var interactiveSegments = []struct {
 // that would block a non-interactive agent. goos selects platform-specific
 // rules (pass "" to use the host runtime.GOOS).
 func DetectInteractiveCommand(command string, goos string) InteractiveCommandResult {
+	return detectInteractiveCommandAt(command, goos, 0)
+}
+
+func detectInteractiveCommandAt(command string, goos string, depth int) InteractiveCommandResult {
+	if depth > maxAnalyzerDepth {
+		return InteractiveCommandResult{
+			Interactive: true,
+			Command:     "nested shell launcher",
+			Reason:      "shell launcher nesting exceeds the safe inspection limit, so its payload cannot be proven non-interactive",
+			Suggestion:  "Simplify the nested shell command or run its non-interactive payload directly.",
+		}
+	}
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return InteractiveCommandResult{}
@@ -192,10 +204,12 @@ func DetectInteractiveCommand(command string, goos string) InteractiveCommandRes
 		// command; recurse into it so an interactive program inside the payload
 		// is detected (e.g. `sh -c 'vim x'`).
 		if payload := shellDashCPayload(first, fields); payload != "" {
-			if inner := DetectInteractiveCommand(payload, goos); inner.Interactive {
+			if inner := detectInteractiveCommandAt(payload, goos, depth+1); inner.Interactive {
 				return inner
 			}
-			continue
+			// strings.Fields cannot preserve a quoted multi-word payload. If its
+			// best-effort read is clean, keep going so the AST pass below can
+			// inspect the actual payload rather than treating truncation as safe.
 		}
 		program, ok := interactivePrograms[first]
 		if !ok {
@@ -229,7 +243,7 @@ func DetectInteractiveCommand(command string, goos string) InteractiveCommandRes
 	// the parser cannot handle (Windows cmd.exe, obfuscation) yields no commands
 	// and falls through unchanged — the guard never hard-blocks on a parse error.
 	for _, fields := range astCommandFields(command) {
-		if result, ok := inspectCommandFields(fields, goos); ok {
+		if result, ok := inspectCommandFields(fields, goos, depth); ok {
 			return result
 		}
 	}
@@ -243,7 +257,7 @@ func DetectInteractiveCommand(command string, goos string) InteractiveCommandRes
 // non-interactive suppressions (hasNonInteractiveFlag covers REPL flags and
 // trailing-command clients like ssh). It mirrors the hand-written passes above
 // so an AST-extracted command is classified identically to a plainly-split one.
-func inspectCommandFields(fields []string, goos string) (InteractiveCommandResult, bool) {
+func inspectCommandFields(fields []string, goos string, depth int) (InteractiveCommandResult, bool) {
 	body := strings.ToLower(commandBody(fields))
 	for _, seg := range interactiveSegments {
 		if body == seg.match || strings.HasPrefix(body, seg.match+" ") {
@@ -258,8 +272,14 @@ func inspectCommandFields(fields []string, goos string) (InteractiveCommandResul
 	if first == "" {
 		return InteractiveCommandResult{}, false
 	}
-	if payload := shellDashCPayload(first, fields); payload != "" {
-		if inner := DetectInteractiveCommand(payload, goos); inner.Interactive {
+	start := programIndex(first, fields)
+	args := fields[start+1:]
+	payloadIndex, hasPayload := shellCommandPayloadIndex(first, args)
+	if hasPayload && payloadIndex < len(args) {
+		// astCommandFields already removed the launcher's outer quoting. Do not
+		// trim again: trailing quotes can belong to a nested launcher's payload.
+		payload := args[payloadIndex]
+		if inner := detectInteractiveCommandAt(payload, goos, depth+1); inner.Interactive {
 			return inner, true
 		}
 		return InteractiveCommandResult{}, false
@@ -297,12 +317,13 @@ var wrapperPrograms = map[string]bool{
 var wrapperValueOptionsByProg = map[string]map[string]bool{
 	"sudo":    {"-u": true, "--user": true, "-g": true, "--group": true, "-p": true, "--prompt": true, "-C": true, "--close-from": true, "-r": true, "--role": true, "-T": true, "--command-timeout": true, "-U": true, "--other-user": true, "-h": true, "--host": true, "-D": true, "--chdir": true, "-R": true, "--chroot": true},
 	"doas":    {"-u": true, "-C": true},
-	"env":     {"-u": true, "--unset": true, "-S": true, "--split-string": true, "-C": true, "--chdir": true},
+	"env":     {"-u": true, "--unset": true, "-S": true, "--split-string": true, "-C": true, "--chdir": true, "-a": true, "--argv0": true},
 	"timeout": {"-s": true, "--signal": true, "-k": true, "--kill-after": true},
 	"nice":    {"-n": true, "--adjustment": true},
 	"ionice":  {"-c": true, "--class": true, "-n": true, "--classdata": true, "-p": true, "--pid": true},
 	"stdbuf":  {"-i": true, "--input": true, "-o": true, "--output": true, "-e": true, "--error": true},
 	"xargs":   {"-a": true, "--arg-file": true, "-d": true, "--delimiter": true, "-E": true, "-I": true, "--replace": true, "-L": true, "--max-lines": true, "-n": true, "--max-args": true, "-P": true, "--max-procs": true, "-s": true, "--max-chars": true},
+	"exec":    {"-a": true, "--argv0": true},
 }
 
 // wrapperConsumesValue reports whether option is a value-consuming flag of the
@@ -361,10 +382,20 @@ func firstProgram(fields []string) string {
 // command boundary (e.g. `sudo git rebase -i` -> "git rebase -i") instead of
 // matching the segment text anywhere as a raw substring.
 func commandBody(fields []string) string {
+	return strings.Join(commandBodyFields(fields), " ")
+}
+
+// commandBodyFields is commandBody's scan, returning the fields from the first
+// real command token onward (nil when the segment is nothing but assignments and
+// wrappers). Callers that need to reason about the program and its arguments
+// separately — the unparseable-command fallback in risk.go — use this rather
+// than re-splitting commandBody's joined string, which would lose the token
+// boundaries the fallback tokenizer worked to preserve.
+func commandBodyFields(fields []string) []string {
 	wrapper := ""
 	for index := 0; index < len(fields); index++ {
 		field := fields[index]
-		if strings.Contains(field, "=") && !strings.HasPrefix(field, "=") {
+		if strings.Contains(field, "=") && !strings.HasPrefix(field, "=") && !strings.HasPrefix(field, "-") {
 			continue
 		}
 		if strings.HasPrefix(field, "-") {
@@ -381,9 +412,534 @@ func commandBody(fields []string) string {
 			continue
 		}
 		// First real command token: the body starts here.
-		return strings.Join(fields[index:], " ")
+		return fields[index:]
 	}
-	return ""
+	return nil
+}
+
+// envSplitCommandFields resolves GNU env's -S/--split-string launcher when env
+// appears at an actual command position (possibly behind another wrapper). The
+// split string is argv syntax, not shell source, so metacharacters remain inert
+// unless the resulting executable is itself a shell with -c.
+type envSplitCommandResult struct {
+	command                           []string
+	recognized                        bool
+	executableEnvironmentDependent    bool
+	commandSourceEnvironmentDependent bool
+}
+
+func envSplitCommandFields(fields []string) envSplitCommandResult {
+	wrapper := ""
+	for index := 0; index < len(fields); index++ {
+		field := fields[index]
+		if strings.Contains(field, "=") && !strings.HasPrefix(field, "=") && !strings.HasPrefix(field, "-") {
+			continue
+		}
+		if strings.HasPrefix(field, "-") {
+			if wrapperConsumesValue(wrapper, field) && index+1 < len(fields) {
+				index++
+			}
+			continue
+		}
+		if isNumericToken(field) {
+			continue
+		}
+		token := normalizeProgramToken(field)
+		if token == "env" {
+			return envSplitCommand(fields[index+1:])
+		}
+		if wrapperPrograms[token] {
+			wrapper = token
+			continue
+		}
+		return envSplitCommandResult{}
+	}
+	return envSplitCommandResult{}
+}
+
+func envSplitCommand(args []string) envSplitCommandResult {
+	current := append([]string(nil), args...)
+	dependent := make([]bool, len(current))
+	recognized := false
+	for rewrite := 0; rewrite < 16; rewrite++ {
+		commandIndex := len(current)
+		rewritten := false
+		for index := 0; index < len(current); index++ {
+			arg := current[index]
+			if arg == "--" {
+				commandIndex = index + 1
+				break
+			}
+			if strings.Contains(arg, "=") && !strings.HasPrefix(arg, "=") && !strings.HasPrefix(arg, "-") {
+				continue
+			}
+			value, consumed, retainedOption, split := envSplitOption(current, index)
+			if split {
+				recognized = true
+				if consumed == 0 {
+					return envSplitCommandResult{recognized: true}
+				}
+				fields, fieldDependencies, ok := splitEnvString(value)
+				if !ok {
+					// The split string is executable argv this scan cannot read.
+					// "Cannot inspect" is not "does not use the network": env still
+					// runs whatever the shell expanded into it, so keep the gate.
+					return envSplitCommandResult{recognized: true, executableEnvironmentDependent: true}
+				}
+				replacement := fields
+				replacementDependencies := fieldDependencies
+				if retainedOption != "" {
+					replacement = append([]string{retainedOption}, replacement...)
+					replacementDependencies = append([]bool{false}, replacementDependencies...)
+				}
+				current = append(append(append([]string(nil), current[:index]...), replacement...), current[index+consumed:]...)
+				dependent = append(append(append([]bool(nil), dependent[:index]...), replacementDependencies...), dependent[index+consumed:]...)
+				rewritten = true
+				break
+			}
+			if strings.HasPrefix(arg, "-") {
+				if wrapperConsumesValue("env", arg) {
+					index++
+				}
+				continue
+			}
+			commandIndex = index
+			break
+		}
+		if rewritten {
+			continue
+		}
+		if !recognized {
+			return envSplitCommandResult{}
+		}
+		if commandIndex >= len(current) {
+			return envSplitCommandResult{recognized: true}
+		}
+		command := current[commandIndex:]
+		// Preserve a nested env invocation so fallbackBodyUsesNetwork can process
+		// its own -S grammar. Other ordinary wrappers can be resolved directly.
+		if normalizeProgramToken(command[0]) != "env" {
+			command = commandBodyFields(command)
+			commandIndex = len(current) - len(command)
+		}
+		commandDependencies := dependent[commandIndex:]
+		return envSplitCommandResult{
+			command:                           command,
+			recognized:                        true,
+			executableEnvironmentDependent:    len(commandDependencies) > 0 && commandDependencies[0],
+			commandSourceEnvironmentDependent: envSplitCommandSourceDependent(command, commandDependencies),
+		}
+	}
+	// Excessive rewrites are attacker-controlled ambiguity. Keep the network
+	// gate rather than recursing without a bound.
+	return envSplitCommandResult{recognized: true, executableEnvironmentDependent: true}
+}
+
+func envSplitCommandSourceDependent(command []string, dependent []bool) bool {
+	if len(command) == 0 || len(command) != len(dependent) {
+		return false
+	}
+	program := normalizeProgramToken(command[0])
+	if dependent[0] {
+		return true
+	}
+	args, argDependent := command[1:], dependent[1:]
+	if shellPrograms[program] {
+		if index, ok := shellCommandPayloadIndex(program, args); ok && index < len(argDependent) {
+			return argDependent[index]
+		}
+		return false
+	}
+	if program == "powershell" || program == "pwsh" || program == "cmd" ||
+		program == "call" || program == "start" || program == "env" {
+		for _, value := range argDependent {
+			if value {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// envSplitLongOptionName is GNU env's only long option beginning with "s", so
+// any unambiguous prefix of it ("--s", "--split", "--split-strin", ...) names
+// the same option under GNU getopt_long's abbreviation rule.
+const envSplitLongOptionName = "split-string"
+
+// matchesEnvSplitLongOption reports whether name (the text of a "--name" or
+// "--name=value" option, with "--" and any "=value" suffix already stripped)
+// is an unambiguous abbreviation of --split-string. Modelling the runtime
+// option grammar here, rather than the single exact spelling, matters: `env
+// --split 'curl https://…'` is accepted by GNU env exactly like
+// `--split-string`, and treating only the full spelling as recognized let a
+// shortened form fall through to ordinary wrapper handling with no network
+// classification at all.
+func matchesEnvSplitLongOption(name string) bool {
+	if name == "" {
+		return false
+	}
+	return strings.HasPrefix(envSplitLongOptionName, name)
+}
+
+func envSplitOption(args []string, index int) (value string, consumed int, retainedOption string, ok bool) {
+	arg := args[index]
+	switch {
+	case arg == "-S":
+		if index+1 >= len(args) {
+			return "", 0, "", true
+		}
+		return args[index+1], 2, "", true
+	case strings.HasPrefix(arg, "--"):
+		name := arg[2:]
+		hasValue := false
+		optionValue := ""
+		if equals := strings.IndexByte(name, '='); equals >= 0 {
+			hasValue = true
+			optionValue = name[equals+1:]
+			name = name[:equals]
+		}
+		if !matchesEnvSplitLongOption(name) {
+			return "", 0, "", false
+		}
+		if hasValue {
+			return optionValue, 1, "", true
+		}
+		if index+1 >= len(args) {
+			return "", 0, "", true
+		}
+		return args[index+1], 2, "", true
+	case strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--"):
+		position := strings.IndexByte(arg[1:], 'S')
+		if position < 0 {
+			return "", 0, "", false
+		}
+		position++
+		for _, option := range arg[1:position] {
+			if option != 'i' && option != '0' && option != 'v' {
+				return "", 0, "", false
+			}
+		}
+		retained := ""
+		if position > 1 {
+			retained = "-" + arg[1:position]
+		}
+		if position+1 < len(arg) {
+			return arg[position+1:], 1, retained, true
+		}
+		if index+1 >= len(args) {
+			return "", 0, "", true
+		}
+		return args[index+1], 2, retained, true
+	default:
+		return "", 0, "", false
+	}
+}
+
+func splitEnvString(value string) ([]string, []bool, bool) {
+	var fields []string
+	var dependent []bool
+	var word strings.Builder
+	var quote rune
+	started := false
+	wordDependent := false
+	flush := func() {
+		if started {
+			fields = append(fields, word.String())
+			dependent = append(dependent, wordDependent)
+			word.Reset()
+			started = false
+			wordDependent = false
+		}
+	}
+	runes := []rune(value)
+	for index := 0; index < len(runes); index++ {
+		r := runes[index]
+		if r == '\\' {
+			if index+1 >= len(runes) {
+				return nil, nil, false
+			}
+			index++
+			escaped := runes[index]
+			if quote == '\'' && escaped != '\\' && escaped != '\'' {
+				word.WriteRune('\\')
+				word.WriteRune(escaped)
+				started = true
+				continue
+			}
+			switch escaped {
+			case 'c':
+				if quote != 0 {
+					return nil, nil, false
+				}
+				flush()
+				return fields, dependent, true
+			case '_':
+				if quote == '"' {
+					word.WriteRune(' ')
+					started = true
+				} else {
+					flush()
+				}
+			case 'f':
+				word.WriteRune('\f')
+				started = true
+			case 'n':
+				word.WriteRune('\n')
+				started = true
+			case 'r':
+				word.WriteRune('\r')
+				started = true
+			case 't':
+				word.WriteRune('\t')
+				started = true
+			case 'v':
+				word.WriteRune('\v')
+				started = true
+			case '#', '$', '"', '\'', '\\':
+				word.WriteRune(escaped)
+				started = true
+			default:
+				return nil, nil, false
+			}
+			continue
+		}
+		if r == '\'' || r == '"' {
+			if quote == 0 {
+				quote = r
+				started = true
+				continue
+			}
+			if quote == r {
+				quote = 0
+				continue
+			}
+		}
+		if r == '$' && quote != '\'' {
+			if index+2 >= len(runes) || runes[index+1] != '{' {
+				return nil, nil, false
+			}
+			end := index + 2
+			for end < len(runes) && runes[end] != '}' {
+				end++
+			}
+			if end >= len(runes) || !validEnvSplitVariableName(string(runes[index+2:end])) {
+				return nil, nil, false
+			}
+			word.WriteString(string(runes[index : end+1]))
+			started = true
+			wordDependent = true
+			index = end
+			continue
+		}
+		if r == '#' && quote == 0 && !started {
+			break
+		}
+		if quote == 0 && (r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\v' || r == '\f') {
+			flush()
+			continue
+		}
+		word.WriteRune(r)
+		started = true
+	}
+	if quote != 0 {
+		return nil, nil, false
+	}
+	flush()
+	return fields, dependent, true
+}
+
+func validEnvSplitVariableName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for index, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_' ||
+			(index > 0 && r >= '0' && r <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func busyboxDelegatedCommand(args []string) ([]string, commandResolution) {
+	if len(args) == 0 {
+		return nil, commandKnownLocal
+	}
+	switch args[0] {
+	case "--help", "--list", "--list-full", "--install", "--show":
+		return nil, commandKnownLocal
+	}
+	if strings.HasPrefix(args[0], "-") {
+		return nil, commandUnresolved
+	}
+	if fallbackTokenLooksDynamic(args[0]) {
+		return nil, commandUnresolved
+	}
+	return args, commandKnownLocal
+}
+
+var (
+	straceRequiredLongOptions = map[string]bool{
+		"--columns": true, "--detach-on": true, "--env": true, "--interruptible": true,
+		"--stack-trace-frame-limit": true, "--syscall-limit": true, "--output": true,
+		"--summary-syscall-overhead": true, "--attach": true, "--trace-path": true,
+		"--string-limit": true, "--summary-sort-by": true, "--user": true,
+		"--summary-columns": true, "--const-print-style": true, "--argv0": true,
+		"--color": true, "--trace": true, "--trace-fds": true, "--abbrev": true,
+		"--verbose": true, "--raw": true, "--signals": true, "--status": true,
+		"--read": true, "--write": true, "--fault": true, "--inject": true,
+		"--kvm": true, "--decode-pids": true,
+	}
+	straceOptionalLongOptions = map[string]bool{
+		"--daemonize": true, "--daemonised": true, "--daemonized": true,
+		"--stack-trace": true, "--stack-traces": true, "--relative-timestamps": true,
+		"--absolute-timestamps": true, "--timestamps": true, "--syscall-times": true,
+		"--strings-in-hex": true, "--tips": true, "--namespace": true,
+		"--quiet": true, "--silent": true, "--silence": true, "--decode-fds": true,
+		"--secontext": true,
+	}
+	straceValuelessLongOptions = map[string]bool{
+		"--output-append-mode": true, "--summary-only": true, "--summary": true,
+		"--debug": true, "--follow-forks": true, "--output-separately": true,
+		"--instruction-pointer": true, "--kill-on-exit": true, "--syscall-number": true,
+		"--arg-names": true, "--no-abbrev": true, "--summary-wall-clock": true,
+		"--pidns-translation": true, "--successful-only": true, "--failed-only": true,
+		"--failing-only": true, "--seccomp-bpf": true, "--always-show-pid": true,
+	}
+)
+
+type straceLongOptionKind uint8
+
+const (
+	straceLongOptionInvalid straceLongOptionKind = iota
+	straceLongOptionRequired
+	straceLongOptionOptional
+	straceLongOptionValueless
+	straceLongOptionTerminal
+)
+
+func straceDelegatedCommand(args []string) ([]string, commandResolution) {
+	index, status := straceChildResolution(args)
+	if status != commandKnownLocal || index < 0 || index >= len(args) {
+		return nil, status
+	}
+	if fallbackTokenLooksDynamic(args[index]) {
+		return nil, commandUnresolved
+	}
+	return args[index:], commandKnownLocal
+}
+
+func straceChildResolution(args []string) (int, commandResolution) {
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		switch arg {
+		case "--":
+			if index+1 >= len(args) {
+				return -1, commandKnownLocal
+			}
+			return index + 1, commandKnownLocal
+		case "-":
+			return index, commandKnownLocal
+		}
+		if strings.HasPrefix(arg, "--") {
+			name, hasValue := arg, false
+			if equals := strings.IndexByte(arg, '='); equals >= 0 {
+				name, hasValue = arg[:equals], true
+			}
+			kind, ok := resolveStraceLongOption(name)
+			if !ok {
+				return -1, commandUnresolved
+			}
+			switch kind {
+			case straceLongOptionTerminal:
+				return -1, commandKnownLocal
+			case straceLongOptionRequired:
+				if !hasValue {
+					index++
+					if index >= len(args) {
+						return -1, commandUnresolved
+					}
+				}
+			case straceLongOptionOptional:
+				// GNU getopt_long accepts optional values only as --option=value.
+			case straceLongOptionValueless:
+				if hasValue {
+					return -1, commandUnresolved
+				}
+			default:
+				return -1, commandUnresolved
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			cluster := []rune(arg[1:])
+			for clusterIndex, option := range cluster {
+				switch {
+				case option == 'h' || option == 'V':
+					return -1, commandKnownLocal
+				case strings.ContainsRune("abeEIoOpPsSuUX", option):
+					if clusterIndex+1 == len(cluster) {
+						index++
+						if index >= len(args) {
+							return -1, commandUnresolved
+						}
+					}
+					clusterIndex = len(cluster)
+				case strings.ContainsRune("AcCdDfFiknNqrtTvwxyYzZ", option):
+				default:
+					return -1, commandUnresolved
+				}
+				if clusterIndex == len(cluster) {
+					break
+				}
+			}
+			continue
+		}
+		return index, commandKnownLocal
+	}
+	return -1, commandKnownLocal
+}
+
+func resolveStraceLongOption(name string) (straceLongOptionKind, bool) {
+	if kind := exactStraceLongOption(name); kind != straceLongOptionInvalid {
+		return kind, true
+	}
+	matchedKind := straceLongOptionInvalid
+	matches := 0
+	visit := func(options map[string]bool, kind straceLongOptionKind) {
+		for option := range options {
+			if strings.HasPrefix(option, name) {
+				matchedKind = kind
+				matches++
+			}
+		}
+	}
+	visit(straceRequiredLongOptions, straceLongOptionRequired)
+	visit(straceOptionalLongOptions, straceLongOptionOptional)
+	visit(straceValuelessLongOptions, straceLongOptionValueless)
+	for _, option := range []string{"--help", "--version"} {
+		if strings.HasPrefix(option, name) {
+			matchedKind = straceLongOptionTerminal
+			matches++
+		}
+	}
+	return matchedKind, matches == 1
+}
+
+func exactStraceLongOption(name string) straceLongOptionKind {
+	switch {
+	case straceRequiredLongOptions[name]:
+		return straceLongOptionRequired
+	case straceOptionalLongOptions[name]:
+		return straceLongOptionOptional
+	case straceValuelessLongOptions[name]:
+		return straceLongOptionValueless
+	case name == "--help" || name == "--version":
+		return straceLongOptionTerminal
+	default:
+		return straceLongOptionInvalid
+	}
 }
 
 // isNumericToken reports whether a token is purely digits (e.g. the duration
@@ -398,32 +954,6 @@ func isNumericToken(field string) bool {
 		}
 	}
 	return true
-}
-
-// shellCommandFlag reports whether arg is a shell option token that carries the
-// command string to run — the `-c`/`--command` flag — so callers can recurse into
-// the payload. POSIX getopt lets a shell cluster its short options, so the flag
-// is frequently grouped with other letters (`bash -ec`, `sh -lc`, `zsh -xc`);
-// a bare `-c` is only the one-letter case. A long option other than the exact
-// `--command` is not a match. `-o` and `-O` consume the remainder of their
-// cluster (or the next token) as an option value, so a `c` that follows them is
-// that value, not the command flag.
-func shellCommandFlag(arg string) bool {
-	if arg == "--command" {
-		return true
-	}
-	if len(arg) < 2 || arg[0] != '-' || arg[1] == '-' {
-		return false
-	}
-	for _, flag := range arg[1:] {
-		switch flag {
-		case 'c':
-			return true
-		case 'o', 'O':
-			return false
-		}
-	}
-	return false
 }
 
 // shellDashCPayload returns the command string passed to `sh -c`/`bash -c`
@@ -441,20 +971,8 @@ func shellDashCPayload(program string, fields []string) string {
 		return ""
 	}
 	args := fields[start+1:]
-	for i, arg := range args {
-		// `--` ends option processing: every following token is a positional
-		// operand (a script name or argument), not a shell flag. Treating
-		// `bash -- -ec 'cmd'` as `-c` would recurse into an operand the shell
-		// never runs as a command string.
-		if arg == "--" {
-			break
-		}
-		if shellCommandFlag(arg) {
-			if i+1 < len(args) {
-				return strings.Join(args[i+1:], " ")
-			}
-			return ""
-		}
+	if payloadIndex, found := shellCommandPayloadIndex(program, args); found && payloadIndex < len(args) {
+		return strings.Trim(args[payloadIndex], `"'`)
 	}
 	return ""
 }
@@ -487,8 +1005,20 @@ func normalizeProgramToken(field string) string {
 			token = token[i+1:]
 		}
 	}
-	token = strings.ToLower(token)
-	for _, suffix := range []string{".exe", ".cmd", ".bat", ".com"} {
+	return trimExecutableSuffix(strings.ToLower(token))
+}
+
+// executableSuffixes are the Windows executable extensions stripped from a
+// program token so curl.exe, git.cmd, and curl all normalize to one name. Both
+// the parseable path (normalizeProgramToken) and the unparseable fallback
+// (executableTokenBase) strip the same set; a token that normalizes differently
+// on the two paths is exactly how a command slips past the fallback.
+var executableSuffixes = []string{".exe", ".cmd", ".bat", ".com"}
+
+// trimExecutableSuffix removes one trailing Windows executable extension from an
+// already-lowercased token.
+func trimExecutableSuffix(token string) string {
+	for _, suffix := range executableSuffixes {
 		if strings.HasSuffix(token, suffix) {
 			return strings.TrimSuffix(token, suffix)
 		}
@@ -520,9 +1050,9 @@ func windowsExecutablePathBasename(token string) (string, bool) {
 }
 
 func hasWindowsExecutableSuffix(token string) bool {
-	token = strings.ToLower(token)
-	for _, suffix := range []string{".exe", ".cmd", ".bat", ".com"} {
-		if strings.HasSuffix(token, suffix) {
+	lowered := strings.ToLower(token)
+	for _, suffix := range executableSuffixes {
+		if strings.HasSuffix(lowered, suffix) {
 			return true
 		}
 	}
