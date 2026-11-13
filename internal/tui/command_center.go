@@ -633,8 +633,12 @@ func (m model) switchProviderModel(providerName, modelID string) (model, string,
 	// no window for this provider until /model happens to be opened separately.
 	var cmds []tea.Cmd
 	if hasDescriptor {
-		if cmd := m.modelPickerProviderDiscoveryCmd(descriptor, target); cmd != nil {
-			cmds = append(cmds, cmd)
+		// Register the request so the result passes the supersession guard even
+		// when a /model refresh has advanced the generation since this provider
+		// was last requested.
+		var discoveryCmd tea.Cmd
+		if m, discoveryCmd = m.requestProviderDiscoveryCmd(descriptor, target); discoveryCmd != nil {
+			cmds = append(cmds, discoveryCmd)
 		}
 		if cmd := m.ollamaContextWindowDiscoveryCmd(descriptor, target.BaseURL, target.Model); cmd != nil {
 			cmds = append(cmds, cmd)
