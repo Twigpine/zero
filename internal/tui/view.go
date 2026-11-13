@@ -1116,12 +1116,14 @@ func (m model) renderModelPickerOverlay(width, start, count int) string {
 // start. Rows are capped so several failing accounts cannot push the model
 // rows and footer out of the overlay. Hidden notices mostly belong to other
 // accounts, and /model list reports only the active profile, so the summary
-// row states what was cut without pointing anywhere.
+// row states what was cut without pointing there. Cutting a notice can remove
+// its own retry text, so the summary row names the retry key itself.
 func (m model) modelPickerDiscoveryNoticeLines(innerWidth int) []string {
+	const retryHint = "Ctrl+R"
 	width := maxInt(1, innerWidth-lipgloss.Width("❯ "))
 	var wrapped [][]string
 	total := 0
-	for _, status := range m.modelPickerDiscoveryNotices(m.modelPickerProviders(), "Ctrl+R") {
+	for _, status := range m.modelPickerDiscoveryNotices(m.modelPickerProviders(), retryHint) {
 		rows := strings.Split(ansi.Wrap(status, width, ""), "\n")
 		wrapped = append(wrapped, rows)
 		total += len(rows)
@@ -1141,9 +1143,14 @@ func (m model) modelPickerDiscoveryNoticeLines(innerWidth int) []string {
 		lines = wrapped[0][:modelPickerMaxNoticeLines-1]
 		shown = 1
 	}
-	more := "… notice truncated."
+	retry := retryHint + " to retry."
+	more := "… notice truncated. " + retry
 	if hidden := len(wrapped) - shown; hidden > 0 {
-		more = fmt.Sprintf("+%d more discovery notices not shown.", hidden)
+		more = fmt.Sprintf("+%d more notices hidden. %s", hidden, retry)
+	}
+	if lipgloss.Width(more) > width {
+		// Keep the recovery action when a narrow overlay cannot fit the summary.
+		more = retry
 	}
 	return append(lines, ansi.Truncate(more, width, "…"))
 }

@@ -1187,7 +1187,7 @@ func TestModelPickerCapsDiscoveryNoticesFromManyAccounts(t *testing.T) {
 	if strings.Contains(text, "/model list") {
 		t.Fatalf("picker points hidden notices at /model list:\n%s", text)
 	}
-	for _, want := range []string{"target-row", "Esc close", "more discovery notices not shown."} {
+	for _, want := range []string{"target-row", "Esc close", "more notices hidden. Ctrl+R to retry."} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("picker lacks %q with many failing accounts:\n%s", want, text)
 		}
@@ -1205,7 +1205,9 @@ func TestModelPickerCapsDiscoveryNoticesFromManyAccounts(t *testing.T) {
 
 // A single notice longer than the cap is cut rather than hidden; the summary
 // row says so without pointing at /model list, which would show the active
-// profile's notice only when the cut one belongs to it.
+// profile's notice only when the cut one belongs to it. The cut removes the
+// notice's own retry text, so the summary row has to name Ctrl+R, down to the
+// narrowest picker.
 func TestModelPickerTruncatesLongDiscoveryNotice(t *testing.T) {
 	m := subscriptionTestModel(t)
 	m.width, m.height = 80, 24
@@ -1226,5 +1228,16 @@ func TestModelPickerTruncatesLongDiscoveryNotice(t *testing.T) {
 	}
 	if !strings.Contains(text, "notice truncated") {
 		t.Fatalf("truncated notice lacks the summary row:\n%s", text)
+	}
+	m.picker = &commandPicker{kind: pickerModel, items: []pickerItem{{Group: "Models", Label: "only-row", Value: "only"}}}
+	for _, width := range []int{modelPickerOverlayMinWidth, 80} {
+		m.width = width
+		text := plainRender(t, m.modelPickerOverlay(width))
+		if !strings.Contains(text, "Ctrl+R to retry") {
+			t.Fatalf("truncated notice at width %d hides the retry key:\n%s", width, text)
+		}
+		if !strings.Contains(text, "Esc close") {
+			t.Fatalf("picker footer missing at width %d:\n%s", width, text)
+		}
 	}
 }
