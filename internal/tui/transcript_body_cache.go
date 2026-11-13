@@ -117,20 +117,6 @@ var defaultTranscriptBodyRenders = newTranscriptBodyRenderCache(
 	defaultTranscriptBodyRenderCacheMaxCharacters,
 )
 
-// clear drops every cached render. Like the static render cache, it must run
-// when the active theme changes so stale entries painted in the old palette
-// are never reused.
-func (c *transcriptBodyRenderCache) clear() {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.items = map[string]*list.Element{}
-	c.lru.Init()
-	c.retained = 0
-}
-
 // render returns the display string and a selectable copy shifted to
 // startBodyY. When stable is false or key is empty (live rows whose render
 // embeds per-frame state like the spinner), the cache is bypassed entirely.
@@ -155,7 +141,11 @@ func (c *transcriptBodyRenderCache) render(key string, stable bool, startBodyY i
 	cached := copySelectableLines(selectable)
 	c.mu.Lock()
 	c.misses++
-	chars := len(rendered)
+	// The retained key is charged alongside the rendered value: the map key and
+	// entry.key are held for the entry's lifetime, so the byte budget has to
+	// cover them or a working set of long content-addressed keys silently
+	// overshoots the ceiling. Eviction subtracts this same entry.chars value.
+	chars := len(rendered) + len(key)
 	if c.maxEntries > 0 && c.maxCharacters > 0 && chars <= c.maxCharacters {
 		c.items[key] = c.lru.PushFront(&transcriptBodyRenderedEntry{key: key, rendered: rendered, selectable: cached, chars: chars})
 		c.retained += chars
@@ -191,9 +181,9 @@ func (c *transcriptBodyRenderCache) growLocked() {
 }
 
 // reset drops every cached render and shrinks the ceilings back to their
-// defaults. Like clear(), it must run when the active theme changes so stale
-// entries painted in the old palette are never reused; unlike clear() it also
-// releases the growth a previous working set earned, since that set is gone.
+// defaults. It must run when the active theme changes so stale entries
+// painted in the old palette are never reused; it also releases the growth
+// a previous working set earned, since that set is gone.
 func (c *transcriptBodyRenderCache) reset() {
 	if c == nil {
 		return

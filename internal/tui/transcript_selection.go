@@ -175,6 +175,35 @@ func shiftSelectableX(lines []transcriptSelectableLine, gutter int) []transcript
 // shifts its selectable spans to match, and THEN paints the selection highlight —
 // so the highlight is computed in the same shifted coordinate the mouse maps to
 // and lands exactly where the user selected (instead of gutter cells off).
+// transcriptRowIdentity carries the per-item identity fields that a cached
+// selectable line must not answer from another row's render. The render cache
+// is content-addressed, so two rows with byte-identical content (e.g. two
+// collapsed "Thought" headers with empty ids) share one entry; the stored
+// selectable lines baked in the FIRST row's transcript index, and a click on
+// the second header toggled the wrong row. The cache hit rebinds these fields
+// to the requesting row. An empty/absent field is left untouched, and
+// rowIndex < 0 disables the rebind for items whose lines span several rows.
+type transcriptRowIdentity struct {
+	rowIndex     int
+	specialistID string
+}
+
+// rebindSelectableIdentity restamps the requesting row's identity onto every
+// selectable line. The slice is caller-owned on both cache paths (hits get a
+// fresh copy, misses get the builder's slice), so in-place mutation is safe,
+// and the values are already correct on the miss path — this self-heals both.
+func rebindSelectableIdentity(lines []transcriptSelectableLine, identity transcriptRowIdentity) []transcriptSelectableLine {
+	for index := range lines {
+		if identity.rowIndex >= 0 {
+			lines[index].rowIndex = identity.rowIndex
+		}
+		if identity.specialistID != "" {
+			lines[index].specialistID = identity.specialistID
+		}
+	}
+	return lines
+}
+
 // cachedTranscriptBodyRender memoises a body item's display string and
 // selectable geometry (rendered at bodyY origin 0) in the shared
 // transcriptBodyRenderCache. A settled row on a throbber tick previously paid
@@ -182,9 +211,9 @@ func shiftSelectableX(lines []transcriptSelectableLine, gutter int) []transcript
 // re-derivation; on a hit it pays a string copy and a selectable shift.
 // Selection highlight and hover are painted fresh on every frame from the
 // cached pre-highlight lines, so interaction state never leaks into the key.
-func (m model) cachedTranscriptBodyRender(key string, stable bool, startBodyY int, build func() (string, []transcriptSelectableLine), gutter int) transcriptBodyRenderedItem {
+func (m model) cachedTranscriptBodyRender(key string, stable bool, startBodyY int, build func() (string, []transcriptSelectableLine), gutter int, identity transcriptRowIdentity) transcriptBodyRenderedItem {
 	rendered, selectable := defaultTranscriptBodyRenders.render(key, stable, startBodyY, build)
-	return m.finalizeTranscriptBodyRow(rendered, selectable, gutter, startBodyY)
+	return m.finalizeTranscriptBodyRow(rendered, rebindSelectableIdentity(selectable, identity), gutter, startBodyY)
 }
 
 func (m model) finalizeTranscriptBodyRow(rendered string, selectable []transcriptSelectableLine, gutter int, startBodyY int) transcriptBodyRenderedItem {
@@ -332,13 +361,20 @@ func (m model) buildTranscriptBodyItems(width int, emptyOverlay string, detailed
 					groupRowsCopy := append([]transcriptRow(nil), groupRows...)
 					groupIndicesCopy := append([]int(nil), groupIndices...)
 					block := m.renderExploreResultGroup(groupRowsCopy, contentWidth, rc)
+					renderCacheKey := exploreGroupRenderCacheKey(block, groupIndicesCopy)
 					items = append(items, transcriptBodyItem{
 						kind:              transcriptBodyItemRow,
 						rowIndex:          firstRowIndex,
 						heightCacheKey:    transcriptBlockBodyHeightCacheKey(transcriptBodyItemRow, block),
 						heightCacheStable: true,
 						render: func(startBodyY int) transcriptBodyRenderedItem {
-							return m.cachedTranscriptBodyRender(transcriptBlockBodyHeightCacheKey(transcriptBodyItemRow, block), true, startBodyY, func() (string, []transcriptSelectableLine) {
+							// The height key stays content-only (a byte-identical
+							// block is always the same height), but the render key
+							// embeds the group's row indices: each cached line
+							// carries a DIFFERENT group member's rowIndex, so a
+							// rebind can't fix a hit and two identical groups must
+							// not share one entry.
+							return m.cachedTranscriptBodyRender(renderCacheKey, true, startBodyY, func() (string, []transcriptSelectableLine) {
 								rendered := m.renderExploreResultGroup(groupRowsCopy, contentWidth, rc)
 								selectable := make([]transcriptSelectableLine, 0, len(groupIndicesCopy)+1)
 								for offset, line := range viewLines(rendered) {
@@ -351,7 +387,7 @@ func (m model) buildTranscriptBodyItems(width int, emptyOverlay string, detailed
 									}
 								}
 								return rendered, selectable
-							}, gutter)
+							}, gutter, transcriptRowIdentity{rowIndex: -1})
 						},
 					})
 					shownAny = true
@@ -426,9 +462,17 @@ func (m model) buildTranscriptBodyItems(width int, emptyOverlay string, detailed
 				heightCacheKey:    heightCacheKey,
 				heightCacheStable: heightCacheStable,
 				render: func(startBodyY int) transcriptBodyRenderedItem {
+					// The render cache stays content-addressed, so byte-identical
+					// rows share an entry; identity rebinds the per-row metadata
+					// baked into the cached selectable lines (rowIndex,
+					// specialistID) to THIS row on every frame.
+					identity := transcriptRowIdentity{rowIndex: rowIndex}
+					if transcriptRow.specialistInfo != nil {
+						identity.specialistID = transcriptRow.specialistInfo.childSessionID
+					}
 					return m.cachedTranscriptBodyRender(heightCacheKey, heightCacheStable, startBodyY, func() (string, []transcriptSelectableLine) {
 						return renderRowFn(rowIndex, transcriptRow, contentWidth, rc, 0)
-					}, gutter)
+					}, gutter, identity)
 				},
 			})
 			shownAny = true
@@ -708,6 +752,21 @@ func transcriptBlockBodyHeightCacheKey(kind transcriptBodyItemKind, block string
 	appendRenderCacheField(&b, "transcript-body-block-height-v1")
 	appendRenderCacheField(&b, strconv.Itoa(int(kind)))
 	appendRenderCacheField(&b, block)
+	return b.String()
+}
+
+// exploreGroupRenderCacheKey specialises the shared block key for a grouped
+// explore card with the transcript indices of the rows it aggregates. The
+// block's rendered lines bake each member row's index into its selectable
+// metadata, so two byte-identical groups at different positions must not
+// share one render-cache entry.
+func exploreGroupRenderCacheKey(block string, groupIndices []int) string {
+	var b strings.Builder
+	b.WriteString(transcriptBlockBodyHeightCacheKey(transcriptBodyItemRow, block))
+	for _, index := range groupIndices {
+		b.WriteByte(':')
+		b.WriteString(strconv.Itoa(index))
+	}
 	return b.String()
 }
 
