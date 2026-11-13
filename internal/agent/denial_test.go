@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/sandbox"
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 func TestExecuteToolCallCategorizesFilteredDenial(t *testing.T) {

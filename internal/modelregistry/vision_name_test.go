@@ -10,10 +10,15 @@ func TestVisionCapableByName(t *testing.T) {
 		"claude-sonnet-4.5", "claude-3-haiku",
 		"MiniMax-M3",
 		"llava:13b", "qwen2.5-vl-7b", "llama3.2-vision", "pixtral-12b", "moondream",
+		"google/gemma-3-27b-it", "gemma3:27b", "gemma3:4b", "gemma-3-12b-it",
+		"llama-4-scout", "llama4:17b", "mistral-small-3.1", "mistral-small3.1:24b",
+		"phi-4-multimodal", "phi4-multimodal-instruct",
 	}
 	textOnly := []string{
 		"gpt-oss:120b", "kimi-for-coding", "deepseek-coder", "qwen2.5-coder",
 		"codestral", "llama3.1-8b", "grok-text-only", "mistral-large",
+		"gemma3:1b", "gemma-3-1b-it", "gemma3:270m", "gemma-3-270m-it",
+		"gemma2:27b", "mistral-small3:24b", "phi4:14b",
 		// Negated "vision" names must NOT match the bare-"vision" fallback.
 		"my-custom-vision-less-model", "no-vision-model", "grok-vision-less",
 	}

@@ -11,10 +11,10 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/oauth"
-	"github.com/Gitlawb/zero/internal/providers/providerio"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/oauth"
+	"github.com/Twigpine/zero/internal/providers/providerio"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 func TestNewCreatesOpenAIProviderWithFactoryOptions(t *testing.T) {
@@ -160,7 +160,7 @@ func TestNewPassesOpenGatewayHY3ModelThrough(t *testing.T) {
 	for range stream {
 	}
 
-	if transport.request.URL.String() != "https://opengateway.gitlawb.com/v1/chat/completions" {
+	if transport.request.URL.String() != "https://api.twigpine.com/v1/chat/completions" {
 		t.Fatalf("request URL = %q, want OpenGateway chat completions", transport.request.URL.String())
 	}
 	var body map[string]any

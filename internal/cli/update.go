@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/update"
+	"github.com/Twigpine/zero/internal/update"
 )
 
 type updateOptions struct {
@@ -207,6 +207,13 @@ Flags:
       --timeout <duration>    Release check timeout (default 5s)
       --target <platform>     Release target to verify with --check (for example windows-x64); not valid with --apply
   -h, --help                  Show this help
+
+Environment:
+  ZERO_GITHUB_TOKEN     Token for update checks (takes precedence over GITHUB_TOKEN)
+                        Only sent to HTTPS URLs on api.github.com, including endpoint overrides;
+                        never sent to other hosts or plain HTTP
+  GITHUB_TOKEN          Fallback token when ZERO_GITHUB_TOKEN is empty after trimming
+  ZERO_UPDATE_RELEASE_URL  Override the release API URL (same as --endpoint)
 `)
 	return err
 }

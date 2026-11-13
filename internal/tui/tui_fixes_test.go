@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/agent"
 )
 
 // FIX 3 (safety): "!cmd" runs only in unsafe permission mode; auto/ask gate it.

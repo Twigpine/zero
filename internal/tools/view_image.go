@@ -3,8 +3,8 @@ package tools
 import (
 	"context"
 
-	"github.com/Gitlawb/zero/internal/imageinput"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/imageinput"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 // ViewImageToolName is the canonical registry name of the image viewer.

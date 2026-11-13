@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/testutil"
-	"github.com/Gitlawb/zero/internal/tools"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/testutil"
+	"github.com/Twigpine/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 func TestAsyncDiagnosticsNilCollectorNoOps(t *testing.T) {

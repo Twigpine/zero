@@ -7,7 +7,7 @@ downloads, verifies, and installs it.
 ```bash
 zero update --check
 zero update --check --json
-zero update --check --repo Gitlawb/zero
+zero update --check --repo Twigpine/zero
 zero update --check --target windows-x64
 
 zero upgrade
@@ -28,7 +28,11 @@ them explicitly; `zero upgrade` is `zero update` with `--apply` implied.
 
 `--apply` installs the update in place:
 
-- npm installs delegate to `npm install -g @gitlawb/zero@latest`.
+- npm installs delegate to `npm install -g @twigpine/zero@latest`. An install
+  of the old `@gitlawb/zero` package refuses, without a release check, and
+  prints the steps to switch to `@twigpine/zero` (see
+  [INSTALL.md](INSTALL.md#moving-from-gitlawbzero)); `--check` prints them
+  too.
 - Standalone installs download the release archive, verify its checksum,
   extract it, and atomically replace the running binary plus any installed
   optional sandbox helpers.
@@ -38,7 +42,7 @@ them explicitly; `zero upgrade` is `zero update` with `--apply` implied.
 - `--target` cannot be combined with `--apply`; it only applies to `--check`,
   since applying always installs onto the current machine.
 - `--repo` and `--endpoint` are ignored when applying to an npm-managed
-  install: that path delegates to `npm install -g @gitlawb/zero@latest` and
+  install: that path delegates to `npm install -g @twigpine/zero@latest` and
   takes its release from the npm registry, not from GitHub. They still apply to
   `--check` there.
 - `--json` serializes Zero's final result. For npm-managed installs, npm may
@@ -65,11 +69,36 @@ Endpoint resolution order:
 1. `--endpoint`
 2. `ZERO_UPDATE_RELEASE_URL`
 3. `--repo`
-4. `https://api.github.com/repos/Gitlawb/zero/releases/latest`
+4. `https://api.github.com/repos/Twigpine/zero/releases/latest`
 
 Installer scripts download the matching release asset for the local platform and
 verify its `.sha256` file. If Zero is already installed, run `zero upgrade`
 instead of reinstalling.
+
+## Authentication
+
+Unauthenticated GitHub API requests are subject to strict
+[rate limits](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api).
+If you see `403 Forbidden` during update checks, set a GitHub personal access token:
+
+| Environment variable | Role |
+|---|---|
+| `ZERO_GITHUB_TOKEN` | Used for update checks (takes precedence) |
+| `GITHUB_TOKEN` | Fallback when `ZERO_GITHUB_TOKEN` is empty after trimming |
+
+Surrounding whitespace is removed from both token values before use.
+
+Note: `GITHUB_TOKEN` is also used by the GitHub Models provider
+(the `github` descriptor in `internal/providercatalog/catalog.go`); both
+recipients are GitHub so no trust boundary is crossed, but a token set for
+the provider will also be sent on update checks.
+
+Tokens are only sent to HTTPS URLs with the hostname `api.github.com`, including
+URLs selected through `--endpoint` or `ZERO_UPDATE_RELEASE_URL`. Other hosts
+and plain HTTP URLs never receive credentials. Redirects that downgrade to
+`http` after a token-eligible GitHub API request are refused, so the bearer
+token is never sent in cleartext (Go's standard library would otherwise copy
+`Authorization` on same-host redirects based on host alone).
 
 ## Windows recovery state (standalone installs)
 

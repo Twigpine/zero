@@ -6,7 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/agent"
 )
 
 // testAskUserRequest is a two-question request used by model_test.go too.
@@ -23,7 +23,7 @@ func testAskUserRequest() agent.AskUserRequest {
 
 func newAskUserModel(t *testing.T, request agent.AskUserRequest, answers *[][]string) model {
 	t.Helper()
-	m := newModel(context.Background(), Options{})
+	m := newViewTestModel(t, Options{})
 	m.pending = true
 	m.activeRunID = 7
 	m.width = 96

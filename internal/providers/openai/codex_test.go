@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 // codexRequest captures the headers + body of one outgoing Codex request so a
@@ -900,6 +900,145 @@ func TestCodexProviderParsesResponsesToolCalls(t *testing.T) {
 	}
 	if ends != 1 || endName != "get_weather" {
 		t.Fatalf("tool-call-end count=%d name=%q, want 1 get_weather", ends, endName)
+	}
+}
+
+// The runtime only sees tool input through tool-call deltas. The Codex
+// backend may deliver that input incrementally, whole on the done item, or
+// (for custom tool calls) whole on the added item; whichever way it arrives,
+// the deltas before tool-call-end must carry it exactly once, and the replayed
+// history item must hold the same input.
+func TestCodexOutputItemDoneForwardsUnstreamedArguments(t *testing.T) {
+	t.Parallel()
+	const (
+		functionArguments = `{"path":"README.md"}`
+		customInput       = "*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch\n"
+	)
+	cases := []struct {
+		name       string
+		freeform   bool
+		added      bool // response.output_item.added precedes the input
+		addedInput bool // the added item already carries the whole input
+		streamed   bool // input arrives through *_delta events
+	}{
+		{name: "function/added/streamed", added: true, streamed: true},
+		{name: "function/added/final-only", added: true},
+		{name: "function/no-added/streamed", streamed: true},
+		{name: "function/no-added/final-only"},
+		{name: "custom/added/streamed", freeform: true, added: true, streamed: true},
+		{name: "custom/added/final-only", freeform: true, added: true},
+		{name: "custom/no-added/streamed", freeform: true, streamed: true},
+		{name: "custom/no-added/final-only", freeform: true},
+		{name: "custom/input-on-added", freeform: true, added: true, addedInput: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			state := newResponsesState()
+			events := make(chan zeroruntime.StreamEvent, 10)
+			provider := &CodexProvider{}
+			item := &itemPayload{Type: "function_call", ID: "item-1", CallID: "call-1", Name: "read_file", Arguments: functionArguments}
+			want := functionArguments
+			if tc.freeform {
+				item.Type = "custom_tool_call"
+				item.Name = "apply_patch"
+				item.Arguments = ""
+				item.Input = customInput
+				want = customInput
+			}
+			ctx := context.Background()
+			if tc.added {
+				initial := *item
+				if !tc.addedInput {
+					initial.Arguments = ""
+					initial.Input = ""
+				}
+				provider.handleOutputItemAdded(ctx, &responsesEvent{Item: &initial}, state, events)
+			}
+			if tc.streamed {
+				provider.handleToolInputDelta(ctx, &responsesEvent{ItemID: item.ID, Delta: want}, state, events, tc.freeform)
+			}
+			provider.handleOutputItemDone(ctx, &responsesEvent{Item: item}, state, events)
+			close(events)
+			var arguments strings.Builder
+			var starts, ends int
+			for event := range events {
+				switch event.Type {
+				case zeroruntime.StreamEventToolCallStart:
+					starts++
+				case zeroruntime.StreamEventToolCallDelta:
+					arguments.WriteString(event.ArgumentsFragment)
+				case zeroruntime.StreamEventToolCallEnd:
+					ends++
+					if arguments.String() != want {
+						t.Errorf("arguments at tool-call-end = %q, want %q", arguments.String(), want)
+					}
+				}
+				if event.ToolCallID != item.ID {
+					t.Errorf("tool call ID = %q, want %q", event.ToolCallID, item.ID)
+				}
+			}
+			if starts != 1 || ends != 1 {
+				t.Errorf("starts=%d ends=%d, want 1 each", starts, ends)
+			}
+			got := state.outputInputItems()
+			if len(got) != 1 {
+				t.Fatalf("output items = %v, want one tool call", got)
+			}
+			replayed := got[0].Arguments
+			if tc.freeform {
+				replayed = got[0].Input
+			}
+			if replayed != want {
+				t.Errorf("replayed history input = %q, want %q", replayed, want)
+			}
+		})
+	}
+}
+
+// The same cases through the runtime's collector, which is what the agent
+// loop consumes: a function call whose arguments exist only on the done item
+// and a custom tool call whose input exists only on the added item both reach
+// the runtime with their input intact.
+func TestCodexStreamCollectsToolInputDeliveredWhole(t *testing.T) {
+	t.Parallel()
+	var rec codexRequest
+	srv := newCodexResponsesServer(t, &rec,
+		`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc-1","call_id":"call-1","name":"read_file"}}`,
+		`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc-1","call_id":"call-1","name":"read_file","arguments":"{\"path\":\"README.md\"}"}}`,
+		`{"type":"response.output_item.added","output_index":1,"item":{"type":"custom_tool_call","id":"ct-1","call_id":"call-2","name":"apply_patch","input":"*** Begin Patch\n*** End Patch\n"}}`,
+		`{"type":"response.output_item.done","output_index":1,"item":{"type":"custom_tool_call","id":"ct-1","call_id":"call-2","name":"apply_patch","input":"*** Begin Patch\n*** End Patch\n"}}`,
+		`{"type":"response.completed","response":{"id":"resp-1","status":"completed","usage":{"input_tokens":3,"output_tokens":2}}}`,
+	)
+	defer srv.Close()
+	provider, err := NewCodexProvider(CodexOptions{
+		Options:   Options{APIKey: "sk-test", BaseURL: srv.URL, Model: "gpt-5"},
+		AccountID: "acc-x",
+	})
+	if err != nil {
+		t.Fatalf("NewCodexProvider: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "read the readme"}},
+		Tools: []zeroruntime.ToolDefinition{
+			{Name: "read_file", Parameters: map[string]any{"type": "object"}},
+			{Name: "apply_patch", Type: zeroruntime.ToolDefinitionFreeform},
+		},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion: %v", err)
+	}
+	collected := zeroruntime.CollectStream(context.Background(), stream)
+	if collected.Error != "" {
+		t.Fatalf("unexpected stream error: %q", collected.Error)
+	}
+	if len(collected.ToolCalls) != 2 {
+		t.Fatalf("tool calls = %+v, want read_file and apply_patch", collected.ToolCalls)
+	}
+	if call := collected.ToolCalls[0]; call.Name != "read_file" || call.Arguments != `{"path":"README.md"}` || call.Freeform {
+		t.Errorf("function call = %+v, want read_file with the done item's arguments", call)
+	}
+	if call := collected.ToolCalls[1]; call.Name != "apply_patch" || call.Arguments != "*** Begin Patch\n*** End Patch\n" || !call.Freeform {
+		t.Errorf("custom call = %+v, want apply_patch with the added item's input", call)
 	}
 }
 

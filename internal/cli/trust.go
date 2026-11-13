@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/Gitlawb/zero/internal/redaction"
-	"github.com/Gitlawb/zero/internal/workspacetrust"
+	"github.com/Twigpine/zero/internal/redaction"
+	"github.com/Twigpine/zero/internal/workspacetrust"
 )
 
 // runTrust implements `zero trust`, letting the user opt a workspace into running

@@ -187,7 +187,7 @@ func TestCheckRejectsInvalidLatestVersion(t *testing.T) {
 func TestCheckFallsBackReleaseURL(t *testing.T) {
 	result, err := Check(context.Background(), Options{
 		CurrentVersion: "0.1.0",
-		Repository:     "Gitlawb/zero",
+		Repository:     "Twigpine/zero",
 		GOOS:           "linux",
 		GOARCH:         "amd64",
 		Fetch: func(context.Context, string) (Release, error) {
@@ -200,7 +200,7 @@ func TestCheckFallsBackReleaseURL(t *testing.T) {
 		t.Fatalf("Check returned error: %v", err)
 	}
 
-	wantURL := "https://github.com/Gitlawb/zero/releases/tag/v0.2.0"
+	wantURL := "https://github.com/Twigpine/zero/releases/tag/v0.2.0"
 	if result.ReleaseURL != wantURL {
 		t.Fatalf("ReleaseURL = %q, want %q", result.ReleaseURL, wantURL)
 	}
@@ -426,7 +426,7 @@ func TestFormatResult(t *testing.T) {
 	output := Format(Result{
 		CurrentVersion:  "0.1.0",
 		LatestVersion:   "0.2.0",
-		ReleaseURL:      "https://github.com/Gitlawb/zero/releases/tag/v0.2.0",
+		ReleaseURL:      "https://github.com/Twigpine/zero/releases/tag/v0.2.0",
 		TagName:         "v0.2.0",
 		ReleaseAsset:    assetCheckForTest(t, "v0.2.0", "linux", "amd64"),
 		UpdateAvailable: true,
@@ -451,7 +451,7 @@ func TestFormatResult(t *testing.T) {
 	local := Format(Result{
 		CurrentVersion:  "0.1.0",
 		LatestVersion:   "0.2.0",
-		ReleaseURL:      "https://github.com/Gitlawb/zero/releases/tag/v0.2.0",
+		ReleaseURL:      "https://github.com/Twigpine/zero/releases/tag/v0.2.0",
 		TagName:         "v0.2.0",
 		ReleaseAsset:    assetCheckForTest(t, "v0.2.0", runtime.GOOS, runtime.GOARCH),
 		UpdateAvailable: true,
@@ -463,7 +463,7 @@ func TestFormatResult(t *testing.T) {
 	output = Format(Result{
 		CurrentVersion:  "0.2.0",
 		LatestVersion:   "0.2.0",
-		ReleaseURL:      "https://github.com/Gitlawb/zero/releases/tag/v0.2.0",
+		ReleaseURL:      "https://github.com/Twigpine/zero/releases/tag/v0.2.0",
 		TagName:         "v0.2.0",
 		ReleaseAsset:    assetCheckForTest(t, "v0.2.0", "linux", "amd64"),
 		UpdateAvailable: false,
@@ -587,8 +587,32 @@ func TestFormatNpmCustomSourceExplainsInstallSource(t *testing.T) {
 		SourceFlag: "--repo someone/fork", installMethod: InstallMethodNpm,
 	}
 	output := Format(result)
-	if strings.Contains(output, "zero upgrade --repo") || !strings.Contains(output, "npm install -g @gitlawb/zero@latest") || !strings.Contains(output, "only affects the release check and update gating") {
+	if strings.Contains(output, "zero upgrade --repo") || !strings.Contains(output, "npm install -g @twigpine/zero@latest") || !strings.Contains(output, "only affects the release check and update gating") {
 		t.Fatalf("npm custom-source guidance is misleading: %q", output)
+	}
+}
+
+// A legacy install is told to switch whether or not an update is out: up to
+// date today, the next release will not reach it, and `zero upgrade` refuses.
+func TestFormatTellsALegacyNpmInstallToSwitch(t *testing.T) {
+	asset := assetCheckForTest(t, "v0.11.0", runtime.GOOS, runtime.GOARCH)
+	for name, result := range map[string]Result{
+		"up to date": {
+			CurrentVersion: "0.10.0", LatestVersion: "0.10.0", ReleaseURL: "https://example.test/release",
+			ReleaseAsset: asset, installMethod: InstallMethodNpmLegacy,
+		},
+		"update available": {
+			CurrentVersion: "0.10.0", LatestVersion: "0.11.0", ReleaseURL: "https://example.test/release",
+			ReleaseAsset: asset, UpdateAvailable: true, installMethod: InstallMethodNpmLegacy,
+		},
+	} {
+		output := Format(result)
+		if !strings.Contains(output, "npm uninstall -g @gitlawb/zero") || !strings.Contains(output, "npm install -g @twigpine/zero") {
+			t.Errorf("%s: output does not give the switch steps: %q", name, output)
+		}
+		if strings.Contains(output, "Run `zero upgrade`") {
+			t.Errorf("%s: output recommends `zero upgrade`, which refuses a legacy install: %q", name, output)
+		}
 	}
 }
 
@@ -622,7 +646,7 @@ func TestFormatCrossTargetCheckDoesNotRecommendLocalUpgrade(t *testing.T) {
 	output := Format(Result{
 		CurrentVersion:  "0.1.0",
 		LatestVersion:   "0.2.0",
-		ReleaseURL:      "https://github.com/Gitlawb/zero/releases/tag/v0.2.0",
+		ReleaseURL:      "https://github.com/Twigpine/zero/releases/tag/v0.2.0",
 		TagName:         "v0.2.0",
 		ReleaseAsset:    other,
 		UpdateAvailable: true,
@@ -661,7 +685,7 @@ func releaseForTarget(t *testing.T, tag string, goos string, goarch string) Rele
 	check := assetCheckForTest(t, tag, goos, goarch)
 	return Release{
 		TagName: tag,
-		HTMLURL: "https://github.com/Gitlawb/zero/releases/tag/" + tag,
+		HTMLURL: "https://github.com/Twigpine/zero/releases/tag/" + tag,
 		Assets: []Asset{
 			{Name: check.ArchiveName, BrowserDownloadURL: "https://example.test/" + check.ArchiveName},
 			{Name: check.ChecksumName, BrowserDownloadURL: "https://example.test/" + check.ChecksumName},

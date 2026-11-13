@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/trace"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/trace"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 // prewarmTimeout bounds the best-effort prewarm probe. The probe runs in the

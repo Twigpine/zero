@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/lsp"
-	"github.com/Gitlawb/zero/internal/redaction"
-	"github.com/Gitlawb/zero/internal/trace"
-	"github.com/Gitlawb/zero/internal/verify"
+	"github.com/Twigpine/zero/internal/lsp"
+	"github.com/Twigpine/zero/internal/redaction"
+	"github.com/Twigpine/zero/internal/trace"
+	"github.com/Twigpine/zero/internal/verify"
 )
 
 // defaultSelfCorrectMaxAttempts bounds how many corrective rounds a single run

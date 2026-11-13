@@ -24,9 +24,9 @@ const (
 // by the generic missing-binary path and the doctor text fallback.
 const (
 	bunRecoveryLead        = "You installed with Bun, which does not run dependency lifecycle scripts"
-	bunPmTrustProject      = "bun pm trust @gitlawb/zero"
-	bunPmTrustGlobal       = "bun pm -g trust @gitlawb/zero"
-	bunRecoveryTrustedDeps = `"trustedDependencies": ["@gitlawb/zero"]`
+	bunPmTrustProject      = "bun pm trust @twigpine/zero"
+	bunPmTrustGlobal       = "bun pm -g trust @twigpine/zero"
+	bunRecoveryTrustedDeps = `"trustedDependencies": ["@twigpine/zero"]`
 	buildFromSourceLead    = "If this platform has no prebuilt binary, build from source:"
 )
 
@@ -80,8 +80,8 @@ func TestPackageBinPointsToNodeWrapper(t *testing.T) {
 	if err := json.Unmarshal(bytes, &pkg); err != nil {
 		t.Fatalf("Unmarshal package.json: %v", err)
 	}
-	if pkg.Name != "@gitlawb/zero" {
-		t.Fatalf("name = %q, want @gitlawb/zero", pkg.Name)
+	if pkg.Name != "@twigpine/zero" {
+		t.Fatalf("name = %q, want @twigpine/zero", pkg.Name)
 	}
 	if pkg.Bin["zero"] != "bin/zero.js" {
 		t.Fatalf("bin.zero = %q, want bin/zero.js", pkg.Bin["zero"])
@@ -158,7 +158,7 @@ func TestPostinstallComputesAssetPlan(t *testing.T) {
 		if plan.BinaryName != tc.wantBinary {
 			t.Fatalf("%s/%s: binaryName=%q want %q", tc.platform, tc.arch, plan.BinaryName, tc.wantBinary)
 		}
-		wantURL := "https://github.com/Gitlawb/zero/releases/download/v" + version + "/" + tc.wantAsset
+		wantURL := "https://github.com/Twigpine/zero/releases/download/v" + version + "/" + tc.wantAsset
 		if plan.AssetURL != wantURL {
 			t.Fatalf("%s/%s: assetUrl=%q want %q", tc.platform, tc.arch, plan.AssetURL, wantURL)
 		}
@@ -321,11 +321,11 @@ func TestNodeWrapperPrefersPlatformPackageBinary(t *testing.T) {
 		t.Fatalf("WriteFile downloaded fixture: %v", err)
 	}
 
-	platformDir := filepath.Join(root, "node_modules", "@gitlawb", "zero-"+nodePlatformName()+"-"+nodeArchName())
+	platformDir := filepath.Join(root, "node_modules", "@twigpine", "zero-"+nodePlatformName()+"-"+nodeArchName())
 	if err := os.MkdirAll(platformDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll platform package: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(platformDir, "package.json"), []byte(`{"name":"@gitlawb/zero"}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(platformDir, "package.json"), []byte(`{"name":"@twigpine/zero"}`), 0o644); err != nil {
 		t.Fatalf("WriteFile platform package.json: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(platformDir, "zero"), []byte("#!/usr/bin/env sh\nprintf 'platform-zero'; for arg in \"$@\"; do printf ' %s' \"$arg\"; done; printf '\\n'\n"), 0o755); err != nil {
@@ -345,6 +345,98 @@ func TestNodeWrapperPrefersPlatformPackageBinary(t *testing.T) {
 	if got := strings.TrimSpace(string(output)); got != "platform-zero --version" {
 		t.Fatalf("wrapper output = %q, want platform-zero --version", got)
 	}
+}
+
+// bin/zero.js derives the platform payload alias from its own package.json
+// name rather than a hardcoded one, so a wrapper assembled under any name
+// finds the payload published under that same name
+// (build-platform-packages.mjs names both from one value).
+func TestNodeWrapperResolvesPlatformPackageUnderItsOwnName(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock executable fixture uses a POSIX shell script")
+	}
+	wrapperPath := copyWrapperFixture(t)
+	root := filepath.Dir(filepath.Dir(wrapperPath))
+	writeFixtureFile(t, filepath.Join(root, "package.json"), `{"type":"module","name":"@example/zero"}`, 0o644)
+	// A payload under the default name sits beside it and must lose.
+	writePlatformPackageFixture(t, root, "@twigpine/zero", "default-name-zero")
+	writePlatformPackageFixture(t, root, "@example/zero", "own-name-zero")
+
+	stdout, stderr, exitCode := runWrapperFixture(t, wrapperPath, "--version")
+	if exitCode != wrapperExitSuccess {
+		t.Fatalf("wrapper exit = %d; stdout=%s stderr=%s", exitCode, stdout, stderr)
+	}
+	if got := strings.TrimSpace(stdout); got != "own-name-zero --version" {
+		t.Fatalf("wrapper output = %q, want the payload aliased under its own name (own-name-zero --version)", got)
+	}
+}
+
+// The bridge release published under the old name runs normally and, once
+// zero exits, says where the package went and how to switch, in the one order
+// npm accepts.
+func TestNodeWrapperLegacyBuildTellsUsersToSwitchAfterExit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock executable fixture uses a POSIX shell script")
+	}
+	wrapperPath := copyWrapperFixture(t)
+	root := filepath.Dir(filepath.Dir(wrapperPath))
+	writeFixtureFile(t, filepath.Join(root, "package.json"), `{"type":"module","name":"@gitlawb/zero"}`, 0o644)
+	writePlatformPackageFixture(t, root, "@gitlawb/zero", "legacy-zero")
+
+	stdout, stderr, exitCode := runWrapperFixtureWithEnv(t, wrapperPath, []string{"ZERO_WRAPPER_SIMULATE_TTY=1"}, "--version")
+	if exitCode != wrapperExitSuccess {
+		t.Fatalf("wrapper exit = %d; stdout=%s stderr=%s", exitCode, stdout, stderr)
+	}
+	if got := strings.TrimSpace(stdout); got != "legacy-zero --version" {
+		t.Fatalf("stdout = %q, want the legacy build to run normally with the notice kept off stdout", got)
+	}
+	uninstall := strings.Index(stderr, "npm uninstall -g @gitlawb/zero")
+	install := strings.Index(stderr, "npm install -g @twigpine/zero")
+	if uninstall < 0 || install < 0 || uninstall > install {
+		t.Fatalf("stderr does not give the switch steps, uninstall first: %q", stderr)
+	}
+}
+
+func TestNodeWrapperLegacyNoticeStaysOutOfTheWay(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock executable fixture uses a POSIX shell script")
+	}
+	for _, tc := range []struct {
+		name, packageName string
+		env               []string
+		args              []string
+	}{
+		// Scripts capturing stderr must not see a new line in it.
+		{name: "not a terminal", packageName: "@gitlawb/zero", args: []string{"--version"}},
+		// The Go side prints the same note for these; once is enough.
+		{name: "zero upgrade", packageName: "@gitlawb/zero", env: []string{"ZERO_WRAPPER_SIMULATE_TTY=1"}, args: []string{"upgrade"}},
+		{name: "zero update", packageName: "@gitlawb/zero", env: []string{"ZERO_WRAPPER_SIMULATE_TTY=1"}, args: []string{"update", "--check"}},
+		{name: "current package", packageName: "@twigpine/zero", env: []string{"ZERO_WRAPPER_SIMULATE_TTY=1"}, args: []string{"--version"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wrapperPath := copyWrapperFixture(t)
+			root := filepath.Dir(filepath.Dir(wrapperPath))
+			writeFixtureFile(t, filepath.Join(root, "package.json"), `{"type":"module","name":"`+tc.packageName+`"}`, 0o644)
+			writePlatformPackageFixture(t, root, tc.packageName, "zero")
+			stdout, stderr, exitCode := runWrapperFixtureWithEnv(t, wrapperPath, tc.env, tc.args...)
+			if exitCode != wrapperExitSuccess {
+				t.Fatalf("wrapper exit = %d; stdout=%s stderr=%s", exitCode, stdout, stderr)
+			}
+			if strings.TrimSpace(stderr) != "" {
+				t.Fatalf("stderr = %q, want nothing", stderr)
+			}
+		})
+	}
+}
+
+// writePlatformPackageFixture installs a fake platform payload where npm puts
+// the wrapper's optionalDependency alias <packageName>-<platform>-<arch>; its
+// zero binary prints label followed by its arguments.
+func writePlatformPackageFixture(t *testing.T, root string, packageName string, label string) {
+	t.Helper()
+	dir := filepath.Join(root, "node_modules", filepath.FromSlash(packageName+"-"+nodePlatformName()+"-"+nodeArchName()))
+	writeFixtureFile(t, filepath.Join(dir, "package.json"), `{"name":"`+packageName+`"}`, 0o644)
+	writeFixtureFile(t, filepath.Join(dir, "zero"), "#!/usr/bin/env sh\nprintf '"+label+"'; for arg in \"$@\"; do printf ' %s' \"$arg\"; done; printf '\\n'\n", 0o755)
 }
 
 func TestNodeWrapperFallsBackToDownloadedBinary(t *testing.T) {
@@ -393,7 +485,7 @@ func TestNodeWrapperRunsFirstRunDownloaderWhenBinaryMissing(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(scriptsDir, "postinstall.mjs"), postinstall, 0o644); err != nil {
 		t.Fatalf("WriteFile postinstall fixture: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "package.json"), []byte(`{"type":"module","name":"@gitlawb/zero","version":"0.0.0"}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "package.json"), []byte(`{"type":"module","name":"@twigpine/zero","version":"0.0.0"}`), 0o644); err != nil {
 		t.Fatalf("WriteFile package fixture: %v", err)
 	}
 

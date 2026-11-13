@@ -10,8 +10,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/Gitlawb/zero/internal/redaction"
-	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/redaction"
+	"github.com/Twigpine/zero/internal/sessions"
 )
 
 const (
@@ -246,6 +246,15 @@ func RedactResult(result Result) Result {
 	return redacted
 }
 
+// redactMetadata redacts EVERY text field of the metadata, not the subset a
+// reader happens to think is user-facing. `zero search --json` prints this
+// straight to stdout, and the fields carrying the most free text are the ones
+// least likely to be on a hand-kept list: SpecUserComment and SpecRejectReason
+// are review text the user typed, SpecDraftReasoning is the model's own prose,
+// and Goal.Objective and Goal.StatusReason are whatever the goal was phrased
+// as. A field added to sessions.Metadata later is covered by
+// TestRedactMetadataCoversEveryTextField, which walks the struct rather than
+// repeating this list, so the two cannot drift apart silently.
 func redactMetadata(session sessions.Metadata, options redaction.Options) sessions.Metadata {
 	session.SessionID = redaction.RedactString(session.SessionID, options)
 	session.SessionKind = sessions.SessionKind(redaction.RedactString(string(session.SessionKind), options))
@@ -258,6 +267,7 @@ func redactMetadata(session sessions.Metadata, options redaction.Options) sessio
 	session.WorkspaceKey = ""
 	session.ModelID = redaction.RedactString(session.ModelID, options)
 	session.SourceModelID = redaction.RedactString(session.SourceModelID, options)
+	session.PermissionMode = redaction.RedactString(session.PermissionMode, options)
 	session.Provider = redaction.RedactString(session.Provider, options)
 	session.Tag = redaction.RedactString(session.Tag, options)
 	session.ParentSessionID = redaction.RedactString(session.ParentSessionID, options)
@@ -275,19 +285,28 @@ func redactMetadata(session sessions.Metadata, options redaction.Options) sessio
 	session.SpecRejectReason = redaction.RedactString(session.SpecRejectReason, options)
 	session.SpecSourceSessionID = redaction.RedactString(session.SpecSourceSessionID, options)
 	session.SpecImplSessionID = redaction.RedactString(session.SpecImplSessionID, options)
-	if session.Goal != nil {
-		goal := *session.Goal
-		goal.Objective = redaction.RedactString(goal.Objective, options)
-		goal.Status = sessions.GoalStatus(redaction.RedactString(string(goal.Status), options))
-		goal.StatusReason = redaction.RedactString(goal.StatusReason, options)
-		goal.CreatedAt = redaction.RedactString(goal.CreatedAt, options)
-		goal.UpdatedAt = redaction.RedactString(goal.UpdatedAt, options)
-		session.Goal = &goal
-	}
 	session.CreatedAt = redaction.RedactString(session.CreatedAt, options)
 	session.UpdatedAt = redaction.RedactString(session.UpdatedAt, options)
 	session.LastEventType = sessions.EventType(redaction.RedactString(string(session.LastEventType), options))
+	session.Goal = redactGoal(session.Goal, options)
 	return session
+}
+
+// redactGoal returns a redacted COPY. Metadata is passed by value, but Goal is
+// a pointer inside it, so redacting through it would rewrite the goal the
+// caller still holds: a search would quietly edit the live session record it
+// was only supposed to report on.
+func redactGoal(goal *sessions.Goal, options redaction.Options) *sessions.Goal {
+	if goal == nil {
+		return nil
+	}
+	redacted := *goal
+	redacted.Objective = redaction.RedactString(redacted.Objective, options)
+	redacted.Status = sessions.GoalStatus(redaction.RedactString(string(redacted.Status), options))
+	redacted.StatusReason = redaction.RedactString(redacted.StatusReason, options)
+	redacted.CreatedAt = redaction.RedactString(redacted.CreatedAt, options)
+	redacted.UpdatedAt = redaction.RedactString(redacted.UpdatedAt, options)
+	return &redacted
 }
 
 func redactEventSummary(event EventSummary, options redaction.Options) EventSummary {

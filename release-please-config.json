@@ -5,7 +5,7 @@
   "bootstrap-sha": "02f0c0929bec65f5fc41bdcab3eb518d2b0b329a",
   "packages": {
     ".": {
-      "package-name": "@gitlawb/zero"
+      "package-name": "@twigpine/zero"
     }
   }
 }

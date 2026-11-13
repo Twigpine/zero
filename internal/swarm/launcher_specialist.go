@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	"github.com/Gitlawb/zero/internal/specialist"
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/specialist"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 // NewSpecialistLauncher adapts internal/specialist.Executor into a

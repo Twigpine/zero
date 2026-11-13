@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/background"
+	"github.com/Twigpine/zero/internal/background"
 )
 
 // isolateDaemonPaths points DefaultPaths at a temp dir so the test never touches

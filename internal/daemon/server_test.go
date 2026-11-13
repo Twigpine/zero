@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/observability"
-	"github.com/Gitlawb/zero/internal/testutil"
+	"github.com/Twigpine/zero/internal/observability"
+	"github.com/Twigpine/zero/internal/testutil"
 )
 
 func TestServeSupportsReadOnlyCustomRuntimeDirectory(t *testing.T) {

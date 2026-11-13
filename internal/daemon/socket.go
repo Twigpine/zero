@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/Gitlawb/zero/internal/privatedir"
+	"github.com/Twigpine/zero/internal/privatedir"
 )
 
 // maxUnixSocketPath bounds the socket path to the smallest platform sun_path

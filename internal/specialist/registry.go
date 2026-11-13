@@ -1,6 +1,6 @@
 package specialist
 
-import "github.com/Gitlawb/zero/internal/tools"
+import "github.com/Twigpine/zero/internal/tools"
 
 func RegisterTools(registry *tools.Registry, executor Executor) (*Runtime, error) {
 	runtime := executor.BackgroundRuntime
@@ -14,8 +14,8 @@ func RegisterTools(registry *tools.Registry, executor Executor) (*Runtime, error
 	toolExecutor.BackgroundRuntime = runtime
 	toolExecutor.BackgroundManagerFunc = runtime.Manager
 	registry.Register(NewTaskTool(toolExecutor))
-	registry.Register(newOutputToolWithManagerFunc(runtime.Manager, executor.SessionStore))
-	registry.Register(newStopToolWithManagerFunc(runtime.Manager))
+	registry.Register(newOutputToolWithManagerFunc(runtime.Manager, executor.SessionStore, executor.LifecycleHooks))
+	registry.Register(newStopToolWithManagerFunc(runtime.Manager, executor.SessionStore, executor.LifecycleHooks))
 	registry.Register(NewGenerateTool(NewStorage(executor.Paths)))
 	return runtime, nil
 }

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/providerhealth"
+	"github.com/Twigpine/zero/internal/providerhealth"
 )
 
 func TestClassifySetupProbeSuccess(t *testing.T) {

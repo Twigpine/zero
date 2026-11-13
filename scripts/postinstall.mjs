@@ -16,7 +16,7 @@
 //   ZERO_INSTALL_DRY_RUN=1    print the resolved plan as JSON, no network, exit 0
 //   ZERO_INSTALL_PLATFORM=…   override process.platform (linux|darwin|win32|android)
 //   ZERO_INSTALL_ARCH=…       override process.arch (x64|arm64)
-//   ZERO_REPO=owner/name      override the GitHub repo (default Gitlawb/zero)
+//   ZERO_REPO=owner/name      override the GitHub repo (default Twigpine/zero)
 //   ZERO_GITHUB_BASE_URL=…    override the download host (default https://github.com)
 
 import {
@@ -41,7 +41,7 @@ const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const pkg = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'));
 const VERSION = pkg.version;
 
-const REPO = process.env.ZERO_REPO || 'Gitlawb/zero';
+const REPO = process.env.ZERO_REPO || 'Twigpine/zero';
 const BASE = (process.env.ZERO_GITHUB_BASE_URL || 'https://github.com').replace(/\/+$/, '');
 // The .sha256 is fetched from the same origin as the archive, so TLS authenticity
 // is the only real integrity control — require https unless explicitly overridden

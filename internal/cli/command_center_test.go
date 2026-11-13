@@ -10,11 +10,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/oauth"
-	"github.com/Gitlawb/zero/internal/providerhealth"
-	"github.com/Gitlawb/zero/internal/zerocommands"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/oauth"
+	"github.com/Twigpine/zero/internal/providerhealth"
+	"github.com/Twigpine/zero/internal/zerocommands"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 func TestRunConfigPrintsRedactedSummary(t *testing.T) {
@@ -878,6 +878,40 @@ func providerSetupDeps(configPath string) appDeps {
 			return configPath, nil
 		},
 	}
+}
+
+// providerEnvSetupDeps is providerSetupDeps plus a REAL resolver pinned to a
+// temporary user config and a fixed environment. providerSetupDeps only
+// redirects WRITES, so without this the `providers` subcommands resolve against
+// the developer's own config.json and ambient provider variables: a test that
+// exports OPENAI_API_KEY passes on a machine whose real config has an active
+// provider and fails on one that also has GEMINI_API_KEY exported (issue
+// #1130). Passing Env makes resolution fully hermetic — config.envValue prefers
+// the map over os.Getenv whenever it is non-nil.
+func providerEnvSetupDeps(t *testing.T, configPath string, env map[string]string) appDeps {
+	t.Helper()
+
+	cwd := t.TempDir()
+	deps := providerSetupDeps(configPath)
+	deps.getwd = func() (string, error) { return cwd, nil }
+	deps.resolveConfig = func(workspaceRoot string, overrides config.Overrides) (config.ResolvedConfig, error) {
+		return config.Resolve(config.ResolveOptions{
+			UserConfigPath: configPath,
+			Env:            env,
+			Overrides:      overrides,
+		})
+	}
+	// summarizeConfig reads OAuth LOGIN state through the default store, which
+	// resolves the developer's own ZERO_OAUTH_TOKENS_PATH (or XDG keyring root)
+	// — a machine with a stored ChatGPT login would make `providers list`
+	// assertions flip. Pin the file and the backend per the coding guideline
+	// that no test may read the developer's real config, cache or state dirs:
+	// forcing "file" also prevents an ambient ZERO_OAUTH_STORAGE=keyring from
+	// pulling the OS keychain into these tests.
+	tokensPath := filepath.Join(t.TempDir(), "oauth-tokens.json")
+	t.Setenv("ZERO_OAUTH_TOKENS_PATH", tokensPath)
+	t.Setenv("ZERO_OAUTH_STORAGE", "file")
+	return deps
 }
 
 func readFileConfig(t *testing.T, path string) config.FileConfig {

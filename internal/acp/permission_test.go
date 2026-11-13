@@ -3,7 +3,7 @@ package acp
 import (
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/agent"
 )
 
 func TestBuildPermissionOptions(t *testing.T) {

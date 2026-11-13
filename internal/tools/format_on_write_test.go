@@ -531,3 +531,125 @@ func TestEditFileAcceptsInRootAtomicFormatterReplacement(t *testing.T) {
 		t.Fatalf("atomic formatter tracker = %#v, tracked=%t", version, tracked)
 	}
 }
+
+// Prettier's JavaScript configs are modules, so loading one is arbitrary code
+// execution from the workspace. Every prettier command must therefore disable
+// config resolution; this pins that, because a future entry copied without the
+// flag would silently reopen the hole.
+func TestFormatOnWritePrettierDisablesProjectConfig(t *testing.T) {
+	for extension, command := range formatterCommands {
+		if command[0] != "prettier" {
+			continue
+		}
+		found := false
+		for _, argument := range command[1:] {
+			if argument == "--no-config" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("prettier command for %s is %#v; it must pass --no-config so a project .prettierrc.js is never evaluated", extension, command)
+		}
+	}
+}
+
+// A formatter that resolves inside the workspace is repository-controlled. npm
+// run puts node_modules/.bin on PATH, so a cloned project can shadow the real
+// binary; it must be refused rather than executed with Zero's privileges.
+func TestFormatOnWriteRejectsFormatterResolvedInsideWorkspace(t *testing.T) {
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	root := t.TempDir()
+	marker := filepath.Join(root, "formatter-ran")
+	binaryName := "plantedfmt" + formatterScriptExtension()
+	if err := os.WriteFile(filepath.Join(root, binaryName), []byte(plantingFormatterScript(marker)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	registerFormatterCommand(t, ".plantedfmt", binaryName)
+
+	target := filepath.Join(root, "subject.plantedfmt")
+	const written = "written   but   not   formatted\n"
+	if err := os.WriteFile(target, []byte(written), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	formatting := maybeFormatWrittenFile(context.Background(), target, written)
+	if formatting.Content != written || !formatting.ContentKnown {
+		t.Fatalf("workspace-planted formatter result = %q, known=%t", formatting.Content, formatting.ContentKnown)
+	}
+	if formatting.Skipped != formatSkippedInsideWriteRoot {
+		t.Fatalf("workspace-planted formatter skip = %q, want %q", formatting.Skipped, formatSkippedInsideWriteRoot)
+	}
+	notice := formatting.notice("subject.plantedfmt")
+	if !strings.Contains(notice, formatSkippedInsideWriteRoot) {
+		t.Fatalf("workspace-planted formatter notice = %q, want the skip reason", notice)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("a formatter binary resolved inside the workspace was executed")
+	}
+}
+
+// The formatter can evaluate project code, so it must not inherit credentials.
+// PATH and ordinary variables survive; the provider keys the sandbox scrubs do
+// not.
+func TestFormatOnWriteScrubsCredentialsFromFormatterEnvironment(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "envdump")
+	installFakeFormatter(t, ".envfmt", "envfmt", envDumpFormatterScript(marker))
+	t.Setenv("ZERO_FORMAT_ON_WRITE", "1")
+	t.Setenv("OPENAI_API_KEY", "sk-super-secret-value")
+	t.Setenv("ZERO_FORMAT_TEST_CONTROL", "present")
+
+	target := filepath.Join(t.TempDir(), "subject.envfmt")
+	const written = "x\n"
+	if err := os.WriteFile(target, []byte(written), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	formatting := maybeFormatWrittenFile(context.Background(), target, written)
+	if formatting.RestoreFailed {
+		t.Fatal("formatter failed unexpectedly")
+	}
+
+	dumped, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("formatter did not run: %v", err)
+	}
+	if strings.Contains(string(dumped), "sk-super-secret-value") {
+		t.Fatal("formatter inherited a credential from the environment")
+	}
+	if !strings.Contains(string(dumped), "ZERO_FORMAT_TEST_CONTROL=present") {
+		t.Fatal("formatter env dump did not contain the control variable, so the formatter may not have run")
+	}
+}
+
+// plantingFormatterScript leaves a marker when executed, so a test can prove
+// the refusal happened before the binary ran.
+func plantingFormatterScript(marker string) string {
+	if runtime.GOOS == "windows" {
+		return "@echo off\r\necho ran> \"" + marker + "\"\r\nexit /b 0\r\n"
+	}
+	return "#!/bin/sh\necho ran > \"" + marker + "\"\nexit 0\n"
+}
+
+// envDumpFormatterScript writes its environment to marker.
+func envDumpFormatterScript(marker string) string {
+	if runtime.GOOS == "windows" {
+		return "@echo off\r\nset > \"" + marker + "\"\r\nexit /b 0\r\n"
+	}
+	return "#!/bin/sh\nenv > \"" + marker + "\"\nexit 0\n"
+}
+
+// registerFormatterCommand registers an already-on-PATH binary for extension
+// for the test's duration.
+func registerFormatterCommand(t *testing.T, extension, binaryName string) {
+	t.Helper()
+	previous, existed := formatterCommands[extension]
+	formatterCommands[extension] = []string{binaryName}
+	t.Cleanup(func() {
+		if existed {
+			formatterCommands[extension] = previous
+			return
+		}
+		delete(formatterCommands, extension)
+	})
+}

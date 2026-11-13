@@ -1,7 +1,7 @@
 package agent
 
 import (
-	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/sandbox"
 )
 
 // profileController observes per-turn run signals and decides at most one

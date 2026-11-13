@@ -6,7 +6,7 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/execution"
+	"github.com/Twigpine/zero/internal/execution"
 )
 
 // bashWaitDelay bounds how long Wait blocks for the I/O pipes to drain after the

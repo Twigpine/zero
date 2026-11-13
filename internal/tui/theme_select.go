@@ -3,7 +3,7 @@ package tui
 import (
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/config"
+	"github.com/Twigpine/zero/internal/config"
 )
 
 // themeMode is the operator's palette preference.
@@ -91,6 +91,9 @@ func applyTheme(mode themeMode, terminalDark bool) themeMode {
 	rebuildStreamingFadePalette()
 	if defaultRenderCache != nil {
 		defaultRenderCache.clear() // old-palette entries must not be reused
+	}
+	if defaultFileViewCache != nil {
+		defaultFileViewCache.clear()
 	}
 	return resolved
 }

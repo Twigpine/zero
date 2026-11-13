@@ -3,10 +3,10 @@ package cli
 import (
 	"context"
 
-	"github.com/Gitlawb/zero/internal/agent"
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/providers"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/providers"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 // summarizerFactory adapts the resolved profile and the authenticated provider

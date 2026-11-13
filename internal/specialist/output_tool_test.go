@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/background"
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/background"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 func TestOutputToolReadsCompletedTaskSummary(t *testing.T) {

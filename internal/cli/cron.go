@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/cron"
+	"github.com/Twigpine/zero/internal/cron"
 )
 
 // runCron is the dispatch entry for `zero cron`.

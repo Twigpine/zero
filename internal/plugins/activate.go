@@ -14,12 +14,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/execution"
-	"github.com/Gitlawb/zero/internal/hooks"
-	"github.com/Gitlawb/zero/internal/mcp"
-	"github.com/Gitlawb/zero/internal/secrets"
-	"github.com/Gitlawb/zero/internal/skills"
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/execution"
+	"github.com/Twigpine/zero/internal/hooks"
+	"github.com/Twigpine/zero/internal/mcp"
+	"github.com/Twigpine/zero/internal/secrets"
+	"github.com/Twigpine/zero/internal/skills"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 // pluginRootPlaceholder is the manifest path placeholder a plugin may use in a
@@ -374,7 +374,7 @@ func (tool skillTool) Run(_ context.Context, args map[string]any) tools.Result {
 	available := make([]string, 0, len(merged))
 	for _, skill := range merged {
 		if skill.Name == name {
-			return tools.Result{Status: tools.StatusOK, Output: skill.Content}
+			return tools.Result{Status: tools.StatusOK, Output: skills.ToolOutput(skill)}
 		}
 		available = append(available, skill.Name)
 	}

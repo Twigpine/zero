@@ -4,7 +4,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/workspaceindex"
+	"github.com/Twigpine/zero/internal/workspaceindex"
 )
 
 // extToLanguage maps a lowercase file extension (no dot) to a display language.

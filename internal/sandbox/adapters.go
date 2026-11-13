@@ -19,10 +19,10 @@ type Backend struct {
 	NativeIsolation bool        `json:"nativeIsolation"`
 	Executable      string      `json:"executable,omitempty"`
 	// ExecutableArgsPrefix is prepended to a wrapped command's args before the
-	// sandbox arguments. Non-empty only for the Windows self-dispatch helper,
-	// where Executable is the running zero binary and this carries the hidden
-	// subcommand token (e.g. "__windows-command-runner"). nil for every other
-	// backend, so their serialized form is unchanged.
+	// sandbox arguments. Non-empty for self-dispatch helpers, where Executable
+	// is the running zero binary and this carries the hidden subcommand token
+	// ("__windows-command-runner" or "__sandbox-helper"). nil for standalone
+	// helper binaries, so their serialized form is unchanged.
 	ExecutableArgsPrefix []string `json:"executableArgsPrefix,omitempty"`
 	Message              string   `json:"message,omitempty"`
 }
@@ -205,6 +205,21 @@ func (backend Backend) EnforcementLevel(policy Policy) EnforcementLevel {
 		return EnforcementNative
 	}
 	return EnforcementDegraded
+}
+
+// DegradedNotice is one line saying the plan's enforcement is degraded and why,
+// or "" at any other level. Only degraded: a disabled sandbox is the user's own
+// choice, and the unelevated Windows tier still enforces the write jail and
+// says what it lacks through `zero sandbox policy`.
+func (plan BackendPlan) DegradedNotice() string {
+	if plan.EnforcementLevel != EnforcementDegraded {
+		return ""
+	}
+	reason := strings.TrimRight(strings.TrimSpace(plan.DowngradeReason), ".")
+	if reason == "" {
+		reason = "no native sandbox is available"
+	}
+	return "Sandbox enforcement is degraded: " + reason + ". See `zero sandbox policy --effective`."
 }
 
 func (backend Backend) DowngradeReason(policy Policy) string {

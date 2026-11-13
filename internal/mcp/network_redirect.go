@@ -28,6 +28,7 @@ func checkMCPRedirect(server Server) func(*http.Request, []*http.Request) error 
 		if !sameMCPOrigin(via[0].URL, request.URL) {
 			return fmt.Errorf("MCP %s server %s refused cross-origin redirect to %s", server.Type, server.Name, mcpOrigin(request.URL))
 		}
+		reapplyAIMLAPIRedirectHeaders(server, request, via[0])
 		return nil
 	}
 }

@@ -10,7 +10,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/oauth"
+	"github.com/Twigpine/zero/internal/oauth"
 )
 
 const protectedResourceMetadataLimit = 1 << 20

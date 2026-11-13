@@ -75,6 +75,12 @@ type Descriptor struct {
 	// catalog-ordered lists and pickers. The recommended descriptors are the first
 	// entries in the catalog, in order.
 	Recommended bool
+
+	// LegacyBaseURLs lists earlier DefaultBaseURL values that still address
+	// this provider's own endpoint. Profiles saved against one keep catalog
+	// endpoint treatment (catalog env var binding, base-URL matching) after the
+	// default moves; see IsCatalogBaseURL.
+	LegacyBaseURLs []string
 }
 
 func RuntimeSupported(descriptor Descriptor) bool {
@@ -99,11 +105,17 @@ func RuntimeUnsupportedReason(descriptor Descriptor) string {
 }
 
 var descriptors = []Descriptor{
-	// GitLawb OpenGateway — the recommended default. An OpenAI-compatible gateway
-	// that smart-routes by model id across upstream providers (xiaomi-mimo,
-	// minimax, qwen, google, nvidia, tencent, z-ai). Flat /v1/chat/completions
-	// with a Bearer ogw_live_… key; listed first and badged in every picker.
-	recommended(openAICompat("gitlawb-opengateway", "GitLawb OpenGateway", "https://opengateway.gitlawb.com/v1", "mimo-v2.5-pro", []string{"GITLAWB_OPENGATEWAY_API_KEY"}, "gitlawb opengateway", "opengateway")),
+	// Twigpine OpenGateway (formerly GitLawb OpenGateway) — the recommended
+	// default. An OpenAI-compatible gateway at api.twigpine.com that smart-routes
+	// by model id across upstream providers. Flat /v1/chat/completions with a
+	// Bearer ogw_live_… key; listed first and badged in every picker. The public
+	// GET /v1/models lists only active models and is what pickers show when
+	// reachable. DefaultModel must be an exact id from that list (not an alias)
+	// so onboarding keeps it selected after live discovery. The id and env var
+	// keep their gitlawb names so saved configs keep resolving; the old host
+	// (opengateway.gitlawb.com) still serves clients and stays a legacy catalog
+	// endpoint so profiles saved against it resolve unchanged.
+	recommended(withLegacyBaseURLs(openAICompat("gitlawb-opengateway", "Twigpine OpenGateway", "https://api.twigpine.com/v1", "xiaomi/mimo-v2.6-pro", []string{"GITLAWB_OPENGATEWAY_API_KEY"}, "gitlawb opengateway", "opengateway", "twigpine opengateway", "twigpine"), "https://opengateway.gitlawb.com/v1")),
 	// aimlapi.com — OpenAI-compatible aggregating gateway, also badged as
 	// recommended (second, right after the OpenGateway default). The built-in TUI
 	// onboarding can register/top up an account and save the issued key; the partner
@@ -132,7 +144,9 @@ var descriptors = []Descriptor{
 	// way in; RequiresAuth is forced true so catalog consumers know the provider
 	// needs an interactive login before a request will succeed.
 	func() Descriptor {
-		d := openAICompat("chatgpt", "ChatGPT", "https://chatgpt.com/backend-api/codex", "gpt-5.5", nil)
+		// New ChatGPT profiles follow the vendor's GPT-5.5 replacement guidance:
+		// https://learn.chatgpt.com/docs/models#gpt-55-retirement
+		d := openAICompat("chatgpt", "ChatGPT", "https://chatgpt.com/backend-api/codex", "gpt-6.1-sol", nil)
 		d.RequiresAuth = true
 		return oauthProvider(d, false, false)
 	}(),
@@ -143,6 +157,18 @@ var descriptors = []Descriptor{
 	openAICompat("dashscope", "DashScope", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "qwen-plus", []string{"DASHSCOPE_API_KEY", "QWEN_API_KEY"}, "qwen"),
 	openAICompat("moonshot", "Moonshot AI", "https://api.moonshot.ai/v1", "kimi-k2-0905-preview", []string{"MOONSHOT_API_KEY"}, "kimi"),
 	openAICompat("atlascloud", "Atlas Cloud", "https://api.atlascloud.ai/v1", "qwen/qwen3.5-flash", []string{"ATLASCLOUD_API_KEY"}, "atlas cloud", "atlas"),
+	// GMI Cloud — OpenAI-compatible inference. The id matches the models.dev
+	// provider id so the remote catalog resolves without a mapping; GMI's own
+	// docs name the key GMI_API_KEY, models.dev names it GMICLOUD_API_KEY.
+	openAICompat("gmicloud", "GMI Cloud", "https://api.gmi-serving.com/v1", "Qwen/Qwen3.8-Max", []string{"GMI_API_KEY", "GMICLOUD_API_KEY"}, "gmi cloud", "gmi"),
+	// Concentrate AI — OpenAI-compatible gateway to models from many labs.
+	// models.dev has no Concentrate provider, so the id and key name match
+	// OpenClaude's Concentrate integration. The default is the dated id
+	// deepseek-v4-flash-0731: Concentrate's /v1/models keeps the rolling name
+	// deepseek-v4-flash only as an alias, and onboarding matches the default
+	// against live ids. "concentrate ai" also covers "concentrate.ai" and
+	// "concentrate-ai" once normalized.
+	openAICompat("concentrate", "Concentrate", "https://api.concentrate.ai/v1", "deepseek-v4-flash-0731", []string{"CONCENTRATE_API_KEY"}, "concentrate ai"),
 	openAICompat("longcat", "LongCat", "https://api.longcat.chat/openai", "LongCat-2.0", []string{"LONGCAT_API_KEY"}, "meituan longcat", "meituan", "longcat-2.0"),
 	openAICompat("nvidia-nim", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1", "nvidia/llama-3.1-nemotron-70b-instruct", []string{"NVIDIA_API_KEY"}, "nvidia nim"),
 	anthropicCompat("minimax", "MiniMax", "https://api.minimax.io/anthropic", "MiniMax-M3", []string{"MINIMAX_API_KEY"}, "mini-max", "mini_max"),
@@ -293,6 +319,37 @@ func recommended(descriptor Descriptor) Descriptor {
 	return descriptor
 }
 
+// withLegacyBaseURLs records earlier default base URLs that still serve the
+// provider, so profiles saved before a host move keep resolving as the catalog
+// endpoint.
+func withLegacyBaseURLs(descriptor Descriptor, baseURLs ...string) Descriptor {
+	descriptor.LegacyBaseURLs = append(descriptor.LegacyBaseURLs, baseURLs...)
+	return descriptor
+}
+
+// IsCatalogBaseURL reports whether baseURL addresses the descriptor's own
+// endpoint: its DefaultBaseURL or one of its LegacyBaseURLs, ignoring case,
+// surrounding space, and a trailing slash. An empty baseURL never matches.
+func IsCatalogBaseURL(descriptor Descriptor, baseURL string) bool {
+	normalized := normalizeBaseURL(baseURL)
+	if normalized == "" {
+		return false
+	}
+	if normalized == normalizeBaseURL(descriptor.DefaultBaseURL) {
+		return true
+	}
+	for _, legacy := range descriptor.LegacyBaseURLs {
+		if normalized == normalizeBaseURL(legacy) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeBaseURL(baseURL string) string {
+	return strings.ToLower(strings.TrimRight(strings.TrimSpace(baseURL), "/"))
+}
+
 // oauthProvider marks a descriptor as OAuth-capable. mintsKey => the flow returns
 // an API key (OpenRouter); deviceFlow => RFC 8628 device code is also supported.
 func oauthProvider(descriptor Descriptor, mintsKey bool, deviceFlow bool) Descriptor {
@@ -368,6 +425,9 @@ func cloneDescriptor(descriptor Descriptor) Descriptor {
 	descriptor.AuthEnvVars = append([]string{}, descriptor.AuthEnvVars...)
 	descriptor.SupportedAPIFormats = append([]APIFormat{}, descriptor.SupportedAPIFormats...)
 	descriptor.Aliases = append([]string{}, descriptor.Aliases...)
+	if descriptor.LegacyBaseURLs != nil {
+		descriptor.LegacyBaseURLs = append([]string{}, descriptor.LegacyBaseURLs...)
+	}
 	if descriptor.CustomHeaders != nil {
 		descriptor.CustomHeaders = copyStringMap(descriptor.CustomHeaders)
 	}

@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/execution"
-	"github.com/Gitlawb/zero/internal/hooks"
-	"github.com/Gitlawb/zero/internal/skills"
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/execution"
+	"github.com/Twigpine/zero/internal/hooks"
+	"github.com/Twigpine/zero/internal/skills"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 type pluginExecutionPreparer struct {
@@ -671,5 +671,30 @@ func TestExpandPluginRootPathRelative(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("expandPluginRootPath(%q) = %q, want %q", tc.input, got, tc.want)
 		}
+	}
+}
+
+// The multi-root skill tool is the one the CLI registers, so it has to point at
+// a skill's bundled files the same way the core tool does (#584).
+func TestNewSkillToolPointsAtTheSkillsBundledFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	dir := t.TempDir()
+	writeTestSkill(t, dir, "pdf", "Run scripts/fill.py.")
+	script := filepath.Join(dir, "pdf", "scripts", "fill.py")
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, []byte("print('fill')\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got := NewSkillTool(dir, nil).Run(context.Background(), map[string]any{"name": "pdf"})
+	if got.Status != tools.StatusOK {
+		t.Fatalf("Status = %s (output: %s)", got.Status, got.Output)
+	}
+	if !strings.Contains(got.Output, "- scripts/fill.py") || !strings.Contains(got.Output, filepath.Join(dir, "pdf")) {
+		t.Fatalf("output does not point at the bundled script:\n%s", got.Output)
 	}
 }

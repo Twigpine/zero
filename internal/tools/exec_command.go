@@ -11,8 +11,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/Gitlawb/zero/internal/execution"
-	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/execution"
+	zeroSandbox "github.com/Twigpine/zero/internal/sandbox"
 )
 
 const (

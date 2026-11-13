@@ -11,28 +11,33 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Gitlawb/zero/internal/execution"
-	"github.com/Gitlawb/zero/internal/hooks"
-	"github.com/Gitlawb/zero/internal/redaction"
-	"github.com/Gitlawb/zero/internal/sandbox"
-	"github.com/Gitlawb/zero/internal/streamjson"
-	"github.com/Gitlawb/zero/internal/tools"
-	"github.com/Gitlawb/zero/internal/trace"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/execution"
+	"github.com/Twigpine/zero/internal/hooks"
+	"github.com/Twigpine/zero/internal/modelregistry"
+	"github.com/Twigpine/zero/internal/redaction"
+	"github.com/Twigpine/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/streamjson"
+	"github.com/Twigpine/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/trace"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 const maxTurnsAnswer = "Agent reached maximum number of turns without a final answer."
 const maxTurnsFinalAnswerPrompt = "You have reached the tool-turn limit. Do not call tools. Give a concise final answer now: summarize what you completed, what you found, and any remaining blockers."
 
 // maxStreamStallRetries bounds how many times a turn that timed out (idle/stall)
-// WITH NO OUTPUT yet is re-issued on a fresh connection before giving up. Only
-// the no-output case is retried (a partial turn would duplicate), so this is a
-// safe recovery for a stalled/dead pooled connection.
+// OR hit a mid-stream transport abort (#973) with no answer text yet is re-issued
+// on a fresh connection before giving up. Incomplete tool-call previews are
+// allowed through the gate (they are never dispatched before the error return).
+// The safety claim is only that visible answer prose is not duplicated on retry —
+// not that every partial stream shape is excluded. Covers a stalled/dead pooled
+// connection or a socket abort before tool dispatch.
 //
 // Set to 1 (not 2): each attempt can itself idle for the full stream timeout
 // (~5min) before the stall is even detected, so 2 retries left an interactive
 // session frozen for ~15min. One retry keeps the common single-hiccup recovery
-// while bounding the worst case to ~2× the idle timeout.
+// while bounding the worst case to ~2× the idle timeout. Mid-stream transport
+// aborts share this bound (do not raise it for #973).
 const maxStreamStallRetries = 1
 
 const (
@@ -374,7 +379,11 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 					rec.StampFirstToken()
 				}
 				if onText != nil {
-					forwardedVisibleText = true
+					// Zero-length chunks are not committed answer prose; counting
+					// them would block an eligible mid-stream abort retry.
+					if s != "" {
+						forwardedVisibleText = true
+					}
 					onText(s)
 				}
 			}
@@ -404,7 +413,8 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// collected and a non-nil stop error when the run must end now.
 		recoverStreamError := func(collected zeroruntime.CollectedStream) (zeroruntime.CollectedStream, error) {
 			if isImageRejectionError(errors.New(collected.Error)) {
-				return collected, fmt.Errorf("model %s rejected the image: %s. The model may not support image input — try switching to a vision-capable model (claude, gpt-4o, gemini)", options.Model, collected.Error)
+				cause := &zeroruntime.StreamError{Message: collected.Error, StatusCode: collected.ErrorStatusCode, Cause: collected.ErrorCause}
+				return collected, fmt.Errorf("model %s rejected the image: %w. The model may not support image input — try switching to a vision-capable model (claude, gpt-4o, gemini)", options.Model, cause)
 			}
 			// REACTIVE compaction: the streamed error may also be a context limit
 			// (some providers surface it mid-stream). Compact and retry once.
@@ -450,9 +460,14 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			result.Messages = copyMessages(messages)
 			return result, ctx.Err()
 		}
-		// A stream idle/stall timeout is safely re-issued when the turn committed NO
-		// answer text — no forwarded visible prose (forwardedVisibleText) and no
-		// collected final text (collected.Text). This covers two cases:
+		// A stream idle/stall timeout OR mid-stream transport abort (#973 — wsarecv /
+		// connection reset / unexpected EOF / connection closed / broken pipe) is
+		// safely re-issued when the turn committed NO answer text — no forwarded
+		// visible prose (forwardedVisibleText) and no collected final text
+		// (collected.Text). The abort gate matches midStreamAbortNeedles only, not
+		// the full shouldReconnect list: connect-phase timeouts and connection
+		// refused are NOT retried here (a slow healthy server must not cost a
+		// second prefill). This covers three cases:
 		//   1. Nothing streamed at all before the connection died (the original
 		//      macOS stale-pooled-connection hang past the response-header timeout).
 		//   2. The model streamed transient reasoning and began a tool call (e.g. a
@@ -463,13 +478,27 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		//      re-render is transient previews, not duplicated answer text. This is
 		//      why the gate no longer excludes collected.ToolCalls: an incomplete
 		//      tool call from a timed-out stream is discard-and-retry, not output.
+		//   3. Mid-stream socket abort after connect succeeded (Windows WSAECONNABORTED /
+		//      wsarecv, connection reset by peer). Same no-tool-executed safety: the
+		//      error returns before tool dispatch, so a bounded retry is safe.
 		// A turn that forwarded real prose is NOT retried (it would duplicate visible
 		// answer text) and falls through to the error return below. Capped +
 		// exponential backoff, with a user-visible notice per attempt.
 		for attempt := 1; attempt <= maxStreamStallRetries &&
-			isStreamTimeoutError(collected.Error) && !forwardedVisibleText &&
+			(isStreamTimeoutError(collected.Error) || isMidStreamTransportAbort(collected.Error)) &&
+			!forwardedVisibleText &&
 			collected.Text == ""; attempt++ {
-			if notify := stallRetryNoticeFor(options); notify != nil {
+			var notify reconnectNotifier
+			if isStreamTimeoutError(collected.Error) {
+				notify = stallRetryNoticeFor(options)
+			} else {
+				notify = reconnectNoticeFor(options)
+				// Count this post-connect reissue even when the replacement
+				// connect succeeds immediately. streamWithReconnect only
+				// increments reconnect_count after a failed connect attempt.
+				options.Trace.Counter(trace.CounterReconnectCount, 1)
+			}
+			if notify != nil {
 				notify(attempt, maxStreamStallRetries)
 			}
 			if err := sleepWithContext(ctx, backoffFor(attempt)); err != nil {
@@ -482,11 +511,21 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			retryStream, retryErr := streamWithReconnect(ctx, provider, retryRequest, reconnectNoticeFor(options))
 			if retryErr != nil {
 				result.Messages = copyMessages(messages)
+				if ctx.Err() != nil {
+					return result, ctx.Err()
+				}
 				return result, retryErr
 			}
 			stallGenSpan := options.Trace.Span(trace.SpanGeneration)
 			collected = zeroruntime.CollectStreamWithOptions(ctx, retryStream, forwardingOpts)
 			stallGenSpan.End()
+		}
+		// Recheck ctx after a retried CollectStream: helpers.go stores
+		// ctx.Err().Error() in collected.Error, and errors.New of that string
+		// drops the context.Canceled sentinel ACP branches on.
+		if ctx.Err() != nil {
+			result.Messages = copyMessages(messages)
+			return result, ctx.Err()
 		}
 		if collected.Error != "" {
 			// Route a reissued stream's non-stall error through the SAME recovery as
@@ -498,9 +537,13 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				result.Messages = copyMessages(messages)
 				return result, stop
 			}
+			if ctx.Err() != nil {
+				result.Messages = copyMessages(messages)
+				return result, ctx.Err()
+			}
 			if collected.Error != "" {
 				result.Messages = copyMessages(messages)
-				return result, errors.New(collected.Error)
+				return result, &zeroruntime.StreamError{Message: collected.Error, StatusCode: collected.ErrorStatusCode, Cause: collected.ErrorCause}
 			}
 		}
 
@@ -545,6 +588,14 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			// counted toward the runaway cap so we stop before burning maxTurns.
 			if guards.observeTurn(collected) {
 				result.FinalAnswer = noOutputStopAnswer(result.Turns)
+				// Under the headless completion gate this stop is unfinished work,
+				// not a successful final answer: the guard exists precisely because
+				// the model made no progress. Interactive runs keep the gate off, so
+				// their behavior is unchanged.
+				if options.RequireCompletionSignal {
+					result.Incomplete = true
+					result.IncompleteReason = "stopped after " + strconv.Itoa(guards.emptyTurns) + " consecutive turns with no output"
+				}
 				result.Messages = copyMessages(messages)
 				return result, nil
 			}
@@ -646,13 +697,83 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 		// recorded. They travel as user messages, and a user message between two
 		// tool_results breaks strict provider replay — Anthropic coalesces them
 		// into one user block list and requires the tool_result blocks first, so
-		// interleaving yields [tool_result, text, image, tool_result] and a 400.
-		// Same reason the self-correction feedback below is deferred.
-		var toolImageMessages []zeroruntime.Message
+		// Images ride a following USER message rather than the tool result
+		// above. Every provider drops images on a tool-role message —
+		// Anthropic's tool_result content is a string, Gemini's is a
+		// functionResponse, and OpenAI guards its image parts to the user role
+		// — so attaching them there would silently deliver nothing. A separate
+		// message also keeps the one-tool-result-per-tool-call pairing intact,
+		// which the providers validate. Vision-gate evaluation is deferred until
+		// after any model switch this turn resolves, so images can reach an
+		// escalated vision-capable model.
+		var toolResultsWithImages []ToolResult
+		buildToolImageMessages := func() []zeroruntime.Message {
+			var out []zeroruntime.Message
+			for _, tr := range toolResultsWithImages {
+				if imageMessage, ok := toolResultImageMessage(tr, options); ok {
+					out = append(out, imageMessage)
+				}
+			}
+			return out
+		}
 		// Parallel read-ahead state: results for calls[precomputedStart:precomputedEnd]
 		// executed concurrently, consumed strictly in order below.
 		var precomputed []precomputedToolResult
 		precomputedStart, precomputedEnd := 0, 0
+		// closeOutRemaining terminates every advertised call from `from` onward
+		// TRUTHFULLY, and every early return in this loop goes through it.
+		//
+		// Read-ahead broke the assumption the abort placeholders were written
+		// under. executeParallelReadBatch runs an entire eligible run before the
+		// loop consumes any of it, so "not consumed yet" stopped meaning "not
+		// executed": a sibling can already have run, committed its side effects
+		// and any authorization credit they carry, and still sit past the index
+		// where a terminal branch fires. Recording it as aborted threw that result
+		// away, so the transcript disagreed with what had actually happened, and
+		// its callbacks, trace counter, task observation and images went with it.
+		//
+		// So each remaining call is put in the one state that is true of it:
+		// completed, and finalized exactly once with the same bookkeeping the main
+		// path performs, or unstarted, and aborted. The guard is deliberately NOT
+		// consulted for a drained sibling: these results cannot reverse a stop
+		// decision that has already been made, they are only owed an honest record.
+		closeOutRemaining := func(from int) {
+			for next := from; next < len(collected.ToolCalls); next++ {
+				sibling, ran := precomputedResultFor(precomputed, precomputedStart, precomputedEnd, next)
+				if !ran {
+					messages = appendAbortedToolResults(messages, collected.ToolCalls[next:next+1])
+					continue
+				}
+				nextCall := collected.ToolCalls[next]
+				if options.OnToolCall != nil {
+					options.OnToolCall(nextCall)
+				}
+				options.Trace.Counter(trace.CounterToolCalls, 1)
+				recordOutputBudgetTrace(options.Trace, sibling)
+				task.observe(taskStateEvent{kind: taskStateEventToolResult, arguments: nextCall.Arguments, toolResult: sibling})
+				if options.OnToolResult != nil {
+					options.OnToolResult(sibling)
+				}
+				for _, name := range sibling.LoadedTools {
+					loaded[name] = true
+				}
+				// The same fields the consumption path below records, provider call
+				// ID included: a strict replay pairs the result to its tool_use by
+				// that ID, and a finalized sibling without it was the one result in
+				// the turn that could not be paired. Reported by @jatmn.
+				messages = append(messages, zeroruntime.Message{
+					Role:               zeroruntime.MessageRoleTool,
+					Content:            sibling.ModelOutput(),
+					ToolCallID:         sibling.ToolCallID,
+					ToolCallProviderID: nextCall.ProviderCallID,
+					IsError:            sibling.Status == tools.StatusError,
+					ChangedFiles:       append([]string(nil), sibling.ChangedFiles...),
+				})
+				if len(sibling.Images) > 0 {
+					toolResultsWithImages = append(toolResultsWithImages, sibling)
+				}
+			}
+		}
 		for index, call := range collected.ToolCalls {
 			// When this call starts a consecutive run of >= 2 auto-allowed read-only
 			// calls, execute the whole run concurrently now (see parallel_tools.go).
@@ -705,15 +826,8 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				IsError:            toolResult.Status == tools.StatusError,
 				ChangedFiles:       append([]string(nil), toolResult.ChangedFiles...),
 			})
-			// Images ride a following USER message rather than the tool result
-			// above. Every provider drops images on a tool-role message —
-			// Anthropic's tool_result content is a string, Gemini's is a
-			// functionResponse, and OpenAI guards its image parts to the user role
-			// — so attaching them there would silently deliver nothing. A separate
-			// message also keeps the one-tool-result-per-tool-call pairing intact,
-			// which the providers validate.
-			if imageMessage, ok := toolResultImageMessage(toolResult); ok {
-				toolImageMessages = append(toolImageMessages, imageMessage)
+			if len(toolResult.Images) > 0 {
+				toolResultsWithImages = append(toolResultsWithImages, toolResult)
 			}
 
 			// A tool may demand the run ABORT — a canceled/timed-out ask_user prompt
@@ -724,14 +838,14 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				abortErr = ctx.Err()
 			}
 			if abortErr != nil {
-				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
-				messages = append(messages, toolImageMessages...)
+				closeOutRemaining(index + 1)
+				messages = append(messages, buildToolImageMessages()...)
 				result.Messages = copyMessages(messages)
 				return result, abortErr
 			}
 			if stopReason := stopReasonFromToolResult(toolResult); stopReason != "" {
-				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
-				messages = append(messages, toolImageMessages...)
+				closeOutRemaining(index + 1)
+				messages = append(messages, buildToolImageMessages()...)
 				result.FinalAnswer = toolResult.ModelOutput()
 				result.StopReason = stopReason
 				result.Messages = copyMessages(messages)
@@ -745,8 +859,29 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			// aren't fixed by reformatting the call, so a "match this schema" hint
 			// would misdirect the model toward JSON shape or blocked behavior.
 			retriableFailure := isRetriableToolError(toolResult)
-			outcome := guards.observeToolResult(call.Name, retriableFailure, toolResult.ModelOutput())
-			posture.observeToolOutcome(outcome, toolResult)
+			// A categorized denial is NOT retriable — retrying it verbatim is
+			// pointless — but it is still a failure the streaks must count, or a
+			// refused tool loops until the turn limit. Passing retriableFailure for
+			// both is what let that happen: observeToolResult took its success
+			// branch and deleted the record before it could key on the category.
+			// isPolicyRefusal rather than DenialReason alone: the categories are
+			// only attached where a typed denial is built, so a headless prompt
+			// refusal and an uncategorized sandbox block were counted as SUCCESS
+			// and cleared the record they were supposed to accumulate.
+			policyRefusal := isPolicyRefusal(toolResult)
+			countedFailure := retriableFailure || policyRefusal
+			outcome := guards.observeToolResult(call.Name, countedFailure, retriableFailure, toolResult.ModelOutput(), toolResult.DenialReason)
+			// The profile's failure-streak trigger is for RETRIABLE failures: it
+			// restores the displaced turn budget and reasoning effort on the theory
+			// that the tool is struggling and needs room. A policy refusal is not a
+			// struggling tool, it is an answer, and spending the one-shot
+			// escalation on one contradicts that trigger's own contract. Denials
+			// still count for the halt above; they just do not buy more budget.
+			if policyRefusal {
+				posture.observeToolOutcome(toolFailureOutcome{}, toolResult)
+			} else {
+				posture.observeToolOutcome(outcome, toolResult)
+			}
 			if outcome.Stop {
 				// The assistant message advertised EVERY collected tool call, but
 				// the guard halts mid-turn so the calls after this one never run.
@@ -754,10 +889,22 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				// every tool_use has a matching tool_result and the recorded
 				// messages stay valid for a strict provider replay (Anthropic
 				// rejects a tool_use with no answering tool_result).
-				messages = appendAbortedToolResults(messages, collected.ToolCalls[index+1:])
-				messages = append(messages, toolImageMessages...)
-				result.FinalAnswer = toolFailureStopAnswer(call.Name, outcome.Count)
+				closeOutRemaining(index + 1)
+				messages = append(messages, buildToolImageMessages()...)
+				result.FinalAnswer = toolFailureStopAnswer(call.Name, outcome.Count, outcome.Cause)
 				result.Messages = copyMessages(messages)
+				// THE HALT HAS TO CROSS THE TERMINAL-STATUS BOUNDARY TOO.
+				//
+				// This branch returns straight out, so it never reached the
+				// completion gate that the max-turns paths below go through. Under
+				// RequireCompletionSignal `zero exec` treats only Incomplete as exit
+				// 4 and otherwise emits run_end("success", 0), so a task that was
+				// denied six times, or failed through the twelve-call bound, became
+				// a successful automation result having done none of the work.
+				if options.RequireCompletionSignal {
+					result.Incomplete = true
+					result.IncompleteReason = toolFailureIncompleteReason(call.Name, outcome.Cause)
+				}
 				return result, nil
 			}
 			if outcome.InjectHint && failureHint == "" {
@@ -774,10 +921,6 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				postEditDiagnostics.enqueue(ctx, toolResult.ChangedFiles)
 			}
 		}
-		// Every tool_result for this turn is now recorded, including aborted
-		// placeholders, so the images can follow without splitting them.
-		messages = append(messages, toolImageMessages...)
-		toolImageMessages = nil
 
 		// Run post-edit self-correction once over the union of files this turn
 		// changed, then append any feedback after every tool_result is recorded so
@@ -864,6 +1007,12 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 				}
 			}
 		}
+
+		// Every tool_result, self-correct notice, and model-switch update for this
+		// turn is now in place; evaluate and append image messages against the
+		// effective (potentially escalated) model.
+		messages = append(messages, buildToolImageMessages()...)
+		toolResultsWithImages = nil
 
 		// A turn can mix valid tool calls with a dropped (nameless) one. The valid
 		// calls executed above; surface the dropped call too so it is never
@@ -1537,7 +1686,39 @@ func executeToolCall(ctx context.Context, registry *tools.Registry, call ToolCal
 		// the Run turn loop performs the actual provider switch. Empty for every
 		// ordinary tool result.
 		RequestedModel: result.Meta["escalate_to_model"],
+		// ONE REFUSAL IDENTITY, derived here so classification and streak
+		// accounting cannot disagree.
+		//
+		// The registry marks its pre-execution refusals in metadata, and
+		// isPolicyRefusal read that marker while observeToolResult keyed on
+		// DenialReason, which those paths leave empty. The guard therefore fell
+		// back to errorSignature(output), and two refusals of the same category
+		// with different wording looked like two different failures. A model
+		// alternating capture_artifact's browser_screenshot and browser_pdf against
+		// a disabled driver is refused identically each time, and never tripped the
+		// six-call refusal halt: only the generic twelve-error fallback stopped it,
+		// reporting varied errors rather than a repeated refusal.
+		DenialReason: denialCategoryForResult(result),
 	}, nil
+}
+
+// denialCategoryForResult gives every pre-execution refusal a stable category,
+// whether it was built as a typed denial or only marked in metadata.
+//
+// The mapping lives here, at the one boundary tools.Result becomes ToolResult,
+// rather than at each producer. A marker without a category is the shape that
+// caused this: it classified as a refusal and keyed as an error signature.
+func denialCategoryForResult(result tools.Result) DenialCategory {
+	switch result.Meta[tools.PolicyRefusalMeta] {
+	case tools.PolicyRefusalToolNotEnabled:
+		return DenialFiltered
+	case tools.PolicyRefusalPermissionDenied, tools.PolicyRefusalPermissionRequired:
+		return DenialPermissionDenied
+	case tools.PolicyRefusalSandboxDenied, tools.PolicyRefusalSandboxApproval:
+		return DenialSandboxBlock
+	default:
+		return DenialNone
+	}
 }
 
 const sandboxNamespaceLimitedReason = "sandbox output is limited to the sandbox PID namespace; host/global state requires approval"
@@ -1870,6 +2051,10 @@ func toolResultFromPrePermissionReject(call ToolCall, result tools.Result) ToolR
 		Display:         display,
 		LoadedTools:     loadedToolsFromResult(meta),
 		RequestedModel:  meta["escalate_to_model"],
+		// The SAME identity the executed path derives. This is the route a
+		// RejectBeforePermission refusal takes, so leaving it empty here is what
+		// made the marker classify as a refusal and key as an error signature.
+		DenialReason: denialCategoryForResult(tools.Result{Meta: meta}),
 	}
 }
 
@@ -2041,21 +2226,64 @@ func isRetriableToolError(result ToolResult) bool {
 	// A categorized denial (filtered / permission / sandbox) is a policy decision,
 	// not a transient failure — never retry it. This is robust to message wording
 	// (the text checks below remain as a fallback for results lacking the field).
+	return !isPolicyRefusal(result)
+}
+
+// isPolicyRefusal reports a result the run refused on policy grounds: a
+// permission gate, a filter, a sandbox preflight, or a hook.
+//
+// Split out of isRetriableToolError so the two questions cannot drift apart,
+// which is exactly what they had done. The halt guard asked
+// `DenialReason != DenialNone`, and a category is only attached on the paths
+// that build a TYPED denial. A headless run leaves OnPermissionRequest nil, so
+// the loop never reaches its typed-denial branch and the registry returns a bare
+// `Error: Permission required ...` carrying no category. A sandbox preflight
+// denial on a non-shell tool loses its SandboxDecision converting to ToolResult
+// and arrives as an uncategorized `Sandbox block`.
+//
+// Both are refusals, and both were counted as SUCCESS, so observeToolResult
+// cleared the record and the same refused call could repeat to MaxTurns. That is
+// the loop this guard exists to stop. The text checks below already enumerated
+// these outcomes for the retriable question; they simply were not reachable from
+// the counting one.
+func isPolicyRefusal(result ToolResult) bool {
+	// A REFUSAL IS A FAILURE. Everything below inspects metadata and then output
+	// text, and neither is meaningful on a result the tool completed.
+	//
+	// isRetriableToolError gates on this before it calls here, so the boundary
+	// held while that was the only caller. Extracting this helper and calling it
+	// straight from the counting path dropped the gate: an allowed `bash`
+	// printing "Sandbox block", or a read_file returning a document that quotes
+	// one of these phrases, was counted as a denial. Six such successes tripped
+	// the same-signature stop and ended a healthy run with a refusal answer.
+	//
+	// The gate belongs here rather than at each caller, because the next caller
+	// will forget it too.
+	if result.Status != tools.StatusError {
+		return false
+	}
 	if result.DenialReason != DenialNone {
-		return false
+		return true
 	}
-	if result.Meta["permission_action"] == string(PermissionActionDeny) {
-		return false
+	if result.Meta[tools.PermissionActionMeta] == string(PermissionActionDeny) {
+		return true
 	}
-	switch {
-	case strings.Contains(result.Output, "is not enabled for this run"),
-		strings.Contains(result.Output, "Permission denied for "),
-		strings.Contains(result.Output, "Permission required for "),
-		strings.Contains(result.Output, "Sandbox block"),
-		strings.Contains(result.Output, "Sandbox approval required for "):
-		return false
-	}
-	return true
+	// STRUCTURED ONLY. This used to fall back to matching phrases in Output
+	// ("Sandbox block", "Permission denied for ", and so on), which cannot work:
+	// Output is tool-controlled. `bash` preserves arbitrary stdout and stderr on
+	// a StatusError for any nonzero exit, so an ALLOWED command running
+	// `printf 'Sandbox block\n' >&2; exit 1` has actually executed, carries no
+	// DenialReason, and was still classified as refused. The loop then withheld
+	// the schema hint and the profile failure-streak recovery, counted the
+	// executed failure toward the refusal halt, and a later stop told the user a
+	// tool had been refused when it had run.
+	//
+	// read_file returning a document that quotes one of those phrases did the
+	// same thing, which is the more likely way a real session hits it.
+	//
+	// The registry now marks every path that returns BEFORE the tool runs, so
+	// the question is answerable from provenance. Nothing below reads Output.
+	return tools.IsPolicyRefusalResult(tools.Result{Meta: result.Meta})
 }
 
 // scrubInterceptedOutput mirrors the registry's scrubResultSecrets boundary for
@@ -2621,7 +2849,7 @@ func deniedPermissionResult(call ToolCall, reason string, requestEvent Permissio
 		Output:       "Error: Permission denied for " + call.Name + ": " + reason,
 		DenialReason: denial,
 		Meta: map[string]string{
-			"permission_action": string(event.Action),
+			tools.PermissionActionMeta: string(event.Action),
 		},
 	}
 }
@@ -2647,7 +2875,7 @@ func canceledPermissionResult(call ToolCall, reason string, requestEvent Permiss
 		Output:       "Error: Permission approval cancelled for " + call.Name + ": " + reason,
 		DenialReason: DenialApprovalCanceled,
 		Meta: map[string]string{
-			"permission_action": string(event.Action),
+			tools.PermissionActionMeta: string(event.Action),
 		},
 	}
 }
@@ -3464,8 +3692,10 @@ func copyMessages(messages []Message) []Message {
 //
 // The text names the tool so the model can tell which call an image came from
 // when several ran in one turn — the images arrive detached from their tool
-// result, so nothing else associates them.
-func toolResultImageMessage(result ToolResult) (zeroruntime.Message, bool) {
+// result, so nothing else associates them. If the effective model cannot
+// accept images, the tool's text result is left unchanged and this follow-up
+// is a notice with no image parts, matching the CLI/TUI vision gate.
+func toolResultImageMessage(result ToolResult, options Options) (zeroruntime.Message, bool) {
 	images := make([]zeroruntime.ImageBlock, 0, len(result.Images))
 	for _, image := range result.Images {
 		if len(image.Data) == 0 {
@@ -3486,9 +3716,53 @@ func toolResultImageMessage(result ToolResult) (zeroruntime.Message, bool) {
 	if label == "" {
 		label = "tool"
 	}
+	if !modelAcceptsToolImages(options) {
+		return zeroruntime.Message{
+			Role:    zeroruntime.MessageRoleUser,
+			Content: "Image output from " + label + " was not sent because the current model does not support image input. Switch to a vision-capable model before retrying image delivery, including any images skipped by the tool's image budget.",
+		}, true
+	}
 	return zeroruntime.Message{
 		Role:    zeroruntime.MessageRoleUser,
 		Content: "Image output from " + label + ":",
 		Images:  images,
 	}, true
+}
+
+// precomputedResultFor reports the read-ahead result for call index, and whether
+// that call actually produced one. A batch entry that never started is still
+// unstarted as far as the transcript is concerned.
+//
+// PRODUCING A RESULT AND ASKING THE RUN TO STOP ARE DIFFERENT FACTS. Treating a
+// non-nil abortErr as "unstarted" conflated them, and a cancelled permission
+// request is exactly the case where they disagree: executeToolCall builds the
+// cancellation result and returns it WITH ErrPermissionApprovalCanceled, so an
+// earlier sibling reaching a terminal branch discarded a real result and wrote
+// an aborted placeholder in its place. The transcript then denied that the call
+// had completed permission handling, and the cancellation was missing from
+// OnToolResult, the trace counters and the task observation even though the
+// permission event had already happened.
+//
+// The terminal decision is not affected: draining such a sibling only records
+// what occurred, it cannot reverse a stop already selected.
+func precomputedResultFor(precomputed []precomputedToolResult, start, end, index int) (ToolResult, bool) {
+	if index < start || index >= end {
+		return ToolResult{}, false
+	}
+	entry := precomputed[index-start]
+	if !entry.completed {
+		return ToolResult{}, false
+	}
+	return entry.result, true
+}
+
+func modelAcceptsToolImages(options Options) bool {
+	if options.SupportsVision != nil {
+		return options.SupportsVision(options.Model)
+	}
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		return modelregistry.VisionCapableByName(options.Model)
+	}
+	return modelregistry.SupportsVision(registry, options.Model)
 }

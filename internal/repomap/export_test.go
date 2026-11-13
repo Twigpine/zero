@@ -4,7 +4,7 @@ package repomap
 import (
 	"io/fs"
 
-	"github.com/Gitlawb/zero/internal/workspaceindex"
+	"github.com/Twigpine/zero/internal/workspaceindex"
 )
 
 func handleWalkError(cleanRoot string, current string, entry fs.DirEntry, walkErr error, truncated *bool) (bool, error) {

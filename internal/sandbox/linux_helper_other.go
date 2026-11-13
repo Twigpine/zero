@@ -8,6 +8,9 @@ import (
 )
 
 func RunLinuxSandboxHelper(args []string, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == LinuxSandboxHelperSubcommand {
+		args = args[1:]
+	}
 	if _, err := ParseLinuxSandboxHelperArgs(args); err != nil {
 		fmt.Fprintln(stderr, LinuxSandboxHelperName+": "+err.Error())
 		return 2

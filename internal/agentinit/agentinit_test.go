@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/repoinfo"
+	"github.com/Twigpine/zero/internal/repoinfo"
 )
 
 func intPtr(n int) *int { return &n }

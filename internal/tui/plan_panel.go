@@ -7,7 +7,7 @@ package tui
 import (
 	"time"
 
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 // planStep is one rendered plan item. The timestamps are preserved across

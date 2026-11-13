@@ -9,17 +9,28 @@ import (
 )
 
 // npmPackageName is the published package name for the npm distribution of
-// zero (see package.json). scripts/postinstall.mjs downloads the native
-// binary into the same directory as package.json and leaves a
-// ".zero-binary-version" marker file next to it — both are reliable signals
-// that a given executable came from an npm install.
-const npmPackageName = "@gitlawb/zero"
+// zero, and must equal the name in the repository's package.json
+// (TestNpmPackageNameMatchesPackageJSON holds the two together).
+// scripts/postinstall.mjs downloads the native binary into the same directory
+// as package.json and leaves a ".zero-binary-version" marker file next to it —
+// both are reliable signals that a given executable came from an npm install.
+const npmPackageName = "@twigpine/zero"
+
+// legacyNpmPackageName is the name zero was published under on npm up to
+// 0.9.0. The 0.10.0 release was published once more under it, so that 0.9.0's
+// `zero upgrade` and anyone still installing the old name land on a build that
+// says where the package went (docs/NPM_PACKAGING.md). Nothing is published
+// under it after that, which is why an install of it is told to switch instead
+// of offered an update.
+const legacyNpmPackageName = "@gitlawb/zero"
 
 // InstallMethod identifies how the running zero binary was installed.
 type InstallMethod string
 
 const (
-	InstallMethodNpm        InstallMethod = "npm"
+	InstallMethodNpm InstallMethod = "npm"
+	// InstallMethodNpmLegacy is an npm install of legacyNpmPackageName.
+	InstallMethodNpmLegacy  InstallMethod = "npm-legacy"
 	InstallMethodHomebrew   InstallMethod = "homebrew"
 	InstallMethodStandalone InstallMethod = "standalone"
 )
@@ -53,30 +64,69 @@ func DetectInstallMethod(executablePath string) InstallMethod {
 		return InstallMethodHomebrew
 	}
 	dir := filepath.Dir(executablePath)
+	pkg, hasManifest := readNpmManifest(dir)
 	if _, err := os.Stat(filepath.Join(dir, ".zero-binary-version")); err == nil {
+		// The first-run downloader put this binary next to the wrapper's own
+		// package.json, which names the package it was installed as.
+		if hasManifest && pkg.Name == legacyNpmPackageName {
+			return InstallMethodNpmLegacy
+		}
 		return InstallMethodNpm
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "package.json"))
-	if err != nil {
-		return InstallMethodStandalone
-	}
-	var pkg struct {
-		Name string          `json:"name"`
-		OS   []string        `json:"os"`
-		CPU  []string        `json:"cpu"`
-		Bin  json.RawMessage `json:"bin"`
-	}
-	if err := json.Unmarshal(data, &pkg); err != nil {
+	if !hasManifest {
 		return InstallMethodStandalone
 	}
 	// The native platform package is inert and constrained to one OS/CPU. The
 	// repository's wrapper package has the same name but carries a bin entry and
 	// broad platform lists, so name alone would misclassify `go build -o zero`
 	// from the repository root as an npm-managed install.
-	if pkg.Name == npmPackageName && len(pkg.OS) == 1 && len(pkg.CPU) == 1 && len(pkg.Bin) == 0 {
+	if len(pkg.OS) != 1 || len(pkg.CPU) != 1 || len(pkg.Bin) != 0 {
+		return InstallMethodStandalone
+	}
+	switch pkg.Name {
+	case npmPackageName:
 		return InstallMethodNpm
+	case legacyNpmPackageName:
+		return InstallMethodNpmLegacy
 	}
 	return InstallMethodStandalone
+}
+
+type npmManifest struct {
+	Name string          `json:"name"`
+	OS   []string        `json:"os"`
+	CPU  []string        `json:"cpu"`
+	Bin  json.RawMessage `json:"bin"`
+}
+
+// readNpmManifest reads the package.json in dir, reporting false when there is
+// none or it does not parse.
+func readNpmManifest(dir string) (npmManifest, bool) {
+	data, err := os.ReadFile(filepath.Join(dir, "package.json"))
+	if err != nil {
+		return npmManifest{}, false
+	}
+	var pkg npmManifest
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		return npmManifest{}, false
+	}
+	return pkg, true
+}
+
+// legacyPackageSwitchMessage tells someone running the build published under
+// legacyNpmPackageName how to move to npmPackageName. bin/zero.js prints the
+// same note.
+//
+// There is no in-place migration. Both packages own the `zero` bin, so npm
+// refuses to install the new one over the old (EEXIST), and forcing it lets a
+// later uninstall of the old package delete the shared bin. Uninstalling first
+// is the only safe order, and it has to be the user's own step: the running
+// binary is inside the package it would remove.
+func legacyPackageSwitchMessage() string {
+	return "Zero has moved to " + npmPackageName + " on npm, and " + legacyNpmPackageName + " gets no further releases. To keep getting updates, quit zero and run:\n" +
+		"  npm uninstall -g " + legacyNpmPackageName + "\n" +
+		"  npm install -g " + npmPackageName + "\n" +
+		"Uninstall first: both packages provide the `zero` command. With bun, pnpm or yarn, use its global remove and add commands instead."
 }
 
 // isHomebrewPath reports whether executablePath is inside a Homebrew keg.

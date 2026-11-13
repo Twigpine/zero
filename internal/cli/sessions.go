@@ -5,10 +5,10 @@ import (
 	"io"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/agentsessions"
-	"github.com/Gitlawb/zero/internal/redaction"
-	"github.com/Gitlawb/zero/internal/sessions"
-	"github.com/Gitlawb/zero/internal/zerocommands"
+	"github.com/Twigpine/zero/internal/agentsessions"
+	"github.com/Twigpine/zero/internal/redaction"
+	"github.com/Twigpine/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/zerocommands"
 )
 
 type sessionCommandOptions struct {
@@ -23,6 +23,8 @@ type sessionCommandOptions struct {
 	agent            string
 	maxEvents        int
 	includeReasoning bool
+	olderThan        string
+	dryRun           bool
 }
 
 func runSessions(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -87,6 +89,11 @@ func runSessions(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 			return writeExecUsageError(stderr, "sessions import requires a reference of the form <agent>:<id>")
 		}
 		return runSessionsImport(store, remaining[0], options, stdout, stderr)
+	case "prune":
+		if len(remaining) != 0 {
+			return writeExecUsageError(stderr, "sessions prune does not accept positional arguments")
+		}
+		return runSessionsPrune(store, options, stdout, stderr, deps)
 	default:
 		return writeExecUsageError(stderr, fmt.Sprintf("unknown sessions command %q", command))
 	}
@@ -121,6 +128,8 @@ func parseSessionsArgs(args []string) (string, []string, sessionCommandOptions, 
 			}
 			options.agent = agent
 			index = next
+		case "--dry-run":
+			options.dryRun = true
 		case "--kind":
 			value, next, err := nextFlagValue(args, index, arg)
 			if err != nil {
@@ -197,6 +206,21 @@ func parseSessionsArgs(args []string) (string, []string, sessionCommandOptions, 
 					return command, remaining, options, false, err
 				}
 				options.preserveLast = preserveLast
+				continue
+			case arg == "--older-than":
+				value, next, err := nextFlagValue(args, index, arg)
+				if err != nil {
+					return command, remaining, options, false, err
+				}
+				options.olderThan = value
+				index = next
+				continue
+			case strings.HasPrefix(arg, "--older-than="):
+				value, err := parseNonEmptySessionsFlag("--older-than", strings.TrimPrefix(arg, "--older-than="))
+				if err != nil {
+					return command, remaining, options, false, err
+				}
+				options.olderThan = value
 				continue
 			case arg == "--max-prompt-chars":
 				value, next, err := nextFlagValue(args, index, arg)
@@ -281,7 +305,7 @@ func parseSessionKindFlag(value string) (sessions.SessionKind, error) {
 
 func isSessionsCommand(command string) bool {
 	switch command {
-	case "list", "children", "lineage", "tree", "rewind-plan", "rewind", "compact-plan", "discover", "import":
+	case "list", "children", "lineage", "tree", "rewind-plan", "rewind", "compact-plan", "discover", "import", "prune":
 		return true
 	default:
 		return false
@@ -305,6 +329,9 @@ func validateSessionCommandFlags(command string, options sessionCommandOptions) 
 	}
 	if (options.maxEvents > 0 || options.includeReasoning) && command != "import" {
 		return execUsageError{"--max-events and --include-reasoning are only valid for sessions import"}
+	}
+	if (options.olderThan != "" || options.dryRun) && command != "prune" {
+		return execUsageError{"--older-than and --dry-run are only valid for sessions prune"}
 	}
 	return nil
 }
@@ -596,6 +623,7 @@ Commands:
   compact-plan <id>     Preview events compacted and preserved by compaction
   discover              List sessions from other coding agents on this machine
   import <agent>:<id>   Copy one of those sessions into Zero, then --resume it
+  prune                 Remove sessions last updated before a cutoff
 
 Flags:
       --json            Print JSON output
@@ -609,11 +637,17 @@ Flags:
       --agent <name>    Only this agent (discover)
       --max-events <n>  Keep only the last n events (import)
       --include-reasoning Keep the other model's thinking blocks (import)
-  -h, --help            Show this help
 
 discover and import are read-only with respect to the other agent: Zero reads
 its transcripts, never its credentials, and never writes to its store. The
 imported session runs on Zero's own provider and your own key.
+      --older-than <age>  Prune cutoff, as days (30d) or a duration (720h); at least 1d.
+                        Without it, prune uses sessions.retentionDays from your user config.
+      --dry-run         List what prune would remove, and why it keeps the rest
+  -h, --help            Show this help
+
+prune only runs when you run it. It never removes a session another Zero process
+has open, or an ancestor of a session it keeps, and --dry-run shows why.
 `)
 	return err
 }

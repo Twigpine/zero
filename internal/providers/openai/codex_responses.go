@@ -47,8 +47,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/providers/providerio"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/providers/providerio"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 // Codex Responses API event type names. Only the ones the Codex backend
@@ -212,13 +212,32 @@ type errorPayload struct {
 // response.output_item.added, the argument deltas, and the final
 // response.output_item.done.
 type toolCallBuilder struct {
-	ID        string
-	CallID    string
-	Name      string
+	ID     string
+	CallID string
+	Name   string
+	// Arguments holds exactly the input already forwarded to the runtime as
+	// tool-call deltas: every write goes through forwardInput, so an empty
+	// builder means the runtime has received nothing for this call yet. The
+	// done handler relies on that to forward input that only arrived whole
+	// (on the added or done item) without duplicating streamed fragments.
 	Arguments strings.Builder
 	Freeform  bool
 	started   bool
 	ended     bool
+}
+
+// forwardInput appends fragment to the builder and emits the matching
+// tool-call delta, keeping the builder and the runtime in step.
+func (builder *toolCallBuilder) forwardInput(ctx context.Context, events chan<- zeroruntime.StreamEvent, fragment string) {
+	if fragment == "" {
+		return
+	}
+	builder.Arguments.WriteString(fragment)
+	providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
+		Type:              zeroruntime.StreamEventToolCallDelta,
+		ToolCallID:        builder.ID,
+		ArgumentsFragment: fragment,
+	})
 }
 
 // responsesState tracks in-flight tool calls and whether the terminal
@@ -726,9 +745,6 @@ func (p *CodexProvider) handleOutputItemAdded(
 			builder.Name = event.Item.Name
 		}
 		builder.Freeform = builder.Freeform || event.Item.Type == "custom_tool_call"
-		if builder.Freeform && event.Item.Input != "" && builder.Arguments.Len() == 0 {
-			builder.Arguments.WriteString(event.Item.Input)
-		}
 		state.emitted = true
 		if !builder.started {
 			providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
@@ -739,6 +755,11 @@ func (p *CodexProvider) handleOutputItemAdded(
 				ToolCallFreeform:   builder.Freeform,
 			})
 			builder.started = true
+		}
+		// A custom tool call may arrive with its whole input on the added item
+		// instead of input deltas; the runtime needs it as a delta either way.
+		if builder.Freeform && builder.Arguments.Len() == 0 {
+			builder.forwardInput(ctx, events, event.Item.Input)
 		}
 	}
 }
@@ -773,13 +794,8 @@ func (p *CodexProvider) handleToolInputDelta(
 	if event.CallID != "" && builder.CallID == "" {
 		builder.CallID = event.CallID
 	}
-	builder.Arguments.WriteString(event.Delta)
 	state.emitted = true
-	providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
-		Type:              zeroruntime.StreamEventToolCallDelta,
-		ToolCallID:        key,
-		ArgumentsFragment: event.Delta,
-	})
+	builder.forwardInput(ctx, events, event.Delta)
 }
 
 // handleOutputItemDone finalizes a tool call when the item type is
@@ -813,13 +829,6 @@ func (p *CodexProvider) handleOutputItemDone(
 		builder.CallID = event.Item.CallID
 	}
 	builder.Freeform = builder.Freeform || event.Item.Type == "custom_tool_call"
-	finalInput := event.Item.Arguments
-	if builder.Freeform {
-		finalInput = event.Item.Input
-	}
-	if finalInput != "" && builder.Arguments.Len() == 0 {
-		builder.Arguments.WriteString(finalInput)
-	}
 	if !builder.started {
 		providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
 			Type:               zeroruntime.StreamEventToolCallStart,
@@ -829,6 +838,16 @@ func (p *CodexProvider) handleOutputItemDone(
 			ToolCallFreeform:   builder.Freeform,
 		})
 		builder.started = true
+	}
+	// The done item repeats the complete input. When nothing reached the
+	// runtime through deltas (or the added item), this is the only copy, so
+	// forward it before closing the call; otherwise the streamed copy stands.
+	if builder.Arguments.Len() == 0 {
+		finalInput := event.Item.Arguments
+		if builder.Freeform {
+			finalInput = event.Item.Input
+		}
+		builder.forwardInput(ctx, events, finalInput)
 	}
 	providerio.SendEvent(ctx, events, zeroruntime.StreamEvent{
 		Type:       zeroruntime.StreamEventToolCallEnd,

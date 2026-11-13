@@ -13,7 +13,7 @@ import (
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 type transcriptSelectionPoint struct {
@@ -1020,7 +1020,7 @@ func (m model) renderSelectableReasoningRow(rowIndex int, row transcriptRow, wid
 }
 
 func (m model) renderSelectableStreamingReasoning(width int, startBodyY int) []transcriptSelectableLine {
-	_, selectable := m.renderSelectableReasoningBlock(-1, m.streamingReasoning, m.streamingReasoningExpanded, true, 0, width, startBodyY)
+	_, selectable := m.renderSelectableReasoningBlock(-1, m.streamingReasoningString(), m.streamingReasoningExpanded, true, 0, width, startBodyY)
 	for index := range selectable {
 		selectable[index].live = true
 	}

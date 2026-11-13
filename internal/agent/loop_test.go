@@ -13,13 +13,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/execution"
-	"github.com/Gitlawb/zero/internal/hooks"
-	"github.com/Gitlawb/zero/internal/sandbox"
-	"github.com/Gitlawb/zero/internal/specmode"
-	"github.com/Gitlawb/zero/internal/tools"
-	"github.com/Gitlawb/zero/internal/trace"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/execution"
+	"github.com/Twigpine/zero/internal/hooks"
+	"github.com/Twigpine/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/specmode"
+	"github.com/Twigpine/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/trace"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 type mockProvider struct {
@@ -685,11 +685,23 @@ func TestIsRetriableToolError(t *testing.T) {
 		{"success", ToolResult{Status: tools.StatusOK}, false},
 		{"bad arguments", ToolResult{Status: tools.StatusError, Output: "Error: Failed to parse arguments for x: bad json"}, true},
 		{"execution failure", ToolResult{Status: tools.StatusError, Output: "Error: read foo.txt: no such file"}, true},
-		{"disabled tool", ToolResult{Status: tools.StatusError, Output: `Error: Tool "x" is not enabled for this run.`}, false},
+		// Each refusal carries the provenance its production path attaches: the
+		// disabled-tool path sets a denial category, the registry gates set the
+		// pre-execution marker. Text is never what decides.
+		{"disabled tool", ToolResult{Status: tools.StatusError, Output: `Error: Tool "x" is not enabled for this run.`, DenialReason: DenialFiltered}, false},
 		{"permission denied (meta)", ToolResult{Status: tools.StatusError, Output: "Error: Permission denied for x: needs approval", Meta: map[string]string{"permission_action": "deny"}}, false},
-		{"permission required", ToolResult{Status: tools.StatusError, Output: "Error: Permission required for x: approve first"}, false},
-		{"sandbox block", ToolResult{Status: tools.StatusError, Output: "Error: Sandbox block: outside_workspace"}, false},
-		{"sandbox approval", ToolResult{Status: tools.StatusError, Output: "Error: Sandbox approval required for x: network"}, false},
+		{"permission required", ToolResult{Status: tools.StatusError, Output: "Error: Permission required for x: approve first", Meta: map[string]string{tools.PolicyRefusalMeta: tools.PolicyRefusalPermissionRequired}}, false},
+		{"sandbox block", ToolResult{Status: tools.StatusError, Output: "Error: Sandbox block: outside_workspace", Meta: map[string]string{tools.PolicyRefusalMeta: tools.PolicyRefusalSandboxDenied}}, false},
+		{"sandbox approval", ToolResult{Status: tools.StatusError, Output: "Error: Sandbox approval required for x: network", Meta: map[string]string{tools.PolicyRefusalMeta: tools.PolicyRefusalSandboxApproval}}, false},
+		// THE INVERSE, which is the failure this classifier had. An allowed tool
+		// that RAN, failed, and happened to print one of those phrases must stay
+		// retriable: `bash` preserves arbitrary stdout and stderr on any nonzero
+		// exit, and read_file returns whatever the file says.
+		{"executed failure printing the sandbox phrase", ToolResult{Status: tools.StatusError, Output: "Sandbox block\n"}, true},
+		{"executed failure printing a permission denial", ToolResult{Status: tools.StatusError, Output: "cp: Permission denied for /etc/hosts"}, true},
+		{"executed failure printing a permission requirement", ToolResult{Status: tools.StatusError, Output: "Permission required for sudo"}, true},
+		{"executed failure printing the approval phrase", ToolResult{Status: tools.StatusError, Output: "Sandbox approval required for curl"}, true},
+		{"executed failure quoting the disabled-tool phrase", ToolResult{Status: tools.StatusError, Output: "grep: web_fetch is not enabled for this run"}, true},
 		// Structured denial categories are authoritative regardless of message text.
 		{"denial: filtered", ToolResult{Status: tools.StatusError, Output: "anything", DenialReason: DenialFiltered}, false},
 		{"denial: permission", ToolResult{Status: tools.StatusError, Output: "anything", DenialReason: DenialPermissionDenied}, false},
@@ -4190,6 +4202,86 @@ func TestRunNilTraceForwardsUsage(t *testing.T) {
 	}
 	if onUsageCalls == 0 {
 		t.Fatal("OnUsage not forwarded when Trace is nil")
+	}
+}
+
+// TestRunReturnsStreamErrorWithStatusCodeAndCause covers the collector-to-agent
+// propagation boundary: a provider stream that terminates with a StreamEventError
+// carrying StatusCode/Cause must have Run return an error that errors.As can
+// still recover those fields from — the detail a session's "error" event needs
+// to actually diagnose why a provider call failed (#674).
+func TestRunReturnsStreamErrorWithStatusCodeAndCause(t *testing.T) {
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{{
+		{
+			Type:       zeroruntime.StreamEventError,
+			Error:      "provider error: provider returned error",
+			StatusCode: 500,
+			Cause:      "upstream returned an empty completion",
+		},
+	}}}
+
+	_, err := Run(context.Background(), "hi", provider, Options{
+		SessionID:    "stream-error-session",
+		Cwd:          t.TempDir(),
+		ProviderName: "test-provider",
+		Model:        "test-model",
+	})
+	if err == nil {
+		t.Fatal("Run: expected an error, got nil")
+	}
+
+	var streamErr *zeroruntime.StreamError
+	if !errors.As(err, &streamErr) {
+		t.Fatalf("Run error %v (%T) does not unwrap to *zeroruntime.StreamError", err, err)
+	}
+	if streamErr.StatusCode != 500 {
+		t.Fatalf("StatusCode = %d, want 500", streamErr.StatusCode)
+	}
+	if streamErr.Cause != "upstream returned an empty completion" {
+		t.Fatalf("Cause = %q, want %q", streamErr.Cause, "upstream returned an empty completion")
+	}
+	if err.Error() != "provider error: provider returned error" {
+		t.Fatalf("Error() = %q, want the flattened message unchanged", err.Error())
+	}
+}
+
+// TestRunImageRejectionKeepsStreamErrorStatusCodeAndCause covers the 400
+// image-rejection recovery path: the friendly message is kept, but the returned
+// error must still unwrap to the *StreamError so StatusCode and Cause reach the
+// session's "error" event (#674).
+func TestRunImageRejectionKeepsStreamErrorStatusCodeAndCause(t *testing.T) {
+	provider := &mockProvider{turns: [][]zeroruntime.StreamEvent{{
+		{
+			Type:       zeroruntime.StreamEventError,
+			Error:      "provider error 400: image input is not supported",
+			StatusCode: 400,
+			Cause:      "this model does not support image input",
+		},
+	}}}
+
+	_, err := Run(context.Background(), "hi", provider, Options{
+		SessionID:    "image-rejection-session",
+		Cwd:          t.TempDir(),
+		ProviderName: "test-provider",
+		Model:        "test-model",
+	})
+	if err == nil {
+		t.Fatal("Run: expected an error, got nil")
+	}
+
+	want := "model test-model rejected the image: provider error 400: image input is not supported. The model may not support image input — try switching to a vision-capable model (claude, gpt-4o, gemini)"
+	if err.Error() != want {
+		t.Fatalf("Error() = %q, want the friendly message unchanged: %q", err.Error(), want)
+	}
+	var streamErr *zeroruntime.StreamError
+	if !errors.As(err, &streamErr) {
+		t.Fatalf("Run error %v (%T) does not unwrap to *zeroruntime.StreamError", err, err)
+	}
+	if streamErr.StatusCode != 400 {
+		t.Fatalf("StatusCode = %d, want 400", streamErr.StatusCode)
+	}
+	if streamErr.Cause != "this model does not support image input" {
+		t.Fatalf("Cause = %q, want the upstream cause", streamErr.Cause)
 	}
 }
 

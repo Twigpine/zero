@@ -203,112 +203,15 @@ func highlightCodeAuto(code []string, lang string, measure int) ([]string, bool)
 }
 
 func highlightCodeForPath(code []string, path string, measure int, bg color.Color) ([]string, bool) {
-	return highlightCodeWithLexer(cachedLexerForPath(path), code, measure, bg)
+	return highlightCodeForPathWithTheme(code, path, measure, bg, zeroTheme)
 }
 
-// highlightShellCommand styles a one-line command for a tool-card heading.
-// Command output is deliberately left untouched: it may be structured data,
-// prose, or terminal control text rather than shell source.
-func highlightShellCommand(command string) (string, bool) {
-	if command == "" {
-		return "", false
+func highlightCodeForPathWithTheme(code []string, path string, measure int, bg color.Color, theme tuiTheme) ([]string, bool) {
+	backgrounds := make([]color.Color, len(code))
+	for index := range backgrounds {
+		backgrounds[index] = bg
 	}
-	lexer := cachedLexer("bash")
-	if lexer == nil {
-		return "", false
-	}
-	iterator, err := lexer.Tokenise(nil, command)
-	if err != nil {
-		return "", false
-	}
-	var builder strings.Builder
-	expectingCommand := true
-	for _, token := range iterator.Tokens() {
-		if token.Type == chroma.Text || token.Type == chroma.TextWhitespace {
-			builder.WriteString(highlightShellText(token.Value, &expectingCommand))
-			continue
-		}
-		builder.WriteString(tokenStyle(token.Type).Render(token.Value))
-		if token.Type.InCategory(chroma.Operator) || (token.Type.InCategory(chroma.Punctuation) && strings.ContainsAny(token.Value, ";|")) {
-			expectingCommand = true
-		}
-	}
-	return builder.String(), true
-}
-
-func highlightShellText(text string, expectingCommand *bool) string {
-	var builder strings.Builder
-	for start := 0; start < len(text); {
-		end := start
-		space := text[start] == ' ' || text[start] == '\t'
-		for end < len(text) {
-			isSpace := text[end] == ' ' || text[end] == '\t'
-			if isSpace != space {
-				break
-			}
-			end++
-		}
-		part := text[start:end]
-		if space {
-			builder.WriteString(part)
-			start = end
-			continue
-		}
-
-		clean := strings.Trim(part, "\"'")
-		style := tokenStyle(chroma.Text)
-		switch {
-		case isShellControlOperator(clean):
-			style = tokenStyle(chroma.Operator)
-			*expectingCommand = true
-		case *expectingCommand:
-			style = tokenStyle(chroma.NameFunction)
-			*expectingCommand = isShellCommandWrapper(clean)
-		case strings.HasPrefix(clean, "-"):
-			style = tokenStyle(chroma.NameAttribute)
-		case isShellNumber(clean):
-			style = tokenStyle(chroma.LiteralNumber)
-		case looksLikeShellPath(clean):
-			style = tokenStyle(chroma.LiteralString)
-		}
-		builder.WriteString(style.Render(part))
-		start = end
-	}
-	return builder.String()
-}
-
-func isShellControlOperator(value string) bool {
-	switch value {
-	case "&&", "||", "|", ";":
-		return true
-	default:
-		return false
-	}
-}
-
-func isShellCommandWrapper(value string) bool {
-	switch value {
-	case "sudo", "env", "command", "time", "xargs":
-		return true
-	default:
-		return false
-	}
-}
-
-func isShellNumber(value string) bool {
-	if value == "" {
-		return false
-	}
-	for _, r := range value {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-func looksLikeShellPath(value string) bool {
-	return strings.HasPrefix(value, "./") || strings.HasPrefix(value, "../") || strings.HasPrefix(value, "/") || strings.HasPrefix(value, "~/") || strings.Contains(value, "/")
+	return highlightCodeWithLexerThemeAndLineBackgrounds(cachedLexerForPath(path), code, measure, theme, backgrounds, nil)
 }
 
 // highlightSpan overlays a background on a rune range in one source line while
@@ -318,10 +221,6 @@ type highlightSpan struct {
 	line       int
 	start, end int
 	background color.Color
-}
-
-func highlightCodeForPathWithSpans(code []string, path string, measure int, bg color.Color, spans []highlightSpan) ([]string, bool) {
-	return highlightCodeWithLexerAndSpans(cachedLexerForPath(path), code, measure, bg, spans)
 }
 
 // highlightCodeForPathWithLineBackgrounds applies syntax highlighting to a
@@ -394,6 +293,10 @@ func highlightCodeWithLexerAndSpans(lexer chroma.Lexer, code []string, measure i
 }
 
 func highlightCodeWithLexerAndLineBackgrounds(lexer chroma.Lexer, code []string, measure int, backgrounds []color.Color, spans []highlightSpan) ([]string, bool) {
+	return highlightCodeWithLexerThemeAndLineBackgrounds(lexer, code, measure, zeroTheme, backgrounds, spans)
+}
+
+func highlightCodeWithLexerThemeAndLineBackgrounds(lexer chroma.Lexer, code []string, measure int, theme tuiTheme, backgrounds []color.Color, spans []highlightSpan) ([]string, bool) {
 	if measure < 4 {
 		return nil, false
 	}
@@ -476,7 +379,7 @@ func highlightCodeWithLexerAndLineBackgrounds(lexer chroma.Lexer, code []string,
 
 	line, column := 0, 0
 	for _, token := range iterator.Tokens() {
-		style := tokenStyle(token.Type)
+		style := tokenStyleForTheme(theme, token.Type)
 		for index, part := range strings.Split(token.Value, "\n") {
 			if index > 0 {
 				flushLine()

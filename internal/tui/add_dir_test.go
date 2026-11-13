@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/agent"
-	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/sandbox"
 )
 
 func TestParseCommandRecognizesAddDir(t *testing.T) {

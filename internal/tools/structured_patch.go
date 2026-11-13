@@ -9,8 +9,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/pathjail"
-	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/pathjail"
+	"github.com/Twigpine/zero/internal/sandbox"
 )
 
 const (

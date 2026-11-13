@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/repomap"
+	"github.com/Twigpine/zero/internal/repomap"
 )
 
 const defaultRepoMapOutputFiles = 40

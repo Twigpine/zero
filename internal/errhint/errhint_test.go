@@ -17,6 +17,7 @@ func TestClassify(t *testing.T) {
 		{"raw 401", "provider request error: 401 Unauthorized", Auth},
 		{"invalid api key", "provider request error: invalid_api_key: incorrect key provided", Auth},
 		{"rate limit prefix", "rate limit error: 429 too many requests", RateLimit},
+		{"local RPM", `rate limit error: local RPM limit for "gpt-4.1" (2 requests/60s); retry in 12s`, LocalRPM},
 		{"overloaded", "provider error: model is overloaded, please retry", RateLimit},
 		{"resource exhausted gemini", "provider stream error: rpc error: code = ResourceExhausted desc = quota exceeded", RateLimit},
 		{"context length openai", "provider request error: this model's maximum context length is 128000 tokens", ContextOverflow},

@@ -9,7 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/Gitlawb/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/agent"
 )
 
 // typeRunes feeds each rune of s through Update as an individual key press,
@@ -306,7 +306,7 @@ func TestSuggestionsSuppressedDuringSpecReview(t *testing.T) {
 }
 
 func TestSuggestionOverlayRenders(t *testing.T) {
-	m := newModel(context.Background(), Options{})
+	m := newViewTestModel(t, Options{})
 	m.width, m.height = 96, 30
 	m = typeRunes(t, m, "/mo")
 
@@ -387,7 +387,7 @@ func TestOverlayViewportLinesPreservesTextOutsidePanel(t *testing.T) {
 }
 
 func TestSuggestionOverlayCapsRowsWithoutMoreText(t *testing.T) {
-	m := newModel(context.Background(), Options{})
+	m := newViewTestModel(t, Options{})
 	m.width, m.height = 96, 30
 	m = typeRunes(t, m, "/")
 

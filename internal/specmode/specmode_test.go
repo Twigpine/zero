@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 func TestSaveDraftWritesPlainMarkdownWithCollisionSuffix(t *testing.T) {

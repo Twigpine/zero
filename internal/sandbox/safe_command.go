@@ -400,6 +400,32 @@ func isNumericToken(field string) bool {
 	return true
 }
 
+// shellCommandFlag reports whether arg is a shell option token that carries the
+// command string to run — the `-c`/`--command` flag — so callers can recurse into
+// the payload. POSIX getopt lets a shell cluster its short options, so the flag
+// is frequently grouped with other letters (`bash -ec`, `sh -lc`, `zsh -xc`);
+// a bare `-c` is only the one-letter case. A long option other than the exact
+// `--command` is not a match. `-o` and `-O` consume the remainder of their
+// cluster (or the next token) as an option value, so a `c` that follows them is
+// that value, not the command flag.
+func shellCommandFlag(arg string) bool {
+	if arg == "--command" {
+		return true
+	}
+	if len(arg) < 2 || arg[0] != '-' || arg[1] == '-' {
+		return false
+	}
+	for _, flag := range arg[1:] {
+		switch flag {
+		case 'c':
+			return true
+		case 'o', 'O':
+			return false
+		}
+	}
+	return false
+}
+
 // shellDashCPayload returns the command string passed to `sh -c`/`bash -c`
 // (and other POSIX shells) so the caller can recurse into it, or "" when the
 // segment is not a `<shell> -c <payload>` invocation. The payload is returned
@@ -416,7 +442,14 @@ func shellDashCPayload(program string, fields []string) string {
 	}
 	args := fields[start+1:]
 	for i, arg := range args {
-		if arg == "-c" || arg == "--command" {
+		// `--` ends option processing: every following token is a positional
+		// operand (a script name or argument), not a shell flag. Treating
+		// `bash -- -ec 'cmd'` as `-c` would recurse into an operand the shell
+		// never runs as a command string.
+		if arg == "--" {
+			break
+		}
+		if shellCommandFlag(arg) {
 			if i+1 < len(args) {
 				return strings.Join(args[i+1:], " ")
 			}

@@ -10,6 +10,27 @@ import (
 	"testing"
 )
 
+func fakeZeroMain(t *testing.T) string {
+	t.Helper()
+	name := "zero"
+	if runtime.GOOS == "windows" {
+		name = "zero.exe"
+	}
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	restoreExec := linuxSandboxExecutable
+	restoreFile := linuxFileIsExecutable
+	t.Cleanup(func() {
+		linuxSandboxExecutable = restoreExec
+		linuxFileIsExecutable = restoreFile
+	})
+	linuxSandboxExecutable = func() (string, error) { return path, nil }
+	linuxFileIsExecutable = func(p string) bool { return p == path }
+	return path
+}
+
 func TestBuildLinuxSandboxCommandArgsSerializesPermissionProfile(t *testing.T) {
 	profile := PermissionProfile{
 		FileSystem: FileSystemPolicy{
@@ -461,6 +482,64 @@ func indexString(values []string, want string) int {
 		}
 	}
 	return -1
+}
+
+func TestFindLinuxSandboxHelperCommandSelfExec(t *testing.T) {
+	cmd, err := findLinuxSandboxHelperCommand()
+	if err != nil {
+		t.Fatalf("findLinuxSandboxHelperCommand failed: %v", err)
+	}
+	if cmd.Name == "" {
+		t.Fatal("expected non-empty command name")
+	}
+	// When self-exec is selected, ArgsPrefix must contain __sandbox-helper
+	if len(cmd.ArgsPrefix) > 0 && cmd.ArgsPrefix[0] == "__sandbox-helper" {
+		exe, err := os.Executable()
+		if err != nil {
+			t.Fatalf("os.Executable: %v", err)
+		}
+		if cmd.Name != exe {
+			t.Fatalf("cmd.Name = %q, want os.Executable %q", cmd.Name, exe)
+		}
+	}
+}
+
+func TestBuildLinuxSandboxBwrapPlanVersionedStandaloneOmitsVerb(t *testing.T) {
+	plan, err := buildLinuxSandboxBwrapPlan(LinuxSandboxBwrapOptions{
+		Config: LinuxSandboxHelperConfig{
+			SandboxPolicyCWD: t.TempDir(),
+			CommandCWD:       t.TempDir(),
+			Command:          []string{"echo", "hello"},
+		},
+		HelperPath: "/usr/local/bin/zero-linux-sandbox-v1",
+	})
+	if err != nil {
+		t.Fatalf("buildLinuxSandboxBwrapPlan failed: %v", err)
+	}
+	if argsContainSequence(plan.Args, "__sandbox-helper") {
+		t.Fatalf("versioned standalone helper must not get __sandbox-helper: %v", plan.Args)
+	}
+	if !argsContainSequence(plan.Args, "--", "/usr/local/bin/zero-linux-sandbox-v1", "--sandbox-policy-cwd") {
+		t.Fatalf("expected flags directly after versioned helper path: %v", plan.Args)
+	}
+}
+
+func TestBuildLinuxSandboxBwrapPlanSelfExecInsertsHelperVerb(t *testing.T) {
+	plan, err := buildLinuxSandboxBwrapPlan(LinuxSandboxBwrapOptions{
+		Config: LinuxSandboxHelperConfig{
+			SandboxPolicyCWD: t.TempDir(),
+			CommandCWD:       t.TempDir(),
+			Command:          []string{"echo", "hello"},
+		},
+		HelperPath: "/usr/local/bin/zero",
+		SelfExec:   true,
+	})
+	if err != nil {
+		t.Fatalf("buildLinuxSandboxBwrapPlan failed: %v", err)
+	}
+	if !argsContainSequence(plan.Args, "--", "/usr/local/bin/zero", "__sandbox-helper", "--sandbox-policy-cwd") {
+		t.Fatalf("bwrap plan args missing __sandbox-helper after self-exec helperPath: %v", plan.Args)
+	}
 }
 
 func argsContainSequence(args []string, sequence ...string) bool {

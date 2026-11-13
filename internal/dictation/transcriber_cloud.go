@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/providers/providerio"
+	"github.com/Twigpine/zero/internal/providers/providerio"
 )
 
 // CloudConfig configures a batch cloud transcriber. Groq and OpenAI share the

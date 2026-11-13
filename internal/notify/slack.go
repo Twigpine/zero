@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/redaction"
+	"github.com/Twigpine/zero/internal/redaction"
 )
 
 // defaultWebhookTimeout bounds a single delivery attempt. A notification must

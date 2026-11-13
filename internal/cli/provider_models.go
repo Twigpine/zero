@@ -7,10 +7,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/providermodelcatalog"
-	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
-	"github.com/Gitlawb/zero/internal/providers"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/providermodelcatalog"
+	"github.com/Twigpine/zero/internal/providermodeldiscovery"
+	"github.com/Twigpine/zero/internal/providers"
 )
 
 type providerModelsOptions struct {

@@ -149,6 +149,7 @@ func TestRefreshModelsDevCacheRejectsBadBodyWithoutClobbering(t *testing.T) {
 	}
 	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
 	t.Setenv("ZERO_MODELS_URL", server.URL)
+	t.Setenv("ZERO_DISABLE_MODELS_FETCH", "")
 
 	if err := RefreshModelsDevCache(t.Context()); err == nil {
 		t.Fatal("bad body must return an error")
@@ -211,6 +212,9 @@ func TestCachedModelsDevProvidersIgnoresStaleCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
+	// The variable turns the overlay off too, which would pass this test
+	// without the staleness check ever running.
+	t.Setenv("ZERO_DISABLE_MODELS_FETCH", "")
 	resetModelsDevCacheForTest()
 	t.Cleanup(resetModelsDevCacheForTest)
 	EnableModelsDevOverlay()
@@ -226,6 +230,9 @@ func TestCachedModelsDevProvidersRequiresOptIn(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
+	// As above: with the variable set, a nil result says nothing about the
+	// opt-in.
+	t.Setenv("ZERO_DISABLE_MODELS_FETCH", "")
 	resetModelsDevCacheForTest()
 	t.Cleanup(resetModelsDevCacheForTest)
 
@@ -242,6 +249,7 @@ func TestDefaultModelEntriesAppliesFreshCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("ZERO_MODELS_CACHE_PATH", cachePath)
+	t.Setenv("ZERO_DISABLE_MODELS_FETCH", "")
 	resetModelsDevCacheForTest()
 	t.Cleanup(resetModelsDevCacheForTest)
 	EnableModelsDevOverlay()
@@ -255,4 +263,26 @@ func TestDefaultModelEntriesAppliesFreshCache(t *testing.T) {
 		}
 	}
 	t.Fatal("claude-sonnet-4.5 not found")
+}
+
+// With the fetch off, no refresh is started at all, so none is left running to
+// read the environment after a test has restored it and fetch into the real
+// cache.
+func TestStartModelsDevRefreshStartsNothingWhenTheFetchIsOff(t *testing.T) {
+	started := 0
+	previous := startModelsDevRefresh
+	startModelsDevRefresh = func() { started++ }
+	t.Cleanup(func() { startModelsDevRefresh = previous })
+
+	t.Setenv("ZERO_DISABLE_MODELS_FETCH", "1")
+	StartModelsDevRefresh()
+	if started != 0 {
+		t.Fatalf("started %d refreshes with the fetch off, want none", started)
+	}
+
+	t.Setenv("ZERO_DISABLE_MODELS_FETCH", "")
+	StartModelsDevRefresh()
+	if started != 1 {
+		t.Fatalf("started %d refreshes with the fetch on, want 1", started)
+	}
 }

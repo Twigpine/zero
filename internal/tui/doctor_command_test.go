@@ -8,9 +8,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/doctor"
-	"github.com/Gitlawb/zero/internal/providerhealth"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/doctor"
+	"github.com/Twigpine/zero/internal/providerhealth"
 )
 
 func TestParseDoctorCommandArgsRejectsFixWithConnectivity(t *testing.T) {

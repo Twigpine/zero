@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/providercatalog"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/providercatalog"
 )
 
 func TestSetupCommandUsesCatalogEnvAndSetActive(t *testing.T) {

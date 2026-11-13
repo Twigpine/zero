@@ -2,7 +2,8 @@
 
 Run this checklist when a PR changes npm distribution files such as
 `package.json`, `bin/zero.js`, `scripts/npm/build-platform-packages.mjs`,
-Go build or release tooling, or the npm `bin` wrapper.
+`scripts/npm/publish-packages.sh`, Go build or release tooling, or the npm
+`bin` wrapper.
 
 ## Required Checks
 
@@ -37,24 +38,24 @@ path:
 
 ```bash
 # platform-package path
-mkdir -p /tmp/zero-sim/node_modules/@gitlawb
-cp -R dist/npm/wrapper /tmp/zero-sim/node_modules/@gitlawb/zero
+mkdir -p /tmp/zero-sim/node_modules/@twigpine
+cp -R dist/npm/wrapper /tmp/zero-sim/node_modules/@twigpine/zero
 cp -R dist/npm/platforms/zero-<platform>-<arch> \
-  "/tmp/zero-sim/node_modules/@gitlawb/zero-<platform>-<arch>"
-node /tmp/zero-sim/node_modules/@gitlawb/zero/bin/zero.js --version
+  "/tmp/zero-sim/node_modules/@twigpine/zero-<platform>-<arch>"
+node /tmp/zero-sim/node_modules/@twigpine/zero/bin/zero.js --version
 
 # first-run download fallback (delete the platform package first)
-rm -rf "/tmp/zero-sim/node_modules/@gitlawb/zero-<platform>-<arch>"
-node /tmp/zero-sim/node_modules/@gitlawb/zero/bin/zero.js --version
+rm -rf "/tmp/zero-sim/node_modules/@twigpine/zero-<platform>-<arch>"
+node /tmp/zero-sim/node_modules/@twigpine/zero/bin/zero.js --version
 ```
 
 ## Checklist
 
-- `package.json` has the expected package name (`@gitlawb/zero`), version,
+- `package.json` has the expected package name (`@twigpine/zero`), version,
   `bin.zero` entry, and NO `scripts` entries — the published package must be
   free of lifecycle scripts (see NPM_PACKAGING.md).
 - `scripts/npm/build-platform-packages.mjs` emits platform payloads whose
-  `package.json` is `@gitlawb/zero@<version>-<platform>-<arch>` with matching
+  `package.json` is `@twigpine/zero@<version>-<platform>-<arch>` with matching
   `os`/`cpu`, contains the executable binary and the vendored `helpers/` tree
   with regular-file (non-symlink) `.bin` shims, and a wrapper payload with no
   scripts, no dependencies, and the full five-alias `optionalDependencies`

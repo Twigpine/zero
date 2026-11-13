@@ -9,11 +9,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/aimlapi"
-	"github.com/Gitlawb/zero/internal/modelregistry"
-	"github.com/Gitlawb/zero/internal/notify"
-	"github.com/Gitlawb/zero/internal/providercatalog"
-	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/aimlapi"
+	"github.com/Twigpine/zero/internal/modelregistry"
+	"github.com/Twigpine/zero/internal/notify"
+	"github.com/Twigpine/zero/internal/providercatalog"
+	"github.com/Twigpine/zero/internal/sandbox"
 )
 
 // ErrNoActiveProvider marks a resolve failure caused solely by a missing or
@@ -104,6 +104,9 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		// trusted global-config merge, which must keep honouring the setting.
 		commandConfig.Sandbox.Enabled = nil
 		commandConfig.CrossSessionInbound = ""
+		// External provider commands cannot relax the user cap.
+		mergeModelRPM(&cfg.ModelRPM, commandConfig.ModelRPM, true)
+		commandConfig.ModelRPM = nil
 		mergeConfig(&cfg, commandConfig)
 	}
 
@@ -157,11 +160,31 @@ func Resolve(options ResolveOptions) (ResolvedConfig, error) {
 		// On ErrNoActiveProvider, providers may still hold the successfully
 		// normalized (but active-less) profile list — keep it so a caller can fall
 		// back to an already-configured usable provider instead of treating this
-		// like a config with nothing set up at all.
-		return ResolvedConfig{Providers: providers}, err
+		// like a config with nothing set up at all. The non-provider fields parsed
+		// before the failure (notify, sandbox, tools, preferences, ...) are kept
+		// too: the TUI's provider-recovery path forwards this partial config, and
+		// dropping them would let the TUI's unconfigured notify default overwrite
+		// a stored explicit opt-out on startup (maintainer review, PR #1001).
+		partial := ResolvedConfig{
+			ModelRPM:            cfg.ModelRPM,
+			Providers:           providers,
+			MaxTurns:            cfg.MaxTurns,
+			MCP:                 cfg.MCP,
+			Sandbox:             cfg.Sandbox,
+			Notify:              cfg.Notify,
+			Tools:               cfg.Tools,
+			Swarm:               cfg.Swarm,
+			Preferences:         cfg.Preferences,
+			KeyBindings:         cfg.KeyBindings,
+			LocalControl:        cfg.LocalControl,
+			STT:                 cfg.STT,
+			CrossSessionInbound: cfg.CrossSessionInbound,
+		}
+		return partial, err
 	}
 
 	return ResolvedConfig{
+		ModelRPM:            cfg.ModelRPM,
 		ActiveProvider:      active.Name,
 		Providers:           providers,
 		Provider:            active,
@@ -230,6 +253,7 @@ func loadConfigFile(path string) (FileConfig, error) {
 }
 
 func mergeConfig(dst *FileConfig, src FileConfig) {
+	mergeModelRPM(&dst.ModelRPM, src.ModelRPM, false)
 	if activeProvider := strings.TrimSpace(src.ActiveProvider); activeProvider != "" {
 		dst.ActiveProvider = activeProvider
 	}
@@ -291,6 +315,7 @@ func mergeConfig(dst *FileConfig, src FileConfig) {
 }
 
 func mergeProjectConfig(dst *FileConfig, src FileConfig) error {
+	mergeModelRPM(&dst.ModelRPM, src.ModelRPM, true)
 	if activeProvider := strings.TrimSpace(src.ActiveProvider); activeProvider != "" {
 		dst.ActiveProvider = activeProvider
 	}
@@ -430,7 +455,7 @@ func projectAPIKeyEnvAllowed(profile ProviderProfile, envName string) bool {
 	if baseURL == "" {
 		baseURL = descriptor.DefaultBaseURL
 	}
-	if !sameBaseURL(baseURL, descriptor.DefaultBaseURL) {
+	if !providercatalog.IsCatalogBaseURL(descriptor, baseURL) {
 		return false
 	}
 	return containsStringFold(descriptor.AuthEnvVars, envName)
@@ -438,7 +463,7 @@ func projectAPIKeyEnvAllowed(profile ProviderProfile, envName string) bool {
 
 func projectBaseURLAllowed(profile ProviderProfile) bool {
 	descriptor, ok := catalogDescriptorForProfile(profile)
-	return ok && sameBaseURL(profile.BaseURL, descriptor.DefaultBaseURL)
+	return ok && providercatalog.IsCatalogBaseURL(descriptor, profile.BaseURL)
 }
 
 func hasInheritedProviderCredentialMaterial(project ProviderProfile, candidate ProviderProfile) bool {
@@ -1103,10 +1128,13 @@ func applyCatalogDescriptor(profile *ProviderProfile, descriptor providercatalog
 	if profile.Model == "" {
 		profile.Model = descriptor.DefaultModel
 	}
-	if profile.APIKeyEnv == "" && len(descriptor.AuthEnvVars) > 0 && (!explicitBaseURL || sameBaseURL(profile.BaseURL, descriptor.DefaultBaseURL)) {
+	// A legacy catalog base URL (an earlier default that still serves the
+	// provider, e.g. a profile saved before a host move) counts as the catalog
+	// endpoint, so it keeps the catalog env var binding.
+	canonicalCatalogEndpoint := !explicitBaseURL || providercatalog.IsCatalogBaseURL(descriptor, profile.BaseURL)
+	if profile.APIKeyEnv == "" && len(descriptor.AuthEnvVars) > 0 && canonicalCatalogEndpoint {
 		profile.APIKeyEnv = descriptor.AuthEnvVars[0]
 	}
-	canonicalCatalogEndpoint := !explicitBaseURL || sameBaseURL(profile.BaseURL, descriptor.DefaultBaseURL)
 	if len(descriptor.CustomHeaders) > 0 && canonicalCatalogEndpoint {
 		catalogHeaders := descriptor.CustomHeaders
 		if strings.EqualFold(strings.TrimSpace(descriptor.ID), "aimlapi") {

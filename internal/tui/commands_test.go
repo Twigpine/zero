@@ -10,10 +10,10 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/Gitlawb/zero/internal/agent"
-	"github.com/Gitlawb/zero/internal/config"
-	internalmcp "github.com/Gitlawb/zero/internal/mcp"
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/config"
+	internalmcp "github.com/Twigpine/zero/internal/mcp"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 func applyCommandResult(t *testing.T, m model, cmd tea.Cmd) model {
@@ -263,7 +263,7 @@ func TestMCPManagerNavigationOpensAddWizard(t *testing.T) {
 }
 
 func TestMCPManagerSearchFiltersMarketplace(t *testing.T) {
-	m := newModel(context.Background(), Options{})
+	m := newViewTestModel(t, Options{})
 	m.width = 120
 	m.height = 36
 	m.input.SetValue("/mcp")

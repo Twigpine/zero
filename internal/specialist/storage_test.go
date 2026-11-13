@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/fsutil"
+	"github.com/Twigpine/zero/internal/fsutil"
 )
 
 func TestStorageCreateWritesValidManifestAndDeleteRemovesIt(t *testing.T) {

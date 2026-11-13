@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/providermodeldiscovery"
 )
 
 func TestRunProvidersModelsListsDiscoveredModels(t *testing.T) {

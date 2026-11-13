@@ -7,8 +7,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/execution"
-	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/execution"
+	zeroSandbox "github.com/Twigpine/zero/internal/sandbox"
 )
 
 // bashWaitDelay bounds how long Wait blocks for the I/O pipes to drain after the

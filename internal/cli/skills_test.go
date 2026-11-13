@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/tui"
+	"github.com/Twigpine/zero/internal/tui"
 )
 
 func writeSkillFixture(t *testing.T, dir string, name string, content string) {

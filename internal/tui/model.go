@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,29 +18,29 @@ import (
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/Gitlawb/zero/internal/agent"
-	"github.com/Gitlawb/zero/internal/agentsessions"
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/doctor"
-	"github.com/Gitlawb/zero/internal/errhint"
-	"github.com/Gitlawb/zero/internal/lsp"
-	internalmcp "github.com/Gitlawb/zero/internal/mcp"
-	"github.com/Gitlawb/zero/internal/modelregistry"
-	"github.com/Gitlawb/zero/internal/notify"
-	"github.com/Gitlawb/zero/internal/peermsg"
-	"github.com/Gitlawb/zero/internal/providerhealth"
-	"github.com/Gitlawb/zero/internal/providermodeldiscovery"
-	"github.com/Gitlawb/zero/internal/providers"
-	"github.com/Gitlawb/zero/internal/providers/providerio"
-	"github.com/Gitlawb/zero/internal/sandbox"
-	"github.com/Gitlawb/zero/internal/sessions"
-	"github.com/Gitlawb/zero/internal/skills"
-	"github.com/Gitlawb/zero/internal/streamjson"
-	"github.com/Gitlawb/zero/internal/terminalpet"
-	"github.com/Gitlawb/zero/internal/tools"
-	"github.com/Gitlawb/zero/internal/usage"
-	"github.com/Gitlawb/zero/internal/usercommands"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/agentsessions"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/doctor"
+	"github.com/Twigpine/zero/internal/errhint"
+	"github.com/Twigpine/zero/internal/lsp"
+	internalmcp "github.com/Twigpine/zero/internal/mcp"
+	"github.com/Twigpine/zero/internal/modelregistry"
+	"github.com/Twigpine/zero/internal/notify"
+	"github.com/Twigpine/zero/internal/peermsg"
+	"github.com/Twigpine/zero/internal/providerhealth"
+	"github.com/Twigpine/zero/internal/providermodeldiscovery"
+	"github.com/Twigpine/zero/internal/providers"
+	"github.com/Twigpine/zero/internal/providers/providerio"
+	"github.com/Twigpine/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/skills"
+	"github.com/Twigpine/zero/internal/streamjson"
+	"github.com/Twigpine/zero/internal/terminalpet"
+	"github.com/Twigpine/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/usage"
+	"github.com/Twigpine/zero/internal/usercommands"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 const tuiToolOutputLimit = 240
@@ -74,6 +73,7 @@ type model struct {
 	ctx                  context.Context
 	cwd                  string
 	appVersion           string
+	startupNotices       []string               // Options.StartupNotices, said again when a session is resumed
 	userCommands         []usercommands.Command // file-sourced /commands (.zero/commands)
 	loadSkills           func() []skills.Skill  // lazy installed-skills loader for /skills + /<skill-name>
 	userConfigPath       string
@@ -89,6 +89,7 @@ type model struct {
 	// allowEscalation mirrors Options.AllowEscalation: it gates the per-run model
 	// switchers, and the caller gates the escalate_model tool on the same flag.
 	allowEscalation             bool
+	modelRPM                    *zeroruntime.ModelRPMLimiter
 	newProvider                 func(config.ProviderProfile) (zeroruntime.Provider, error)
 	newTurnSessionProvider      func(config.ProviderProfile, zeroruntime.Provider) zeroruntime.TurnSessionProvider
 	probeProviderHealth         func(context.Context, providerhealth.Options) providerhealth.Result
@@ -221,16 +222,26 @@ type model struct {
 	keyBindings                   keyBindings
 	themeMode                     themeMode // palette preference: system (default) or named palette
 	hasDarkBg                     bool      // last terminal background-detection result, if one is delivered
-	userAgent                     string
-	compactRequests               int
-	compactInFlight               bool
-	compactFrame                  int
-	lastCompactResult             *CompactResult
-	lastCompactError              string
-	unpricedRequests              int
-	unpricedTokens                int
-	lastUsage                     usage.Normalized
-	lastUsageSeen                 bool
+	// notifyMode and notifyFocusMode track the user's in-session notify
+	// preference (from options.Notify, updated by /notify). The notifier built
+	// at startup is independent, so changes apply on the NEXT permission prompt.
+	notifyMode string
+	// notifyConfiguredMode holds the RAW configured mode ("" when the user
+	// never set one) so state output can label the effective default as
+	// "(default)" — mirroring the CLI's `mode: (default)` for the same state
+	// (maintainer review, PR #1001). Cleared once the user picks a mode.
+	notifyConfiguredMode string
+	notifyFocusMode      string
+	userAgent            string
+	compactRequests      int
+	compactInFlight      bool
+	compactFrame         int
+	lastCompactResult    *CompactResult
+	lastCompactError     string
+	unpricedRequests     int
+	unpricedTokens       int
+	lastUsage            usage.Normalized
+	lastUsageSeen        bool
 	// turnLatencySum / turnLatencyCount accumulate completed-run wall time so
 	// /context can show a rolling average turn latency (the "is it slow?" signal).
 	// Reset by /new.
@@ -430,7 +441,7 @@ type model struct {
 	// A []byte (not strings.Builder) because the model is copied by value on every
 	// Update, which would trip strings.Builder's copy check.
 	streamingText              []byte
-	streamingReasoning         string // live provider reasoning for the current segment
+	streamingReasoning         []byte // live provider reasoning for the current segment; []byte for the same O(1)-append reason as streamingText (see above) — read via streamingReasoningString()
 	streamingReasoningExpanded bool
 	// turnStreamedRunes accumulates every reasoning+answer rune streamed in the
 	// current turn so the working line can show a live, monotonic token estimate.
@@ -595,6 +606,11 @@ type model struct {
 	// with. Nil in production; used by tests to assert image threading without a
 	// real provider round-trip.
 	captureRunImages func([]zeroruntime.ImageBlock)
+
+	// captureRunSupportsVision, when set, is invoked with the vision-support
+	// predicate wired into the run's agent options. Nil in production; used by
+	// tests to assert snapshot isolation and discovery scoping.
+	captureRunSupportsVision func(func(string) bool)
 }
 
 type agentTextMsg struct {
@@ -769,6 +785,13 @@ type specialistCompleteMsg struct {
 	errorMsg       string
 }
 
+// unknownScopeMutationMsg carries the completion of a suppressed tool result
+// (e.g. TaskOutput) that may have mutated workspace files without reporting the
+// affected paths. It triggers the conservative file-view refresh.
+type unknownScopeMutationMsg struct {
+	runID int
+}
+
 // swarmSessionsMsg carries swarm task_id -> member session_id pairs (from
 // swarm_collect's Meta) so the AGENTS sidebar rows can drill into a member's
 // session like a specialist card.
@@ -849,6 +872,11 @@ type permissionRequestMsg struct {
 type pendingPermissionPrompt struct {
 	request agent.PermissionRequest
 	decide  func(agent.PermissionDecision)
+	// decideCmd is the Update-safe alternative to decide for prompts the TUI
+	// itself raises: decide forwards through runtimeMessageSink, which blocks on
+	// the program's unbuffered message channel when called from Update, so these
+	// prompts return a command that yields the follow-up message instead.
+	decideCmd func(agent.PermissionDecision) tea.Cmd
 	// cursor is the highlighted option index (into permissionOptions): 0 is the
 	// resting approval choice. Moved by ↑/↓/Tab; confirmed by Enter or a click.
 	// Hotkeys resolve the matching request-provided option directly.
@@ -902,6 +930,22 @@ type tuiAgentRunOptions struct {
 	systemPrompt          string
 	transientSystemPrompt string
 	specDraft             bool
+}
+
+// effectiveTUINotifyMode returns the notification mode the TUI should use. An
+// empty/unconfigured mode falls back to the TUI's own effective default
+// ("both": terminal bell + OSC-9 desktop notification) so the needs-input
+// alert works for new users without requiring them to hand-edit config.json.
+// The default lives HERE, deliberately not in config.Resolve: the resolver is
+// shared with headless `zero exec`, which must stay byte-silent when
+// unconfigured (maintainer review, PR #1001). The /notify command persists
+// explicit choices; blank stays blank on disk.
+func effectiveTUINotifyMode(mode string) notify.Mode {
+	m := notify.Mode(strings.TrimSpace(mode))
+	if m == "" {
+		return notify.ModeBoth
+	}
+	return m
 }
 
 func newModel(ctx context.Context, options Options) model {
@@ -979,7 +1023,7 @@ func newModel(ctx context.Context, options Options) model {
 	runSpinner.Spinner.FPS = activeAnimationFrameInterval
 
 	notifier := notify.New(os.Stderr, notify.Config{
-		Mode:      notify.Mode(strings.TrimSpace(options.Notify.Mode)),
+		Mode:      effectiveTUINotifyMode(options.Notify.Mode),
 		FocusMode: notify.FocusMode(strings.TrimSpace(options.Notify.FocusMode)),
 	})
 	// Opt-in webhook fan-out (ZERO_NOTIFY_WEBHOOK_URL). Delivery failures stay
@@ -994,6 +1038,7 @@ func newModel(ctx context.Context, options Options) model {
 		ctx:                         ctx,
 		cwd:                         cwd,
 		appVersion:                  strings.TrimSpace(options.Version),
+		startupNotices:              options.StartupNotices,
 		swarmDoneAt:                 map[string]time.Time{},
 		userCommands:                loadedUserCommands,
 		loadSkills:                  options.LoadSkills,
@@ -1033,6 +1078,7 @@ func newModel(ctx context.Context, options Options) model {
 		sandboxSetupCommand:         options.SandboxSetupCommand,
 		agentOptions:                options.AgentOptions,
 		allowEscalation:             options.AllowEscalation,
+		modelRPM:                    options.ModelRPM,
 		sessionCompactor:            options.SessionCompactor,
 		runtimeMessageSink:          options.RuntimeMessageSink,
 		permissionMode:              permissionMode,
@@ -1043,6 +1089,9 @@ func newModel(ctx context.Context, options Options) model {
 		keyBindings:                 resolvedKeyBindings,
 		themeMode:                   resolveThemeMode(options.Theme, os.Getenv("ZERO_THEME"), options.SavedTheme),
 		hasDarkBg:                   true,
+		notifyMode:                  string(effectiveTUINotifyMode(options.Notify.Mode)),
+		notifyConfiguredMode:        strings.TrimSpace(options.Notify.Mode),
+		notifyFocusMode:             strings.TrimSpace(options.Notify.FocusMode),
 		userAgent:                   options.UserAgent,
 		usageTracker:                usageTracker,
 		transcript:                  initialTranscript(),
@@ -1106,7 +1155,26 @@ func newModel(ctx context.Context, options Options) model {
 	for _, warning := range keyBindingWarnings {
 		m = m.appendSystemNotice(warning)
 	}
+	m.transcript = m.withStartupNotices(m.transcript)
 	return m
+}
+
+// withStartupNotices appends the session's startup notices to rows as system
+// rows, in order, skipping blank ones so a caller can pass one unconditionally.
+//
+// EVERY SESSION THIS PROCESS OPENS IS TOLD. The notices describe the sandbox
+// every session here runs under, so they open the first session, and they come
+// back when /new or /resume rebuilds the transcript for another one; both
+// started from an empty transcript and dropped them. Rewind, compaction and
+// /clear stay in the same session and keep the notice in the scrollback above
+// their divider. Reported by CodeRabbit.
+func (m model) withStartupNotices(rows []transcriptRow) []transcriptRow {
+	for _, notice := range m.startupNotices {
+		if strings.TrimSpace(notice) != "" {
+			rows = appendRow(rows, rowSystem, notice)
+		}
+	}
+	return rows
 }
 
 func (m model) doctorOptions(connectivity bool) doctor.Options {
@@ -1389,13 +1457,18 @@ func batchCommands(cmds ...tea.Cmd) tea.Cmd {
 }
 
 func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var resizeCmd tea.Cmd
 	if size, ok := msg.(tea.WindowSizeMsg); ok {
-		m = m.resizeBTWParent(size)
+		m, resizeCmd = m.resizeBTWParent(size)
 	}
 	if next, cmd, routed := m.routeBTWParentMessage(msg); routed {
-		return next, cmd
+		return next, batchCommands(cmd, resizeCmd)
 	}
 	switch msg := msg.(type) {
+	case fileViewLoadedMsg:
+		return m.handleFileViewLoaded(msg)
+	case fileViewRevalidatedMsg:
+		return m.handleFileViewRevalidated(msg)
 	case uv.CellSizeEvent:
 		if msg.Width > 0 && msg.Height > 0 {
 			m.petCellPixelWidth = msg.Width
@@ -1491,6 +1564,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.hasDarkBg = msg.IsDark()
 		if m.themeMode != themeSystem {
 			applyTheme(m.themeMode, m.hasDarkBg)
+			if m.fileView.active && m.fileView.mode == fileViewFull {
+				return m.startFileViewLoadCmd(m.chatColumnWidth())
+			}
 		}
 		return m, nil
 	case tea.MouseMsg:
@@ -1746,6 +1822,19 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case m.runDetailsOpen:
 			if keyIs(msg, tea.KeyEsc) || m.keyMatch(m.keyBindings.toggleSidebar, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'b') }) {
 				m.runDetailsOpen = false
+				return m, nil
+			}
+			// Enter drills into the selected FILES row only while Run details is
+			// the overlay on screen, the same gate mouse picks use. The flag can
+			// outlive the visible overlay (e.g. a click entered a subchat).
+			if keyIs(msg, tea.KeyEnter) && m.selectedFile != "" && m.runDetailsVisible() {
+				layout := m.runDetailsLayout(m.runDetailsInnerWidth())
+				for _, h := range layout.fileHits {
+					if h.path == m.selectedFile {
+						return m.selectFile(m.selectedFile)
+					}
+				}
+				return m, nil
 			}
 			return m, nil
 		case m.keyMatch(m.keyBindings.toggleDetailed, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'o') }):
@@ -1755,9 +1844,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// (so mid-sentence typing is never hijacked) and no modal is up (so a
 			// permission prompt / ask-user / wizard keeps its own key handling).
 			if keyText(msg) == "f" {
-				return m.setFileViewMode(fileViewFull), nil
+				return m.setFileViewMode(fileViewFull)
 			}
-			return m.setFileViewMode(fileViewDiff), nil
+			return m.setFileViewMode(fileViewDiff)
 		case m.keyMatch(m.keyBindings.toggleMouse, msg, func(tea.KeyMsg) bool { return keyCtrl(msg, 'e') }) && canFireComposerGatedToggle(m.keyBindings.toggleMouse, defaultToggleMouseChord, m.composerValue() == ""):
 			// Release/recapture the mouse so the user can drag-select and copy text
 			// natively (mouse capture otherwise intercepts terminal selection). The
@@ -2437,7 +2526,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.runID != m.activeRunID {
 			return m, nil
 		}
-		m.streamingReasoning += msg.delta
+		m.streamingReasoning = append(m.streamingReasoning, msg.delta...)
 		m.turnStreamedRunes += utf8.RuneCountInString(msg.delta)
 		// Reasoning IS live provider output, so refresh the activity clock — else the
 		// quiet-generation hint can wrongly read "still generating…" mid-think.
@@ -2551,7 +2640,12 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// A resumed/idle session may already hold agents; keep their short lifecycle
 		// fade alive. No-op when the loop is already running or nothing animates.
-		return m, m.ensureSpinnerTick()
+		if m.fileView.active && m.fileView.mode == fileViewFull {
+			var cmd tea.Cmd
+			m, cmd = m.startFileViewLoadCmd(m.chatColumnWidth())
+			return m, batchCommands(m.ensureSpinnerTick(), cmd, resizeCmd)
+		}
+		return m, batchCommands(m.ensureSpinnerTick(), resizeCmd)
 	case permissionRequestMsg:
 		// The agent goroutine that raised this request is BLOCKED waiting on the
 		// decision callback, so every branch below must resolve it exactly once —
@@ -2681,6 +2775,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.exiting && len(m.flushRunIDs) == 0 {
 					return m.quit()
 				}
+				// The cancelled run kept going until it finished, and agentRowMsg
+				// ignored its late tool results because the run is no longer active.
+				// A write that completed in that window reported nothing, so give an
+				// open file view the conservative unknown-scope refresh.
+				return m.invalidateFileViewForUnknownMutation()
 			}
 			return m, nil
 		}
@@ -2753,7 +2852,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		for _, row := range msg.rows {
 			if row.kind == rowReasoning {
-				m.streamingReasoning = ""
+				m.streamingReasoning = nil
 				m.streamingReasoningExpanded = false
 			}
 			m.transcript = appendTranscriptRow(m.transcript, row)
@@ -2762,7 +2861,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// A failed turn has no final answer row to supersede the streamed
 			// text the user already watched — keep the partial answer instead of
 			// letting it vanish from history.
-			if row, ok := reasoningTranscriptRow("", msg.runID, m.streamingReasoning); ok {
+			if row, ok := reasoningTranscriptRow("", msg.runID, m.streamingReasoningString()); ok {
 				m.transcript = appendTranscriptRow(m.transcript, row)
 			}
 			if text := strings.TrimRight(m.streamingTextString(), "\n"); strings.TrimSpace(text) != "" {
@@ -2787,7 +2886,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.streamingText = nil
-		m.streamingReasoning = ""
+		m.streamingReasoning = nil
 		m.streamingReasoningExpanded = false
 		if msg.goalAware {
 			m = m.reconcileGoalAfterRun(msg.usageEvents, msg.err)
@@ -2829,6 +2928,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// complete once the turn settles.
 		var sweepCmd tea.Cmd
 		m, sweepCmd = m.maybeGitSweep()
+		// The sweep is a no-op outside a git workspace, so an open full-file view
+		// still needs the conservative invalidation to pick up mutations whose
+		// paths were never reported (e.g. a hidden TaskOutput success).
+		var fileRefreshCmd tea.Cmd
+		m, fileRefreshCmd = m.invalidateFileViewForUnknownMutation()
 		// If this run was a loop iteration, advance that loop (schedule its next wake
 		// or stop it). Done before launchQueuedMessageIfReady so a user's queued prompt
 		// still wins the immediate re-launch; the loop fires on the next idle tick.
@@ -2860,7 +2964,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.goalAware && !hadQueuedMessage && peerCmd == nil && next.pendingPermission == nil && msg.specReview == nil {
 			next, goalCmd = next.launchGoalContinuationIfReady()
 		}
-		return next, tea.Batch(pendingClearCmd, titleCmd, recapCmd, sweepCmd, queuedCmd, peerCmd, peerApprovalCmd, loopTickCmd, goalCmd)
+		return next, tea.Batch(pendingClearCmd, titleCmd, recapCmd, sweepCmd, fileRefreshCmd, queuedCmd, peerCmd, peerApprovalCmd, loopTickCmd, goalCmd)
 	case sessionTitleGeneratedMsg:
 		return m.handleSessionTitleGenerated(msg)
 	case recapIdleMsg:
@@ -2888,6 +2992,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.lastCompactResult = &msg.result
 		m = m.setCompactStatusRow(m.compactText(true))
+		if msg.hasSessionSnapshot {
+			return m.refreshFileViewMarkers()
+		}
 		return m, nil
 	case planUpdateMsg:
 		if msg.runID != m.activeRunID {
@@ -2966,7 +3073,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.transcript = appendTranscriptRow(m.transcript, cardRow)
 		}
-		return m, nil
+		// A specialist (Task) works in a separate workspace-visible process and
+		// its successful result is suppressed from the transcript, so this is the
+		// only boundary that sees the mutation. Conservatively invalidate the open
+		// snapshot: the child may have changed files without a path report.
+		var refresh tea.Cmd
+		m, refresh = m.invalidateFileViewForUnknownMutation()
+		return m, refresh
 	case specialistProgressMsg:
 		if msg.runID != m.activeRunID {
 			return m, nil
@@ -2983,7 +3096,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.row.kind == rowReasoning {
-			m.streamingReasoning = ""
+			m.streamingReasoning = nil
 			m.streamingReasoningExpanded = false
 		}
 		// A tool call ends the current streamed text segment. The segment is the
@@ -2991,9 +3104,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// non-final assistant row so it stays in history instead of silently
 		// vanishing when the tool card replaces the interim block.
 		if msg.row.kind == rowToolCall {
-			if row, ok := reasoningTranscriptRow("", msg.runID, m.streamingReasoning); ok {
+			if row, ok := reasoningTranscriptRow("", msg.runID, m.streamingReasoningString()); ok {
 				m.transcript = appendTranscriptRow(m.transcript, row)
-				m.streamingReasoning = ""
+				m.streamingReasoning = nil
 				m.streamingReasoningExpanded = false
 			}
 			if text := strings.TrimRight(m.streamingTextString(), "\n"); strings.TrimSpace(text) != "" {
@@ -3021,10 +3134,65 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A finished command tool may have mutated files git can see but no
 		// changedFiles reports (npm create, heredoc writes, subagent edits) —
 		// re-sweep so the FILES sidebar picks them up mid-turn.
-		if msg.row.kind == rowToolResult && isPlanCommandTool(msg.row.tool) {
-			var sweep tea.Cmd
-			m, sweep = m.maybeGitSweep()
-			return m, sweep
+		if msg.row.kind == rowToolResult {
+			var loadCmds []tea.Cmd
+			invalidated := false
+			selfNeedsRefresh := false
+			for _, p := range msg.row.changedFiles {
+				invalidated = true
+				target := p
+				if !filepath.IsAbs(target) {
+					target = filepath.Join(m.cwd, target)
+				}
+				rev := defaultFileViewCache.invalidatePath(target)
+				if m.fileView.active && (p == m.fileView.path || target == m.fileView.path) {
+					m.fileView.requiredSourceRev = rev
+					if m.fileView.mode == fileViewFull {
+						selfNeedsRefresh = true
+					}
+				}
+			}
+			// A tool that can mutate files outside exact ChangedFiles (command
+			// tools, terminal sessions, swarm status/collect, or results with
+			// aggregated directory summaries) must also run the conservative
+			// unknown-scope refresh even when exact paths were reported.
+			unknownScope := isPlanCommandTool(msg.row.tool) ||
+				toolResultMayMutateUnknownScope(msg.row.tool) ||
+				len(msg.row.changeSummaries) > 0
+			if unknownScope {
+				var sweep tea.Cmd
+				m, sweep = m.maybeGitSweep()
+				if sweep != nil {
+					loadCmds = append(loadCmds, sweep)
+				}
+				var refresh tea.Cmd
+				m, refresh = m.invalidateFileViewForUnknownMutation()
+				if refresh != nil {
+					loadCmds = append(loadCmds, refresh)
+				}
+				selfNeedsRefresh = false
+			}
+			if selfNeedsRefresh {
+				var cmd tea.Cmd
+				m, cmd = m.startFileViewRefreshCmd(m.chatColumnWidth())
+				if cmd != nil {
+					loadCmds = append(loadCmds, cmd)
+				}
+			}
+			// The handler above only reloads the surface that received the result.
+			// A side mutation must also wake the hidden parent when that parent is
+			// showing the same path; the reverse direction is recovered after the
+			// parent message is routed. Neither wait depends on a git sweep.
+			if invalidated && !unknownScope {
+				var peerCmd tea.Cmd
+				m, peerCmd = m.refreshHiddenParentFileView()
+				if peerCmd != nil {
+					loadCmds = append(loadCmds, peerCmd)
+				}
+			}
+			if len(loadCmds) > 0 {
+				return m, batchCommands(loadCmds...)
+			}
 		}
 		return m, nil
 	case swarmSessionsMsg:
@@ -3040,6 +3208,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case unknownScopeMutationMsg:
+		// A suppressed mutating result (TaskOutput) completed. Its success row is
+		// hidden, so trigger the conservative refresh on the owning surface.
+		if msg.runID != m.activeRunID {
+			return m, nil
+		}
+		return m.invalidateFileViewForUnknownMutation()
 	case doctorCommandResultMsg:
 		if msg.id == 0 || msg.id == m.doctorCommandSeq {
 			m.doctorInFlight = false
@@ -3057,7 +3232,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.prState = msg.state
 		return m, nil
 	case gitSweepMsg:
-		return m.handleGitSweepMsg(msg), nil
+		m = m.handleGitSweepMsg(msg)
+		// The swept list is cumulative since the baseline, so it says nothing
+		// about what changed since the open snapshot, and each live sweep starts
+		// beside tool-result, turn-end, or BTW-return handling that already
+		// reloads or rechecks the open view. Revalidate the open view's content
+		// rather than force a second reload.
+		return m.revalidateFileView()
 	case prWatcherStartedMsg:
 		if msg.stop == nil {
 			return m, nil
@@ -3069,7 +3250,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case bashResultMsg:
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: msg.output})
-		return m, nil
+		// invalidateFileViewForUnknownMutation schedules startFileViewRefreshCmd when fileView is active
+		return m.invalidateFileViewForUnknownMutation()
 	case providerModelsDiscoveredMsg:
 		return m.applyProviderModelsDiscovered(msg), nil
 	case setupModelsDiscoveredMsg:
@@ -3705,6 +3887,16 @@ func (m model) scrollChat(delta int) model {
 	if !m.altScreen || delta == 0 {
 		return m
 	}
+	// A pending full-file reload renders a one-line placeholder whose geometry
+	// cannot represent the reader's position. Apply the delta to the pending
+	// intent against the last completed body instead, so a Page Down, arrow, or
+	// wheel during the reload is not discarded by the placeholder's zero height.
+	if m.fileView.active && m.fileView.mode == fileViewFull && m.fileView.loading {
+		maxOffset := maxInt(0, m.fileView.completedBodyLines-m.chatViewportHeight())
+		m.fileView.preservedScrollOffset = clampInt(m.fileView.preservedScrollOffset+delta, 0, maxOffset)
+		m.chatScrollOffset = m.fileView.preservedScrollOffset
+		return m
+	}
 	viewport, ok := m.chatTranscriptViewport()
 	if !ok {
 		return m
@@ -3712,6 +3904,28 @@ func (m model) scrollChat(delta int) model {
 	m.chatScrollOffset = viewport.scroll(delta).offset
 	if m.chatScrollOffset == 0 {
 		m.chatBodyLines = 0
+	}
+	return m
+}
+
+// chatViewportHeight returns the height of the transcript body viewport, or 0
+// when it cannot be measured. It lets pending-scroll math run against the last
+// completed body even while the visible body is the loading placeholder.
+func (m model) chatViewportHeight() int {
+	viewport, ok := m.chatTranscriptViewport()
+	if !ok {
+		return 0
+	}
+	return viewport.height
+}
+
+// resetChatScrollToBottom snaps the viewport to the tail for a real submission
+// and, if a full-file reload is pending, records the same intent so completion
+// cannot restore the reader's pre-submission position.
+func (m model) resetChatScrollToBottom() model {
+	m.chatScrollOffset = 0
+	if m.fileView.loading {
+		m.fileView.preservedScrollOffset = 0
 	}
 	return m
 }
@@ -3750,6 +3964,16 @@ func (m model) chatTranscriptViewport() (transcriptViewport, bool) {
 // so the absolute view holds; at the bottom (offset 0) it follows normally. Only the
 // scrolled-up path renders the body, so the common case stays cheap.
 func (m model) syncChatScroll() model {
+	// A pending full-file reload temporarily renders a one-line loading
+	// placeholder. Measuring it would clamp the reader's offset to 0 and lose
+	// their place, so hold the pending intent — which scroll actions and prompt
+	// submission keep up to date — until handleFileViewLoaded reconciles it
+	// against the real body.
+	if m.altScreen && m.fileView.active && m.fileView.mode == fileViewFull &&
+		m.fileView.loading && m.fileView.preservedScrollOffset > 0 {
+		m.chatScrollOffset = m.fileView.preservedScrollOffset
+		return m
+	}
 	if !m.altScreen || m.chatScrollOffset <= 0 {
 		// At the bottom (or inline mode): follow the tail; reset the pin baseline.
 		m.chatBodyLines = 0
@@ -3800,7 +4024,7 @@ func (m model) liveReasoningBodyCap() int {
 
 func (m model) interimBlock(width int) string {
 	text := strings.TrimRight(m.streamingTextString(), "\n")
-	reasoning := strings.TrimRight(m.streamingReasoning, "\n")
+	reasoning := strings.TrimRight(m.streamingReasoningString(), "\n")
 	blocks := []string{}
 	if strings.TrimSpace(reasoning) != "" {
 		blocks = append(blocks, renderReasoningBlock(reasoning, m.streamingReasoningExpanded, width, true, 0, m.liveReasoningBodyCap()))
@@ -4023,20 +4247,36 @@ func formatWorkingElapsed(d time.Duration) string {
 // stream as a dimmed preview so a long "Thinking" phase shows live, changing
 // content instead of a static header. Each line shows its TAIL (the most recent
 // text) so a single continuously-growing reasoning line still visibly moves as
-// tokens arrive. Returns nil when there is no reasoning text.
+// tokens arrive. Only the tail is ever shown, so it scans backwards from the end
+// instead of splitting the whole (continuously growing) string on every frame.
+// Returns nil when there is no reasoning text.
 func reasoningPreviewLines(reasoning string, width int) []string {
-	var lines []string
-	for _, raw := range strings.Split(strings.TrimSpace(reasoning), "\n") {
-		if t := strings.TrimSpace(raw); t != "" {
-			lines = append(lines, t)
+	// Collect up to the last 2 non-blank lines, walking backwards from the end.
+	var tail [2]string
+	count := 0
+	rest := reasoning
+	for count < 2 {
+		end := len(rest)
+		for end > 0 && rest[end-1] == '\n' {
+			end--
 		}
+		if end == 0 {
+			break
+		}
+		lineStart := strings.LastIndexByte(rest[:end], '\n') + 1
+		if t := strings.TrimSpace(rest[lineStart:end]); t != "" {
+			tail[1-count] = t
+			count++
+		}
+		if lineStart == 0 {
+			break
+		}
+		rest = rest[:lineStart-1]
 	}
-	if len(lines) == 0 {
+	if count == 0 {
 		return nil
 	}
-	if len(lines) > 2 {
-		lines = lines[len(lines)-2:]
-	}
+	lines := tail[2-count:]
 	avail := width - 2
 	if avail < 8 {
 		avail = 8
@@ -4050,16 +4290,37 @@ func reasoningPreviewLines(reasoning string, width int) []string {
 
 // previewTail returns the last `width` runes of s, prefixed with "…" when text
 // was dropped, so a streaming preview shows the newest content. s is plain text
-// (reasoning deltas carry no ANSI), so rune counting is a safe width proxy.
+// (reasoning deltas carry no ANSI), so rune counting is a safe width proxy. It
+// decodes only the last `width` runes instead of converting the whole line,
+// because a single growing reasoning line is re-previewed on every frame.
 func previewTail(s string, width int) string {
-	runes := []rune(s)
-	if width <= 0 || len(runes) <= width {
+	if width <= 0 || s == "" {
 		return s
 	}
 	if width == 1 {
-		return string(runes[len(runes)-1:])
+		_, size := utf8.DecodeLastRuneInString(s)
+		return s[len(s)-size:]
 	}
-	return "…" + string(runes[len(runes)-(width-1):])
+	// Walk back at most `width` runes, remembering where the last width-1 runes
+	// start. If fewer than width runes exist, nothing was dropped; if exactly
+	// width exist, the original whole-line return still applies. Only when a
+	// width+1-th rune exists do we truncate and prefix "…".
+	i := len(s)
+	cut := len(s)
+	for consumed := 0; i > 0 && consumed < width; consumed++ {
+		_, size := utf8.DecodeLastRuneInString(s[:i])
+		i -= size
+		if consumed == width-2 {
+			cut = i
+		}
+	}
+	if i == 0 {
+		return s
+	}
+	// Re-encode through []rune so invalid UTF-8 bytes in the tail become
+	// replacement characters, matching the whole-string rune conversion this
+	// truncation replaced.
+	return "…" + string([]rune(s[cut:]))
 }
 
 func (m model) appendStreamingCursor(lines []string, width int) []string {
@@ -4515,11 +4776,13 @@ func (m model) resolvePermissionWithReason(decision permissionDecision, reason s
 		return m, nil
 	}
 
+	resolved := agent.PermissionDecision{Action: decision, Reason: reason}
 	if pending.decide != nil {
-		pending.decide(agent.PermissionDecision{
-			Action: decision,
-			Reason: reason,
-		})
+		pending.decide(resolved)
+	}
+	var decideCmd tea.Cmd
+	if pending.decideCmd != nil {
+		decideCmd = pending.decideCmd(resolved)
 	}
 	m.pendingPermission = nil
 	// Time spent at the prompt is user wait, not provider silence. Restart the
@@ -4529,9 +4792,10 @@ func (m model) resolvePermissionWithReason(decision permissionDecision, reason s
 	if pending.request.ToolName == peerPermissionToolName {
 		// Receipt delivery completes asynchronously. That completion advances
 		// the peer queue after this prompt is fully settled.
-		return m, nil
+		return m, decideCmd
 	}
-	return m.openNextPeerApproval()
+	next, cmd := m.openNextPeerApproval()
+	return next, tea.Batch(decideCmd, cmd)
 }
 
 func permissionDecisionReason(decision permissionDecision) string {
@@ -4582,15 +4846,14 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		previousProvider, previousModel := m.providerName, m.modelName
 		text := ""
 		var switchPersistErr error
-		owner := strings.TrimSpace(item.OwnerProvider)
-		_, ownerIsSavedProvider := m.savedProviderByName(owner)
-		if owner != "" && !strings.EqualFold(owner, strings.TrimSpace(m.providerName)) && ownerIsSavedProvider {
+		// The row's owner label is derived from the same decision, so it always
+		// names the provider used here.
+		if owner := m.modelPickerSwitchOwner(item); owner != "" {
 			// A model from another saved provider: switch provider + model together.
 			m, text, _, cmd, switchPersistErr = m.switchProviderModel(owner, item.Value)
 		} else {
-			// OwnerProvider is blank, matches the active provider, or (registry-fallback
-			// / stale-history rows) doesn't resolve to any saved provider: apply against
-			// the active provider instead of attempting an unresolvable provider switch.
+			// Apply against the active provider instead of attempting an
+			// unresolvable provider switch.
 			m, text, switchPersistErr = m.handleModelCommand(item.Value)
 		}
 		if m.providerName != previousProvider || m.modelName != previousModel {
@@ -4618,6 +4881,9 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		if text != "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		}
+		if text == "" {
+			m, cmd = m.refreshFileViewMarkers()
+		}
 	case pickerSkill:
 		// Fill the composer with "/name " so the user adds their request before
 		// submitting (a bare second Enter runs it without one); names the slash
@@ -4643,9 +4909,28 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		// local preview and never changes the active palette.
 		text := ""
 		m, text = m.handleThemeCommand(item.Value)
-		if validThemeMode(item.Value) && !strings.Contains(text, "could not save theme preference") {
-			return m.showTransientNotice(m.themeAppliedNotice(), transientNoticeSuccess)
+		var loadCmd tea.Cmd
+		if m.fileView.active && m.fileView.mode == fileViewFull {
+			m, loadCmd = m.startFileViewLoadCmd(m.chatColumnWidth())
 		}
+		if validThemeMode(item.Value) && !strings.Contains(text, "could not save theme preference") {
+			next, noticeCmd := m.showTransientNotice(m.themeAppliedNotice(), transientNoticeSuccess)
+			if loadCmd != nil {
+				return next, tea.Batch(noticeCmd, loadCmd)
+			}
+			return next, noticeCmd
+		}
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		if loadCmd != nil {
+			return m, loadCmd
+		}
+	case pickerNotify:
+		// The picker item's Value is "<mode> <focus>"; reusing the text handler
+		// keeps validation, persistence, and the user-facing message in one
+		// place. There is no live preview for notify, so no follow-up command
+		// is needed here.
+		text := ""
+		m, text = m.handleNotifyCommand(item.Value)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 	}
 	return m, cmd
@@ -4714,9 +4999,10 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	m.clearSuggestions()
 	// Snap the viewport back to the bottom for a real submission, but not for an
 	// empty Enter (a no-op) — that would yank the user away from wherever they
-	// had scrolled without anything actually being submitted.
+	// had scrolled without anything actually being submitted. A pending file
+	// reload records the same intent so its completion cannot undo the reset.
 	if command.kind != commandEmpty {
-		m.chatScrollOffset = 0
+		m = m.resetChatScrollToBottom()
 	}
 
 	return m.dispatchCommand(command)
@@ -4775,7 +5061,9 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		if m.loopActive() {
 			m = m.appendLoopSystem(m.loopFooterSummary() + " still running — /loop stop all to end them.")
 		}
-		return m, nil
+		var clearCmd tea.Cmd
+		m, clearCmd = m.refreshFileViewMarkers()
+		return m, clearCmd
 	case commandNew:
 		// A fresh session mid-run would strand the in-flight turn's events; make the
 		// user cancel first. Idle, /new saves the current session (already on disk)
@@ -4784,7 +5072,10 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "A run is in progress. Press Esc to cancel it first, then /new."})
 			return m, nil
 		}
-		return m.startNewSession(), nil
+		next := m.startNewSession()
+		var newCmd tea.Cmd
+		next, newCmd = next.refreshFileViewMarkers()
+		return next, newCmd
 	case commandBTW:
 		return m.handleBTWCommand(command.text)
 	case commandLoop:
@@ -4944,7 +5235,11 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		} else if text != "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		}
-		return m, cmd
+		var resumeCmd tea.Cmd
+		if text == "" {
+			m, resumeCmd = m.refreshFileViewMarkers()
+		}
+		return m, tea.Batch(cmd, resumeCmd)
 	case commandRename:
 		if title := strings.TrimSpace(command.text); title != "" {
 			return m.renameActiveSession(title), nil
@@ -4964,9 +5259,10 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		return m.toggleDetailedTranscript(), nil
 	case commandRewind:
 		text := ""
-		m, text = m.handleRewindCommand(command.text)
+		var rewindCmd tea.Cmd
+		m, text, rewindCmd = m.handleRewindCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
-		return m, nil
+		return m, rewindCmd
 	case commandEffort:
 		if strings.TrimSpace(command.text) == "" {
 			if m.pending {
@@ -5054,9 +5350,32 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		}
 		text := ""
 		m, text = m.handleThemeCommand(command.text)
-		if validThemeMode(command.text) && !strings.Contains(text, "could not save theme preference") {
-			return m.showTransientNotice(m.themeAppliedNotice(), transientNoticeSuccess)
+		var loadCmd tea.Cmd
+		if m.fileView.active && m.fileView.mode == fileViewFull {
+			m, loadCmd = m.startFileViewLoadCmd(m.chatColumnWidth())
 		}
+		if validThemeMode(command.text) && !strings.Contains(text, "could not save theme preference") {
+			next, noticeCmd := m.showTransientNotice(m.themeAppliedNotice(), transientNoticeSuccess)
+			if loadCmd != nil {
+				return next, tea.Batch(noticeCmd, loadCmd)
+			}
+			return next, noticeCmd
+		}
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		if loadCmd != nil {
+			return m, loadCmd
+		}
+		return m, nil
+	case commandNotify:
+		// Bare `/notify` opens the popup picker so the user can pick mode + focus
+		// with arrow keys, matching /model and /theme. An explicit
+		// `/notify off|bell|notify|both [unfocused|always]` runs the text handler.
+		if strings.TrimSpace(command.text) == "" {
+			m.picker = m.newNotifyPicker()
+			return m, nil
+		}
+		text := ""
+		m, text = m.handleNotifyCommand(command.text)
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		return m, nil
 	case commandImage:
@@ -5182,7 +5501,7 @@ func (m model) executeSlash(input string) (tea.Model, tea.Cmd) {
 	}
 	m.rememberInput(input)
 	m.clearSuggestions()
-	m.chatScrollOffset = 0
+	m = m.resetChatScrollToBottom()
 	return m.dispatchCommand(command)
 }
 
@@ -5469,7 +5788,7 @@ func (m *model) cancelRun() {
 		// A cancelled run must terminate visibly in the transcript: first the
 		// partial streamed answer (if any), then the cancellation marker — the
 		// session log gets the same marker below.
-		if row, ok := reasoningTranscriptRow("", m.activeRunID, m.streamingReasoning); ok {
+		if row, ok := reasoningTranscriptRow("", m.activeRunID, m.streamingReasoningString()); ok {
 			m.transcript = appendTranscriptRow(m.transcript, row)
 		}
 		if text := strings.TrimRight(m.streamingTextString(), "\n"); strings.TrimSpace(text) != "" {
@@ -5507,7 +5826,7 @@ func (m *model) cancelRun() {
 	// The interim block renders streamingText live; a cancelled run's partial
 	// answer must not leak into (and concatenate with) the next turn's stream.
 	m.streamingText = nil
-	m.streamingReasoning = ""
+	m.streamingReasoning = nil
 	m.streamingReasoningExpanded = false
 	// Hard-stop the fade and drop the per-line age map. The next turn's
 	// first agentTextMsg will seed a fresh lineAges slice and restart
@@ -5534,6 +5853,19 @@ func selfCorrectAutonomyForMode(mode agent.PermissionMode) string {
 }
 
 func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt string, images []zeroruntime.ImageBlock, runOptions tuiAgentRunOptions) tea.Cmd {
+	var activeDiscovered []providermodeldiscovery.Model
+	if models, ok := m.discoveredModelsForActiveRoute(); ok {
+		activeDiscovered = make([]providermodeldiscovery.Model, len(models))
+		for i, dm := range models {
+			copied := dm
+			if len(dm.InputModalities) > 0 {
+				copied.InputModalities = append([]string{}, dm.InputModalities...)
+			}
+			activeDiscovered[i] = copied
+		}
+	}
+	catalog := m.modelCatalog
+
 	return func() tea.Msg {
 		started := m.now()
 		if m.turnTimer != nil {
@@ -5647,7 +5979,26 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 				// currentModel: every usage event after a real escalation is billed
 				// to the escalated model, not the one the run started on.
 				func(modelID string) { usageModelID = modelID },
+				providers.Options{ModelRPM: m.modelRPM},
 			)
+		}
+		options.SupportsVision = func(modelID string) bool {
+			trimmed := strings.TrimSpace(modelID)
+			if trimmed == "" {
+				return false
+			}
+			if len(activeDiscovered) > 0 {
+				if supported, ok := discoveredVisionSupport(activeDiscovered, trimmed); ok {
+					return supported
+				}
+			}
+			if entry, known := catalog.Resolve(trimmed); known {
+				return entry.Supports(modelregistry.ModelCapabilityVision)
+			}
+			return modelregistry.SupportsVision(catalog, trimmed)
+		}
+		if m.captureRunSupportsVision != nil {
+			m.captureRunSupportsVision(options.SupportsVision)
 		}
 
 		// Post-edit self-correction is on by default in the TUI but kept FAST: it
@@ -5902,11 +6253,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			// them is flushed at end-of-run AND on cancel (flushRunIDs), so the blobs
 			// never stay orphaned — see its contract in internal/sessions.
 			if m.sessionStore != nil && m.activeSession.SessionID != "" {
-				var args map[string]any
-				if call.Arguments != "" {
-					_ = json.Unmarshal([]byte(call.Arguments), &args)
-				}
-				if targets := tools.MutationTargets(m.cwd, call.Name, args); len(targets) > 0 {
+				if targets := agent.CheckpointTargets(m.cwd, options.Registry, call); len(targets) > 0 {
 					if payload, ok := m.sessionStore.SnapshotForCheckpoint(m.activeSession.SessionID, m.cwd, call.Name, targets); ok {
 						sessionEvents = append(sessionEvents, pendingSessionEvent{
 							Type:    sessions.EventSessionCheckpoint,
@@ -5956,6 +6303,11 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			if !toolResultCardSuppressedInTranscript(result.Name, result.Status) {
 				rows = append(rows, row)
 				m.sendAgentRow(runID, row)
+			} else if result.Name != "Task" && toolResultMayMutateUnknownScope(result.Name) && m.runtimeMessageSink != nil {
+				// A hidden successful mutating result (TaskOutput) still needs the
+				// conservative refresh; Task completion carries it via
+				// specialistCompleteMsg.
+				m.runtimeMessageSink(unknownScopeMutationMsg{runID: runID})
 			}
 			// Keep the latest plan state in sync for run details and step drill-in.
 			if result.Name == "update_plan" && m.registry != nil {
@@ -6052,7 +6404,7 @@ func (m model) runAgentWithOptions(runID int, runCtx context.Context, prompt str
 			flushReasoning(m.now())
 			sessionEvents = append(sessionEvents, pendingSessionEvent{
 				Type:    sessions.EventError,
-				Payload: map[string]any{"message": err.Error()},
+				Payload: sessions.ErrorEventPayload(err),
 			})
 			return agentResponseMsg{runID: runID, rows: rows, usageEvents: usageEvents, usageModelID: usageModelID, usageModelIDs: usageModelIDs, sessionEvents: sessionEvents, err: err, goalAware: goalAwareRun, turnTools: toolCalls, turnElapsed: m.activeTurnElapsed(started)}
 		}
@@ -6150,6 +6502,15 @@ func (m model) sendAgentText(runID int, delta string) {
 // by the segment length, the same cost the renderer already pays.
 func (m model) streamingTextString() string {
 	return string(m.streamingText)
+}
+
+// streamingReasoningString returns the accumulated live reasoning. Like
+// streamingText it is stored as []byte so each reasoning delta is an O(1)
+// amortized append instead of the O(n²) that string += delta incurs across a
+// long thinking segment; the conversion here is bounded by the segment length,
+// the same cost the renderer already pays in interimBlock.
+func (m model) streamingReasoningString() string {
+	return string(m.streamingReasoning)
 }
 
 func (m model) sendToolCallStreamStart(runID int, id, name string) {

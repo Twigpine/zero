@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/dictation"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/dictation"
 )
 
 // buildFails returns a controller whose build always fails with a setup error,

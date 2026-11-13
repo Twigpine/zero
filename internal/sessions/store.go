@@ -16,7 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/fsutil"
+	"github.com/Twigpine/zero/internal/fsutil"
 )
 
 const (
@@ -133,6 +133,7 @@ type Metadata struct {
 	UpdatedAt           string     `json:"updatedAt"`
 	EventCount          int        `json:"eventCount"`
 	LastEventType       EventType  `json:"lastEventType,omitempty"`
+	PermissionMode      string     `json:"permissionMode,omitempty"`
 }
 
 type CreateInput struct {
@@ -246,6 +247,11 @@ type Store struct {
 	// is accepted deliberately rather than risk an unsafe eviction.
 	sessionLocks map[string]*sync.Mutex
 	idCounter    atomic.Uint64
+
+	// leases are the sessions this Store holds open, with the path of each
+	// lease file. The files themselves belong to the process. See Hold.
+	leasesMu sync.Mutex
+	leases   map[string]string
 }
 
 var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
@@ -291,6 +297,14 @@ func (store *Store) Create(input CreateInput) (Metadata, error) {
 	}
 	if input.Depth < 0 {
 		return Metadata{}, fmt.Errorf("invalid zero session depth %d", input.Depth)
+	}
+	// A session created under a parent holds that parent, the way Fork and
+	// CreateChild do, and is refused while prune holds or is removing it: exec
+	// --calling-session-id and spec implementations create their children here.
+	if parent := strings.TrimSpace(input.ParentSessionID); parent != "" {
+		if err := store.holdParent(parent); err != nil {
+			return Metadata{}, err
+		}
 	}
 
 	timestamp := store.timestamp()
@@ -347,6 +361,7 @@ func (store *Store) Create(input CreateInput) (Metadata, error) {
 	if err := file.Close(); err != nil {
 		return Metadata{}, fmt.Errorf("close zero session events file: %w", err)
 	}
+	store.Hold(sessionID)
 	return session, nil
 }
 
@@ -506,6 +521,9 @@ func (store *Store) LatestResumable() (*Metadata, error) {
 func (store *Store) Fork(parentSessionID string, input ForkInput) (Metadata, error) {
 	if !ValidSessionID(parentSessionID) {
 		return Metadata{}, fmt.Errorf("invalid zero session id %q", parentSessionID)
+	}
+	if err := store.holdParent(parentSessionID); err != nil {
+		return Metadata{}, err
 	}
 	parent, err := store.Get(parentSessionID)
 	if err != nil {
@@ -957,6 +975,35 @@ func (store *Store) UpdateModel(sessionID string, modelID string) (Metadata, err
 	return session, nil
 }
 
+// UpdateMode replaces a session's permission mode without changing its activity
+// timestamp or event counters. An empty mode clears the session override; the
+// stored value is not validated here because the reader that turns it back into
+// a live mode is the boundary that decides what a stored string may become.
+func (store *Store) UpdateMode(sessionID string, mode string) (Metadata, error) {
+	if !ValidSessionID(sessionID) {
+		return Metadata{}, fmt.Errorf("invalid zero session id %q", sessionID)
+	}
+	mode = strings.TrimSpace(mode)
+	unlock, err := store.lockSession(sessionID)
+	if err != nil {
+		return Metadata{}, err
+	}
+	defer unlock()
+
+	session, err := store.readMetadata(sessionID)
+	if err != nil {
+		return Metadata{}, err
+	}
+	if session.PermissionMode == mode {
+		return session, nil
+	}
+	session.PermissionMode = mode
+	if err := store.writeMetadata(session); err != nil {
+		return Metadata{}, err
+	}
+	return session, nil
+}
+
 func (store *Store) ReadEvents(sessionID string) ([]Event, error) {
 	events, _, err := store.ReadEventsWithPresence(sessionID)
 	return events, err
@@ -1042,6 +1089,14 @@ func (store *Store) sessionLock(sessionID string) *sync.Mutex {
 // reverse order. The OS lock is best-effort: if it cannot be acquired (e.g. an
 // unsupported platform) the in-memory mutex still applies.
 func (store *Store) lockSession(sessionID string) (func(), error) {
+	// A process that writes a session has it open. See Hold.
+	store.Hold(sessionID)
+	return store.lockSessionWithoutLease(sessionID)
+}
+
+// lockSessionWithoutLease is lockSession for prune, which must not mark as open
+// the session it is about to remove.
+func (store *Store) lockSessionWithoutLease(sessionID string) (func(), error) {
 	mu := store.sessionLock(sessionID)
 	mu.Lock()
 	release, err := store.acquireFileLock(sessionID)

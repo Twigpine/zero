@@ -11,7 +11,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/terminalpet"
+	"github.com/Twigpine/zero/internal/terminalpet"
 	"github.com/charmbracelet/x/ansi"
 )
 

@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/execution"
-	zeroSandbox "github.com/Gitlawb/zero/internal/sandbox"
-	"github.com/Gitlawb/zero/internal/secrets"
+	"github.com/Twigpine/zero/internal/execution"
+	zeroSandbox "github.com/Twigpine/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/secrets"
 )
 
 const defaultBashTimeoutMS = 120000

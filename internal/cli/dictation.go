@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/config"
-	"github.com/Gitlawb/zero/internal/dictation"
-	"github.com/Gitlawb/zero/internal/tui"
+	"github.com/Twigpine/zero/internal/config"
+	"github.com/Twigpine/zero/internal/dictation"
+	"github.com/Twigpine/zero/internal/tui"
 )
 
 // Default batch cloud models (§8). Overridable via stt.model.

@@ -16,6 +16,11 @@ var (
 )
 
 func RunLinuxSandboxHelper(args []string, stderr io.Writer) int {
+	selfExec := false
+	if len(args) > 0 && args[0] == LinuxSandboxHelperSubcommand {
+		selfExec = true
+		args = args[1:]
+	}
 	config, err := ParseLinuxSandboxHelperArgs(args)
 	if err != nil {
 		fmt.Fprintln(stderr, LinuxSandboxHelperName+": "+err.Error())
@@ -35,6 +40,7 @@ func RunLinuxSandboxHelper(args []string, stderr io.Writer) int {
 	bwrapPlan, err := buildLinuxSandboxBwrapPlan(LinuxSandboxBwrapOptions{
 		Config:     config,
 		HelperPath: helperPath,
+		SelfExec:   selfExec,
 	})
 	if err != nil {
 		fmt.Fprintln(stderr, LinuxSandboxHelperName+": "+err.Error())

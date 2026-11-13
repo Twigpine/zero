@@ -125,7 +125,7 @@ func TestDiffSyntaxKeepsThemeColorOverDiffSurface(t *testing.T) {
 	}
 }
 
-func TestInlineCodeAndShellCommandsUseTheActiveSyntaxPalette(t *testing.T) {
+func TestInlineCodeUsesTheActiveSyntaxPalette(t *testing.T) {
 	previous := zeroTheme
 	defer func() { zeroTheme = previous }()
 	_, zeroTheme = themeForMode("nord", true)
@@ -133,26 +133,6 @@ func TestInlineCodeAndShellCommandsUseTheActiveSyntaxPalette(t *testing.T) {
 	inline := styleAssistantMarkdownLine(renderMarkdownInline("Run `gofmt` before committing."), zeroTheme.ink)
 	if want := inlineCodeStyle().Render("gofmt"); !strings.Contains(inline, want) {
 		t.Fatalf("inline code should use the active palette:\n%s", inline)
-	}
-
-	command, ok := highlightShellCommand("gofmt -w calculator.go && go run . divide 9 2")
-	if !ok {
-		t.Fatal("bash command should have a cached syntax lexer")
-	}
-	if plain := ansiPattern.ReplaceAllString(command, ""); plain != "gofmt -w calculator.go && go run . divide 9 2" {
-		t.Fatalf("command highlight changed visible command to %q", plain)
-	}
-	if !strings.Contains(command, "\x1b[") {
-		t.Fatalf("shell command should be syntax styled, got %q", command)
-	}
-	for token, style := range map[string]lipgloss.Style{
-		"gofmt": tokenStyle(chroma.NameFunction),
-		"-w":    tokenStyle(chroma.NameAttribute),
-		"9":     tokenStyle(chroma.LiteralNumber),
-	} {
-		if want := style.Render(token); !strings.Contains(command, want) {
-			t.Fatalf("shell token %q should use its semantic style:\n%s", token, command)
-		}
 	}
 }
 

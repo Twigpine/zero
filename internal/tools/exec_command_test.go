@@ -13,8 +13,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/Gitlawb/zero/internal/execution"
-	"github.com/Gitlawb/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/execution"
+	"github.com/Twigpine/zero/internal/sandbox"
 )
 
 func TestIndependentExecCommandConstructorsShareDefaultManager(t *testing.T) {
@@ -373,20 +373,34 @@ func TestExecCommandForegroundServerReturnsSessionAndServesHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("foreground server should return session_id, meta=%#v output=%q", start.Meta, start.Output)
 	}
-	addr := parseListeningAddress(start.Output)
-	if addr == "" {
-		t.Fatalf("server output did not include listening address: %q", start.Output)
-	}
 	t.Cleanup(func() {
 		writeTool.Run(context.Background(), map[string]any{
 			"session_id": sessionID,
 			"chars":      "\u0003",
 		})
 	})
+	// Process start-up and net.Listen can outlast the first yield on a loaded
+	// runner, so keep polling the session until the address shows up.
+	output := start.Output
+	addr := parseListeningAddress(output)
+	for deadline := time.Now().Add(20 * time.Second); addr == "" && time.Now().Before(deadline); {
+		poll := writeTool.Run(context.Background(), map[string]any{
+			"session_id":    sessionID,
+			"yield_time_ms": 250,
+		})
+		if poll.Status != StatusOK {
+			t.Fatalf("write_stdin poll status = %s: %s", poll.Status, poll.Output)
+		}
+		output += "\n" + poll.Output
+		addr = parseListeningAddress(output)
+	}
+	if addr == "" {
+		t.Fatalf("server output did not include listening address: %q", output)
+	}
 
 	response, err := http.Get("http://" + addr)
 	if err != nil {
-		t.Fatalf("foreground exec server was not reachable at %s: %v; output=%q", addr, err, start.Output)
+		t.Fatalf("foreground exec server was not reachable at %s: %v; output=%q", addr, err, output)
 	}
 	defer response.Body.Close()
 	bytes, err := io.ReadAll(response.Body)
@@ -922,8 +936,15 @@ func TestExecCommandInteractiveBlockSuggestsTTY(t *testing.T) {
 }
 
 func TestExecCommandTTYSkipsInteractiveBlock(t *testing.T) {
-	tool := NewScopedExecCommandTool(t.TempDir(), nil, newExecSessionManager())
-	// ssh to a bogus host fails fast on its own; the point is that the
+	// The ssh can still be resolving the bogus host when the 250ms yield
+	// returns, which leaves its session running in the test root. Stop it
+	// before the root goes, and use execTestRoot for the moment Windows still
+	// holds the directory after the stop.
+	root := execTestRoot(t)
+	manager := newExecSessionManager()
+	t.Cleanup(func() { manager.StopAll() })
+	tool := NewScopedExecCommandTool(root, nil, manager)
+	// ssh to a bogus host fails on its own; the point is that the
 	// interactive guard must not fire ahead of the tty path.
 	result := tool.Run(context.Background(), map[string]any{
 		"cmd": "ssh host.example.com", "tty": true, "yield_time_ms": 250,

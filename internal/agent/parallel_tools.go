@@ -2,9 +2,10 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"sync"
 
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 // Parallel read-ahead for tool batches. When a turn requests several
@@ -12,8 +13,17 @@ import (
 // them one after another serializes pure I/O waits. A consecutive run of
 // capability-safe read-only calls is executed concurrently instead; results are
 // then consumed in the original call order, so guard counters, message
-// ordering, abort semantics, and the surface's call/result event pairing are
-// byte-identical to sequential execution. Runs never span a mutating call: a
+// ordering, abort semantics, and the surface's call/result event pairing match
+// sequential execution.
+//
+// What can differ is how many calls RAN. A run executes before the guard
+// consumes its first result, so a halt on an earlier call can leave up to
+// maxParallelReadTools-1 siblings already executed. The guard bounds count
+// consumed results, not executions, and the extra executions are reads by the
+// eligibility rule below; closeOutRemaining records them without feeding the
+// guard. Reported by @jatmn.
+//
+// Runs never span a mutating call: a
 // read that follows a write must observe the write, so eligibility is decided
 // per consecutive run, not per batch.
 //
@@ -36,6 +46,15 @@ const maxParallelReadTools = 8
 type precomputedToolResult struct {
 	result   ToolResult
 	abortErr error
+	// completed records whether this call PRODUCED a result, which is a
+	// different question from whether it asks the enclosing run to stop.
+	//
+	// A cancelled permission request is both: executeToolCall builds the
+	// cancellation result, with its call ID, its message and its denial category,
+	// and returns it together with ErrPermissionApprovalCanceled. Reading the
+	// error as "never started" throws that result away, and the transcript then
+	// denies that permission handling happened at all.
+	completed bool
 }
 
 // parallelSafeToolCall reports whether call may run concurrently with its
@@ -189,7 +208,15 @@ func executeParallelReadBatch(ctx context.Context, registry *tools.Registry, cal
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 			result, abortErr := executeToolCall(ctx, registry, calls[index], permissionMode, batchOptions)
-			results[index-start] = precomputedToolResult{result: result, abortErr: abortErr}
+			// Recorded HERE, where both halves are in hand, rather than inferred later
+			// from the error. A populated call ID is what every path that produced a
+			// result sets and what a context cancellation before execution leaves
+			// empty.
+			results[index-start] = precomputedToolResult{
+				result:    result,
+				abortErr:  abortErr,
+				completed: strings.TrimSpace(result.ToolCallID) != "",
+			}
 		}(index)
 	}
 	waitGroup.Wait()

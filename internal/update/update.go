@@ -3,6 +3,7 @@ package update
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -15,9 +16,20 @@ import (
 )
 
 const (
-	DefaultRepository = "Gitlawb/zero"
+	DefaultRepository = "Twigpine/zero"
 	DefaultTimeout    = 5 * time.Second
+	// EnvUpdateToken is read by fetchRelease to authenticate GitHub API
+	// requests. ZERO_GITHUB_TOKEN takes precedence over GITHUB_TOKEN.
+	EnvUpdateToken = "ZERO_GITHUB_TOKEN"
+	// EnvGitHubToken is the fallback token variable used for GitHub API requests.
+	EnvGitHubToken = "GITHUB_TOKEN"
+	// EnvUpdateReleaseURL overrides the release API endpoint.
+	EnvUpdateReleaseURL = "ZERO_UPDATE_RELEASE_URL"
 )
+
+// httpClient is the client used by fetchRelease. Overridden in tests to
+// intercept requests without mutating the global http.DefaultClient.
+var httpClient = http.DefaultClient
 
 type Release struct {
 	TagName string  `json:"tag_name"`
@@ -129,7 +141,7 @@ func Check(ctx context.Context, options Options) (Result, error) {
 		currentVersion = "0.0.0"
 	}
 	repository := strings.TrimSpace(firstNonEmpty(options.Repository, DefaultRepository))
-	endpoint, err := resolveEndpoint(firstNonEmpty(options.Endpoint, os.Getenv("ZERO_UPDATE_RELEASE_URL")), repository)
+	endpoint, err := resolveEndpoint(firstNonEmpty(options.Endpoint, os.Getenv(EnvUpdateReleaseURL)), repository)
 	if err != nil {
 		return Result{}, err
 	}
@@ -203,7 +215,7 @@ func upgradeSourceFlag(options Options) string {
 	if endpoint := strings.TrimSpace(options.Endpoint); endpoint != "" {
 		return "--endpoint " + shellQuote(endpoint)
 	}
-	if strings.TrimSpace(os.Getenv("ZERO_UPDATE_RELEASE_URL")) != "" {
+	if strings.TrimSpace(os.Getenv(EnvUpdateReleaseURL)) != "" {
 		return ""
 	}
 	if repository := strings.TrimSpace(options.Repository); repository != "" && repository != DefaultRepository {
@@ -233,6 +245,10 @@ func Format(result Result) string {
 		"Latest release: " + result.ReleaseURL,
 	}
 	lines = appendAssetLines(lines, result.ReleaseAsset)
+	if result.installMethod == InstallMethodNpmLegacy {
+		// Up to date today, but the next release will not reach this install.
+		lines = append(lines, legacyPackageSwitchMessage())
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -322,6 +338,11 @@ func upgradeGuidance(asset AssetCheck, sourceFlag string, installMethod InstallM
 		// `brew upgrade zero` would change this one instead.
 		return "This Homebrew-managed installation is updated with `brew upgrade zero`. `zero upgrade` refuses here, because replacing the keg binary would leave Homebrew's records describing a version that is no longer installed."
 	}
+	if installMethod == InstallMethodNpmLegacy {
+		// Placed like the Homebrew answer above, and for the same reason: it is a
+		// property of the install on this machine, and `zero upgrade` refuses it.
+		return legacyPackageSwitchMessage()
+	}
 	if sourceFlag != "" {
 		if installMethod == InstallMethodNpm {
 			return "This npm-managed installation can be updated with `npm install -g " + npmPackageName + "@latest`, which installs the official npm package. The custom `" + sourceFlag + "` source only affects the release check and update gating, not the npm install source."
@@ -329,6 +350,14 @@ func upgradeGuidance(asset AssetCheck, sourceFlag string, installMethod InstallM
 		return "Run `zero upgrade " + sourceFlag + "` to install from the source this check used; a bare `zero upgrade` does not repeat that explicit source flag."
 	}
 	return "Run `zero upgrade` to download, verify, and install the latest release."
+}
+
+// githubAPIToken selects a trimmed token only for HTTPS GitHub API URLs.
+func githubAPIToken(u *url.URL) string {
+	if u.Scheme != "https" || !strings.EqualFold(u.Hostname(), "api.github.com") {
+		return ""
+	}
+	return firstNonEmpty(os.Getenv(EnvUpdateToken), os.Getenv(EnvGitHubToken))
 }
 
 func fetchRelease(ctx context.Context, endpoint string) (release Release, err error) {
@@ -341,7 +370,30 @@ func fetchRelease(ctx context.Context, endpoint string) (release Release, err er
 	}
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("User-Agent", "zero/update")
-	response, err := http.DefaultClient.Do(request)
+	if token := githubAPIToken(request.URL); token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	client := &http.Client{
+		Transport: httpClient.Transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			if req.URL.Scheme != "https" {
+				for _, prev := range via {
+					if githubAPIToken(prev.URL) != "" {
+						return errors.New("refusing redirect to non-HTTPS URL")
+					}
+				}
+			}
+			// net/http also forwards Authorization to subdomains; keep the exact-host boundary.
+			if req.URL.Scheme != "https" || !strings.EqualFold(req.URL.Hostname(), "api.github.com") {
+				req.Header.Del("Authorization")
+			}
+			return nil
+		},
+	}
+	response, err := client.Do(request)
 	if err != nil {
 		return Release{}, err
 	}
@@ -457,7 +509,7 @@ func releasePlatform(goos string) (string, error) {
 		// self-updating release asset. Point users at `npm update` rather
 		// than a source rebuild, since that's the documented Termux
 		// install/upgrade path and doesn't require a Go toolchain.
-		return "", fmt.Errorf("no published release for %q (release assets: linux, macos, windows). Your build is the current version of record. Upgrade with `npm update -g @gitlawb/zero` to get the latest.", goos) //nolint:staticcheck // Preserve established user-facing error text.
+		return "", fmt.Errorf("no published release for %q (release assets: linux, macos, windows). Your build is the current version of record. Upgrade with `npm update -g %s` to get the latest.", goos, npmPackageName) //nolint:staticcheck // Preserve established user-facing error text.
 	}
 }
 

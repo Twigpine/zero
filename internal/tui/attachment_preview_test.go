@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/terminalpet"
-	"github.com/Gitlawb/zero/internal/zeroruntime"
+	"github.com/Twigpine/zero/internal/terminalpet"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 func previewImageBlock(t *testing.T) zeroruntime.ImageBlock {

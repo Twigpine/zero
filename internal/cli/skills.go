@@ -5,8 +5,8 @@ import (
 	"io"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/redaction"
-	"github.com/Gitlawb/zero/internal/skills"
+	"github.com/Twigpine/zero/internal/redaction"
+	"github.com/Twigpine/zero/internal/skills"
 )
 
 type skillListOptions struct {
