@@ -805,7 +805,7 @@ func TestModelPickerDiscoveryCmds_OrderIndependence(t *testing.T) {
 		m := newModel(t.Context(), Options{
 			SavedProviders: order,
 		})
-		cmd := m.modelPickerDiscoveryCmds()
+		_, cmd := m.modelPickerDiscoveryCmds()
 		if cmd == nil {
 			t.Fatalf("expected discovery commands for order %v", order)
 		}

@@ -575,8 +575,12 @@ type model struct {
 	modelPickerLiveByProvider map[string][]providermodeldiscovery.Model
 	// Discovery errors and generations belong to the provider lookup, not the
 	// active model, so concurrent results cannot clear another account's status.
-	modelPickerErrorsByProvider    map[string]string
+	modelPickerErrorsByProvider map[string]string
+	// modelPickerDiscoveryGeneration numbers refresh requests; the map records
+	// the newest request per discovery key so a refresh of one account cannot
+	// discard another account's still-pending result.
 	modelPickerDiscoveryGeneration int
+	modelPickerDiscoveryRequests   map[string]int
 	// ollamaContextWindowByModel holds context-window sizes fetched from a local
 	// Ollama daemon's native /api/show endpoint (keyed by model name), for
 	// custom/local models that have no curated-catalog entry and whose
@@ -2093,8 +2097,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case keyCtrl(msg, 'r'):
 			if m.picker != nil && m.picker.kind == pickerModel {
-				m.modelPickerDiscoveryGeneration++
-				return m, m.modelPickerDiscoveryCmds()
+				return m.modelPickerDiscoveryCmds()
 			}
 		case keyCtrl(msg, 'f'):
 			if m.picker != nil && m.picker.kind == pickerModel {
@@ -3219,7 +3222,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case setupOAuthDeviceMsg:
 		return m.applySetupOAuthDeviceCode(msg)
 	case modelPickerModelsDiscoveredMsg:
-		if msg.generation != 0 && msg.generation != m.modelPickerDiscoveryGeneration {
+		if msg.generation != 0 && msg.generation != m.modelPickerDiscoveryRequests[modelPickerDiscoveryKey(msg.endpointKey, msg.providerID)] {
+			// Only a newer request for the same account supersedes this result.
 			// Honor an explicit list request using current state without letting
 			// an older response overwrite the newer discovery or its loading flag.
 			if msg.showList {
@@ -5121,9 +5125,8 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		return m, nil
 	case commandModel:
 		if arg := strings.ToLower(strings.TrimSpace(command.text)); arg == "list" || arg == "ls" {
-			m.modelPickerDiscoveryGeneration++
-			if cmd := m.modelListDiscoveryCmd(); cmd != nil {
-				return m, cmd
+			if next, cmd := m.modelListDiscoveryCmd(); cmd != nil {
+				return next, cmd
 			}
 		}
 		if strings.TrimSpace(command.text) == "" {
