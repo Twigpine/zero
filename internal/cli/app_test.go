@@ -1596,10 +1596,14 @@ func TestRunUpdateHelpDocumentsCheckFlag(t *testing.T) {
 	if exitCode != exitSuccess {
 		t.Fatalf("expected exit code %d, got %d: %s", exitSuccess, exitCode, stderr.String())
 	}
-	for _, want := range []string{"--check", "--repo", "--endpoint", "--timeout", "--target"} {
+	for _, want := range []string{"--check", "--repo", "--endpoint", "--timeout", "--target", "ZERO_GITHUB_TOKEN", "ZERO_UPDATE_RELEASE_URL"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("expected update help to document %s, got %q", want, stdout.String())
 		}
+	}
+	// The fallback entry must have its own line, apart from the precedence prose.
+	if !strings.Contains(stdout.String(), "\n  GITHUB_TOKEN ") {
+		t.Fatalf("expected update help to document a standalone GITHUB_TOKEN entry, got %q", stdout.String())
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("expected empty stderr, got %q", stderr.String())

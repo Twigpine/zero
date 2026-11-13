@@ -55,15 +55,24 @@ func helpText() string {
 // across turns (e.g. Gemini's gemini_tool_N), so a bare id could attribute a
 // decision or a result to a different run's call.
 type rowContext struct {
-	resolved map[string]bool
-	hints    map[string]string
-	args     map[string]string
-	auto     map[string]bool
-	decided  map[string]bool
+	resolved map[rowKey]bool
+	hints    map[rowKey]string
+	args     map[rowKey]string
+	auto     map[rowKey]bool
+	decided  map[rowKey]bool
 }
 
-func rcKey(runID int, id string) string {
-	return strconv.Itoa(runID) + ":" + id
+// rowKey identifies a tool call within a run for the rowContext maps. A
+// comparable struct avoids the strconv.Itoa + concatenation that the previous
+// string key paid on every lookup; the render path built millions of these
+// keys per session purely to hash them.
+type rowKey struct {
+	runID int
+	id    string
+}
+
+func rcKey(runID int, id string) rowKey {
+	return rowKey{runID: runID, id: id}
 }
 
 func buildRowContext(rows []transcriptRow) rowContext {
@@ -73,13 +82,13 @@ func buildRowContext(rows []transcriptRow) rowContext {
 		return rowContext{}
 	}
 	rc := rowContext{
-		resolved: map[string]bool{},
-		hints:    map[string]string{},
-		args:     map[string]string{},
-		auto:     map[string]bool{},
-		decided:  map[string]bool{},
+		resolved: map[rowKey]bool{},
+		hints:    map[rowKey]string{},
+		args:     map[rowKey]string{},
+		auto:     map[rowKey]bool{},
+		decided:  map[rowKey]bool{},
 	}
-	prompted := map[string]bool{}
+	prompted := map[rowKey]bool{}
 	for _, row := range rows {
 		switch row.kind {
 		case rowToolCall:

@@ -90,7 +90,8 @@ func applyTheme(mode themeMode, terminalDark bool) themeMode {
 	zeroTheme = theme
 	rebuildStreamingFadePalette()
 	if defaultRenderCache != nil {
-		defaultRenderCache.clear() // old-palette entries must not be reused
+		defaultRenderCache.clear()           // old-palette entries must not be reused
+		defaultTranscriptBodyRenders.reset() // ...nor the row-level body renders
 	}
 	if defaultFileViewCache != nil {
 		defaultFileViewCache.clear()

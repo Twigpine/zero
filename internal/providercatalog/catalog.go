@@ -234,6 +234,18 @@ func All() []Descriptor {
 	return copied
 }
 
+// Find returns the first catalog entry matching pred. The predicate reads the
+// internal (uncloned) descriptors, so scanning on a hot path costs no
+// allocations; only a match pays the single clone that Get already pays.
+func Find(pred func(Descriptor) bool) (Descriptor, bool) {
+	for _, descriptor := range descriptors {
+		if pred(descriptor) {
+			return cloneDescriptor(descriptor), true
+		}
+	}
+	return Descriptor{}, false
+}
+
 func Get(id string) (Descriptor, bool) {
 	normalized := NormalizeID(id)
 	for _, descriptor := range descriptors {

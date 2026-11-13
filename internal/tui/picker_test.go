@@ -1868,3 +1868,54 @@ func TestProviderDescriptorByBaseURLMapsLegacyOpenGatewayHost(t *testing.T) {
 		t.Fatal("an unknown host must not map to a catalog entry")
 	}
 }
+
+func TestModelContextWindowResolvesBaseURLOnlyProfilePerFrame(t *testing.T) {
+	// view.go calls modelContextWindow on every render, so its active-provider
+	// lookup must resolve a catalog-less, base-URL-only profile through the
+	// providercatalog.Find scan added for #1196. A model ID carried by both the
+	// active provider's discovered list and another provider's pins that the
+	// active-provider result wins, not the random-order fallback map scan.
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		t.Fatalf("load default registry: %v", err)
+	}
+	const unknownModel = "totally-unknown-proxy-model"
+	if _, ok := registry.Resolve(unknownModel); ok {
+		t.Fatalf("%q unexpectedly resolves in the curated registry; pick another ID", unknownModel)
+	}
+	m := model{
+		modelCatalog: registry,
+		providerProfile: config.ProviderProfile{
+			Name:         "proxy",
+			ProviderKind: config.ProviderKindOpenAICompatible,
+			BaseURL:      config.OpenAIBaseURL,
+		},
+		modelPickerLiveByProvider: map[string][]providermodeldiscovery.Model{
+			"openai": {{ID: unknownModel, ContextWindow: 246810}},
+			"xai":    {{ID: unknownModel, ContextWindow: 1}},
+		},
+	}
+	descriptor, ok := m.activeProviderDescriptor()
+	if !ok || descriptor.ID != "openai" {
+		t.Fatalf("activeProviderDescriptor for a base-URL-only profile = (%q, %v), want openai", descriptor.ID, ok)
+	}
+	// The per-frame lookup hands back clones: mutating the returned descriptor's
+	// shared-state fields must not poison the catalog for the next frame.
+	if len(descriptor.AuthEnvVars) > 0 {
+		descriptor.AuthEnvVars[0] = "MUTATED"
+	}
+	again, ok := m.activeProviderDescriptor()
+	if !ok || again.ID != "openai" {
+		t.Fatalf("per-frame lookup lost the openai entry after the first result was mutated: (%q, %v)", again.ID, ok)
+	}
+	if len(again.AuthEnvVars) > 0 && again.AuthEnvVars[0] == "MUTATED" {
+		t.Fatal("per-frame lookup returned an internal catalog slice without cloning")
+	}
+	// Drive the per-frame entry point itself. Map iteration order is random, so
+	// repeat enough that a fallback-order leak would fail long before this loop.
+	for i := 0; i < 16; i++ {
+		if got := m.modelContextWindow(unknownModel); got != 246810 {
+			t.Fatalf("modelContextWindow per-frame lookup #%d = %d, want the active provider's 246810", i, got)
+		}
+	}
+}

@@ -12,7 +12,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
-  <img alt="Go 1.26.10+" src="https://img.shields.io/badge/Go-1.26.10+-00ADD8?logo=go&logoColor=white">
+  <img alt="Go 1.26.11+" src="https://img.shields.io/badge/Go-1.26.11+-00ADD8?logo=go&logoColor=white">
   <img alt="25+ providers" src="https://img.shields.io/badge/providers-25+-34E2EA">
   <a href="https://discord.gg/CaQDS6wdFn"><img alt="Discord" src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white"></a>
   <a href="https://vercel.com/open-source-program"><img alt="Vercel OSS Program" src="https://vercel.com/oss/program-badge-2026.svg"></a>
@@ -168,7 +168,7 @@ irm https://raw.githubusercontent.com/Twigpine/zero/main/scripts/install.ps1 | i
 
 ### From source
 
-Source builds require Go 1.26.10+.
+Source builds require Go 1.26.11+.
 
 ```bash
 git clone https://github.com/Twigpine/zero.git
