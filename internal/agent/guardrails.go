@@ -346,9 +346,14 @@ func attachCountedHeadingEntries(text string) string {
 		}
 		if _, ok := markdownListEntryContent(lines[firstEntry]); !ok {
 			content := strings.TrimSpace(lines[firstEntry])
+			if countedOperationResolved(trimmed, content) {
+				joined = append(joined, content)
+				index = firstEntry
+				continue
+			}
 			if (countedHeadingIsOperational(strings.TrimSpace(trimmed)) ||
 				containsFailureConsequence(content)) &&
-				!paragraphReportsAffirmativeOutcome(content) {
+				!countedOperationResolved(trimmed, content) {
 				joined = append(joined, line+" - "+content)
 				index = firstEntry
 				continue
@@ -378,10 +383,41 @@ func attachCountedHeadingEntries(text string) string {
 	return strings.Join(joined, "\n")
 }
 
-var affirmativeOutcomeParagraphPattern = regexp.MustCompile(`^(?:the\s+)?(?:[[:alnum:]_-]+\s+){0,4}(?:succeeded|completed\s+successfully|was\s+successful|is\s+(?:complete|completed|done))[.!]?$`)
+var affirmativeOutcomeParagraphPattern = regexp.MustCompile(`^(?:the\s+)?((?:[[:alnum:]_-]+\s+){0,4})(?:succeeded|completed\s+successfully|was\s+successful|is\s+(?:complete|completed|done))[.!]?$`)
 
 func paragraphReportsAffirmativeOutcome(text string) bool {
 	return affirmativeOutcomeParagraphPattern.MatchString(text)
+}
+
+func countedOperationResolved(heading, content string) bool {
+	if !paragraphReportsAffirmativeOutcome(content) {
+		return false
+	}
+	operation := strings.TrimPrefix(strings.TrimSpace(heading), "unable to ")
+	verb, _, _ := cutFirstWord(operation)
+	terms := []string{verb}
+	switch verb {
+	case "deploy":
+		terms = []string{"deploy", "deployment", "rollout"}
+	case "migrate":
+		terms = []string{"migrate", "migration"}
+	case "publish", "release":
+		terms = []string{"publish", "publication", "release"}
+	case "write", "edit", "apply":
+		terms = []string{"write", "edit", "change", "patch"}
+	}
+	match := affirmativeOutcomeParagraphPattern.FindStringSubmatch(content)
+	if len(match) < 2 {
+		return false
+	}
+	subject := strings.TrimSpace(match[1])
+	for _, prep := range []string{" of ", " for ", " after ", " before ", " during ", " with "} {
+		if at := strings.Index(subject, prep); at >= 0 {
+			subject = subject[:at]
+		}
+	}
+	words := strings.Fields(subject)
+	return len(words) > 0 && containsWord(terms, words[len(words)-1])
 }
 
 var markdownListEntryPattern = regexp.MustCompile(`^(?:[-+*]|[0-9]+[.)])\s+(.+)$`)
@@ -900,10 +936,42 @@ func fallbackOutcomeIsAffirmative(fallback string) bool {
 	}) {
 		return false
 	}
-	return !fallbackHasUnprovenAdversativeOutcome(fallback) &&
+	return !quantifiedPartialOutcome(fallback) && !unprovenResultClause(fallback) &&
+		!fallbackHasUnprovenAdversativeOutcome(fallback) &&
 		!negatedFallbackPredicatePattern.MatchString(fallback) &&
 		!nonAffirmativeFallbackPattern.MatchString(fallback) &&
 		!containsFailureConsequence(fallback)
+}
+
+var resultClauseBoundary = regexp.MustCompile(`\s+(?:and|but|though|yet|however)\s+|;\s*|,\s*`)
+var resultStatePredicate = regexp.MustCompile(`\b(?:is|are|was|were|remain|remains|need|needs|still)\b`)
+var resultFraction = regexp.MustCompile(`\b([0-9]+)\s*(?:of|out of|/)\s*([0-9]+)\b`)
+
+func quantifiedPartialOutcome(text string) bool {
+	for _, match := range resultFraction.FindAllStringSubmatch(text, -1) {
+		part, e1 := strconv.ParseUint(match[1], 10, 64)
+		whole, e2 := strconv.ParseUint(match[2], 10, 64)
+		if e1 != nil || e2 != nil || part < whole {
+			return true
+		}
+	}
+	return false
+}
+
+// A later asserted result needs its own proof; an earlier positive fragment
+// cannot certify the next clause. Coordinated noun phrases contain no new
+// predicate and remain part of the first assertion.
+func unprovenResultClause(text string) bool {
+	clauses := resultClauseBoundary.Split(text, -1)
+	for _, clause := range clauses[1:] {
+		clause = strings.TrimSpace(clause)
+		if resultStatePredicate.MatchString(clause) &&
+			!paragraphReportsAffirmativeOutcome(clause) &&
+			!affirmativeObservationConsequencePattern.MatchString(clause) {
+			return true
+		}
+	}
+	return false
 }
 
 // fallbackHasUnprovenAdversativeOutcome treats a qualification of the claimed
@@ -1638,7 +1706,7 @@ func containsUnambiguousFailureState(text string) bool {
 var consequenceBoundaries = []string{
 	", so ", "; so ", " so ", ", but ", "; but ", " but ",
 	", therefore", "; therefore", " therefore", ", leaving ", " leaving ",
-	" because ", " since ", "; ", ": ", " - ", " -- ", " and ", ", ",
+	" because ", " since ", " due to ", " owing to ", "; ", ": ", " - ", " -- ", " and ", ", ",
 }
 
 // reportedConsequence returns an asserted outcome after one matched inability.
@@ -1650,7 +1718,7 @@ func reportedConsequence(sentence string, stemEnd int) string {
 		return ""
 	}
 	tail := sentence[stemEnd:]
-	thatAt := strings.Index(tail, " that ")
+	thatAt := negatedSearchPropositionAt(tail)
 	earliest := -1
 	width := 0
 	for _, boundary := range consequenceBoundaries {
@@ -1661,7 +1729,8 @@ func reportedConsequence(sentence string, stemEnd int) string {
 		explicit := strings.HasPrefix(boundary, ";") ||
 			strings.Contains(boundary, " so ") || strings.Contains(boundary, " but ") ||
 			strings.Contains(boundary, "therefore") || strings.Contains(boundary, "leaving") ||
-			strings.Contains(boundary, "because") || strings.Contains(boundary, "since")
+			strings.Contains(boundary, "because") || strings.Contains(boundary, "since") ||
+			strings.Contains(boundary, "due to") || strings.Contains(boundary, "owing to")
 		if thatAt >= 0 && index > thatAt && !explicit {
 			continue
 		}
@@ -1673,6 +1742,24 @@ func reportedConsequence(sentence string, stemEnd int) string {
 		return ""
 	}
 	return tail[earliest+width:]
+}
+
+// A searched-for proposition can be a that-clause or a prepositional object
+// (evidence of ..., signs for ...). Its failure-state adjectives describe what
+// was absent, until an explicit consequence introduces an asserted outcome.
+func negatedSearchPropositionAt(tail string) int {
+	first := strings.Index(tail, " that ")
+	for _, prep := range []string{" of ", " for ", " about ", " concerning ", " regarding "} {
+		at := strings.Index(tail, prep)
+		if at < 0 {
+			continue
+		}
+		words := strings.Fields(tail[:at])
+		if len(words) > 0 && containsWord(strongAbsenceObjects, words[len(words)-1]) && (first < 0 || at < first) {
+			first = at
+		}
+	}
+	return first
 }
 
 // causalConsequenceConnectives present what follows as CAUSED by what preceded.
@@ -1797,7 +1884,7 @@ var exhaustiveObservationEvidencePattern = regexp.MustCompile(`^after\s+(?:(?:[[
 // because its failure wording is absent from a deny-list. It recognizes either
 // an explicit completed action or a bounded positive result of the observation.
 func observationConsequenceIsAffirmative(consequence string) bool {
-	if containsFailureConsequence(consequence) {
+	if containsFailureConsequence(consequence) || unprovenResultClause(consequence) {
 		return false
 	}
 	if fallbackHasUnprovenAdversativeOutcome(consequence) {
@@ -1848,15 +1935,29 @@ func countedLabelContent(sentence string) (string, bool) {
 	}
 	remainder := strings.TrimSpace(trimmed[match[1]:])
 	heading := strings.TrimSpace(trimmed[:match[1]])
+	if open := strings.LastIndex(heading, "("); open >= 0 {
+		if close := strings.Index(heading[open:], ")"); close >= 0 {
+			count, err := strconv.ParseUint(strings.TrimSpace(heading[open+1:open+close]), 10, 64)
+			if err == nil && count == 0 {
+				if content, ok := markdownListEntryContent(remainder); ok {
+					return content, true
+				}
+				return remainder, true
+			}
+		}
+	}
 	// Only the counted HEADING is exempt. Attached prose or a same-line bullet is
 	// still ordinary report content and must pass through admission detection.
 	if remainder == "" {
-		if hasObjectiveFailure(heading) {
+		if hasObjectiveFailure(heading) || countedHeadingIsOperational(heading) {
 			return heading, false
 		}
 		return "", true
 	}
 	if content, listEntry := markdownListEntryContent(remainder); listEntry {
+		if countedOperationResolved(heading, content) {
+			return content, true
+		}
 		if containsFailureConsequence(content) || hasObjectiveFailure(heading) ||
 			countedHeadingIsOperational(heading) || !countedContentIsBenignFinding(content) {
 			return heading + " " + content, false
@@ -2037,13 +2138,58 @@ func fallbackContradictedByNextSentence(claim inabilityClaim) bool {
 	// takes it back. A sentence about something else ("Documentation is
 	// outdated.") has no such subject and is left alone, which is exactly the
 	// neutral follow-on this correction protects.
-	return fallbackBackReferenceSubject.MatchString(next) &&
-		!affirmativeOutcomePattern.MatchString(next)
+	return fallbackResultIsRelated(claim.sentence, next) &&
+		!paragraphReportsAffirmativeOutcome(next) &&
+		!affirmativeOutcomePattern.MatchString(next) &&
+		!affirmativePassiveResultPattern.MatchString(next)
 }
 
-// fallbackBackReferenceSubject matches a sentence opening that refers back to
-// the substitute just described, rather than introducing a new subject.
-var fallbackBackReferenceSubject = regexp.MustCompile(`^(?:it|that|this|they|the\s+[[:alnum:]_-]+)\b`)
+var affirmativePassiveResultPattern = regexp.MustCompile(`^(?:[[:alnum:]_-]+\s+){1,6}(?:is|are|was|were|has\s+been|have\s+been)\s+(?:fully\s+)?(?:formatted|migrated|deployed|published|released|verified|validated|tested|checked|completed|done)(?:\s+successfully)?[.!]?$`)
+
+var resultSubjectBoundary = regexp.MustCompile(`\b(?:is|are|was|were|remain|remains|need|needs|still|got|completed|succeeded|explains)\b`)
+
+// Relate the grammatical subject to the obligation and its material objects,
+// rather than treating every sentence beginning with "the" as a result. The
+// operation families also name their ordinary result objects (formatter/files,
+// migration/rows). A different activity, such as documentation, stays neutral.
+func fallbackResultIsRelated(failed, next string) bool {
+	if quantifiedPartialOutcome(next) {
+		return true
+	}
+	subject := next
+	if at := resultSubjectBoundary.FindStringIndex(next); at != nil {
+		subject = next[:at[0]]
+	}
+	if containsAlternativeTerm(subject, []string{"i", "we"}) {
+		return true
+	}
+	if containsAlternativeTerm(subject, []string{"it", "that", "this", "they", "run", "check"}) {
+		if containsAlternativeTerm(next, []string{"documented", "documentation", "readme"}) &&
+			!containsAlternativeTerm(failed, []string{"document", "documentation"}) {
+			return false
+		}
+		return true
+	}
+	for _, terms := range [][]string{
+		{"format", "formatting", "formatter", "formatted", "unformatted", "style", "lint", "gofmt", "file", "files"},
+		{"migration", "migrate", "migrated", "row", "rows", "data"},
+		{"test", "tests", "testing", "verification", "validation"},
+		{"deploy", "deployment", "rollout"},
+		{"publish", "publishing", "release"},
+		{"plan", "planning"},
+		{"document", "documentation", "report", "summary"},
+	} {
+		if containsAlternativeTerm(failed, terms) && containsAlternativeTerm(subject, terms) {
+			return true
+		}
+	}
+	for _, word := range materialObligationComponents(failed) {
+		if containsAlternativeTerm(subject, []string{word, word + "s"}) {
+			return true
+		}
+	}
+	return false
+}
 
 // strongAbsenceHasBlockedOutcome decides whether blocked-state text is outside
 // the proposition whose absence was observed. This makes the relationship
@@ -2051,26 +2197,6 @@ var fallbackBackReferenceSubject = regexp.MustCompile(`^(?:it|that|this|they|the
 // while preserving "no evidence that the issue is unresolved" as a successful
 // negative finding.
 func strongAbsenceHasBlockedOutcome(claim inabilityClaim) bool {
-	tail := claim.sentence[claim.stemAt+claim.stemLen:]
-	thatAt := strings.Index(tail, " that ")
-	for _, marker := range unambiguousFailureStates {
-		markerAt := strings.Index(tail, marker)
-		if markerAt < 0 {
-			continue
-		}
-		if thatAt < 0 || markerAt < thatAt {
-			return true
-		}
-	}
-	// The regex-backed passive/active forms are part of the same unambiguous
-	// state contract. Apply them only when no negated `that ...` proposition can
-	// own the wording; reportedConsequence handles asserted text beyond one.
-	if thatAt < 0 && passiveMissedWorkPattern.MatchString(tail) {
-		return true
-	}
-	if thatAt < 0 && activeMissedWorkPattern.MatchString(tail) && !readOnlyNoChangePattern.MatchString(tail) {
-		return true
-	}
 	consequence := reportedConsequence(claim.sentence, claim.stemAt+claim.stemLen)
 	if containsFailureConsequence(consequence) {
 		if !readOnlyNoChangeOnly(consequence) {
