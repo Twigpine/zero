@@ -3227,9 +3227,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.applySetupOAuthDeviceCode(msg)
 	case modelPickerModelsDiscoveredMsg:
 		requested, tracked := m.modelPickerDiscoveryRequests[modelPickerDiscoveryKey(msg.endpointKey, msg.providerID)]
-		if msg.generation != 0 && tracked && msg.generation != requested {
-			// Only a newer registered request for the same account supersedes
-			// this result; an unregistered warm-up from Init stands until then.
+		if tracked && msg.generation < requested {
+			// A registered request for the same account supersedes every older
+			// result for it, including the unregistered startup warm-up, whose
+			// generation 0 is older than any registered request. A key with no
+			// registered request accepts its result.
 			// Honor an explicit list request using current state without letting
 			// an older response overwrite the newer discovery or its loading flag.
 			if msg.showList {

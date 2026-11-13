@@ -215,8 +215,11 @@ func TestModelPickerShowsLoadingUntilDiscoveryCompletes(t *testing.T) {
 	}
 
 	// When the provider's discovery returns, its section shows the live models.
+	// Opening the picker registered the request, so the result carries the
+	// generation it was stamped with.
 	updated, _ = m.Update(modelPickerModelsDiscoveredMsg{
 		providerID: "ollama-cloud",
+		generation: m.modelPickerDiscoveryGeneration,
 		models:     []providermodeldiscovery.Model{{ID: "live-cloud-a", Description: "Live Cloud A"}},
 	})
 	m = updated.(model)
@@ -290,7 +293,7 @@ func TestModelPickerFallsBackWhenDiscoveryFails(t *testing.T) {
 		t.Fatal("expected opening the model picker to start discovery")
 	}
 	// A failed discovery leaves the static catalog list in place — no crash, no block.
-	updated, _ = m.Update(modelPickerModelsDiscoveredMsg{providerID: "ollama-cloud", models: nil, err: errors.New("offline")})
+	updated, _ = m.Update(modelPickerModelsDiscoveredMsg{providerID: "ollama-cloud", generation: m.modelPickerDiscoveryGeneration, models: nil, err: errors.New("offline")})
 	m = updated.(model)
 	view := plainRender(t, m.pickerOverlay(100))
 	assertNotContains(t, view, "Checking available models...")

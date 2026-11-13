@@ -470,7 +470,8 @@ func (m model) requestProviderDiscoveryCmd(descriptor providercatalog.Descriptor
 // its credential the same way the wizard does: a stored/inline/env key, or a stored
 // OAuth bearer for token-login providers (e.g. xAI). It stamps the current
 // generation without registering a request; Init has no model to return, so its
-// warm-up result is accepted until a registered request supersedes it.
+// warm-up carries generation 0 and loses to any registered request for the same
+// key, however late it finishes.
 func (m model) modelPickerProviderDiscoveryCmd(descriptor providercatalog.Descriptor, profile config.ProviderProfile) tea.Cmd {
 	authed := profile
 	if store, err := m.providerKeyStore(); err == nil {

@@ -374,6 +374,36 @@ func TestSubscriptionListRefreshKeepsOtherAccountResult(t *testing.T) {
 	}
 }
 
+// Init warms discovery without registering a request. When that slow startup
+// result lands after a registered refresh already applied, it must not revert
+// the account's models to stale startup data.
+func TestSubscriptionLateStartupWarmupDoesNotOverrideRefresh(t *testing.T) {
+	m := subscriptionTestModel(t)
+	m.picker = m.newModelPicker()
+	m.discoverProviderModels = func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+		return []providermodeldiscovery.Model{{ID: "gpt-refreshed"}}, nil
+	}
+	updated, cmd := m.Update(testKeyCtrl('r'))
+	if cmd == nil {
+		t.Fatal("Ctrl+R must register and start a refresh")
+	}
+	updated, _ = updated.(model).Update(cmd())
+	updated, _ = updated.(model).Update(modelPickerModelsDiscoveredMsg{
+		providerID: "chatgpt", endpointKey: "subscription",
+		models: []providermodeldiscovery.Model{{ID: "gpt-stale-startup"}},
+	})
+	next := updated.(model)
+	if models := next.modelPickerLiveByProvider["subscription"]; len(models) != 1 || models[0].ID != "gpt-refreshed" {
+		t.Fatalf("late startup warm-up overrode the registered refresh; cached = %#v", models)
+	}
+	updated, _ = next.Update(modelPickerModelsDiscoveredMsg{
+		providerID: "chatgpt", endpointKey: "subscription", err: errors.New("startup discovery failed"),
+	})
+	if strings.Contains(updated.(model).modelPickerOverlay(100), "startup discovery failed") {
+		t.Fatal("late startup warm-up failure replaced the registered refresh's status")
+	}
+}
+
 type subscriptionTransport func(*http.Request) (*http.Response, error)
 
 func (f subscriptionTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
