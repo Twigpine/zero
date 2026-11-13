@@ -25,6 +25,7 @@ package measurements
 import (
 	"encoding/json"
 	"math"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -78,13 +79,66 @@ type Conflict struct {
 // The pooling made the check agree with a number the stated command never
 // printed, silently, which is the failure mode that is hardest to notice.
 //
-// A zero Run is a legitimate value meaning "this caller does not distinguish
-// runs"; everything it records and asks about lives in one group, which is how
-// this behaved before provenance existed.
+// Recording requires an explicit go test -json invocation. A zero Run or an
+// opaque wrapper cannot establish who produced JSON-shaped output.
 type Run struct {
 	Command string
 	Args    []string
 	Dir     string
+}
+
+// producesGoTestJSON checks the executed argv, not words found in its output.
+// Test arguments after -args/-- cannot enable cmd/go's JSON framing, and the
+// last -json setting wins just as it does in Go's flag parser.
+func (r Run) producesGoTestJSON() bool {
+	name := filepath.Base(strings.ReplaceAll(r.Command, `\`, "/"))
+	if (name != "go" && name != "go.exe") || len(r.Args) < 2 || r.Args[0] != "test" {
+		return false
+	}
+	jsonOutput := false
+	for at := 1; at < len(r.Args); at++ {
+		arg := r.Args[at]
+		if arg == "-args" || arg == "--" {
+			break
+		}
+		if !strings.HasPrefix(arg, "-") {
+			continue
+		}
+		name, value, assigned := strings.Cut(strings.TrimPrefix(arg, "-"), "=")
+		if name == "json" {
+			if !assigned {
+				jsonOutput = true
+				continue
+			}
+			enabled, err := strconv.ParseBool(value)
+			if err != nil {
+				return false
+			}
+			jsonOutput = enabled
+			continue
+		}
+		switch name {
+		case "race", "v", "short", "benchmem", "failfast", "cover", "c", "work", "x", "n", "a", "msan", "asan", "trimpath", "fullpath":
+			if assigned {
+				if _, err := strconv.ParseBool(value); err != nil {
+					return false
+				}
+			}
+		case "run", "bench", "count", "timeout", "parallel", "cpu", "list", "shuffle", "skip", "coverprofile", "covermode", "coverpkg", "memprofile", "memprofilerate", "cpuprofile", "blockprofile", "blockprofilerate", "mutexprofile", "mutexprofilefraction", "outputdir", "trace", "fuzz", "fuzztime", "fuzzminimizetime", "gcflags", "ldflags", "asmflags", "buildmode", "compiler", "tags", "mod", "modfile", "overlay", "p", "pkgdir", "toolexec", "exec", "o", "C", "vet":
+			// A flag's value can itself be "-json" (notably -run/-exec).
+			// It is data, not an instruction to cmd/go's output formatter.
+			if !assigned {
+				at++
+				if at >= len(r.Args) {
+					return false
+				}
+			}
+		default:
+			// Unknown flag grammars cannot establish a producer safely.
+			return false
+		}
+	}
+	return jsonOutput
 }
 
 // key identifies the run for grouping. Args are joined with a separator that
@@ -599,9 +653,8 @@ func (l *Ledger) ensureMaps() {
 // timings accepted. Repeated records of the same command retain the existing
 // grouping; changing the command builder produces a different identity.
 //
-// Pass the command actually executed. A zero Run says this caller does not
-// distinguish runs, which is a legitimate answer — but it is now said out loud at
-// the call site rather than being the only thing the type could express.
+// Pass the command actually executed, including -json. Unknown provenance and
+// non-JSON commands produce no evidence, even when their output looks like JSON.
 func (l *Ledger) Record(run Run, text string) (RecordedRun, int) {
 	if l == nil {
 		return RecordedRun{}, 0
@@ -609,6 +662,9 @@ func (l *Ledger) Record(run Run, text string) (RecordedRun, int) {
 	run = run.snapshot()
 	key := run.key()
 	handle := RecordedRun{ledger: l, key: key}
+	if !run.producesGoTestJSON() {
+		return handle, 0
+	}
 	found := ParseGoTest(text)
 	if len(found) == 0 {
 		return handle, 0
