@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/memory"
+	"github.com/Twigpine/zero/internal/memory"
 )
 
 func memoryTestPaths(t *testing.T) memory.Paths {
