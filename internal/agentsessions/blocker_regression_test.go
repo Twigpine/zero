@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/sessions"
 )
 
 // TestImportedControlBytesAreStripped pins the terminal-injection fix: a foreign

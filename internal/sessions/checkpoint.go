@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/securefile"
+	"github.com/Twigpine/zero/internal/securefile"
 )
 
 // CheckpointsDir is the per-session subdirectory holding content-addressed blobs.

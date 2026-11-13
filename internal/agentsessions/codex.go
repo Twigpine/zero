@@ -7,8 +7,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/Gitlawb/zero/internal/sessions"
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 // codex reads Codex's rollout transcripts.

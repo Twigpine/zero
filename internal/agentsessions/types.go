@@ -27,7 +27,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/sessions"
 )
 
 // ForeignSession is the index entry for one session belonging to another agent.

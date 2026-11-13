@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/sessions"
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 // A source-shaped Pi session: the real outer wrapper (a "session" header, then

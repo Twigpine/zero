@@ -7,7 +7,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/sessions"
 )
 
 func summaryTexts(t *testing.T, events []sessions.AppendEventInput) []string {

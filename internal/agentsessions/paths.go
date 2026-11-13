@@ -68,6 +68,12 @@ func factoryRoot(env Env) string {
 // sibling of ~/.pi/agent/sessions/. Rooting discovery at ~/.pi/agent instead of
 // ~/.pi/agent/sessions would put a live credential file one glob away.
 func piRoot(env Env) string {
+	if dir := env.lookup("PI_CODING_AGENT_SESSION_DIR"); filepath.IsAbs(dir) {
+		return dir
+	}
+	if dir := env.lookup("PI_CODING_AGENT_DIR"); filepath.IsAbs(dir) {
+		return filepath.Join(dir, "sessions")
+	}
 	return env.underHome(".pi", "agent", "sessions")
 }
 

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/sessions"
 )
 
 // family1 is the layout two of the agents surveyed independently arrived at:

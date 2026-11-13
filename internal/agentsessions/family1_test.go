@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/sessions"
 )
 
 // The fixtures below are hand-written to the shapes observed in a real

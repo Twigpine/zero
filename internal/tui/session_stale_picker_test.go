@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/agentsessions"
-	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/agentsessions"
+	"github.com/Twigpine/zero/internal/sessions"
 )
 
 // twoResumableSessions seeds a store with sessions "a" and "b" in workspace

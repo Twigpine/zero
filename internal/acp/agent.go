@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/agentsessions"
 	"github.com/Twigpine/zero/internal/config"
 	"github.com/Twigpine/zero/internal/modelregistry"
 	"github.com/Twigpine/zero/internal/providercatalog"
@@ -428,6 +429,10 @@ func (a *Agent) handleSessionList(_ context.Context, params json.RawMessage) (an
 		if !filepath.IsAbs(operationalCwd) {
 			continue
 		}
+		if (item.WorkspaceKey != "" || agentsessions.ImportedAgent(item.Tag) != "") &&
+			!passiveImportedWorkspaceLocal(operationalCwd) {
+			continue
+		}
 		itemRoot, err := a.deps.ResolveWorkspaceRoot(operationalCwd)
 		if err != nil {
 			continue
@@ -447,6 +452,8 @@ func (a *Agent) handleSessionList(_ context.Context, params json.RawMessage) (an
 	}
 	return result, nil
 }
+
+var passiveImportedWorkspaceLocal = agentsessions.PassiveWorkspaceIsLocal
 
 // ---- prompt turn ----
 

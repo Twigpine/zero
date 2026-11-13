@@ -54,6 +54,30 @@ func TestDiscardCreatedRefusesChangedOrCommittedSession(t *testing.T) {
 	}
 }
 
+func TestDiscardCreatedRefusesAnotherStoresLiveLease(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(StoreOptions{RootDir: root})
+	created, discard, err := store.CreateDiscardable(CreateInput{Title: "owned import"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := NewStore(StoreOptions{RootDir: root})
+	other.Hold(created.SessionID)
+	if err := discard(); err == nil {
+		t.Fatal("discard removed a session held by another Store")
+	}
+	if got, err := store.Get(created.SessionID); err != nil || got == nil {
+		t.Fatalf("refused cleanup damaged the session: %+v %v", got, err)
+	}
+	other.Release(created.SessionID)
+	if err := discard(); err != nil {
+		t.Fatalf("cleanup after borrower release: %v", err)
+	}
+	if _, err := os.Stat(store.sessionPath(created.SessionID)); !os.IsNotExist(err) {
+		t.Fatalf("owned session directory remains: %v", err)
+	}
+}
+
 func TestStoreAppendEventsBatchesSequencesAndMetadata(t *testing.T) {
 	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: sequenceClock([]time.Time{
 		time.Date(2026, 6, 4, 15, 0, 0, 0, time.UTC),

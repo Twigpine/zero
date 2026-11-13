@@ -7,8 +7,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/Gitlawb/zero/internal/sessions"
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 // An imported session's tool work never reaches the model.
@@ -57,19 +57,22 @@ type activityLog struct {
 	calls  int
 	failed int
 
-	read     []string
-	changed  []string
-	commands []string
-	searches []string
-	failures []string
+	read              []string
+	changed           []string
+	commands          []string
+	searches          []string
+	failures          []string
+	requestedCommands []string
+	requestedSearches []string
 
-	// pendingPath maps a call id to the file claim it would contribute, held
+	// pendingPath maps a call id to the activity claim it would contribute, held
 	// until the call's RESULT is known. A path is committed to its bucket only
 	// once a success result confirms the tool ran: a Read of a path that does
 	// not exist must not appear under "Files read", and a Write whose result
 	// never arrives (an interrupted final call) must not appear under "Files
 	// changed" — both read as fact and are exactly the wrong thing to tell the
-	// next model. A claim still pending when the transcript ends is discarded.
+	// next model. Unconfirmed command/search requests are labeled as requests;
+	// unanswered file claims are discarded.
 	pendingPath map[string]pathClaim
 
 	// toolCounts is the fallback when nothing could be extracted from a tool's
@@ -103,8 +106,13 @@ func newActivityLog(cwd string) *activityLog {
 // and cannot erase the success — the withdraw-by-value it replaced could.
 func (log *activityLog) commitClaim(claim pathClaim) {
 	list := &log.read
-	if claim.bucket == "changed" {
+	switch claim.bucket {
+	case "changed":
 		list = &log.changed
+	case "cmd":
+		list = &log.commands
+	case "search":
+		list = &log.searches
 	}
 	log.add(claim.bucket, list, claim.value)
 }
@@ -145,7 +153,7 @@ func (log *activityLog) observeCall(callID string, name string, arguments string
 		// Not a JSON object. Codex's custom_tool_call carries a bare script in
 		// "input", which is a command in every sense that matters here.
 		if script := strings.TrimSpace(arguments); script != "" {
-			log.add("cmd", &log.commands, log.shorten(script))
+			log.pendingPath[callID] = pathClaim{bucket: "cmd", value: log.shorten(script)}
 			return
 		}
 		log.toolCounts[trimmedName]++
@@ -153,11 +161,11 @@ func (log *activityLog) observeCall(callID string, name string, arguments string
 	}
 
 	if command := firstStringField(fields, "command", "cmd", "script", "input"); command != "" {
-		log.add("cmd", &log.commands, log.shorten(command))
+		log.pendingPath[callID] = pathClaim{bucket: "cmd", value: log.shorten(command)}
 		return
 	}
 	if pattern := firstStringField(fields, "pattern", "query", "search_query", "regex"); pattern != "" {
-		log.add("search", &log.searches, log.shorten(pattern))
+		log.pendingPath[callID] = pathClaim{bucket: "search", value: log.shorten(pattern)}
 		return
 	}
 	if path := firstStringField(fields, "file_path", "filePath", "path", "notebook_path", "target_file"); path != "" {
@@ -193,7 +201,13 @@ func (log *activityLog) observeResult(callID string, name string, status tools.S
 		// A foreign format that supplies no outcome evidence is not proof of
 		// success or failure. Drop its pending factual claim while preserving the
 		// raw result event for history.
+		if hadClaim {
+			log.retainUnconfirmed(claim)
+		}
 		return
+	}
+	if hadClaim {
+		log.retainUnconfirmed(claim)
 	}
 	// The call did not do what it claimed, so its pending claim is dropped
 	// (never committed) and the failure itself is recorded below.
@@ -207,6 +221,15 @@ func (log *activityLog) observeResult(callID string, name string, status tools.S
 		detail = "failed"
 	}
 	log.add("fail", &log.failures, trimmedName+": "+detail)
+}
+
+func (log *activityLog) retainUnconfirmed(claim pathClaim) {
+	switch claim.bucket {
+	case "cmd":
+		log.add("requested-cmd", &log.requestedCommands, claim.value)
+	case "search":
+		log.add("requested-search", &log.requestedSearches, claim.value)
+	}
 }
 
 // isMutatingToolName reports whether a tool that takes a path changes the file.
@@ -282,6 +305,16 @@ func firstStringField(fields map[string]any, keys ...string) string {
 // truncates each event at 500 characters — a single combined summary would lose
 // its tail. Failures come last so they sit closest to the user's new request.
 func (log *activityLog) summaryEvents() []sessions.AppendEventInput {
+	// An unanswered request is useful history, but is not completed work.
+	// Sort call identities so map order cannot reshuffle the resume context.
+	ids := make([]string, 0, len(log.pendingPath))
+	for id := range log.pendingPath {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		log.retainUnconfirmed(log.pendingPath[id])
+	}
 	if log == nil || log.calls == 0 {
 		return nil
 	}
@@ -310,6 +343,8 @@ func (log *activityLog) summaryEvents() []sessions.AppendEventInput {
 		{"Files changed", log.changed},
 		{"Commands run", log.commands},
 		{"Searched for", log.searches},
+		{"Command requests (execution unconfirmed)", log.requestedCommands},
+		{"Search requests (execution unconfirmed)", log.requestedSearches},
 		{"Failures", log.failures},
 	} {
 		if line := summaryLine(section.label, section.items); line != "" {

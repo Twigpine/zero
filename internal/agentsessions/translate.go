@@ -11,9 +11,9 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/Gitlawb/zero/internal/redaction"
-	"github.com/Gitlawb/zero/internal/sessions"
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/redaction"
+	"github.com/Twigpine/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 // The payload field names below are a CONTRACT with the TUI, not a convention.
@@ -76,7 +76,14 @@ func stripControlWithBoundaries(value string) (string, []int) {
 	var b strings.Builder
 	b.Grow(len(value))
 	boundaries := []int{}
-	for _, r := range value {
+	for index := 0; index < len(value); {
+		if value[index] == 0x1b {
+			boundaries = appendBoundary(boundaries, b.Len())
+			index = displayEscapeEnd(value, index)
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(value[index:])
+		index += size
 		switch {
 		case r == '\t' || r == '\n':
 			b.WriteRune(r)

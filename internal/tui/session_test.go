@@ -1387,9 +1387,19 @@ func TestSessionPickerDetailStatusChips(t *testing.T) {
 	}
 }
 
+func isolatedResumePickerWorkspace(t *testing.T) string {
+	t.Helper()
+	workspace := filepath.Join(t.TempDir(), "project", "repo")
+	if err := os.MkdirAll(workspace, 0700); err != nil {
+		t.Fatal(err)
+	}
+	return workspace
+}
+
 func TestResumePickerDetailRendersOnlyAtMediumWidth(t *testing.T) {
+	workspace := isolatedResumePickerWorkspace(t)
 	store := testSessionStore(t)
-	sess, err := store.Create(sessions.CreateInput{Title: "Detail row", ModelID: "gpt-5-pickertest", Provider: "openai"})
+	sess, err := store.Create(sessions.CreateInput{Title: "Detail row", ModelID: "gpt-5-pickertest", Provider: "openai", Cwd: workspace})
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
 	}
@@ -1399,7 +1409,7 @@ func TestResumePickerDetailRendersOnlyAtMediumWidth(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AppendEvent returned error: %v", err)
 	}
-	m := newModel(context.Background(), Options{SessionStore: store})
+	m := newModel(context.Background(), Options{SessionStore: store, Cwd: workspace, AgentSessionsEnv: &agentsessions.Env{Home: t.TempDir()}})
 	m.input.SetValue("/resume")
 	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
@@ -1423,9 +1433,10 @@ func TestResumePickerDetailRendersOnlyAtMediumWidth(t *testing.T) {
 }
 
 func TestResumePickerFilterMatchesDetailFields(t *testing.T) {
+	workspace := isolatedResumePickerWorkspace(t)
 	store := testSessionStore(t)
 	mk := func(title, modelID string) {
-		sess, err := store.Create(sessions.CreateInput{Title: title, ModelID: modelID, Provider: "openai"})
+		sess, err := store.Create(sessions.CreateInput{Title: title, ModelID: modelID, Provider: "openai", Cwd: workspace})
 		if err != nil {
 			t.Fatalf("Create %q returned error: %v", title, err)
 		}
@@ -1439,7 +1450,7 @@ func TestResumePickerFilterMatchesDetailFields(t *testing.T) {
 	mk("alpha", "gpt-5")
 	mk("beta", "claude-sonnet-4.5")
 
-	m := newModel(context.Background(), Options{SessionStore: store})
+	m := newModel(context.Background(), Options{SessionStore: store, Cwd: workspace, AgentSessionsEnv: &agentsessions.Env{Home: t.TempDir()}})
 	m.input.SetValue("/resume")
 	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
@@ -1460,6 +1471,7 @@ func TestResumePickerFilterMatchesDetailFields(t *testing.T) {
 }
 
 func TestResumePickerSanitizesMultilineMetadata(t *testing.T) {
+	workspace := isolatedResumePickerWorkspace(t)
 	// Persisted session metadata is user-controlled: a title or model id can
 	// legally contain newlines, which must not break the picker's fixed
 	// one-or-two-line row geometry (a stray line shifts every row below it and
@@ -1468,7 +1480,7 @@ func TestResumePickerSanitizesMultilineMetadata(t *testing.T) {
 	sess, err := store.Create(sessions.CreateInput{
 		Title:   "alpha\nbravo",
 		ModelID: "gpt\x1b[31m5",
-		Cwd:     "/repo",
+		Cwd:     workspace,
 		Tag:     "side\x1b]0;x\achat",
 	})
 	if err != nil {
@@ -1480,7 +1492,7 @@ func TestResumePickerSanitizesMultilineMetadata(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AppendEvent returned error: %v", err)
 	}
-	m := newModel(context.Background(), Options{SessionStore: store, Cwd: "/repo"})
+	m := newModel(context.Background(), Options{SessionStore: store, Cwd: workspace, AgentSessionsEnv: &agentsessions.Env{Home: t.TempDir()}})
 	m.input.SetValue("/resume")
 	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)

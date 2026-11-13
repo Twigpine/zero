@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/sessions"
-	"github.com/Gitlawb/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/tools"
 )
 
 // A NORMALIZER THAT REMOVES BYTES IS ALSO A REASSEMBLER, SO IT CANNOT RUN LAST.

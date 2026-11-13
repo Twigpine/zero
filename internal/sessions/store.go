@@ -401,7 +401,9 @@ func (store *Store) discardCreated(created Metadata) error {
 	if !ValidSessionID(created.SessionID) {
 		return fmt.Errorf("invalid zero session id %q", created.SessionID)
 	}
-	unlock, err := store.lockSession(created.SessionID)
+	// Cleanup must not acquire another long-lived shared lease. Creation already
+	// holds this Store's lease; a deletion needs exclusive ownership instead.
+	unlock, err := store.lockSessionWithoutLease(created.SessionID)
 	if err != nil {
 		return err
 	}
@@ -422,15 +424,34 @@ func (store *Store) discardCreated(created Metadata) error {
 	if current.EventCount != 0 {
 		return fmt.Errorf("zero session %s has committed events", created.SessionID)
 	}
+	store.Release(created.SessionID)
+	releaseLease, exclusive, err := store.HoldExclusive(created.SessionID)
+	if err != nil || !exclusive {
+		store.Hold(created.SessionID)
+		if err != nil {
+			return fmt.Errorf("take cleanup lease for zero session %s: %w", created.SessionID, err)
+		}
+		return fmt.Errorf("zero session %s is held by another operation", created.SessionID)
+	}
+	leaseHeld := true
+	defer func() {
+		if leaseHeld {
+			releaseLease()
+		}
+	}()
 
 	var cleanupErr error
-	for _, path := range []string{store.eventsPath(created.SessionID), store.metadataPath(created.SessionID)} {
+	for _, path := range []string{store.eventsPath(created.SessionID), store.metadataPath(created.SessionID), store.leasePath(created.SessionID)} {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			cleanupErr = errors.Join(cleanupErr, err)
 		}
 	}
 	unlock()
 	locked = false
+	// Windows can keep a deleted lease entry pending until its handle closes.
+	// Drop that handle before trying to remove the now-empty owned directory.
+	releaseLease()
+	leaseHeld = false
 	for _, path := range []string{store.lockPath(created.SessionID), store.sessionPath(created.SessionID)} {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			cleanupErr = errors.Join(cleanupErr, err)

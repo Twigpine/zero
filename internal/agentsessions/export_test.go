@@ -1,7 +1,7 @@
 // Test seams: helpers only test code uses, kept out of the production binary.
 package agentsessions
 
-import "github.com/Gitlawb/zero/internal/sessions"
+import "github.com/Twigpine/zero/internal/sessions"
 
 // The production readers take an open handle (see openSelectedSource) so the
 // identity that was verified is the one that is read. Tests that only care

@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Gitlawb/zero/internal/agentsessions"
-	"github.com/Gitlawb/zero/internal/redaction"
-	"github.com/Gitlawb/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/agentsessions"
+	"github.com/Twigpine/zero/internal/redaction"
+	"github.com/Twigpine/zero/internal/sessions"
 )
 
 // runSessionsDiscover lists sessions belonging to other coding agents.
@@ -297,10 +297,16 @@ func pathsEqualForOS(left string, right string, goos string) bool {
 	if goos != runtime.GOOS {
 		return false
 	}
-	leftInfo, leftErr := os.Stat(left)
-	rightInfo, rightErr := os.Stat(right)
+	if goos == "windows" && (!importWorkspaceLocal(left) || !importWorkspaceLocal(right)) {
+		return false
+	}
+	leftInfo, leftErr := importWorkspaceStat(left)
+	rightInfo, rightErr := importWorkspaceStat(right)
 	return leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo)
 }
+
+var importWorkspaceLocal = agentsessions.PassiveWorkspaceIsLocal
+var importWorkspaceStat = os.Stat
 
 func windowsPathCategory(value string) string {
 	value = strings.TrimSpace(strings.ReplaceAll(value, `\`, "/"))

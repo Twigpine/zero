@@ -298,7 +298,7 @@ func sessionPickerWarning(localErr error, foreignProblems []error) string {
 // describes a request whose preconditions hold: no run has started, the same
 // session is active, and no newer /resume has replaced it.
 func (m model) sessionPickerResultIsCurrent(msg sessionPickerLoadedMsg) bool {
-	return !m.pending &&
+	return !m.pending && !m.sessionImportInFlight &&
 		msg.generation == m.sessionPickerGeneration &&
 		msg.originSession == m.activeSession.SessionID
 }
@@ -338,6 +338,10 @@ func (m model) startResumeCommand(args string) (model, string, tea.Cmd) {
 		return m, "Sessions\na foreign session import is already in progress", nil
 	}
 	m.sessionImportInFlight = true
+	m.sessionPickerGeneration++
+	if m.picker != nil && m.picker.kind == pickerSession {
+		m.picker = nil
+	}
 	return m, "", m.importForeignSessionCmd(args)
 }
 
@@ -643,6 +647,10 @@ func (m model) startForeignSessionImport(source agentsessions.ForeignSession) (m
 		return m, "Sessions\na foreign session import is already in progress", nil
 	}
 	m.sessionImportInFlight = true
+	m.sessionPickerGeneration++
+	if m.picker != nil && m.picker.kind == pickerSession {
+		m.picker = nil
+	}
 	return m, "", m.importForeignSessionSourceCmd(source)
 }
 
@@ -671,6 +679,10 @@ func (m model) finishForeignSessionImport(msg foreignSessionImportedMsg) (model,
 	// This session is no longer un-imported, so the memo that says otherwise
 	// must go before the picker is rebuilt.
 	agentsessions.InvalidateDiscovery()
+	m.sessionPickerGeneration++
+	if m.picker != nil && m.picker.kind == pickerSession {
+		m.picker = nil
+	}
 	if m.pending || m.activeSession.SessionID != msg.originSession {
 		note := importedSessionNote(msg.result, m.cwd)
 		return m, note + "\nThe import completed, but Zero did not resume it because the active session changed or a run started."

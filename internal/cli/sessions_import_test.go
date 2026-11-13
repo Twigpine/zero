@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Gitlawb/zero/internal/agentsessions"
-	"github.com/Gitlawb/zero/internal/sessions"
-	"github.com/Gitlawb/zero/internal/zerocommands"
+	"github.com/Twigpine/zero/internal/agentsessions"
+	"github.com/Twigpine/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/zerocommands"
 )
 
 func writeImportFixture(t *testing.T, path string, content string) {
