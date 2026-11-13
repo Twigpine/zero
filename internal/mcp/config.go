@@ -48,6 +48,10 @@ func NormalizeConfig(cfg config.MCPConfig) ([]Server, error) {
 	}
 	sort.Strings(names)
 
+	if err := ValidateUniqueNames(cfg); err != nil {
+		return nil, err
+	}
+
 	servers := make([]Server, 0, len(names))
 	for _, name := range names {
 		raw := cfg.Servers[name]
@@ -61,6 +65,54 @@ func NormalizeConfig(cfg config.MCPConfig) ([]Server, error) {
 		servers = append(servers, server)
 	}
 	return servers, nil
+}
+
+// ValidateUniqueNames reports two enabled configuration keys that resolve to
+// one runtime identity.
+//
+// THE NORMALIZED NAME IS AN IDENTITY, so it has to be unique. Trimming means
+// "docs" and " docs " are two configuration keys and one runtime server, and
+// everything downstream keys on the runtime name: tool accounting, the
+// skipped-server observations the panel renders, and invalidation. Two rows then
+// share one failure, both report the same state, and Go map iteration decides
+// which configuration survives.
+//
+// It is also a confidentiality problem rather than only a wrong status. Each row
+// redacts that shared error with ITS OWN configuration, so if the server that
+// actually failed echoed a credential, the other row does not have that value
+// among its candidates and prints it.
+//
+// Rejecting is the honest answer: one of the two entries is unreachable whatever
+// we do, and an error naming both spellings is something an operator can act on.
+// A single padded name still works, because trimming is not the problem; two
+// names trimming to one is. A disabled entry claims nothing, matching the rest
+// of startup, which skips it before it reaches any of these paths.
+//
+// Exported because startup splits the configuration before registering it, so
+// the two halves normalize separately and a collision that straddles them is
+// invisible to either call. A user-configured "  exa" alongside the built-in
+// default "exa" is exactly that shape.
+func ValidateUniqueNames(cfg config.MCPConfig) error {
+	names := make([]string, 0, len(cfg.Servers))
+	for name := range cfg.Servers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	claimed := make(map[string]string, len(names))
+	for _, name := range names {
+		if cfg.Servers[name].Disabled {
+			continue
+		}
+		canonical := strings.TrimSpace(name)
+		if previous, taken := claimed[canonical]; taken {
+			return fmt.Errorf(
+				"mcp: server names %q and %q both resolve to %q; rename one so each server has its own identity",
+				previous, name, canonical)
+		}
+		claimed[canonical] = name
+	}
+	return nil
 }
 
 func normalizeServer(name string, raw config.MCPServerConfig) (Server, error) {
