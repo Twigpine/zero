@@ -3972,8 +3972,16 @@ func (m model) liveReasoningBodyCap() int {
 }
 
 func (m model) interimBlock(width int) string {
+	return m.interimBlockWithReasoning(width, m.streamingReasoningString())
+}
+
+// interimBlockWithReasoning renders the live interim block from an already
+// converted reasoning string, so a render pass that also builds the streaming
+// reasoning's selectable lines converts the accumulated bytes once per frame
+// instead of once per consumer.
+func (m model) interimBlockWithReasoning(width int, reasoningRaw string) string {
 	text := strings.TrimRight(m.streamingTextString(), "\n")
-	reasoning := strings.TrimRight(m.streamingReasoningString(), "\n")
+	reasoning := strings.TrimRight(reasoningRaw, "\n")
 	blocks := []string{}
 	if strings.TrimSpace(reasoning) != "" {
 		blocks = append(blocks, renderReasoningBlock(reasoning, m.streamingReasoningExpanded, width, true, 0, m.liveReasoningBodyCap()))
@@ -4068,7 +4076,7 @@ func (m model) activeToolCall() (transcriptRow, bool) {
 	if !m.pending || m.activeRunID == 0 {
 		return transcriptRow{}, false
 	}
-	var resolved map[string]struct{}
+	var resolved map[rowKey]struct{}
 	for i, scanned := len(m.transcript)-1, 0; i >= 0 && scanned < activeToolCallScanLimit; i, scanned = i-1, scanned+1 {
 		row := m.transcript[i]
 		if row.runID != m.activeRunID || row.id == "" {
@@ -4078,7 +4086,7 @@ func (m model) activeToolCall() (transcriptRow, bool) {
 		switch row.kind {
 		case rowToolResult:
 			if resolved == nil {
-				resolved = make(map[string]struct{})
+				resolved = make(map[rowKey]struct{})
 			}
 			resolved[key] = struct{}{}
 		case rowToolCall:
