@@ -2,6 +2,7 @@ package specialist
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -118,6 +119,8 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 		// tool result a child emits streams through here, which is the only place
 		// the parent ever sees what a task's commands printed.
 		measured := measurements.NewLedger()
+		var measurementMu sync.Mutex
+		measurementCalls := map[string]streamjson.Event{}
 		// WHAT THIS TASK ACTUALLY CHANGED, accumulated from the child's own tool
 		// results. The handoff below is built from this rather than from prose,
 		// which matters twice: it costs nothing, and it cannot be invented — a
@@ -127,14 +130,28 @@ func NewPlanRunner(planCtx PlanTaskContext) PlanRunner {
 		counted := func(event streamjson.Event) {
 			if event.Type == streamjson.EventToolCall {
 				toolCalls.Add(1)
+				if event.ID != "" {
+					if event.Cwd == "" {
+						event.Cwd = planCtx.Cwd
+					}
+					measurementMu.Lock()
+					measurementCalls[event.ID] = event
+					measurementMu.Unlock()
+				}
 			}
 			if event.Type == streamjson.EventToolResult {
-				// WITH THE CALL THAT PRODUCED IT. The stream carries the tool,
-				// its arguments and the directory, so a timing is recorded
-				// against the command that printed it rather than pooled with
-				// every other command's — which is what let a claim about one run
-				// be satisfied by a number a different run produced.
-				measured.Record(runForEvent(event), event.Output)
+				// Results carry an ID and output, while arguments live on the
+				// preceding call. Only their matching pair certifies the producer.
+				measurementMu.Lock()
+				call, found := measurementCalls[event.ID]
+				delete(measurementCalls, event.ID)
+				measurementMu.Unlock()
+				executed := (event.Status == string(tools.StatusOK) || event.Status == string(tools.StatusError)) &&
+					event.Meta[tools.PolicyRefusalMeta] == "" && event.Meta[tools.PermissionActionMeta] != "deny" &&
+					event.Meta[tools.SandboxLikelyDeniedMeta] != "true"
+				if found && call.Name == event.Name && executed {
+					measured.Record(runForEvent(call), event.Output)
+				}
 				if len(event.ChangedFiles) > 0 {
 					changedMu.Lock()
 					for _, file := range event.ChangedFiles {
@@ -642,13 +659,12 @@ func planTaskHandoff(changed map[string]bool, existing string) string {
 }
 
 // runForEvent describes the command a tool result came from, for the
-// measurements ledger. Args is rendered rather than structured because the
-// ledger only ever compares and displays it — two calls differing in their
-// arguments must land in different runs, and that is all this has to guarantee.
+// measurements ledger. Only a parsed simple command can certify cmd/go JSON;
+// rendered maps and tool names preserve neither argv nor producer identity.
 func runForEvent(event streamjson.Event) measurements.Run {
-	run := measurements.Run{Command: event.Name, Dir: event.Cwd}
-	if event.Args != nil {
-		run.Args = []string{fmt.Sprint(event.Args)}
+	arguments, err := json.Marshal(event.Args)
+	if err != nil {
+		return measurements.Run{}
 	}
-	return run
+	return tools.MeasurementRun(event.Name, string(arguments), event.Cwd)
 }

@@ -12,10 +12,10 @@ import (
 // goTestTool stands in for a shell that ran `go test` and printed its result.
 type goTestTool struct{ output string }
 
-func (goTestTool) Name() string        { return "run_tests" }
+func (goTestTool) Name() string        { return "exec_command" }
 func (goTestTool) Description() string { return "run the test suite" }
 func (goTestTool) Parameters() tools.Schema {
-	return tools.Schema{Type: "object", AdditionalProperties: false}
+	return tools.Schema{Type: "object", AdditionalProperties: true}
 }
 func (goTestTool) Safety() tools.Safety {
 	return tools.Safety{SideEffect: tools.SideEffectNone, Permission: tools.PermissionAllow, AdvertiseInAuto: true}
@@ -27,16 +27,33 @@ func (t goTestTool) Run(context.Context, map[string]any) tools.Result {
 // callThenAnswer is a provider that calls run_tests, then gives finalAnswer, then
 // gives corrected — so a run that is sent back for a number gets somewhere to go.
 func callThenAnswer(finalAnswer, corrected string) *mockProvider {
+	return callThenAnswerCommand(finalAnswer, corrected, `{"cmd":"go test -json ./..."}`)
+}
+
+func callThenAnswerCommand(finalAnswer, corrected, arguments string) *mockProvider {
 	return &mockProvider{turns: [][]zeroruntime.StreamEvent{
 		{
-			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "run_tests"},
-			{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: `{}`},
+			{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "call-1", ToolName: "exec_command"},
+			{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "call-1", ArgumentsFragment: arguments},
 			{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "call-1"},
 			{Type: zeroruntime.StreamEventDone},
 		},
 		{{Type: zeroruntime.StreamEventText, Content: finalAnswer}, {Type: zeroruntime.StreamEventDone}},
 		{{Type: zeroruntime.StreamEventText, Content: corrected}, {Type: zeroruntime.StreamEventDone}},
 	}}
+}
+
+func TestVerboseToolOutputCannotCertifyAFabricatedTiming(t *testing.T) {
+	registry := tools.NewRegistry()
+	registry.Register(goTestTool{output: suiteOutput})
+	provider := callThenAnswerCommand("github.com/x/y took 4.20s.", "should not be requested", `{"cmd":"go test -v ./..."}`)
+	result, err := Run(context.Background(), "report the suite", provider, Options{Cwd: t.TempDir(), Registry: registry, Zeromaxing: ZeromaxingActive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.requests) != 2 || result.FinalAnswer != "github.com/x/y took 4.20s." {
+		t.Fatalf("unverified producer influenced completion: requests=%d answer=%q", len(provider.requests), result.FinalAnswer)
+	}
 }
 
 const suiteOutput = `{"Action":"pass","Package":"github.com/x/y","Test":"TestChattyChild","Elapsed":0.86}

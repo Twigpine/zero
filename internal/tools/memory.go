@@ -150,7 +150,7 @@ func (tool memoryTool) Run(_ context.Context, args map[string]any) Result {
 		return okResult(fmt.Sprintf("memory %q (%s)\n\n%s", note.Name, note.Scope, note.Body))
 	}
 	if len(problems) > 0 {
-		return errorResult(fmt.Sprintf("Error: reading memory %q: %v", name, errors.Join(problems...)))
+		return errorResult(fmt.Sprintf("Error: reading memory %q: %s", name, memoryReadFailure(errors.Join(problems...))))
 	}
 	return errorResult(fmt.Sprintf("Error: no memory named %q. Call memory with no arguments to see what exists.", name))
 }
@@ -293,7 +293,7 @@ func (tool memoryForgetTool) Run(_ context.Context, args map[string]any) Result 
 		// Read-before-delete is a safety gate, not only an existence probe. If the
 		// note cannot be read, deleting it would destroy the only copy without the
 		// caller ever being able to inspect what the destructive tool removed.
-		return errorResult(fmt.Sprintf("Error: cannot read memory %q in %s before deleting it: %v", name, scope, readErr))
+		return errorResult(fmt.Sprintf("Error: cannot read memory %q in %s before deleting it: %s", name, scope, memoryReadFailure(readErr)))
 	}
 	if err := memory.Forget(tool.paths, scope, name); err != nil {
 		return errorResult("Error: " + err.Error())
@@ -305,7 +305,7 @@ func (tool memoryForgetTool) Run(_ context.Context, args map[string]any) Result 
 // failed. It must not read like an empty store, so it says what is unknown and
 // what would make it knowable again.
 func memoryListFailure(listErr error) string {
-	return "The memory store could not be read, so its contents are unknown — this is NOT the same as having no notes. " +
+	return "The memory listing could not read any notes, so its contents are unknown — this is NOT the same as having no notes. " +
 		"Do not assume memory is empty or rewrite notes that may already exist.\n\n" +
 		memoryListCaveat(listErr)
 }
@@ -318,12 +318,22 @@ func memoryListFailure(listErr error) string {
 func memoryListCaveat(listErr error) string {
 	switch {
 	case errors.Is(listErr, memory.ErrIsSymlink):
-		return "The memory store is a link pointing outside the workspace and was refused: " + listErr.Error()
+		return "A memory path is a link or reparse point and was refused: " + memoryReadFailure(listErr)
 	case errors.Is(listErr, memory.ErrUnreadable):
 		return "The memory store exists but could not be opened: " + listErr.Error()
 	default:
 		return "Some notes could not be read: " + listErr.Error()
 	}
+}
+
+// The shared sentinel describes a write policy. A read/list refusal needs the
+// same path and error identity at the store boundary, but truthful read wording
+// in the tool's operator-facing text; it establishes no fact about link targets.
+func memoryReadFailure(err error) string {
+	if errors.Is(err, memory.ErrIsSymlink) {
+		return strings.Replace(err.Error(), memory.ErrIsSymlink.Error(), "refusing to read through a link or reparse point", 1)
+	}
+	return err.Error()
 }
 
 func renderMemoryList(notes []memory.Note) string {

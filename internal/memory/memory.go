@@ -27,13 +27,14 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/Twigpine/zero/internal/gitsafe"
 	"github.com/Twigpine/zero/internal/pathjail"
 )
 
@@ -760,55 +761,59 @@ func refuseTrackedLocalStore(handle *os.Root, relative, dir string) error {
 	if err != nil {
 		return fmt.Errorf("%w: cannot resolve %s to ask git about it: %v", ErrNotPrivate, dir, err)
 	}
-	repo, err := enclosingGitRepo(resolved)
+	repos, err := enclosingGitRepos(resolved)
 	if err != nil {
 		return fmt.Errorf("%w: cannot tell whether %s is inside a git repository: %v", ErrNotPrivate, dir, err)
 	}
-	if repo == "" {
+	if len(repos) == 0 {
 		// Nothing encloses the store, so nothing can be tracked and there is
 		// nothing to ask. This is also where a machine with no git at all lands,
 		// which is why the question above is not a subprocess.
 		return nil
 	}
-	tracked, err := trackedStoreEntries(resolved)
-	if err != nil {
-		return fmt.Errorf("%w: %s is inside the git repository at %s, and git could not say which files there are tracked: %v",
-			ErrNotPrivate, dir, repo, err)
-	}
-	offenders := make([]string, 0, len(tracked))
-	for _, entry := range tracked {
-		// The store's own ignore file is the one tracked entry that is not a leak:
-		// it carries no note, and a repository that checks it in hands every clone
-		// the rule before the first write. Anything else under this directory is a
-		// note the local scope promised would not be in the repository.
-		if entry == gitignoreName {
+	for _, repo := range repos {
+		tracked, err := trackedStoreEntries(repo, resolved)
+		if err != nil {
+			return fmt.Errorf("%w: %s is inside the git repository at %s, and git could not say which files there are tracked: %v",
+				ErrNotPrivate, dir, repo, err)
+		}
+		offenders := make([]string, 0, len(tracked))
+		for _, entry := range tracked {
+			// The store's own ignore file is the one tracked entry that is not a leak:
+			// it carries no note, and a repository that checks it in hands every clone
+			// the rule before the first write. Anything else under this directory is a
+			// note the local scope promised would not be in the repository.
+			if entry == gitignoreName {
+				continue
+			}
+			offenders = append(offenders, entry)
+		}
+		if len(offenders) == 0 {
 			continue
 		}
-		offenders = append(offenders, entry)
+		sort.Strings(offenders)
+		return fmt.Errorf("%w: the repository at %s tracks %s in %s, and git applies no ignore rule to a path already in the index; remove it with `git rm --cached` before saving a local note",
+			ErrNotPrivate, repo, namedEntries(offenders), dir)
 	}
-	if len(offenders) == 0 {
-		return nil
-	}
-	sort.Strings(offenders)
-	return fmt.Errorf("%w: the repository at %s tracks %s in %s, and git applies no ignore rule to a path already in the index; remove it with `git rm --cached` before saving a local note",
-		ErrNotPrivate, repo, namedEntries(offenders), dir)
+	return nil
 }
 
-// enclosingGitRepo returns the nearest ancestor of dir, dir itself included,
-// carrying possible repository metadata, or "" when none does. Inert markers
-// do not stop the walk: a real enclosing checkout may still track the store.
-func enclosingGitRepo(dir string) (string, error) {
+// enclosingGitRepos finds every repository that can already track this store.
+// A nested repository does not remove paths from an outer repository's index.
+// Inert markers do not stop the walk, and unreadable metadata fails closed.
+func enclosingGitRepos(dir string) ([]string, error) {
+	var repos []string
 	for current := filepath.Clean(dir); ; {
 		candidate, err := gitMarkerHasMetadata(filepath.Join(current, gitDirName))
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		if candidate {
-			return current, nil
+			repos = append(repos, current)
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
-			return "", nil
+			return repos, nil
 		}
 		current = parent
 	}
@@ -877,22 +882,28 @@ func gitMarkerHasMetadata(marker string) (bool, error) {
 // trackedStoreEntries lists what git's index holds under dir, named relative to
 // it.
 //
-// The store directory goes in as the WORKING DIRECTORY and nothing goes in as an
-// argument: `git ls-files` run inside a subdirectory already lists that
-// subdirectory and names its paths relative to it, so there is no pathspec for a
-// note name to reach, and no path for this side to spell differently from the
-// way the kernel just resolved it. -z because a tracked path may hold anything a
-// filename can and git quotes such a name in its default output. Both the
-// subcommand and the flag predate any version this project could plausibly meet.
-func trackedStoreEntries(dir string) ([]string, error) {
+// Each enclosing repository is queried from its own root with a literal store
+// pathspec. That binds the index selection instead of allowing a nested .git
+// directory at the store to change which repository answers. -z preserves file
+// names verbatim. Literal pathspecs have been supported since Git 1.9.
+func trackedStoreEntries(repo, dir string) ([]string, error) {
+	relative, err := filepath.Rel(repo, dir)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("store %s is not inside repository %s", dir, repo)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), gitIndexTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "ls-files", "-z")
-	cmd.Dir = dir
+	// Query from this repository's root, not the store, where Git could select
+	// a nested repository. Literal pathspecs prevent glob characters in a
+	// directory name from selecting a different set of indexed paths.
+	cmd, err := gitsafe.Command(ctx, repo, "ls-files", "-z", "--", filepath.ToSlash(relative))
+	if err != nil {
+		return nil, err
+	}
 	// Cancelling the context does not by itself return control here: WaitDelay is
 	// what stops a git holding its pipes open from outliving the deadline.
 	cmd.WaitDelay = gitIndexTimeout
-	cmd.Env = gitDiscoveryEnv(os.Environ())
+	cmd.Env = append(gitDiscoveryEnv(cmd.Env), "GIT_LITERAL_PATHSPECS=1")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -903,9 +914,15 @@ func trackedStoreEntries(dir string) ([]string, error) {
 		return nil, err
 	}
 	entries := make([]string, 0, 4)
+	prefix := filepath.ToSlash(relative)
+	if prefix == "." {
+		prefix = ""
+	} else {
+		prefix += "/"
+	}
 	for _, entry := range strings.Split(stdout.String(), "\x00") {
 		if entry != "" {
-			entries = append(entries, entry)
+			entries = append(entries, strings.TrimPrefix(entry, prefix))
 		}
 	}
 	return entries, nil
@@ -926,11 +943,18 @@ func gitDiscoveryEnv(environ []string) []string {
 	filtered := make([]string, 0, len(environ))
 	for _, entry := range environ {
 		redirected := false
+		comparison := entry
+		if runtime.GOOS == "windows" {
+			comparison = strings.ToUpper(comparison)
+		}
 		for _, prefix := range redirects {
-			if strings.HasPrefix(entry, prefix) {
+			if strings.HasPrefix(comparison, prefix) {
 				redirected = true
 				break
 			}
+		}
+		if strings.HasPrefix(comparison, "GIT_LITERAL_PATHSPECS=") {
+			redirected = true
 		}
 		if !redirected {
 			filtered = append(filtered, entry)

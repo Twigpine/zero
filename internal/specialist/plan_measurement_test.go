@@ -13,6 +13,15 @@ import (
 // and then reports a number about it.
 func childRunner(t *testing.T, toolOutput, answer string) PlanRunner {
 	t.Helper()
+	return childRunnerEvents(t, []streamjson.Event{
+		{Type: streamjson.EventToolCall, ID: "measure-1", Name: "exec_command", Args: map[string]any{"cmd": "go test -json ./..."}},
+		{Type: streamjson.EventToolResult, ID: "measure-1", Name: "exec_command", Status: "ok", Output: toolOutput},
+		{Type: streamjson.EventFinal, Text: answer},
+	})
+}
+
+func childRunnerEvents(t *testing.T, events []streamjson.Event) PlanRunner {
+	t.Helper()
 	executor := Executor{
 		BinaryPath:   "/bin/true",
 		NewSessionID: func() (string, error) { return "specialist_00000000000000000000000a", nil },
@@ -22,11 +31,6 @@ func childRunner(t *testing.T, toolOutput, answer string) PlanRunner {
 			// what the ledger reads) and returns them for SummarizeStream to fold
 			// into the task's output. A fixture that only did one would test a
 			// path production never takes.
-			events := []streamjson.Event{
-				{Type: streamjson.EventToolCall, Name: "exec_command"},
-				{Type: streamjson.EventToolResult, Output: toolOutput},
-				{Type: streamjson.EventFinal, Text: answer},
-			}
 			for _, event := range events {
 				if progress != nil {
 					progress(event)

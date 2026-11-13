@@ -899,7 +899,9 @@ func Run(ctx context.Context, prompt string, provider Provider, options Options)
 			// command being answered by a number a different one produced: a
 			// `-race` run is routinely several times slower, which is the size of
 			// discrepancy this check exists to catch.
-			measured.Record(measurements.Run{Command: call.Name, Args: []string{call.Arguments}}, toolResult.Output)
+			if toolResult.DenialReason == "" {
+				measured.Record(tools.MeasurementRun(call.Name, call.Arguments, options.Cwd), toolResult.Output)
+			}
 			task.observe(taskStateEvent{kind: taskStateEventToolResult, arguments: call.Arguments, toolResult: toolResult})
 			if options.OnToolResult != nil {
 				options.OnToolResult(toolResult)

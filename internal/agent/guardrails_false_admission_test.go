@@ -456,3 +456,310 @@ func TestAStateInsideTheNegatedPropositionIsNotTheOutcome(t *testing.T) {
 		}
 	}
 }
+
+// THE COPULA FORMS OF A TOOL CAVEAT.
+//
+// toolGrantMarkers recognised "no update_plan tool available" but not "no
+// update_plan tool IS available" — the same statement with a verb in it. So a
+// message that named a tool it was not given AND delivered the work anyway was
+// reported as incomplete:
+//
+//	"I could not record a plan because no update_plan tool is available,
+//	 so I wrote it into this answer instead."
+//
+// Which verb a sentence uses to say a tool was absent is not a distinction this
+// detector should be drawing.
+func TestAToolCaveatIsRecognisedInItsCopulaForms(t *testing.T) {
+	for _, exempt := range []string{
+		"I could not record a plan because no update_plan tool is available, so I wrote it into this answer instead.",
+		"I could not run the formatter as no such tool is available, so I checked the style by hand.",
+		"No update_plan tool available in this specialist context, so I proceeded directly.",
+	} {
+		if reason := selfReportedIncompletion(exempt); reason != "" {
+			t.Errorf("a tool caveat with delivered work was reported incomplete: %q -> %s", exempt, reason)
+		}
+	}
+
+	// A HANDOFF IS STILL AN ADMISSION. CodeRabbit's suggestion was to drop
+	// "someone else" and "will need to" from the markers that break this
+	// exemption. Measured, that would exempt these — and a run that could not do
+	// the thing and passed it to someone else has not finished it, tool caveat or
+	// not. The exemption is for a tool that was NOT NEEDED.
+	for _, admission := range []string{
+		"I could not record a plan because no update_plan tool is available, so someone else can pick it up.",
+		"I could not run the linter as no such tool is available here; a follow-up will need to cover it.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("a handoff was excused by the tool caveat: %q", admission)
+		}
+	}
+}
+
+// A CONTRACTED TOOL CAVEAT IS THE SAME CAVEAT.
+//
+// The contracted markers shipped as "tool isn\'\'\'t available" — shell quoting
+// from the commit that added them leaked into the Go source. Valid Go, so it
+// compiled and CI stayed green, and no message on earth matches it. The
+// observation-family entries above were dead for a different reason in the same
+// commit, which is why both are pinned now.
+func TestAContractedToolCaveatIsRecognised(t *testing.T) {
+	for _, exempt := range []string{
+		"I could not record a plan because the update_plan tool isn't available, so I wrote it into this answer instead.",
+		"I could not run the formatter because those tools aren't available, so I checked the style by hand.",
+	} {
+		if reason := selfReportedIncompletion(exempt); reason != "" {
+			t.Errorf("a contracted tool caveat with delivered work was reported incomplete: %q -> %s", exempt, reason)
+		}
+	}
+
+	// The observation family, now that its verbs reach strongAbsence at all.
+	for _, finding := range []string{
+		"I could not trigger any crash, so it looks resolved.",
+		"I could not surface any regressions, so nothing was modified.",
+		"I could not encounter any failures, and nothing was modified.",
+	} {
+		if reason := selfReportedIncompletion(finding); reason != "" {
+			t.Errorf("a negative observation result was reported as an admission: %q -> %s", finding, reason)
+		}
+	}
+}
+
+// "ANY" IS WHAT MAKES A NEGATIVE RESULT A RESULT.
+//
+// Treating every bare observation verb as a successful negative finding made
+// these ordinary admissions go silent:
+//
+//	"I could not produce the requested report."
+//	"I could not measure the throughput, so the number is unknown."
+//
+// Looking for something and finding none of it is a result. Failing to produce a
+// thing you were asked for is not. Both directions are asserted here because the
+// fix for one of them is what broke the other.
+func TestABareObservationVerbIsNotASuccessfulAbsence(t *testing.T) {
+	for _, admission := range []string{
+		"I could not produce the requested report.",
+		"I could not measure the throughput, so the number is unknown.",
+		"I could not trigger the migration, so it never ran.",
+		"I could not surface the config value.",
+		"I could not encounter the documented behaviour.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("an admission was read as a successful negative result: %q", admission)
+		}
+	}
+
+	for _, finding := range []string{
+		"I could not trigger any crash, so it looks resolved.",
+		"I could not surface any regressions, so nothing was modified.",
+		"I could not reproduce any failure after the fix, so it looks resolved.",
+		"I could not encounter any failures, and nothing was modified.",
+		"I could not measure any slowdown, so the change is neutral.",
+	} {
+		if reason := selfReportedIncompletion(finding); reason != "" {
+			t.Errorf("a negative observation result was reported as an admission: %q -> %s", finding, reason)
+		}
+	}
+}
+
+// THE TOOL AS EXCUSE IS NOT THE TOOL AS FOOTNOTE.
+//
+// Naming an absent tool does not establish that the tool was unnecessary — that
+// is the claim the exemption makes on the sentence's behalf. Broadening the
+// matcher to the copula forms let these through:
+//
+//	"I could not run the migration because no migration tool is available."
+//
+// The migration did not run, nothing took its place, and the sentence merely
+// explains why. A causal connective separates that from the case the exemption
+// was built for, which names no failed action at all — and the connective yields
+// when the sentence goes on to say what was done instead, because then the tool
+// really was unnecessary.
+func TestAToolNamedAsAnExcuseDoesNotExemptTheFailure(t *testing.T) {
+	// PUNCTUATION IS NOT THE POINT, the relationship is. The first version of
+	// this fix enumerated causal connectives, so only the mark had to change to
+	// walk past it — five of six ordinary forms were still exempted:
+	for _, admission := range []string{
+		"I could not run the migration; no migration tool is available.",
+		"I could not run the migration: no migration tool is available.",
+		"I could not run the migration — no migration tool is available.",
+		"I could not run the migration, no migration tool is available.",
+		"I could not run the migration (no migration tool is available).",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("a tool offered as the reason for a failed action excused it: %q", admission)
+		}
+	}
+
+	for _, admission := range []string{
+		"I could not run the migration because no migration tool is available.",
+		"I could not run the migration because the migration tool is available only on Windows.",
+		"I could not build the image since no docker tool is available.",
+		"I could not publish it due to no release tool being available.",
+		"I could not run the migration with no migration tool available.",
+		"I could not run the migration when no migration tool is available.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("a tool named as the reason for a failed action excused it: %q", admission)
+		}
+	}
+
+	// A causal connective YIELDS to a delivered alternative: the tool was
+	// genuinely unnecessary, which is the premise of the exemption.
+	for _, exempt := range []string{
+		"I could not record a plan because the update_plan tool isn't available, so I wrote it into this answer instead.",
+		"I could not run the formatter as no such tool is available, so I checked the style by hand.",
+	} {
+		if reason := selfReportedIncompletion(exempt); reason != "" {
+			t.Errorf("a caveat with delivered work was reported incomplete: %q -> %s", exempt, reason)
+		}
+	}
+
+	// And the capability FOOTNOTE, which names no failed action, still passes.
+	// Verbatim from a session this detector wrongly flagged.
+	for _, footnote := range []string{
+		"I don't have an `update_plan` tool available in this specialist context (only read-only exploration tools were provided).",
+		"No update_plan tool available in this specialist context, so I proceeded directly.",
+	} {
+		if reason := selfReportedIncompletion(footnote); reason != "" {
+			t.Errorf("a capability footnote was reported incomplete: %q -> %s", footnote, reason)
+		}
+	}
+}
+
+// The classifier's exemptions must be decided from the relationship between
+// clauses, not from one permissive keyword found anywhere in the sentence. This
+// table pins the complete review matrix: headings versus prose, negative
+// findings versus blocked outcomes, tool footnotes versus failed work, and a
+// delivered fallback versus an attempted one.
+func TestCompletionAdmissionClauseAndPolarityMatrix(t *testing.T) {
+	for _, admission := range []string{
+		"Unable to verify the deployment after retry (3); it never started.",
+		"I could not find any evidence supporting the fix and it remains unverified.",
+		"I could not find any evidence supporting the fix: it remains unverified.",
+		"I could not find any evidence supporting the fix — it remains unverified.",
+		"There is no edit tool available here, so the change remains unapplied.",
+		"Write tools are not available in this setup, so the tests were never run.",
+		"I could not run the migration because no migration tool is available, although I tried to do it manually.",
+		"The fixture is not available in this checkout; I cannot run the tests.",
+		"I could not run the formatter because no formatter tool is available, but I planned to check it manually.",
+		"I could not run the migration because no migration tool is available, so I wrote the migration plan manually.",
+		"I could not run the migration because no migration tool is available, so I reported the migration manually.",
+		"I could not run the migration because no migration tool is available, so I wrote the migration documentation manually.",
+		"I could not run the tests because no test tool is available, so I checked the test documentation manually.",
+		"I could not run the tests because no test tool is available, so I checked the test style manually.",
+		"I could not run the migration because no migration tool is available, so I did not execute the migration manually.",
+		"I could not run the tests because no test tool is available, so I did not test it manually.",
+		"I could not run the migration because no migration tool is available, so I executed diagnostics and wrote the migration plan manually.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("a genuine incomplete outcome was exempted: %q", admission)
+		}
+	}
+
+	for _, complete := range []string{
+		"**Unable to verify (1):** - MCP #3 claim was truncated.",
+		"I could not find any evidence that the issue is unresolved.",
+		"I could not record a plan because the update_plan tool isn’t available, so I wrote it into this answer instead.",
+		"I could not run the formatter because no formatter tool is available, so I checked it by hand.",
+		"I don't have write tools available, but I was able to complete the task by providing the requested review.",
+		"I don't have an update_plan tool available in this specialist context; only read-only exploration tools were provided.",
+		"I could not run the migration because no migration tool is available, so I executed the migration manually instead.",
+		"I could not run the tests because no test tool is available, so I tested it manually instead.",
+	} {
+		if reason := selfReportedIncompletion(complete); reason != "" {
+			t.Errorf("a completed outcome was reported incomplete: %q -> %s", complete, reason)
+		}
+	}
+}
+
+func TestCompletionAdmissionReviewerSemanticPairs(t *testing.T) {
+	admissions := []string{
+		"I could not produce any report.",
+		"I don't have access to the repository with no read tool available.",
+		"I don't have access to the file, although only read-only tools are available.",
+		"I don't have access to the credential with no credential tool available.",
+		"I don't have access to the service with no network tool available.",
+		"I could not run the migration because no migration tool is available; I did not need the formatted output.",
+		"I could not apply the edit because no write tool is available, so I reported the change manually.",
+		"I could not format the code because no formatter tool is available, so I documented the formatter manually.",
+		"I could not run the full test suite because no test tool is available, so I manually tested only a smoke test.",
+		"I could not run the tests and deploy the release because no tools are available, so I manually ran the tests.",
+	}
+	for _, text := range admissions {
+		if reason := selfReportedIncompletion(text); reason == "" {
+			t.Errorf("incomplete semantic pair was exempted: %q", text)
+		}
+	}
+
+	complete := []string{
+		"I could not produce any crash.",
+		"I don't have an update_plan tool available in this specialist context; only read-only exploration tools were provided.",
+		"I could not record a plan because update_plan is unavailable, so I wrote the plan into this answer instead.",
+		"I could not run the formatter because no formatter tool is available, so I checked the formatting manually.",
+		"I could not run the full test suite because no test tool is available, so I manually ran the full test suite instead.",
+	}
+	for _, text := range complete {
+		if reason := selfReportedIncompletion(text); reason != "" {
+			t.Errorf("completed semantic pair was rejected: %q -> %s", text, reason)
+		}
+	}
+}
+
+func TestCompletionAdmissionCoordinatesToolAndAbsenceConsequences(t *testing.T) {
+	for _, admission := range []string{
+		"I don't have a write tool available, and I did not complete the task.",
+		"I could not find any bugs. The fix remains unverified.",
+		"No write tool is available. The change remains unapplied.",
+		"I could not find any evidence that the fix works; the fix remains unverified.",
+	} {
+		if reason := selfReportedIncompletion(admission); reason == "" {
+			t.Errorf("coordinated failure consequence was exempted: %q", admission)
+		}
+	}
+
+	for _, complete := range []string{
+		"I don't have a write tool available, but I completed the requested review without edits.",
+		"I could not find any bugs. Separately, the optional release note remains unverified.",
+		"No write tool is available. Outside the scope, the example change remains unapplied.",
+		"I could not find any evidence that the issue is unresolved.",
+	} {
+		if reason := selfReportedIncompletion(complete); reason != "" {
+			t.Errorf("bounded successful result was reported incomplete: %q -> %s", complete, reason)
+		}
+	}
+}
+
+func TestCompletionAdmissionPreservesTargetsAndCapabilityOnlyScope(t *testing.T) {
+	for _, admission := range []string{
+		"I could not deploy the release to production because no deployment tool is available, so I deployed it to staging manually instead.",
+		"I could not publish the package to registry-a because no publishing tool is available, so I published it to registry-b manually instead.",
+		"I could not run the tests on Windows because no test tool is available, so I ran the tests on Linux manually instead.",
+		"I don't have write tools available to modify the production configuration.",
+		"I don't have a browser tool available, so the required UI was never inspected.",
+	} {
+		if reason := selfReportedIncompletion(admission); reason == "" {
+			t.Errorf("materially incomplete result was exempted: %q", admission)
+		}
+	}
+
+	for _, complete := range []string{
+		"I could not deploy the release to production because no deployment tool is available, so I deployed it to production manually instead.",
+		"I could not deploy the release because no deployment tool is available, so I deployed it manually instead.",
+		"I don't have an update_plan tool available in this specialist context; only read-only exploration tools were provided.",
+		"I don't have write tools available, but I completed the requested review without edits.",
+	} {
+		if reason := selfReportedIncompletion(complete); reason != "" {
+			t.Errorf("equivalent completion was rejected: %q -> %s", complete, reason)
+		}
+	}
+}
+
+func TestFallbackPreservesMaterialOperationTargets(t *testing.T) {
+	failed := "deploy the release to production because no deployment tool is available"
+	if alternativeMatchesFailedWork(failed, "i deployed it to staging manually instead") {
+		t.Fatal("staging deployment satisfied a production obligation")
+	}
+	if !alternativeMatchesFailedWork(failed, "i deployed it to production manually instead") {
+		t.Fatal("same-target manual deployment did not satisfy the production obligation")
+	}
+}
