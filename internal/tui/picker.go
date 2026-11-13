@@ -457,9 +457,20 @@ func (m model) modelPickerDiscoveryCmds() (model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+// requestProviderDiscoveryCmd registers a fresh request for one provider and
+// returns its discovery command. Every caller that can return the updated model
+// must use this, or the result arrives stamped with a generation the guard in
+// Update never saw and is dropped as stale.
+func (m model) requestProviderDiscoveryCmd(descriptor providercatalog.Descriptor, profile config.ProviderProfile) (model, tea.Cmd) {
+	m = m.requestModelPickerDiscovery(modelPickerDiscoveryKey(providerEndpointKey(profile, descriptor), descriptor.ID))
+	return m, m.modelPickerProviderDiscoveryCmd(descriptor, profile)
+}
+
 // modelPickerProviderDiscoveryCmd discovers one provider's live models, resolving
 // its credential the same way the wizard does: a stored/inline/env key, or a stored
-// OAuth bearer for token-login providers (e.g. xAI).
+// OAuth bearer for token-login providers (e.g. xAI). It stamps the current
+// generation without registering a request; Init has no model to return, so its
+// warm-up result is accepted until a registered request supersedes it.
 func (m model) modelPickerProviderDiscoveryCmd(descriptor providercatalog.Descriptor, profile config.ProviderProfile) tea.Cmd {
 	authed := profile
 	if store, err := m.providerKeyStore(); err == nil {
@@ -511,8 +522,7 @@ func (m model) modelListDiscoveryCmd() (model, tea.Cmd) {
 	if !ok || !config.HasProviderProfile(m.providerProfile) {
 		return m, nil
 	}
-	m = m.requestModelPickerDiscovery(modelPickerDiscoveryKey(providerEndpointKey(m.providerProfile, descriptor), descriptor.ID))
-	cmd := m.modelPickerProviderDiscoveryCmd(descriptor, m.providerProfile)
+	m, cmd := m.requestProviderDiscoveryCmd(descriptor, m.providerProfile)
 	if cmd == nil {
 		return m, nil
 	}
