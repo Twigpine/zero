@@ -19,7 +19,18 @@ func runWindowsSandboxCommand(config WindowsSandboxCommandConfig, stderr io.Writ
 	}
 	switch config.SandboxLevel {
 	case WindowsSandboxLevelRestrictedToken:
-		if err := ValidateWindowsSandboxSetupMarker(WindowsSandboxSetupConfigFromCommand(config)); err != nil {
+		setupConfig := WindowsSandboxSetupConfigFromCommand(config)
+		if err := ValidateWindowsSandboxSetupMarker(setupConfig); err != nil {
+			fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
+			return 1
+		}
+		// The marker and the stamp are about intent and about the pathname. Whether
+		// the objects still carry the grant is a third question, and it is the one
+		// that decides whether this child can write its temp and cache directories.
+		// The unelevated tier below answers it by reading the descriptors and
+		// re-applying; this tier cannot repeat an elevated provisioning, so it
+		// refuses and names the action.
+		if err := ValidateWindowsSandboxLaunchGrants(setupConfig); err != nil {
 			fmt.Fprintln(stderr, WindowsSandboxCommandRunnerName+": "+err.Error())
 			return 1
 		}
@@ -117,7 +128,11 @@ func ensureWindowsUnelevatedSetup(config WindowsSandboxCommandConfig) error {
 	if err != nil {
 		return err
 	}
-	if marker.contains(applied) {
+	// The marker says this plan was applied; the object has to agree. See
+	// windowsACLPlanStillApplied: a deterministic runtime root can be removed and
+	// recreated between commands under the same pathname, which leaves the plan
+	// hash identical and the capability grant gone.
+	if marker.contains(applied) && windowsACLPlanStillApplied(plan) {
 		return nil
 	}
 	if _, err := applyWindowsACLPlan(plan); err != nil {

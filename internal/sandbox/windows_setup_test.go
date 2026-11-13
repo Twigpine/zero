@@ -11,7 +11,7 @@ import (
 
 func TestBuildAndParseWindowsSandboxSetupArgs(t *testing.T) {
 	home := t.TempDir()
-	args, err := BuildWindowsSandboxSetupArgs(WindowsSandboxSetupArgsOptions{
+	setupPlan, err := BuildWindowsSandboxSetupArgs(WindowsSandboxSetupArgsOptions{
 		SandboxHome:    home,
 		CommandCWD:     `C:\workspace\src`,
 		WorkspaceRoots: []string{`C:\workspace`},
@@ -29,6 +29,7 @@ func TestBuildAndParseWindowsSandboxSetupArgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildWindowsSandboxSetupArgs: %v", err)
 	}
+	args := setupPlan.Args
 	config, err := ParseWindowsSandboxSetupArgs(args)
 	if err != nil {
 		t.Fatalf("ParseWindowsSandboxSetupArgs: %v", err)
@@ -65,7 +66,7 @@ func TestRunWindowsSandboxSetupRejectsInvalidArgs(t *testing.T) {
 
 func TestRunWindowsSandboxSetupRejectsDenyReadUpfront(t *testing.T) {
 	home := t.TempDir()
-	args, err := BuildWindowsSandboxSetupArgs(WindowsSandboxSetupArgsOptions{
+	setupPlan, err := BuildWindowsSandboxSetupArgs(WindowsSandboxSetupArgsOptions{
 		SandboxHome:    home,
 		CommandCWD:     `C:\workspace\src`,
 		WorkspaceRoots: []string{`C:\workspace`},
@@ -81,8 +82,11 @@ func TestRunWindowsSandboxSetupRejectsDenyReadUpfront(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildWindowsSandboxSetupArgs: %v", err)
 	}
+	// Building the args provisions nothing the refusal below could leave behind,
+	// but the plan carries the ledger for whatever it did create, so hand it back.
+	t.Cleanup(func() { _ = setupPlan.Rollback() })
 	var stderr bytes.Buffer
-	code := RunWindowsSandboxSetup(args, &stderr)
+	code := RunWindowsSandboxSetup(setupPlan.Args, &stderr)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1 for unsupported DenyRead", code)
 	}
