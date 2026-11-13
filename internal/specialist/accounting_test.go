@@ -14,9 +14,12 @@ import (
 	"time"
 
 	"github.com/Twigpine/zero/internal/background"
+	"github.com/Twigpine/zero/internal/modelregistry"
 	"github.com/Twigpine/zero/internal/sessions"
 	"github.com/Twigpine/zero/internal/streamjson"
 	"github.com/Twigpine/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/usage"
+	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
 func TestExecutorRecordsForegroundLifecycleAndUsageRollup(t *testing.T) {
@@ -164,9 +167,15 @@ func TestExecutorRecordsStartedChildErrorExitCode(t *testing.T) {
 
 func TestOutputToolRollsUpCompletedBackgroundUsageOnce(t *testing.T) {
 	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
-	parent, err := store.Create(sessions.CreateInput{SessionID: "parent_session"})
+	parent, err := store.Create(sessions.CreateInput{SessionID: "parent_session", ModelID: "gpt-4.1"})
 	if err != nil {
 		t.Fatalf("Create parent returned error: %v", err)
+	}
+	// Simulate the metadata persisted by the child exec before it emits usage.
+	if _, err := store.CreateChild(parent.SessionID, sessions.ChildInput{
+		SessionID: "child_task", ModelID: "gpt-4.1-mini",
+	}); err != nil {
+		t.Fatalf("CreateChild returned error: %v", err)
 	}
 	manager, err := background.NewManager(t.TempDir())
 	if err != nil {
@@ -218,6 +227,7 @@ func TestOutputToolRollsUpCompletedBackgroundUsageOnce(t *testing.T) {
 	requirePayloadInt(t, usagePayload, "promptTokens", 20)
 	requirePayloadInt(t, usagePayload, "completionTokens", 8)
 	requirePayloadInt(t, usagePayload, "totalTokens", 28)
+	requireBackgroundChildPricing(t, store, parent)
 }
 
 func ptrInt(value int) *int {
@@ -730,9 +740,15 @@ func TestBackgroundLaunchFailureDoesNotFireStopHookOnReap(t *testing.T) {
 // because onExit runs before the launcher (and the start decision) can return.
 func TestRunBackgroundDefersExitUntilStartDecisionCompletes(t *testing.T) {
 	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
-	parent, err := store.Create(sessions.CreateInput{SessionID: "parent_session"})
+	parent, err := store.Create(sessions.CreateInput{SessionID: "parent_session", ModelID: "gpt-4.1"})
 	if err != nil {
 		t.Fatalf("Create parent returned error: %v", err)
+	}
+	// Simulate the metadata persisted by the child exec before it emits usage.
+	if _, err := store.CreateChild(parent.SessionID, sessions.ChildInput{
+		SessionID: "child_task", ModelID: "gpt-4.1-mini",
+	}); err != nil {
+		t.Fatalf("CreateChild returned error: %v", err)
 	}
 	manager, err := background.NewManager(t.TempDir())
 	if err != nil {
@@ -768,7 +784,10 @@ func TestRunBackgroundDefersExitUntilStartDecisionCompletes(t *testing.T) {
 		},
 		// The child exits before the launcher returns, so the exit callback runs
 		// synchronously - exactly the ordering hazard this test guards.
-		LaunchBackground: func(_ string, _ []string, _ string, onExit func(exitCode int)) (int, error) {
+		LaunchBackground: func(_ string, _ []string, outputFile string, onExit func(exitCode int)) (int, error) {
+			if err := os.WriteFile(outputFile, []byte(`{"schemaVersion":2,"type":"usage","runId":"run_1","promptTokens":20,"completionTokens":8,"totalTokens":28}`+"\n"), 0o600); err != nil {
+				return 0, err
+			}
 			onExit(0)
 			return 1234, nil
 		},
@@ -817,6 +836,7 @@ func TestRunBackgroundDefersExitUntilStartDecisionCompletes(t *testing.T) {
 	// The deferred stop must observe the task after SetPID; a stop recorded
 	// before the start decision completes would omit the pid.
 	requirePayloadInt(t, eventPayload(t, stopEvents[0]), "pid", 1234)
+	requireBackgroundChildPricing(t, store, parent)
 }
 
 // When SetPID fails after the child started, Run kills the unrecorded child. Only
@@ -1014,9 +1034,15 @@ func TestStopToolRecordsRecoveredTaskStopOnce(t *testing.T) {
 		t.Fatalf("NewManagerWithOptions returned error: %v", err)
 	}
 	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
-	parent, err := store.Create(sessions.CreateInput{SessionID: "parent_session"})
+	parent, err := store.Create(sessions.CreateInput{SessionID: "parent_session", ModelID: "gpt-4.1"})
 	if err != nil {
 		t.Fatalf("Create parent returned error: %v", err)
+	}
+	// Simulate the metadata persisted by the child exec before it emits usage.
+	if _, err := store.CreateChild(parent.SessionID, sessions.ChildInput{
+		SessionID: "child_task", ModelID: "gpt-4.1-mini",
+	}); err != nil {
+		t.Fatalf("CreateChild returned error: %v", err)
 	}
 	outputFile, err := manager.Register(background.RegisterInput{
 		TaskID:         "child_task",
@@ -1031,6 +1057,7 @@ func TestStopToolRecordsRecoveredTaskStopOnce(t *testing.T) {
 	}
 	if err := os.WriteFile(outputFile, []byte(strings.Join([]string{
 		`{"schemaVersion":2,"type":"run_start","runId":"run_1","sessionId":"child_task"}`,
+		`{"schemaVersion":2,"type":"usage","runId":"run_1","promptTokens":20,"completionTokens":8,"totalTokens":28}`,
 		`{"schemaVersion":2,"type":"final","runId":"run_1","text":"done"}`,
 		`{"schemaVersion":2,"type":"run_end","runId":"run_1","status":"success","exitCode":0}`,
 		"",
@@ -1076,6 +1103,7 @@ func TestStopToolRecordsRecoveredTaskStopOnce(t *testing.T) {
 		t.Fatalf("stop-hook claim events = %d, want 1", len(claims))
 	}
 	requirePayloadString(t, eventPayload(t, claims[0]), "runId", "run_1")
+	requireBackgroundChildPricing(t, store, parent)
 }
 
 func stopCounterHooks(counter *atomic.Int32) *LifecycleHooks {
@@ -1155,4 +1183,75 @@ func mustGetBackgroundTask(t *testing.T, manager *background.Manager, taskID str
 		t.Fatalf("background task %q not found", taskID)
 	}
 	return task
+}
+
+// Exercise the real persisted-event reader as well as the rollup payload: the
+// parent and child have different known prices, and reaping must count once.
+func requireBackgroundChildPricing(t *testing.T, store *sessions.Store, parent sessions.Metadata) {
+	t.Helper()
+	events, err := store.ReadEvents(parent.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rolledUp := eventsOfType(events, sessions.EventUsage)
+	if len(rolledUp) != 1 {
+		t.Fatalf("usage events = %d, want 1", len(rolledUp))
+	}
+	requirePayloadString(t, eventPayload(t, rolledUp[0]), "model", "gpt-4.1-mini")
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := usage.BuildReport(events, []sessions.Metadata{parent}, &registry, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, err := registry.Require("gpt-4.1-mini")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := modelregistry.CalculateCost(model, zeroruntime.Usage{InputTokens: 20, OutputTokens: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want.TotalCost <= 0 || report.Total.TotalCost != want.TotalCost || report.Total.TotalTokens != 28 {
+		t.Fatalf("report totals = %+v, want 28 tokens priced at child cost %g", report.Total, want.TotalCost)
+	}
+}
+
+func TestBackgroundAccountingPreservesUsageWithoutReadableChildMetadata(t *testing.T) {
+	for _, metadata := range []string{"missing", "corrupt"} {
+		t.Run(metadata, func(t *testing.T) {
+			root := t.TempDir()
+			store := sessions.NewStore(sessions.StoreOptions{RootDir: root})
+			parent, err := store.Create(sessions.CreateInput{SessionID: "parent_session"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if metadata == "corrupt" {
+				if _, err := store.Create(sessions.CreateInput{SessionID: "child_task"}); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, "child_task", sessions.MetadataFile), []byte("{"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			Executor{SessionStore: store}.recordBackgroundTaskAccounting(background.Task{
+				ID: "child_task", ParentID: parent.SessionID, Status: background.StatusError,
+			}, StreamResult{Usage: StreamUsage{PromptTokens: 20, CompletionTokens: 8, TotalTokens: 28, Events: 1}})
+			events, err := store.ReadEvents(parent.SessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rolledUp := eventsOfType(events, sessions.EventUsage)
+			if len(rolledUp) != 1 || len(eventsOfType(events, sessions.EventSpecialistStop)) != 1 {
+				t.Fatalf("usage or stop accounting was lost: %+v", events)
+			}
+			payload := eventPayload(t, rolledUp[0])
+			requirePayloadInt(t, payload, "totalTokens", 28)
+			if _, ok := payload["model"]; ok {
+				t.Fatalf("unavailable model must not be invented: %+v", payload)
+			}
+		})
+	}
 }

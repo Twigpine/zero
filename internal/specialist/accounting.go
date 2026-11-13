@@ -227,6 +227,12 @@ func (executor Executor) recordBackgroundTaskAccounting(task background.Task, su
 		Background:      true,
 		PID:             task.PID,
 	}
+	// Reapers can run in a different process, without the launch manifest. The
+	// child exec persists its resolved model before emitting usage, so recover
+	// it from the child session rather than pricing against the parent's model.
+	if child, err := accountingStore(executor.SessionStore).Get(input.ChildSessionID); err == nil && child != nil {
+		input.Model = child.ModelID
+	}
 	rolledUp := executor.rollUpSpecialistUsage(input, summary)
 	executor.recordSpecialistStop(input, summary, string(task.Status), task.ExitCode, nil, rolledUp)
 }
