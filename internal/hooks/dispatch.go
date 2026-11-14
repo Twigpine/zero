@@ -51,16 +51,19 @@ type commandResult struct {
 // logic can be tested without spawning processes.
 type commandRunner func(ctx context.Context, command string, args []string, stdin []byte, cwd string, env []string) commandResult
 
-// DispatcherOptions configures a Dispatcher.
+// DispatcherOptions configures a Dispatcher. ConfigError is set when
+// hooks.json exists but could not be loaded; Dispatch blocks beforeTool rather
+// than running with an unknown policy.
 type DispatcherOptions struct {
-	Config    Config
-	Audit     *AuditStore       // optional; when set, every run is recorded
-	Cwd       string            // working directory for hook commands
-	Env       []string          // extra environment entries appended to the process env
-	Timeout   time.Duration     // per-command timeout (defaults to defaultHookTimeout)
-	Execution *execution.Runner // routes hook subprocesses through sandbox policy
-	now       func() time.Time
-	run       commandRunner
+	Config      Config
+	ConfigError string            // set when hooks.json exists but could not be loaded
+	Audit       *AuditStore       // optional; when set, every run is recorded
+	Cwd         string            // working directory for hook commands
+	Env         []string          // extra environment entries appended to the process env
+	Timeout     time.Duration     // per-command timeout (defaults to defaultHookTimeout)
+	Execution   *execution.Runner // routes hook subprocesses through sandbox policy
+	now         func() time.Time
+	run         commandRunner
 }
 
 // Dispatcher selects and runs the hooks configured for a lifecycle event,
@@ -68,13 +71,14 @@ type DispatcherOptions struct {
 // blocks the tool; hooks for other events are advisory (failures are recorded
 // but do not interrupt the run).
 type Dispatcher struct {
-	config  Config
-	audit   *AuditStore
-	cwd     string
-	env     []string
-	timeout time.Duration
-	now     func() time.Time
-	run     commandRunner
+	config      Config
+	configError string
+	audit       *AuditStore
+	cwd         string
+	env         []string
+	timeout     time.Duration
+	now         func() time.Time
+	run         commandRunner
 }
 
 // NewDispatcher builds a Dispatcher. A zero/empty config yields a dispatcher that
@@ -97,13 +101,14 @@ func NewDispatcher(options DispatcherOptions) *Dispatcher {
 		}
 	}
 	return &Dispatcher{
-		config:  options.Config,
-		audit:   options.Audit,
-		cwd:     options.Cwd,
-		env:     options.Env,
-		timeout: timeout,
-		now:     now,
-		run:     run,
+		config:      options.Config,
+		configError: options.ConfigError,
+		audit:       options.Audit,
+		cwd:         options.Cwd,
+		env:         options.Env,
+		timeout:     timeout,
+		now:         now,
+		run:         run,
 	}
 }
 
@@ -156,6 +161,17 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, input DispatchInput)
 	outcome := DispatchOutcome{}
 	if dispatcher == nil {
 		return outcome
+	}
+	if dispatcher.configError != "" {
+		// The config file exists but could not be read or parsed. The policy it
+		// contained is unknown; block a blocking event rather than selecting from
+		// an empty/partial config. Advisory events can still run the valid layers.
+		if blocksOn(input.Event) {
+			outcome.Blocked = true
+			outcome.BlockedBy = "hook-config"
+			outcome.Reason = "hook config could not be loaded: " + dispatcher.configError
+			return outcome
+		}
 	}
 	selected := Select(dispatcher.config, SelectInput{Event: input.Event, ToolName: input.ToolName})
 	if len(selected) == 0 {

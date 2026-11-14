@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -30,6 +31,38 @@ func TestResolvePathsUsesXDGLocations(t *testing.T) {
 	}
 	if paths.AuditPath != filepath.Join(dir, "data", "zero", "hooks", "audit.jsonl") {
 		t.Fatalf("audit path = %q", paths.AuditPath)
+	}
+}
+
+func TestLoadConfigRejectsMalformedExistingLayer(t *testing.T) {
+	dir := t.TempDir()
+	projectConfigPath := filepath.Join(dir, "hooks.json")
+	if err := os.WriteFile(projectConfigPath, []byte("{"), 0o600); err != nil {
+		t.Fatalf("write hooks: %v", err)
+	}
+
+	_, err := LoadConfig(LoadOptions{
+		UserConfigPath:    filepath.Join(dir, "missing-user-hooks.json"),
+		ProjectConfigPath: projectConfigPath,
+	})
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("LoadConfig error = %v, want ErrInvalidConfig", err)
+	}
+}
+
+func TestLoadConfigRejectsUnreadableExistingLayer(t *testing.T) {
+	dir := t.TempDir()
+	projectConfigPath := filepath.Join(dir, "hooks.json")
+	if err := os.Mkdir(projectConfigPath, 0o700); err != nil {
+		t.Fatalf("mkdir hooks: %v", err)
+	}
+
+	_, err := LoadConfig(LoadOptions{
+		UserConfigPath:    filepath.Join(dir, "missing-user-hooks.json"),
+		ProjectConfigPath: projectConfigPath,
+	})
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("LoadConfig error = %v, want ErrInvalidConfig", err)
 	}
 }
 
@@ -197,11 +230,11 @@ func TestLoadConfigRejectsMatchersOnLifecycleHooks(t *testing.T) {
 				UserConfigPath:    filepath.Join(dir, "missing-user-hooks.json"),
 				ProjectConfigPath: projectConfigPath,
 			})
-			if err != nil {
-				t.Fatalf("LoadConfig returned error: %v", err)
+			if !errors.Is(err, ErrInvalidConfig) {
+				t.Fatalf("LoadConfig error = %v, want ErrInvalidConfig", err)
 			}
 			if len(result.Config.Hooks) != 0 {
-				t.Fatalf("expected invalid hooks to be skipped: %#v", result.Config.Hooks)
+				t.Fatalf("expected invalid hooks to be omitted from the partial result: %#v", result.Config.Hooks)
 			}
 			if !hasHookDiagnostic(result.Diagnostics, DiagnosticSchema, "", "hooks.0.matcher") {
 				t.Fatalf("missing matcher diagnostic: %#v", result.Diagnostics)
@@ -436,6 +469,107 @@ func TestAuditStoreAppendsAndSkipsMalformedLines(t *testing.T) {
 	}
 	if appended.Sequence != 3 || appended.CreatedAt != "2026-06-04T00:00:02Z" {
 		t.Fatalf("unexpected appended event: %#v", appended)
+	}
+}
+
+func TestLoadConfigRejectsDanglingSymlink(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(dir, "hooks.json")
+	if err := os.Symlink(filepath.Join(dir, "missing-target.json"), link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	result, err := LoadConfig(LoadOptions{
+		UserConfigPath:    filepath.Join(dir, "missing-user-hooks.json"),
+		ProjectConfigPath: link,
+	})
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("LoadConfig error = %v, want ErrInvalidConfig", err)
+	}
+	if !hasHookDiagnostic(result.Diagnostics, DiagnosticIO, "", "") {
+		t.Fatalf("missing dangling-symlink diagnostic: %#v", result.Diagnostics)
+	}
+}
+
+func TestLoadConfigRejectsDanglingParentSymlink(t *testing.T) {
+	dir := t.TempDir()
+	workspace := filepath.Join(dir, "workspace")
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "missing-zero"), filepath.Join(workspace, ".zero")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	projectConfigPath := filepath.Join(workspace, ".zero", "hooks.json")
+
+	result, err := LoadConfig(LoadOptions{
+		UserConfigPath:    filepath.Join(dir, "missing-user-hooks.json"),
+		ProjectConfigPath: projectConfigPath,
+	})
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("LoadConfig error = %v, want ErrInvalidConfig", err)
+	}
+	if !hasHookDiagnostic(result.Diagnostics, DiagnosticIO, "", "") {
+		t.Fatalf("missing dangling-parent diagnostic: %#v", result.Diagnostics)
+	}
+}
+
+func TestLoadConfigRejectsSchemaInvalidLayer(t *testing.T) {
+	dir := t.TempDir()
+	projectConfigPath := filepath.Join(dir, "hooks.json")
+	writeHookJSON(t, projectConfigPath, map[string]any{
+		"hooks": []any{map[string]any{
+			"id":      "zero.bad",
+			"event":   "beforeTool",
+			"matcher": "bash",
+			"command": 42,
+		}},
+	})
+
+	result, err := LoadConfig(LoadOptions{
+		UserConfigPath:    filepath.Join(dir, "missing-user-hooks.json"),
+		ProjectConfigPath: projectConfigPath,
+	})
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("LoadConfig error = %v, want ErrInvalidConfig", err)
+	}
+	if !hasHookDiagnostic(result.Diagnostics, DiagnosticSchema, "", "hooks.0.command") {
+		t.Fatalf("missing schema diagnostic: %#v", result.Diagnostics)
+	}
+}
+
+func TestLoadConfigKeepsValidLayerWhenAnotherLayerIsInvalid(t *testing.T) {
+	dir := t.TempDir()
+	userConfigPath := filepath.Join(dir, "user-hooks.json")
+	projectConfigPath := filepath.Join(dir, "project-hooks.json")
+	writeHookJSON(t, userConfigPath, map[string]any{
+		"enabled": true,
+		"hooks": []any{map[string]any{
+			"id":      "zero.advisory",
+			"event":   "afterTool",
+			"command": "node",
+			"args":    []string{"audit.mjs"},
+		}},
+	})
+	if err := os.WriteFile(projectConfigPath, []byte("{"), 0o600); err != nil {
+		t.Fatalf("write malformed project hooks: %v", err)
+	}
+
+	result, err := LoadConfig(LoadOptions{
+		UserConfigPath:    userConfigPath,
+		ProjectConfigPath: projectConfigPath,
+	})
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("LoadConfig error = %v, want ErrInvalidConfig", err)
+	}
+	if len(result.Config.Hooks) != 1 || result.Config.Hooks[0].ID != "zero.advisory" {
+		t.Fatalf("partial result dropped the valid user hook: %#v", result.Config.Hooks)
+	}
+	if !hasHookDiagnostic(result.Diagnostics, DiagnosticJSON, "", "") {
+		t.Fatalf("missing JSON diagnostic: %#v", result.Diagnostics)
+	}
+	if result.Paths.UserConfigPath != userConfigPath || result.Paths.ProjectConfigPath != projectConfigPath {
+		t.Fatalf("paths = %#v", result.Paths)
 	}
 }
 

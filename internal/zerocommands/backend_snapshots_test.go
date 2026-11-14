@@ -482,3 +482,30 @@ func TestNewBackendLifecycleSnapshotBundlesAndDefaultsNilsToEmpty(t *testing.T) 
 		t.Fatalf("expected one of each, got %#v", full)
 	}
 }
+
+func TestHookDiagnosticSnapshotsRedactsSensitiveValues(t *testing.T) {
+	if got := HookDiagnosticSnapshots(nil); got == nil || len(got) != 0 {
+		t.Fatalf("expected non-nil empty diagnostics, got %#v", got)
+	}
+	diagnostics := []hooks.Diagnostic{{
+		Kind:      hooks.DiagnosticIO,
+		Source:    hooks.SourceUser,
+		Path:      "https://alice:hunter2@example.com/hooks.json",
+		HookID:    "zero.guard",
+		FieldPath: "hooks.0.command",
+		Message:   "api_key=sk-live-supersecret",
+	}}
+	snapshots := HookDiagnosticSnapshots(diagnostics)
+	if len(snapshots) != 1 {
+		t.Fatalf("expected one snapshot, got %#v", snapshots)
+	}
+	encoded, err := json.Marshal(snapshots)
+	if err != nil {
+		t.Fatalf("json.Marshal returned error: %v", err)
+	}
+	for _, secret := range []string{"hunter2", "sk-live-supersecret"} {
+		if strings.Contains(string(encoded), secret) {
+			t.Fatalf("snapshot leaked %q: %s", secret, encoded)
+		}
+	}
+}
