@@ -6,6 +6,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/agentsessions"
 	"github.com/Twigpine/zero/internal/config"
 	"github.com/Twigpine/zero/internal/mcp"
 	"github.com/Twigpine/zero/internal/modelregistry"
@@ -52,8 +53,12 @@ type Options struct {
 	// AwaitToolReadiness gives prompt-critical integration startup a bounded
 	// chance to publish its tools before this turn snapshots the registry. The
 	// wait runs inside the asynchronous agent command, so the TUI stays usable.
-	AwaitToolReadiness  func(context.Context)
-	SessionStore        *sessions.Store
+	AwaitToolReadiness func(context.Context)
+	SessionStore       *sessions.Store
+	// AgentSessionsEnv overrides foreign-agent transcript roots. Nil uses the
+	// process environment; tests inject a temporary home so /resume never reads
+	// the developer machine's real transcripts.
+	AgentSessionsEnv    *agentsessions.Env
 	SandboxStore        *sandbox.GrantStore
 	MCPConfig           config.MCPConfig
 	MCPPermissionStore  *mcp.PermissionStore

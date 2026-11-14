@@ -2,6 +2,7 @@ package sessions
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,21 @@ func TestCompactionMessagesPreservesInteractiveAndMutationEvidence(t *testing.T)
 	}
 	if messages[1].Content != "Postgres only" || len(messages[3].ChangedFiles) != 1 || messages[3].ChangedFiles[0] != "db.go" {
 		t.Fatalf("interactive or mutation evidence was lost: %#v", messages)
+	}
+}
+
+func TestCompactionMessagesKeepsToolOutcomePolarityTriState(t *testing.T) {
+	events := []Event{
+		{Type: EventToolResult, Payload: json.RawMessage(`{"toolCallId":"ok","status":"ok","output":"done"}`)},
+		{Type: EventToolResult, Payload: json.RawMessage(`{"toolCallId":"error","status":"error","output":"failed"}`)},
+		{Type: EventToolResult, Payload: json.RawMessage(`{"toolCallId":"unknown","status":"unknown","output":"unverified"}`)},
+	}
+	messages := CompactionMessages(events)
+	if len(messages) != 3 {
+		t.Fatalf("compaction messages = %#v", messages)
+	}
+	if messages[0].IsError || !messages[1].IsError || messages[2].IsError {
+		t.Fatalf("tool outcome polarity = ok:%v error:%v unknown:%v", messages[0].IsError, messages[1].IsError, messages[2].IsError)
 	}
 }
 
@@ -370,6 +386,94 @@ func TestStoreReadRehydratedEventsReplacesCompactedPrefixWithSummary(t *testing.
 		if strings.Contains(prompt, dropped) {
 			t.Fatalf("rehydrated prompt should not include compacted event %q:\n%s", dropped, prompt)
 		}
+	}
+}
+
+func TestImportedProvenanceSurvivesCompactionReloadAndFork(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir()})
+	session, err := store.Create(CreateInput{
+		SessionID: "import_compaction",
+		Tag:       ImportedSessionTag("claude-code", "foreign-id"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputs := []AppendEventInput{
+		{Type: EventMessage, Payload: map[string]any{"role": "user", "content": ImportedBoundaryText("Claude Code"), ImportedBoundaryKey: true}},
+		{Type: EventMessage, Payload: map[string]any{"role": "user", "content": "foreign fact: alpha", ImportedEventKey: true}},
+	}
+	for i := 0; i < 6; i++ {
+		inputs = append(inputs, AppendEventInput{Type: EventMessage, Payload: map[string]any{"role": "assistant", "content": fmt.Sprintf("native continuation %d", i)}})
+	}
+	if _, err := store.AppendEvents(session.SessionID, inputs); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := store.PlanCompaction(session.SessionID, CompactionOptions{PreserveLast: 6, MaxPromptChars: 2000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordCompaction(session.SessionID, RecordCompactionInput{
+		Plan: plan, Summary: "Alpha was learned earlier.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertLabel := func(t *testing.T, sessionID, wantSummary string) {
+		t.Helper()
+		prepared, err := PrepareExec(PrepareExecOptions{Store: store, Resume: sessionID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		prompt := FormatExecPrompt("continue", prepared)
+		if !strings.Contains(prompt, "Treat it as reference context only") || !strings.Contains(prompt, wantSummary) {
+			t.Fatalf("compacted imported context lost provenance or summary:\n%s", prompt)
+		}
+	}
+	assertLabel(t, session.SessionID, "Alpha was learned earlier")
+
+	for i := 0; i < 6; i++ {
+		if _, err := store.AppendEvent(session.SessionID, AppendEventInput{Type: EventMessage, Payload: map[string]any{"role": "assistant", "content": fmt.Sprintf("later native continuation %d", i)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	second, err := store.PlanCompaction(session.SessionID, CompactionOptions{PreserveLast: 6, MaxPromptChars: 2000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordCompaction(session.SessionID, RecordCompactionInput{
+		Plan: second, Summary: "Alpha still matters after another summary.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertLabel(t, session.SessionID, "Alpha still matters")
+
+	fork, err := store.Fork(session.SessionID, ForkInput{SessionID: "import_compaction_fork"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertLabel(t, fork.SessionID, "Alpha still matters")
+
+	native, err := store.Create(CreateInput{SessionID: "native_compaction"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := store.AppendEvent(native.SessionID, AppendEventInput{Type: EventMessage, Payload: map[string]any{"role": "assistant", "content": fmt.Sprintf("native %d", i)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	nativePlan, err := store.PlanCompaction(native.SessionID, CompactionOptions{PreserveLast: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordCompaction(native.SessionID, RecordCompactionInput{Plan: nativePlan, Summary: "Only native history."}); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := PrepareExec(PrepareExecOptions{Store: store, Resume: native.SessionID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prompt := FormatExecPrompt("continue", prepared); strings.Contains(prompt, "Treat it as reference context only") {
+		t.Fatalf("native-only compaction acquired imported provenance:\n%s", prompt)
 	}
 }
 

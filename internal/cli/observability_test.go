@@ -397,11 +397,23 @@ func TestRunSearchJSONRedactsQueryAndSessionMetadata(t *testing.T) {
 	}
 
 	session, err := store.Create(sessions.CreateInput{
-		SessionID: "json_metadata_secret",
-		Title:     "Title " + metadataSecret,
-		Cwd:       "/repo/" + metadataSecret,
-		ModelID:   "model-" + metadataSecret,
-		Provider:  "provider-token=" + metadataSecret,
+		SessionID:        "json_metadata_secret",
+		Title:            "Title " + metadataSecret,
+		Cwd:              "/repo/" + metadataSecret,
+		WorkspaceKey:     "/raw-repo/" + metadataSecret,
+		ModelID:          "model-" + metadataSecret,
+		SourceModelID:    "source-model-" + metadataSecret,
+		Provider:         "provider-token=" + metadataSecret,
+		Tag:              "tag-" + metadataSecret,
+		SpecUserComment:  "comment-" + metadataSecret,
+		SpecRejectReason: "reason-" + metadataSecret,
+		Goal: &sessions.Goal{
+			Objective:    "objective-" + metadataSecret,
+			Status:       sessions.GoalStatusBlocked,
+			CreatedAt:    "2026-06-04T18:00:00Z",
+			UpdatedAt:    "2026-06-04T18:00:00Z",
+			StatusReason: "blocked-by-" + metadataSecret,
+		},
 	})
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
@@ -425,6 +437,21 @@ func TestRunSearchJSONRedactsQueryAndSessionMetadata(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "[REDACTED]") {
 		t.Fatalf("expected redacted metadata marker in JSON output: %q", stdout.String())
+	}
+	var result struct {
+		Hits []struct {
+			Session sessions.Metadata `json:"session"`
+		} `json:"hits"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("decode search result: %v", err)
+	}
+	if len(result.Hits) != 1 || result.Hits[0].Session.WorkspaceKey != "" {
+		t.Fatalf("search JSON exposed operational workspace identity: %#v", result.Hits)
+	}
+	persisted, err := store.Get(session.SessionID)
+	if err != nil || persisted == nil || persisted.WorkspaceKey != "/raw-repo/"+metadataSecret {
+		t.Fatalf("stored workspace identity was corrupted: metadata=%#v err=%v", persisted, err)
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/agentsessions"
 	"github.com/Twigpine/zero/internal/config"
 	"github.com/Twigpine/zero/internal/doctor"
 	"github.com/Twigpine/zero/internal/errhint"
@@ -100,31 +101,36 @@ type model struct {
 	// other language servers) stay warm — a fresh manager per run would cold-start
 	// the server on the first edit of every turn. Nil when cwd is unknown; runs then
 	// fall back to a per-run manager. Torn down in quit().
-	lspManager           *lsp.Manager
-	sessionStore         *sessions.Store
-	peerService          *peermsg.Service
-	peerInbox            []peermsg.InboundMessage
-	peerApprovalQueue    []peermsg.InboundMessage
-	peerPendingApproval  *peermsg.InboundMessage
-	sandboxStore         *sandbox.GrantStore
-	mcpConfig            config.MCPConfig
-	mcpPermissionStore   *internalmcp.PermissionStore
-	mcpTokenStore        *internalmcp.TokenStore
-	mcpCommand           func(context.Context, []string) MCPCommandResult
-	sandboxSetupCommand  func(context.Context) SandboxSetupCommandResult
-	mcpViewStateCache    MCPViewState
-	mcpViewStateReady    bool
-	mcpCommandSeq        int
-	mcpCommandCancel     context.CancelFunc
-	sandboxSetupSeq      int
-	sandboxSetupInFlight bool
-	doctorCommandSeq     int
-	doctorInFlight       bool
-	doctorFrame          int
-	activeSession        sessions.Metadata
-	pendingSessionTitle  string
-	sessionEvents        []sessions.Event
-	btw                  btwState
+	lspManager            *lsp.Manager
+	sessionStore          *sessions.Store
+	agentSessionsEnv      agentsessions.Env
+	sessionImportInFlight bool
+	// sessionPickerGeneration counts /resume discovery requests so a result
+	// from a superseded request is recognized and discarded.
+	sessionPickerGeneration uint64
+	peerService             *peermsg.Service
+	peerInbox               []peermsg.InboundMessage
+	peerApprovalQueue       []peermsg.InboundMessage
+	peerPendingApproval     *peermsg.InboundMessage
+	sandboxStore            *sandbox.GrantStore
+	mcpConfig               config.MCPConfig
+	mcpPermissionStore      *internalmcp.PermissionStore
+	mcpTokenStore           *internalmcp.TokenStore
+	mcpCommand              func(context.Context, []string) MCPCommandResult
+	sandboxSetupCommand     func(context.Context) SandboxSetupCommandResult
+	mcpViewStateCache       MCPViewState
+	mcpViewStateReady       bool
+	mcpCommandSeq           int
+	mcpCommandCancel        context.CancelFunc
+	sandboxSetupSeq         int
+	sandboxSetupInFlight    bool
+	doctorCommandSeq        int
+	doctorInFlight          bool
+	doctorFrame             int
+	activeSession           sessions.Metadata
+	pendingSessionTitle     string
+	sessionEvents           []sessions.Event
+	btw                     btwState
 	// btwRunIDSeq is the highest run ID issued by any completed or abandoned BTW
 	// surface. It survives returning to the parent so a late message from an old
 	// side run can never match a run in a later BTW conversation.
@@ -968,6 +974,10 @@ func newModel(ctx context.Context, options Options) model {
 	if sessionStore == nil {
 		sessionStore = sessions.NewStore(sessions.StoreOptions{})
 	}
+	agentSessionsEnv := agentsessions.OSEnv()
+	if options.AgentSessionsEnv != nil {
+		agentSessionsEnv = *options.AgentSessionsEnv
+	}
 	sandboxStore := options.SandboxStore
 	modelCatalog, err := modelregistry.DefaultRegistry()
 	if err != nil {
@@ -1058,6 +1068,7 @@ func newModel(ctx context.Context, options Options) model {
 		registry:                    registry,
 		awaitToolReadiness:          options.AwaitToolReadiness,
 		sessionStore:                sessionStore,
+		agentSessionsEnv:            agentSessionsEnv,
 		peerService:                 options.PeerService,
 		sandboxStore:                sandboxStore,
 		mcpConfig:                   options.MCPConfig,
@@ -1462,6 +1473,39 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Width > 0 && msg.Height > 0 {
 			m.petCellPixelWidth = msg.Width
 			m.petCellPixelHeight = msg.Height
+		}
+		return m, nil
+	case foreignSessionImportedMsg:
+		m, text := m.finishForeignSessionImport(msg)
+		if text != "" {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
+		}
+		return m, nil
+	case sessionPickerLoadedMsg:
+		// A LATE RESULT MUST NOT APPLY A SWITCH WHOSE PRECONDITIONS ARE GONE.
+		// /resume checked m.pending when it dispatched discovery; this message
+		// arrives later. Installing the picker unconditionally let a prompt
+		// submitted in between start a run, and then a selection from the
+		// late picker switch the active session under it — its completion
+		// appended the first run's events into the other conversation. The
+		// result is tied to the request that made it (generation) and the
+		// session it was made for (originSession), and refused outright while
+		// a run is active. The selection route re-checks m.pending on its own
+		// (startResumeCommand), because a run can also begin while this very
+		// request is still current. Reported by @jatmn.
+		if !m.sessionPickerResultIsCurrent(msg) {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{
+				kind: actionAppendSystem,
+				text: "Sessions\nThe session list is out of date because a run started or the session changed; run /resume again.",
+			})
+			return m, nil
+		}
+		if msg.text != "" {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: msg.text})
+		}
+		if msg.picker != nil {
+			m.picker = msg.picker
+			return m, nil
 		}
 		return m, nil
 	case peerMessageMsg:
@@ -2153,6 +2197,13 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.mcpManager != nil {
 				m.burstCount = 0
 				return m.handleMCPManagerKey(msg)
+			}
+			// A tabbed picker (currently /resume) claims Tab to cycle its agent
+			// strip. Checked before the suggestion path below, which already
+			// requires picker == nil, so nothing else changes behaviour.
+			if m.picker != nil && m.picker.hasTabs() {
+				m.picker.cycleTab(1)
+				return m, nil
 			}
 			if m.picker == nil && m.suggestionsActive() {
 				m.moveSuggestion(1)
@@ -4830,7 +4881,11 @@ func (m model) choosePicker() (tea.Model, tea.Cmd) {
 		// item.Value is the chosen session id; handleResumeCommand hydrates it and
 		// rebuilds the transcript (returning "" on success, an error note on failure).
 		text := ""
-		m, text = m.handleResumeCommand(item.Value)
+		if item.ForeignSource != nil {
+			m, text, cmd = m.startForeignSessionImport(*item.ForeignSource)
+		} else {
+			m, text, cmd = m.startResumeCommand(item.Value)
+		}
 		if text != "" {
 			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: text})
 		}
@@ -5174,12 +5229,10 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		// `/resume <id>` and `/resume latest` still resolve directly. The picker falls
 		// back to the text path when there is nothing to resume.
 		if strings.TrimSpace(command.text) == "" {
-			if next, ok := m.openSessionPicker(); ok {
-				return next, nil
-			}
+			return m.sessionPickerCmd()
 		}
 		text := ""
-		m, text = m.handleResumeCommand(command.text)
+		m, text, cmd := m.startResumeCommand(command.text)
 		if strings.HasPrefix(text, sessionsCardsPrefix) {
 			// The list payload renders as stacked session cards, not a note.
 			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{
@@ -5194,7 +5247,7 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		if text == "" {
 			m, resumeCmd = m.refreshFileViewMarkers()
 		}
-		return m, resumeCmd
+		return m, tea.Batch(cmd, resumeCmd)
 	case commandRename:
 		if title := strings.TrimSpace(command.text); title != "" {
 			return m.renameActiveSession(title), nil

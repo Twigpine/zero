@@ -14,6 +14,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/agentsessions"
 	"github.com/Twigpine/zero/internal/sandbox"
 	"github.com/Twigpine/zero/internal/sessions"
 	"github.com/Twigpine/zero/internal/tools"
@@ -25,6 +26,22 @@ type scriptedProvider struct {
 	requests   []zeroruntime.CompletionRequest
 	beforeCall func(int)
 	calls      int
+}
+
+func TestResumeSummarySanitizesPersistedModelMetadata(t *testing.T) {
+	secret := "sk-ant-api03-" + strings.Repeat("A", 24)
+	m := model{modelName: "active-model", providerName: "provider"}
+	summary := m.formatResumeSummary(sessions.Metadata{
+		SessionID: "session-1",
+		ModelID:   "claude\x1b[2K-opus\n" + secret,
+	}, 3)
+	if strings.Contains(summary, "\x1b") || strings.Contains(summary, secret) {
+		t.Fatalf("unsafe model metadata reached the resume summary: %q", summary)
+	}
+	want := "recorded: " + agentsessions.DisplayField("claude\x1b[2K-opus\n"+secret)
+	if !strings.Contains(summary, want) {
+		t.Fatalf("resume summary lost safe model text: %q", summary)
+	}
 }
 
 func (provider *scriptedProvider) StreamCompletion(
@@ -1370,9 +1387,19 @@ func TestSessionPickerDetailStatusChips(t *testing.T) {
 	}
 }
 
+func isolatedResumePickerWorkspace(t *testing.T) string {
+	t.Helper()
+	workspace := filepath.Join(t.TempDir(), "project", "repo")
+	if err := os.MkdirAll(workspace, 0700); err != nil {
+		t.Fatal(err)
+	}
+	return workspace
+}
+
 func TestResumePickerDetailRendersOnlyAtMediumWidth(t *testing.T) {
+	workspace := isolatedResumePickerWorkspace(t)
 	store := testSessionStore(t)
-	sess, err := store.Create(sessions.CreateInput{Title: "Detail row", ModelID: "gpt-5-pickertest", Provider: "openai"})
+	sess, err := store.Create(sessions.CreateInput{Title: "Detail row", ModelID: "gpt-5-pickertest", Provider: "openai", Cwd: workspace})
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
 	}
@@ -1382,10 +1409,15 @@ func TestResumePickerDetailRendersOnlyAtMediumWidth(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AppendEvent returned error: %v", err)
 	}
-	m := newModel(context.Background(), Options{SessionStore: store})
+	m := newModel(context.Background(), Options{SessionStore: store, Cwd: workspace, AgentSessionsEnv: &agentsessions.Env{Home: t.TempDir()}})
 	m.input.SetValue("/resume")
-	updated, _ := m.Update(testKey(tea.KeyEnter))
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected /resume to start asynchronous session discovery")
+	}
+	updated, _ = next.Update(cmd())
+	next = updated.(model)
 	if next.picker == nil || next.picker.kind != pickerSession {
 		t.Fatalf("expected /resume to open the session picker, got %#v", next.picker)
 	}
@@ -1401,9 +1433,10 @@ func TestResumePickerDetailRendersOnlyAtMediumWidth(t *testing.T) {
 }
 
 func TestResumePickerFilterMatchesDetailFields(t *testing.T) {
+	workspace := isolatedResumePickerWorkspace(t)
 	store := testSessionStore(t)
 	mk := func(title, modelID string) {
-		sess, err := store.Create(sessions.CreateInput{Title: title, ModelID: modelID, Provider: "openai"})
+		sess, err := store.Create(sessions.CreateInput{Title: title, ModelID: modelID, Provider: "openai", Cwd: workspace})
 		if err != nil {
 			t.Fatalf("Create %q returned error: %v", title, err)
 		}
@@ -1417,10 +1450,15 @@ func TestResumePickerFilterMatchesDetailFields(t *testing.T) {
 	mk("alpha", "gpt-5")
 	mk("beta", "claude-sonnet-4.5")
 
-	m := newModel(context.Background(), Options{SessionStore: store})
+	m := newModel(context.Background(), Options{SessionStore: store, Cwd: workspace, AgentSessionsEnv: &agentsessions.Env{Home: t.TempDir()}})
 	m.input.SetValue("/resume")
-	updated, _ := m.Update(testKey(tea.KeyEnter))
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected /resume to start asynchronous session discovery")
+	}
+	updated, _ = next.Update(cmd())
+	next = updated.(model)
 	if next.picker == nil {
 		t.Fatal("expected /resume to open the session picker")
 	}
@@ -1433,6 +1471,7 @@ func TestResumePickerFilterMatchesDetailFields(t *testing.T) {
 }
 
 func TestResumePickerSanitizesMultilineMetadata(t *testing.T) {
+	workspace := isolatedResumePickerWorkspace(t)
 	// Persisted session metadata is user-controlled: a title or model id can
 	// legally contain newlines, which must not break the picker's fixed
 	// one-or-two-line row geometry (a stray line shifts every row below it and
@@ -1441,7 +1480,7 @@ func TestResumePickerSanitizesMultilineMetadata(t *testing.T) {
 	sess, err := store.Create(sessions.CreateInput{
 		Title:   "alpha\nbravo",
 		ModelID: "gpt\x1b[31m5",
-		Cwd:     "/repo",
+		Cwd:     workspace,
 		Tag:     "side\x1b]0;x\achat",
 	})
 	if err != nil {
@@ -1453,10 +1492,15 @@ func TestResumePickerSanitizesMultilineMetadata(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AppendEvent returned error: %v", err)
 	}
-	m := newModel(context.Background(), Options{SessionStore: store, Cwd: "/repo"})
+	m := newModel(context.Background(), Options{SessionStore: store, Cwd: workspace, AgentSessionsEnv: &agentsessions.Env{Home: t.TempDir()}})
 	m.input.SetValue("/resume")
-	updated, _ := m.Update(testKey(tea.KeyEnter))
+	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	next := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected /resume to start asynchronous session discovery")
+	}
+	updated, _ = next.Update(cmd())
+	next = updated.(model)
 	if next.picker == nil || len(next.picker.items) != 1 {
 		t.Fatalf("expected one picker item, got %#v", next.picker)
 	}

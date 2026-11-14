@@ -793,6 +793,9 @@ func (m model) pickerOverlay(width int) string {
 	// A visible "search > …" line so typing to filter shows what you've typed,
 	// matching the /model picker. Followed by a separator, then the rows.
 	lines = append(lines, renderPickerSearchLine(m.picker.query, "type to filter…", innerWidth))
+	if m.picker.hasTabs() {
+		lines = append(lines, renderPickerTabs(m.picker.tabs, m.picker.activeTab, innerWidth))
+	}
 	lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
 	lastGroup := ""
 	for index, item := range visible {
@@ -849,6 +852,9 @@ func (m model) pickerOverlay(width int) string {
 	// picker and the other bordered boxes.
 	lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
 	footer := zeroTheme.faint.Render("↑/↓ move   Enter select   Esc close")
+	if m.picker.hasTabs() {
+		footer = zeroTheme.faint.Render("Tab agent   ↑/↓ move   Enter select   Esc close")
+	}
 	if m.picker.kind == pickerSession {
 		position := 0
 		if len(m.picker.items) > 0 {
@@ -1173,6 +1179,24 @@ func renderModelPickerSearchLine(query string, width int) string {
 // renderPickerSearchLine renders the "search > <query>▌" input line shared by the
 // popup pickers, so what you type while filtering is always visible. placeholder
 // is the faint hint shown when the query is empty.
+// renderPickerTabs draws the tab strip: the active tab as a filled badge, the
+// rest faint, laid out left to right.
+//
+// The strip is allowed to overflow a narrow terminal rather than scroll or
+// truncate names: a half-written agent name is worse than a line that wraps,
+// and fitStyledLine clips the overflow at the frame edge either way.
+func renderPickerTabs(tabs []string, active int, width int) string {
+	rendered := make([]string, 0, len(tabs))
+	for index, tab := range tabs {
+		if index == active {
+			rendered = append(rendered, zeroTheme.badge.Render(" "+tab+" "))
+			continue
+		}
+		rendered = append(rendered, zeroTheme.faint.Render(" "+tab+" "))
+	}
+	return fitStyledLine(strings.Join(rendered, " "), width)
+}
+
 func renderPickerSearchLine(query, placeholder string, width int) string {
 	query = strings.TrimSpace(query)
 	prompt := zeroTheme.userPrompt.Render("search > ")

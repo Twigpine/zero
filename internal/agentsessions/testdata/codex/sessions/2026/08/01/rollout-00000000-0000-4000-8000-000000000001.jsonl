@@ -1,0 +1,6 @@
+{"type":"session_meta","timestamp":"2026-08-01T10:00:00.000Z","payload":{"session_id":"fixture0-0000-0000-0000-000000000001","cwd":"/Users/example/workspace/demo"}}
+{"type":"turn_context","payload":{"model":"gpt-5.6-sol","effort":"high","summary":"auto"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Add a --verbose flag to the CLI and cover it with a test"}]}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I'll add the flag and a test."}]}}
+{"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":\"go test ./...\"}","call_id":"fc-1"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"fc-1","output":"ok"}}

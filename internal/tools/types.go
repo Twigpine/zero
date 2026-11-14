@@ -38,8 +38,9 @@ const (
 )
 
 const (
-	StatusOK    Status = "ok"
-	StatusError Status = "error"
+	StatusOK      Status = "ok"
+	StatusError   Status = "error"
+	StatusUnknown Status = "unknown"
 )
 
 const (

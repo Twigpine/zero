@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/Twigpine/zero/internal/agent"
+	"github.com/Twigpine/zero/internal/agentsessions"
 	"github.com/Twigpine/zero/internal/config"
 	"github.com/Twigpine/zero/internal/modelregistry"
 	"github.com/Twigpine/zero/internal/providercatalog"
@@ -89,6 +90,8 @@ type Agent struct {
 type turnRecord struct {
 	user      string
 	assistant string
+	imported  bool
+	boundary  bool
 }
 
 type acpSession struct {
@@ -267,7 +270,8 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 	if operation == persistedSessionResume && !sessions.IsResumableKind(meta.SessionKind) {
 		return nil, RPCError(codeInvalidParams, "session is not resumable: "+p.SessionID)
 	}
-	if strings.TrimSpace(meta.Cwd) == "" {
+	persistedCwd := sessions.OperationalCwd(*meta)
+	if strings.TrimSpace(persistedCwd) == "" {
 		return nil, RPCError(codeInvalidParams, "session has no persisted workspace: "+p.SessionID)
 	}
 	// SAME RULE ON THE WAY IN. Omitting a relative entry from the listing is not
@@ -275,10 +279,10 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 	// client that hands back that same directory as its cwd would be sold the
 	// invented root as a match. A workspace that cannot be identified is not one
 	// this session can be restored into.
-	if !filepath.IsAbs(meta.Cwd) {
+	if !filepath.IsAbs(persistedCwd) {
 		return nil, RPCError(codeInvalidParams, "session workspace is not an absolute path, so it cannot be identified: "+p.SessionID)
 	}
-	persistedRoot, err := a.deps.ResolveWorkspaceRoot(meta.Cwd)
+	persistedRoot, err := a.deps.ResolveWorkspaceRoot(persistedCwd)
 	if err != nil {
 		return nil, RPCError(codeInvalidParams, "persisted session workspace is unavailable: "+err.Error())
 	}
@@ -321,7 +325,10 @@ func (a *Agent) activatePersistedSession(ctx context.Context, p LoadSessionParam
 	if err != nil {
 		return nil, RPCError(codeInternalError, "config: "+err.Error())
 	}
-	if persistedModel := strings.TrimSpace(meta.ModelID); persistedModel != "" && (!restrictModels || modelChoiceExists(models, persistedModel)) {
+	persistedModel := strings.TrimSpace(meta.ModelID)
+	imported := sessions.IsImportedSession(*meta)
+	locallySelected := !imported || meta.ModelSelectedLocally
+	if persistedModel != "" && locallySelected && (!restrictModels || modelChoiceExists(models, persistedModel)) {
 		model = persistedModel
 		if !modelChoiceExists(models, persistedModel) {
 			models = append(models, SessionConfigOptionValue{Value: persistedModel, Name: persistedModel})
@@ -408,7 +415,8 @@ func (a *Agent) handleSessionList(_ context.Context, params json.RawMessage) (an
 		// a session whose workspace has since been deleted, and a legacy entry
 		// holding a relative path, which was then reported as cwd "." even though
 		// ACP requires SessionInfo.cwd to be absolute.
-		if strings.TrimSpace(item.Cwd) == "" {
+		operationalCwd := sessions.OperationalCwd(item)
+		if strings.TrimSpace(operationalCwd) == "" {
 			continue
 		}
 		// A RELATIVE PERSISTED CWD HAS NO RECOVERABLE IDENTITY. Resolving one
@@ -418,10 +426,14 @@ func (a *Agent) handleSessionList(_ context.Context, params json.RawMessage) (an
 		// project's configuration, files and tools. The original base is not
 		// knowable from the metadata, so the honest answer is to omit the entry
 		// rather than to guess at it.
-		if !filepath.IsAbs(item.Cwd) {
+		if !filepath.IsAbs(operationalCwd) {
 			continue
 		}
-		itemRoot, err := a.deps.ResolveWorkspaceRoot(item.Cwd)
+		if (item.WorkspaceKey != "" || agentsessions.ImportedAgent(item.Tag) != "") &&
+			!passiveImportedWorkspaceLocal(operationalCwd) {
+			continue
+		}
+		itemRoot, err := a.deps.ResolveWorkspaceRoot(operationalCwd)
 		if err != nil {
 			continue
 		}
@@ -440,6 +452,8 @@ func (a *Agent) handleSessionList(_ context.Context, params json.RawMessage) (an
 	}
 	return result, nil
 }
+
+var passiveImportedWorkspaceLocal = agentsessions.PassiveWorkspaceIsLocal
 
 // ---- prompt turn ----
 
@@ -1035,6 +1049,7 @@ func (a *Agent) loadHistory(sessionID string, requireHistoryLog bool) ([]turnRec
 	var messages []persistedMessage
 	activeToolCalls := make(map[string]string)
 	var pendingUser string
+	var pendingImported, pendingBoundary bool
 	havePending := false
 	for _, e := range events {
 		if e.Type == sessions.EventCompaction {
@@ -1046,7 +1061,8 @@ func (a *Agent) loadHistory(sessionID string, requireHistoryLog bool) ([]turnRec
 				continue
 			}
 			var payload struct {
-				Summary string `json:"summary"`
+				Summary         string `json:"summary"`
+				ImportedContext bool   `json:"importedEvent"`
 			}
 			if json.Unmarshal(raw, &payload) != nil || strings.TrimSpace(payload.Summary) == "" {
 				continue
@@ -1056,8 +1072,10 @@ func (a *Agent) loadHistory(sessionID string, requireHistoryLog bool) ([]turnRec
 				role:    "assistant",
 				content: payload.Summary,
 			})
-			records = append(records, turnRecord{user: pendingUser, assistant: payload.Summary})
+			records = append(records, turnRecord{user: pendingUser, assistant: payload.Summary, imported: payload.ImportedContext})
 			pendingUser = ""
+			pendingImported = false
+			pendingBoundary = false
 			havePending = false
 			continue
 		}
@@ -1101,6 +1119,8 @@ func (a *Agent) loadHistory(sessionID string, requireHistoryLog bool) ([]turnRec
 		var msg struct {
 			Role        string                      `json:"role"`
 			Content     string                      `json:"content"`
+			Imported    bool                        `json:"importedEvent"`
+			Boundary    bool                        `json:"importedReferenceBoundary"`
 			Attachments sessions.MessageAttachments `json:"attachments"`
 		}
 		if json.Unmarshal(raw, &msg) != nil {
@@ -1111,19 +1131,27 @@ func (a *Agent) loadHistory(sessionID string, requireHistoryLog bool) ([]turnRec
 			msg.Content = msg.Attachments.WithContent(msg.Content)
 			messages = append(messages, persistedMessage{eventID: persistedMessageIdentity(sessionID, e), role: msg.Role, content: msg.Content})
 			if havePending {
-				records = append(records, turnRecord{user: pendingUser})
+				records = append(records, turnRecord{user: pendingUser, imported: pendingImported, boundary: pendingBoundary})
 			}
 			pendingUser = msg.Content
+			pendingImported = msg.Imported
+			pendingBoundary = msg.Boundary
 			havePending = true
 		case "assistant":
 			messages = append(messages, persistedMessage{eventID: persistedMessageIdentity(sessionID, e), role: msg.Role, content: msg.Content})
-			records = append(records, turnRecord{user: pendingUser, assistant: msg.Content})
+			records = append(records, turnRecord{
+				user: pendingUser, assistant: msg.Content,
+				imported: pendingImported || msg.Imported,
+				boundary: pendingBoundary || msg.Boundary,
+			})
 			pendingUser = ""
+			pendingImported = false
+			pendingBoundary = false
 			havePending = false
 		}
 	}
 	if havePending {
-		records = append(records, turnRecord{user: pendingUser})
+		records = append(records, turnRecord{user: pendingUser, imported: pendingImported, boundary: pendingBoundary})
 	}
 	return records, messages, rehydrateWarning, nil
 }
@@ -1177,6 +1205,11 @@ func replayToolUpdate(event sessions.Event) *ToolCallUpdate {
 		Output:       payload.Output,
 		ChangedFiles: append([]string(nil), payload.ChangedFiles...),
 	})
+	if status == tools.StatusUnknown {
+		// ACP has no unknown result status. Omitting the optional status keeps
+		// this replay neutral instead of inventing successful completion.
+		upd.Status = ""
+	}
 	return &upd
 }
 
@@ -1229,7 +1262,14 @@ func buildPrompt(history []turnRecord, userText string) string {
 	}
 	var b strings.Builder
 	b.WriteString("Conversation so far:\n")
+	importedLabeled := false
 	for _, t := range history {
+		if t.imported && !importedLabeled {
+			b.WriteString("Context boundary: ")
+			b.WriteString(sessions.ImportedBoundaryText("another agent's"))
+			b.WriteString("\n")
+			importedLabeled = true
+		}
 		b.WriteString("User: ")
 		b.WriteString(t.user)
 		b.WriteString("\n")
@@ -1237,6 +1277,11 @@ func buildPrompt(history []turnRecord, userText string) string {
 			b.WriteString("Assistant: ")
 			b.WriteString(t.assistant)
 			b.WriteString("\n")
+		}
+		if t.boundary {
+			importedLabeled = true
+		} else if !t.imported {
+			importedLabeled = false
 		}
 	}
 	b.WriteString("\n---\nContinue with this request:\n")

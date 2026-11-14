@@ -527,6 +527,122 @@ func TestACPCustomProviderAllowsUnadvertisedModel(t *testing.T) {
 	}
 }
 
+func TestACPLoadImportedSessionDoesNotRestoreUnadvertisedForeignModel(t *testing.T) {
+	deps := testDeps(t)
+	deps.ResolveConfig = func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+		return config.ResolvedConfig{Provider: config.ProviderProfile{
+			Name: "Custom", CatalogID: "custom-openai-compatible", Model: "workspace-model",
+		}}, nil
+	}
+	workspace := t.TempDir()
+	meta, err := deps.Store.Create(sessions.CreateInput{
+		Title:   "legacy imported session",
+		Cwd:     workspace,
+		ModelID: "foreign-expensive-model",
+		Tag:     sessions.ImportedSessionTag("claude-code", "foreign-id"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var loaded LoadSessionResult
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{
+		SessionID: meta.SessionID,
+		Cwd:       workspace,
+	}, &loaded); err != nil {
+		t.Fatalf("session/load: %v", err)
+	}
+	option := loaded.ConfigOptions[0]
+	if option.CurrentValue != "workspace-model" || modelChoiceExists(option.Options, "foreign-expensive-model") {
+		t.Fatalf("imported model gained ACP authority: %+v", option)
+	}
+}
+
+func TestACPLoadImportedSessionRestoresLaterLocalModelSelection(t *testing.T) {
+	deps := testDeps(t)
+	deps.ResolveConfig = func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+		return config.ResolvedConfig{Provider: config.ProviderProfile{
+			Name: "Custom", CatalogID: "custom-openai-compatible", Model: "workspace-model",
+		}}, nil
+	}
+	clientCwd := t.TempDir()
+	meta, err := deps.Store.Create(sessions.CreateInput{
+		Title:         "modern imported session",
+		Cwd:           "/foreign/display",
+		WorkspaceKey:  clientCwd,
+		SourceModelID: "foreign-expensive-model",
+		Tag:           sessions.ImportedSessionTag("claude-code", "foreign-id"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	h := newHarness(t, deps)
+	var loaded LoadSessionResult
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: meta.SessionID, Cwd: clientCwd}, &loaded); err != nil {
+		t.Fatalf("initial session/load: %v", err)
+	}
+	if got := loaded.ConfigOptions[0].CurrentValue; got != "workspace-model" {
+		t.Fatalf("initial imported model = %q, want workspace default", got)
+	}
+	var selected SetSessionConfigOptionResult
+	if err := h.client.Call(ctx, MethodSessionSetConfigOption, SetSessionConfigOptionParams{
+		SessionID: meta.SessionID, ConfigID: configIDModel, Value: "local-choice",
+	}, &selected); err != nil {
+		t.Fatalf("set local model: %v", err)
+	}
+	if got := selected.ConfigOptions[0].CurrentValue; got != "local-choice" {
+		t.Fatalf("selected model = %q", got)
+	}
+	h.stop()
+
+	h = newHarness(t, deps)
+	defer h.stop()
+	loaded = LoadSessionResult{}
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: meta.SessionID, Cwd: clientCwd}, &loaded); err != nil {
+		t.Fatalf("fresh session/load: %v", err)
+	}
+	option := loaded.ConfigOptions[0]
+	if option.CurrentValue != "local-choice" || !modelChoiceExists(option.Options, "local-choice") {
+		t.Fatalf("fresh load discarded persisted local choice: %+v", option)
+	}
+}
+
+func TestACPLoadNativeImportedPrefixTagRestoresItsModel(t *testing.T) {
+	deps := testDeps(t)
+	deps.ResolveConfig = func(_ string, _ config.Overrides) (config.ResolvedConfig, error) {
+		return config.ResolvedConfig{Provider: config.ProviderProfile{
+			Name: "Custom", CatalogID: "custom-openai-compatible", Model: "workspace-model",
+		}}, nil
+	}
+	workspace := t.TempDir()
+	meta, err := deps.Store.Create(sessions.CreateInput{
+		Title:   "native archived session",
+		Cwd:     workspace,
+		ModelID: "native-model",
+		Tag:     "imported:archive",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var loaded LoadSessionResult
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: meta.SessionID, Cwd: workspace}, &loaded); err != nil {
+		t.Fatalf("session/load: %v", err)
+	}
+	option := loaded.ConfigOptions[0]
+	if option.CurrentValue != "native-model" || !modelChoiceExists(option.Options, "native-model") {
+		t.Fatalf("native tagged model was discarded as foreign: %+v", option)
+	}
+}
+
 func TestACPModelDiscoveryFiltersProviderIncompatibleModels(t *testing.T) {
 	a := &Agent{deps: Deps{
 		ResolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
@@ -1071,7 +1187,6 @@ func TestACPSameConnectionReloadRefreshesRecoveredHistory(t *testing.T) {
 		prompts <- prompt
 		return agent.Result{FinalAnswer: "continued"}, nil
 	}
-
 	h := newHarness(t, deps)
 	defer h.stop()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1128,7 +1243,88 @@ func TestACPSameConnectionReloadRefreshesRecoveredHistory(t *testing.T) {
 	}
 }
 
+func TestACPLoadUsesOperationalWorkspaceKeyForPersistedIdentity(t *testing.T) {
+	deps := testDeps(t)
+	displayCwd := filepath.Join(t.TempDir(), "[REDACTED]", "repo")
+	operationalCwd := t.TempDir()
+	meta, err := deps.Store.Create(sessions.CreateInput{
+		Title:        "imported session",
+		Cwd:          displayCwd,
+		WorkspaceKey: operationalCwd,
+		Tag:          sessions.ImportedSessionTag("claude-code", "foreign-id"),
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	var resolved []string
+	deps.ResolveWorkspaceRoot = func(cwd string) (string, error) {
+		resolved = append(resolved, cwd)
+		return cwd, nil
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: meta.SessionID}, &LoadSessionResult{}); err == nil {
+		t.Fatal("session/load accepted an imported session without an ACP client workspace")
+	}
+	if len(resolved) != 0 {
+		t.Fatalf("omitted client workspace reached resolver: %q", resolved)
+	}
+
+	if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{
+		SessionID: meta.SessionID,
+		Cwd:       operationalCwd,
+	}, &LoadSessionResult{}); err != nil {
+		t.Fatalf("session/load: %v", err)
+	}
+	if len(resolved) != 2 || resolved[0] != operationalCwd || resolved[1] != operationalCwd {
+		t.Fatalf("session/load resolved workspaces %q, want persisted and requested %q", resolved, operationalCwd)
+	}
+}
+
 // drainText collects streamed chunks for a short window and concatenates them.
+func TestACPListAndLoadShareOperationalWorkspaceIdentity(t *testing.T) {
+	for _, createDisplay := range []bool{false, true} {
+		t.Run(fmt.Sprintf("display-exists-%v", createDisplay), func(t *testing.T) {
+			deps := testDeps(t)
+			root := t.TempDir()
+			operational := filepath.Join(root, "token-shaped-workspace")
+			display := filepath.Join(root, "[REDACTED]-workspace")
+			if err := os.MkdirAll(operational, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if createDisplay {
+				if err := os.MkdirAll(display, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			meta, err := deps.Store.Create(sessions.CreateInput{Cwd: display, WorkspaceKey: operational})
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := newHarness(t, deps)
+			defer h.stop()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			for _, params := range []ListSessionsParams{{}, {Cwd: operational}} {
+				var listed ListSessionsResult
+				if err := h.client.Call(ctx, MethodSessionList, params, &listed); err != nil {
+					t.Fatalf("session/list: %v", err)
+				}
+				if len(listed.Sessions) != 1 || listed.Sessions[0].Cwd != operational {
+					t.Fatalf("session/list = %+v, want operational cwd %q", listed.Sessions, operational)
+				}
+				if err := h.client.Call(ctx, MethodSessionLoad, LoadSessionParams{SessionID: meta.SessionID, Cwd: listed.Sessions[0].Cwd}, &LoadSessionResult{}); err != nil {
+					t.Fatalf("list-to-load round trip: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func drainText(t *testing.T, ch <-chan string) string {
 	t.Helper()
 	return drainTextUntil(t, ch, func(text string) bool {
@@ -1845,8 +2041,9 @@ func TestACPCompactedHistoryReplacesCompactedTurnsWithTheirSummary(t *testing.T)
 	if _, err := deps.Store.AppendEvents(created.SessionID, []sessions.AppendEventInput{{
 		Type: sessions.EventCompaction,
 		Payload: map[string]any{
-			"summary":      summary,
-			"preserveLast": 1,
+			"summary":       summary,
+			"preserveLast":  1,
+			"importedEvent": true,
 			"compactableEvents": []map[string]any{
 				{"id": appended[0].ID, "sequence": appended[0].Sequence},
 				{"id": appended[1].ID, "sequence": appended[1].Sequence},
@@ -1907,6 +2104,9 @@ func TestACPCompactedHistoryReplacesCompactedTurnsWithTheirSummary(t *testing.T)
 	if !strings.Contains(prompt, summary) {
 		t.Fatalf("resumed prompt lost the compaction summary:\n%s", prompt)
 	}
+	if !strings.Contains(prompt, sessions.ImportedBoundaryText("another agent's")) {
+		t.Fatalf("resumed prompt lost imported reference-only provenance:\n%s", prompt)
+	}
 	if strings.Contains(prompt, "compacted answer") {
 		t.Fatalf("resumed prompt replayed a compacted-away turn:\n%s", prompt)
 	}
@@ -1929,6 +2129,10 @@ func TestACPLoadReplaysToolCallsPairedByTheirStoredOccurrence(t *testing.T) {
 		// An older record spells the id "id" rather than "toolCallId".
 		{Type: sessions.EventToolCall, Payload: map[string]any{"name": "bash", "id": "call-88", "arguments": `{"command":"go build"}`}},
 		{Type: sessions.EventToolResult, Payload: map[string]any{"name": "bash", "id": "call-88", "status": "error", "output": "build failed"}},
+		// A foreign result with no structured outcome must not become success just
+		// because its prose happens to sound successful.
+		{Type: sessions.EventToolCall, Payload: map[string]any{"name": "shell", "toolCallId": "call-unknown", "arguments": `{"command":"false"}`}},
+		{Type: sessions.EventToolResult, Payload: map[string]any{"name": "shell", "toolCallId": "call-unknown", "status": "unknown", "output": "command completed successfully"}},
 		// A start with no result is an interrupted call, not a completed one.
 		{Type: sessions.EventToolCall, Payload: map[string]any{"name": "grep", "toolCallId": "call-99", "arguments": `{"pattern":"TODO"}`}},
 		// No id at all: unpairable, so it must be skipped rather than replayed.
@@ -1956,6 +2160,8 @@ func TestACPLoadReplaysToolCallsPairedByTheirStoredOccurrence(t *testing.T) {
 		{UpdateToolCall, replayToolCallID(appended[3].ID), ToolStatusInProgress, nil},
 		{UpdateToolCallUpdate, replayToolCallID(appended[3].ID), ToolStatusFailed, nil},
 		{UpdateToolCall, replayToolCallID(appended[5].ID), ToolStatusInProgress, nil},
+		{UpdateToolCallUpdate, replayToolCallID(appended[5].ID), "", nil},
+		{UpdateToolCall, replayToolCallID(appended[7].ID), ToolStatusInProgress, nil},
 	}
 	for i, w := range wants {
 		select {

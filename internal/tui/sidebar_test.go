@@ -52,6 +52,18 @@ func TestSidebarActivityLines(t *testing.T) {
 	}
 }
 
+func TestSidebarActivityKeepsUnknownToolOutcomeNeutral(t *testing.T) {
+	m := model{now: time.Now, transcript: []transcriptRow{
+		{kind: rowToolResult, tool: "write_file", id: "ok", status: tools.StatusOK, text: "tool result: write_file ok wrote"},
+		{kind: rowToolResult, tool: "write_file", id: "error", status: tools.StatusError, text: "tool result: write_file error failed"},
+		{kind: rowToolResult, tool: "write_file", id: "unknown", status: tools.StatusUnknown, text: "tool result: write_file unknown unverified"},
+	}}
+	got := plainRender(t, strings.Join(m.sidebarActivityLines(50, 10), "\n"))
+	if !strings.Contains(got, "✓ wrote") || !strings.Contains(got, "✗ failed") || !strings.Contains(got, "• unverified") {
+		t.Fatalf("tri-state activity glyphs missing:\n%s", got)
+	}
+}
+
 func TestSidebarActivityNamesCurrentTool(t *testing.T) {
 	m := sidebarTestModel()
 	m.pending = true
