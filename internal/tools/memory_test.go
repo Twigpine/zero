@@ -233,6 +233,12 @@ func TestALocalFailureDoesNotHideTheProjectNote(t *testing.T) {
 	if !strings.Contains(result.Output, "the project body") {
 		t.Errorf("the project note was not returned: %q", result.Output)
 	}
+	// BESIDE the note, not swallowed by it. Returning the project body alone
+	// tells the model no local note of this name exists, and its next unscoped
+	// memory_write — local by default — replaces the one it was never shown.
+	if !strings.Contains(result.Output, "local: "+memory.ErrTooLarge.Error()) {
+		t.Errorf("the unreadable local note was not reported beside the project note: %q", result.Output)
+	}
 }
 
 // A DELETE MUST REFUSE THE NAME THE OTHER TWO DOORS REFUSE. memory_read and

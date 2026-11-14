@@ -133,8 +133,10 @@ func (tool memoryTool) Run(_ context.Context, args map[string]any) Result {
 	}
 	// A failure in one scope must not hide a readable note in the next. Unscoped
 	// reads search local first because that is where an unscoped write lands, then
-	// fall back to the checked-in project scope. The failure is carried and
-	// reported even when a later scope supplies a readable fallback.
+	// fall back to the checked-in project scope. The failure is carried: it is the
+	// error when nothing readable turns up, and it is reported BESIDE a later
+	// scope's note otherwise, because returning that note alone says no
+	// same-named note exists in the scope an unscoped write would replace.
 	var problems []error
 	for _, candidate := range scopes {
 		note, readErr := memory.Read(tool.paths, candidate, name)
@@ -149,7 +151,8 @@ func (tool memoryTool) Run(_ context.Context, args map[string]any) Result {
 		}
 		rendered := fmt.Sprintf("memory %q (%s)\n\n%s", note.Name, note.Scope, note.Body)
 		if len(problems) > 0 {
-			rendered += "\n\nEarlier memory scope reads failed: " + memoryReadFailure(errors.Join(problems...))
+			rendered += fmt.Sprintf("\n\nReading %q in another scope failed, so this may not be the only note by that name: %s",
+				name, memoryReadFailure(errors.Join(problems...)))
 		}
 		return okResult(rendered)
 	}
