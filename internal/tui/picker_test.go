@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -851,6 +853,62 @@ func TestSwitchProviderModelRecordsRecentHistory(t *testing.T) {
 	if !reflect.DeepEqual(persisted.Preferences.RecentModels, want) {
 		t.Fatalf("persisted RecentModels = %#v, want %#v", persisted.Preferences.RecentModels, want)
 	}
+}
+
+// Switching providers warms discovery for the target. The result must pass the
+// supersession guard even when the picker registered that provider earlier and
+// a /model list refresh of another provider has since advanced the generation.
+func TestSwitchProviderModelDiscoveryPassesRefreshGuard(t *testing.T) {
+	probe := httptest.NewServer(http.NotFoundHandler())
+	defer probe.Close()
+	configPath := filepath.Join(t.TempDir(), "zero", "config.json")
+	ollama := config.ProviderProfile{Name: "ollama", CatalogID: "ollama", ProviderKind: config.ProviderKindOpenAICompatible, BaseURL: probe.URL + "/v1", Model: "kimi-k2.7-code:cloud"}
+	if _, err := config.UpsertProvider(configPath, config.ProviderProfile{Name: "openai", CatalogID: "openai", Model: "gpt-5.1"}, true); err != nil {
+		t.Fatalf("seed openai provider: %v", err)
+	}
+	if _, err := config.UpsertProvider(configPath, ollama, false); err != nil {
+		t.Fatalf("seed ollama provider: %v", err)
+	}
+	m := newModel(context.Background(), Options{
+		UserConfigPath:  configPath,
+		ProviderName:    "openai",
+		ModelName:       "gpt-5.1",
+		Provider:        &fakeProvider{},
+		ProviderProfile: config.ProviderProfile{Name: "openai", CatalogID: "openai", Model: "gpt-5.1"},
+		SavedProviders:  []config.ProviderProfile{{Name: "openai", CatalogID: "openai", Model: "gpt-5.1"}, ollama},
+		NewProvider: func(config.ProviderProfile) (zeroruntime.Provider, error) {
+			return &fakeProvider{}, nil
+		},
+	})
+	m.discoverProviderModels = func(context.Context, config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+		return []providermodeldiscovery.Model{{ID: "kimi-live"}}, nil
+	}
+	// Picker registers both providers, then /model list advances the generation
+	// for the active one only.
+	m, _ = m.openModelPicker()
+	m.picker = nil
+	m, _ = m.modelListDiscoveryCmd()
+
+	next, status, switched, cmd, _ := m.switchProviderModel("ollama", "kimi-k2.7-code:cloud")
+	if !switched || cmd == nil {
+		t.Fatalf("switch failed or scheduled no discovery: %q", status)
+	}
+	var result tea.Msg
+	for _, sub := range cmd().(tea.BatchMsg) {
+		if msg, ok := sub().(modelPickerModelsDiscoveredMsg); ok {
+			result = msg
+		}
+	}
+	if result == nil {
+		t.Fatal("provider switch produced no discovery result")
+	}
+	updated, _ := next.Update(result)
+	for _, models := range updated.(model).modelPickerLiveByProvider {
+		if len(models) == 1 && models[0].ID == "kimi-live" {
+			return
+		}
+	}
+	t.Fatalf("provider switch discovery was discarded as stale; cache = %#v", updated.(model).modelPickerLiveByProvider)
 }
 
 func TestSwitchProviderModelReportsLockedConfigAsNotSavedWithoutPartialSelection(t *testing.T) {

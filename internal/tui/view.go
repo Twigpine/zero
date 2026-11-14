@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -21,6 +22,7 @@ const (
 	suggestionPaletteMaxWidth   = 76
 	suggestionPaletteMinWidth   = 44
 	pickerOverlayMaxVisible     = 10
+	modelPickerMaxNoticeLines   = 4
 	pickerOverlayMaxWidth       = 92
 	pickerOverlayMinWidth       = 56
 	modelPickerOverlayMaxWidth  = 76
@@ -1071,8 +1073,8 @@ func (m model) renderModelPickerOverlay(width, start, count int) string {
 	searchInset := lipgloss.Width("❯ ")
 	searchPrefix := transparentSurface(zeroTheme.ink).Render(strings.Repeat(" ", searchInset))
 	lines = append(lines, fillPaletteLine(searchPrefix+renderModelPickerSearchLine(m.picker.query, maxInt(1, innerWidth-searchInset)), innerWidth, transparentSurface))
-	if status := strings.TrimSpace(m.modelPickerLoadError); status != "" {
-		lines = append(lines, fillPaletteLine(searchPrefix+zeroTheme.faint.Render(status), innerWidth, transparentSurface))
+	for _, line := range m.modelPickerDiscoveryNoticeLines(innerWidth) {
+		lines = append(lines, fillPaletteLine(searchPrefix+zeroTheme.faint.Render(line), innerWidth, transparentSurface))
 	}
 	lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
 	lastGroup := ""
@@ -1108,6 +1110,49 @@ func (m model) renderModelPickerOverlay(width, start, count int) string {
 		title = "Choose a model"
 	}
 	return centerRenderedBlock(styledBlockFillTitle(overlayWidth, title, lines, zeroTheme.lineStrong, lipgloss.NewStyle()), width)
+}
+
+// Share wrapped notice rows with mouse hit testing so both agree where models
+// start. Rows are capped so several failing accounts cannot push the model
+// rows and footer out of the overlay. Hidden notices mostly belong to other
+// accounts, and /model list reports only the active profile, so the summary
+// row states what was cut without pointing there. Cutting a notice can remove
+// its own retry text, so the summary row names the retry key itself.
+func (m model) modelPickerDiscoveryNoticeLines(innerWidth int) []string {
+	const retryHint = "Ctrl+R"
+	width := maxInt(1, innerWidth-lipgloss.Width("❯ "))
+	var wrapped [][]string
+	total := 0
+	for _, status := range m.modelPickerDiscoveryNotices(m.modelPickerProviders(), retryHint) {
+		rows := strings.Split(ansi.Wrap(status, width, ""), "\n")
+		wrapped = append(wrapped, rows)
+		total += len(rows)
+	}
+	if total <= modelPickerMaxNoticeLines {
+		return slices.Concat(wrapped...)
+	}
+	// Keep whole notices while a summary row still fits, and at least the start
+	// of the first notice so the leading failure stays visible.
+	var lines []string
+	shown := 0
+	for shown < len(wrapped) && len(lines)+len(wrapped[shown]) < modelPickerMaxNoticeLines {
+		lines = append(lines, wrapped[shown]...)
+		shown++
+	}
+	if shown == 0 {
+		lines = wrapped[0][:modelPickerMaxNoticeLines-1]
+		shown = 1
+	}
+	retry := retryHint + " to retry."
+	more := "… notice truncated. " + retry
+	if hidden := len(wrapped) - shown; hidden > 0 {
+		more = fmt.Sprintf("+%d more notices hidden. %s", hidden, retry)
+	}
+	if lipgloss.Width(more) > width {
+		// Keep the recovery action when a narrow overlay cannot fit the summary.
+		more = retry
+	}
+	return append(lines, ansi.Truncate(more, width, "…"))
 }
 
 func (m model) modelPickerLoadingOverlay(width int) string {
