@@ -896,14 +896,12 @@ func trackedStoreEntries(repo, dir string) ([]string, error) {
 	// Query from this repository's root, not the store, where Git could select
 	// a nested repository. Literal pathspecs prevent glob characters in a
 	// directory name from selecting a different set of indexed paths.
-	cmd, err := gitsafe.Command(ctx, repo, "ls-files", "-z", "--", filepath.ToSlash(relative))
-	if err != nil {
-		return nil, err
-	}
+	// This fixed index-only query never reads worktree content, so repositories
+	// using filters can still establish privacy without executing those drivers.
+	cmd := gitsafe.IndexEntriesCommand(ctx, repo, filepath.ToSlash(relative))
 	// Cancelling the context does not by itself return control here: WaitDelay is
 	// what stops a git holding its pipes open from outliving the deadline.
 	cmd.WaitDelay = gitIndexTimeout
-	cmd.Env = append(gitDiscoveryEnv(cmd.Env), "GIT_LITERAL_PATHSPECS=1")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -996,6 +994,8 @@ func readBounded(handle *os.Root, relativePath string) ([]byte, error) {
 	return body, nil
 }
 
+var syncNoteFile = func(file *os.File) error { return file.Sync() }
+
 // Write stores a note, replacing any note of the same name in the same scope.
 //
 // Every step runs against a handle on the containment root, so the directory
@@ -1046,6 +1046,9 @@ func Write(paths Paths, scope Scope, name, description, body string) (string, er
 	}
 	writeErr := func() error {
 		if _, err := file.WriteString(content); err != nil {
+			return err
+		}
+		if err := syncNoteFile(file); err != nil {
 			return err
 		}
 		return file.Close()

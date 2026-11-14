@@ -580,7 +580,7 @@ func runStoreGit(t *testing.T, dir string, args ...string) string {
 		t.Skip("git not available")
 	}
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(gitDiscoveryEnv(os.Environ()),
 		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.invalid",
 		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.invalid",
 	)
