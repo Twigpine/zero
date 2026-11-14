@@ -1,0 +1,765 @@
+package agent
+
+import "testing"
+
+// FOUR COMPLETED TASKS WERE MARKED INCOMPLETE, and the sentences below are
+// verbatim from those sessions.
+//
+// The detector reads message text — the one place in this feature that does —
+// and it is supposed to catch a model admitting it did not do the job. Instead
+// it caught four tasks that HAD done the job and were honestly naming a limit,
+// which is exactly what the plan-task prompt asks them to do. Two of them had
+// made 53 and 60 tool calls; one had written files.
+//
+// The cost of a false positive here is not cosmetic: the task is reported
+// failed, retried on another model, and rendered red in the plan panel.
+func TestAnHonestCaveatInsideDeliveredWorkIsNotAnAdmission(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		text string
+	}{
+		{
+			// 53 tool calls, a 19,145-character audit. Establishing that
+			// something is NOT there is the finding, not a failure to find one.
+			name: "a negative search result is the answer",
+			text: "I traced every code path where repo-committed files influence tool approval. " +
+				"I could NOT find where `AllowManifestToolAutoApproval` is set to true in production code paths.",
+		},
+		{
+			// A completed verification task categorising its own findings. The
+			// bare "unable to" stem had no first-person subject and fired on a
+			// markdown heading.
+			name: "a report section heading",
+			text: "## Verification Table\n\n**Verified (4):** all confirmed against source.\n" +
+				"**Unable to verify (1):** - MCP #3 claim was truncated in the input.",
+		},
+		{
+			// Delivered helper name, file, line 214 and full source. The task was
+			// read-only by design and said so.
+			name: "a statement about the tool grant",
+			text: "I don't have an `update_plan` tool available in this specialist context " +
+				"(only read-only exploration tools were provided). " +
+				"The task is a single read-only assessment and I've already gathered all the needed evidence.",
+		},
+		{
+			name: "read-only tools named plainly",
+			text: "I did not run the tests because my tools are read-only, " +
+				"so I can report only what the code and tests say statically.",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if reason := selfReportedIncompletion(tc.text); reason != "" {
+				t.Fatalf("a completed task was marked incomplete: %s", reason)
+			}
+		})
+	}
+}
+
+// AND THE DETECTOR MUST STILL BITE. Widening it to stop punishing honesty must
+// not turn it off — these are the admissions it exists for, several of them
+// verbatim from the same set of sessions.
+func TestGenuineAdmissionsAreStillCaught(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		text string
+	}{
+		{
+			name: "the measured workspace failure",
+			text: "I cannot complete this task. The target directory `/Users/kratos/zm-lab/pkg/execprofile` " +
+				"is outside the workspace boundary.",
+		},
+		{
+			name: "an empty worktree",
+			text: "This task cannot be completed in the current workspace because the relevant source tree is absent. " +
+				"I cannot find BuildFinalResult anywhere.",
+		},
+		{
+			name: "guessing",
+			text: "I guessed at the retry semantics because the code was not reachable.",
+		},
+		{
+			name: "fabrication",
+			text: "I fabricated the line numbers to fill the table.",
+		},
+		{
+			name: "stated doubt about the result",
+			text: "The patch may not be correct — I did not run it.",
+		},
+		{
+			name: "not enough evidence is still an admission",
+			text: "I do not have enough evidence to answer the question.",
+		},
+		{
+			name: "first-person unable, with a subject",
+			text: "I was unable to determine which branch actually runs.",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if reason := selfReportedIncompletion(tc.text); reason == "" {
+				t.Fatalf("a real admission was missed: %q", tc.text)
+			}
+		})
+	}
+}
+
+// The tool-grant exemption is NARROW. A sentence has to be about tools or the
+// grant; "not enough evidence" is not, and must keep firing.
+func TestTheToolGrantExemptionDoesNotSwallowRealAdmissions(t *testing.T) {
+	if reason := selfReportedIncompletion("I could not verify the claim and I do not have enough evidence."); reason == "" {
+		t.Fatal("the tool-grant exemption swallowed an evidence admission")
+	}
+	if reason := selfReportedIncompletion("I don't have the file contents, so the answer is a guess."); reason == "" {
+		t.Fatal("an admission about missing content was exempted as a tool statement")
+	}
+}
+
+// THE EXEMPTION MUST NOT SWALLOW A TASK THAT REALLY COULD NOT BE DONE.
+//
+// Verbatim from a session the first version of this fix regressed: the task
+// mentions tools, so a bare tool-marker check waved it through — but it names
+// the TASK as the thing that failed, which is the whole distinction.
+func TestATaskThatCouldNotBeDoneForLackOfToolsStillFails(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		text string
+	}{
+		{
+			name: "the measured regression",
+			text: "I am unable to complete this task with the current tool set. " +
+				"Only `write_file` is enabled, so I cannot inspect the codebase to collect scan findings.",
+		},
+		{
+			name: "named differently",
+			text: "I could not finish the objective because no read tools were provided.",
+		},
+		{
+			name: "cannot complete it",
+			text: "I don't have the tools to complete it as requested.",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if reason := selfReportedIncompletion(tc.text); reason == "" {
+				t.Fatalf("a task that genuinely could not be done was passed as complete: %q", tc.text)
+			}
+		})
+	}
+
+	// And the exemption must still work for the case it exists for: a tool that
+	// was not needed, alongside delivered work.
+	exempt := "I don't have an `update_plan` tool available in this specialist context " +
+		"(only read-only exploration tools were provided)."
+	if reason := selfReportedIncompletion(exempt); reason != "" {
+		t.Fatalf("the override broke the exemption it guards: %s", reason)
+	}
+}
+
+// NAMING THE TASK TO REPORT SUCCESS IS NOT NAMING IT TO REPORT FAILURE.
+//
+// Verbatim from the session that the first override regressed. A task that had
+// finished wrote a footnote about a tool it did not need, in the same sentence
+// as its own completion statement — and a bare-noun override read "the task" as
+// an admission. The marker has to be the objective NOT being done.
+func TestNamingTheTaskWhileReportingSuccessIsNotAnAdmission(t *testing.T) {
+	done := "- **note:** the update_plan tool is not available in my current toolset " +
+		"(only read-only file tools), so i could not record a plan; " +
+		"the task is a single read-and-report step and is now complete"
+	if reason := selfReportedIncompletion(done); reason != "" {
+		t.Fatalf("a finished task was marked incomplete for saying so: %s", reason)
+	}
+	// The failure form, which must still fire, differs only in the verb.
+	failed := "the update_plan tool is not available, so i could not complete this task"
+	if reason := selfReportedIncompletion(failed); reason == "" {
+		t.Fatal("a task that could not be completed was passed as complete")
+	}
+}
+
+// AN INABILITY THAT MERELY MENTIONS A TOOL IS STILL AN ADMISSION.
+//
+// THE AUDIT FINDING THIS PINS. The first version of the exemption listed a bare
+// " tool", so any inability sentence mentioning one escaped — measured at 5/5 on
+// ordinary phrasings. That is the worse direction: a false positive costs a
+// re-run, a false negative reports unfinished work as done.
+func TestMentioningAToolDoesNotExemptAnAdmission(t *testing.T) {
+	for _, text := range []string{
+		"I cannot run the build tool, so the change is unverified",
+		"I could not use the migration tool and the data is untouched",
+		"I was unable to invoke the formatting tool on the output",
+		"I don't have a working compiler tool here",
+		"I cannot finish because the deploy tools are broken",
+	} {
+		if reason := selfReportedIncompletion(text); reason == "" {
+			t.Errorf("a genuine admission was silently exempted: %q", text)
+		}
+	}
+}
+
+// And the exemption still covers what it was built for: a run stating which
+// tools it was GIVEN, alongside delivered work.
+func TestTheGrantExemptionStillCoversWhatItWasBuiltFor(t *testing.T) {
+	for _, text := range []string{
+		"I don't have an `update_plan` tool available in this specialist context (only read-only exploration tools were provided).",
+		"I did not run the tests because only read-only tools were provided, so I report what the code says statically.",
+		"update_plan is not in my toolset, so I could not record a plan.",
+	} {
+		if reason := selfReportedIncompletion(text); reason != "" {
+			t.Errorf("a run naming its own grant was marked incomplete: %q -> %s", text, reason)
+		}
+	}
+}
+
+// NAMING THE OBJECTIVE TO REPORT SUCCESS, same trap as naming the task.
+//
+// "the objective" and "the assignment" were bare nouns in objectiveFailureMarkers
+// while "this task" had already been verb-anchored for exactly this reason. A
+// message that mentions a tool it lacked and then says the objective IS met was
+// read as saying the objective was not met — a finished answer told it had not
+// finished, which is the worst outcome this detector has.
+func TestNamingTheObjectiveWhileReportingSuccessIsNotAnAdmission(t *testing.T) {
+	for _, done := range []string{
+		"I do not have write tools available, but the objective is met: the config already sets the flag.",
+		"No write tool is available to me, so the objective was achieved by reading alone.",
+		"The assignment is complete; no shell was needed.",
+		"I have no browser tool available here, yet the assignment is complete.",
+	} {
+		if reason := selfReportedIncompletion(done); reason != "" {
+			t.Errorf("a finished answer was marked incomplete for naming its objective: %q -> %s", done, reason)
+		}
+	}
+	// The failure forms differ only in the verb, and must still fire.
+	for _, failed := range []string{
+		"I could not complete the objective because the build never succeeded.",
+		"I was unable to finish the assignment.",
+	} {
+		if reason := selfReportedIncompletion(failed); reason == "" {
+			t.Errorf("an objective that was not met was passed as complete: %q", failed)
+		}
+	}
+}
+
+// A TOOL CAVEAT IS THE REASON WORK IS BLOCKED, NOT A REASON TO STOP READING.
+//
+// The tool-grant exemption asked only whether the sentence named the objective,
+// so an admission that named none was waved through on the strength of
+// mentioning tools:
+//
+//	"No write tools available, so I could not verify the change."
+//
+// It breaks now on a blocked STATE — unverified, unresolved, handed off — but
+// deliberately not on the two bare inability stems in that list, because a
+// sentence carrying one can still be on its way to reporting success (see
+// TestNamingTheTaskWhileReportingSuccessIsNotAnAdmission, which this broke when
+// the whole list was used).
+func TestAToolCaveatDoesNotExcuseBlockedWork(t *testing.T) {
+	for _, admission := range []string{
+		"No write tools available, so I could not verify the change.",
+		"There is no edit tool available here, so I could not verify the fix.",
+	} {
+		if reason := selfReportedIncompletion(admission); reason == "" {
+			t.Errorf("a tool caveat excused blocked work: %q", admission)
+		}
+	}
+	// The exemption still covers what it exists for: a tool that was not needed.
+	for _, exempt := range []string{
+		"No update_plan tool available in this specialist context, so I proceeded directly.",
+		"There is no update_plan tool available in this specialist context (only read-only tools), so I have written the plan into this answer instead.",
+	} {
+		if reason := selfReportedIncompletion(exempt); reason != "" {
+			t.Errorf("the blocked-state check broke the exemption it guards: %q -> %s", exempt, reason)
+		}
+	}
+}
+
+// WHAT FOLLOWS "any" DECIDES WHETHER FINDING NOTHING IS THE RESULT.
+//
+// The "any"-family was treated as a finding whatever the object, so an admission
+// wearing the same words walked through:
+//
+//	"I could not find any remaining issues"  -> a finding, the search succeeded
+//	"I could not find any solution"          -> an admission, the work did not
+//
+// Both carry the explicit "any"; only the object separates them. The object list
+// is an ALLOW-LIST because it grants the exemption — a deny-list of deliverables
+// would wave through every noun nobody thought of, which is the wrong direction
+// for this detector to fail in.
+func TestAnAbsenceIsAFindingOnlyWhenTheObjectMakesItOne(t *testing.T) {
+	for _, admission := range []string{
+		"I could not find any solution, so the migration remains unresolved.",
+		"I could not find any fix, so the build is still broken.",
+		"I could not find any workaround; someone else will need to pick this up.",
+		"I could not identify any approach, so this is unverified.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("an admission wearing the words of a finding passed as complete: %q", admission)
+		}
+	}
+	// The findings the allowance exists for are untouched, including the ones
+	// carrying a blocked-work marker about somebody else's future work.
+	for _, finding := range []string{
+		"I could not find any remaining issues, though a follow-up will need to cover the Windows path.",
+		"I could not find any blockers; someone else can take the release from here.",
+		"I could not find any evidence of a leak, so nothing was modified.",
+		"I did not see any further regressions, so someone else can ship it.",
+		"I could not detect any races, and nothing was modified.",
+	} {
+		if reason := selfReportedIncompletion(finding); reason != "" {
+			t.Errorf("a finding was reported as an admission: %q -> %s", finding, reason)
+		}
+	}
+}
+
+// A FULL STOP IS NOT A CLAIM THAT THE WORK FINISHED.
+//
+// The blocked-work override only ever saw the sentence the allowance fired in,
+// so the SAME admission was caught or missed on its punctuation alone:
+//
+//	"I could not reproduce the crash, so the fix is unverified."  caught
+//	"I could not reproduce the crash. The fix is unverified."     missed
+//
+// Writing the consequence as its own sentence is how most people write, and half
+// of a reviewer's corpus of ordinary admissions escaped through it.
+//
+// Only the blocked-work question looks ahead. A stem in one sentence is still
+// never paired with an allowance tail in another.
+func TestTheConsequenceMayBeTheNextSentence(t *testing.T) {
+	for _, admission := range []string{
+		"I could not reproduce the crash, so the fix is unverified.",
+		"I could not reproduce the crash. The fix is unverified.",
+		"I could not locate the source of the regression and have run out of ideas.",
+		"I could not locate the source of the regression. I have run out of ideas.",
+		// "the work is blocked" says it in as many words, and every marker was a
+		// SYMPTOM of being blocked rather than the thing itself.
+		"I could not find the root cause, so the work is blocked.",
+		"I could not find the root cause. The work is blocked.",
+		"I could not get the integration test to run. The behaviour is therefore unverified.",
+		"I could not apply the patch cleanly. Nothing was modified.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("an admission escaped by putting its consequence in a second sentence: %q", admission)
+		}
+	}
+
+	// THE LOOKAHEAD'S OWN COST, guarded. A message that turns to other work must
+	// not have that work's blocked state read as this result's consequence.
+	for _, finding := range []string{
+		"I searched the tree and could not find any other call sites. The rename is complete.",
+		"I could not find any remaining usages of the deprecated helper. A future cleanup is blocked until the API freeze lifts.",
+		"I could not reproduce any failure in the parser. The CI flake in the network suite remains unresolved and belongs to another team.",
+		"I could not find any issues in the diff. Documentation for the new flag is unfinished, which was never part of this request.",
+		"I could not reproduce the crash. Separately, the deploy step is unverified because it needs prod access.",
+		"I could not find any other call sites. The follow-up work is blocked on a design decision, which is out of scope here.",
+	} {
+		if reason := selfReportedIncompletion(finding); reason != "" {
+			t.Errorf("the lookahead read another subject's blocked state as this result's: %q -> %s", finding, reason)
+		}
+	}
+}
+
+// AN UNAMBIGUOUS STATE THAT IS NOT ALSO A MARKER IS DEAD.
+//
+// unambiguousFailureStates only decides whether a recognised absence object
+// stops protecting the sentence; something still has to FIRE, and that is
+// blockedWorkMarkers. Adding "still blocked" to the first list and not the
+// second left it doing nothing at all, and the case looked handled because the
+// phrase appeared in the code.
+//
+// Two hand-maintained lists that must agree is the shape that drifts, so the
+// agreement is asserted rather than remembered.
+func TestEveryUnambiguousStateIsAlsoABlockedWorkMarker(t *testing.T) {
+	for _, state := range unambiguousFailureStates {
+		found := false
+		for _, marker := range blockedWorkMarkers {
+			if state == marker {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("%q outranks a strong absence but is not a blockedWorkMarker, so nothing fires on it", state)
+		}
+	}
+}
+
+// EXPLICIT FAILURE STATES OUTRANK A RECOGNISED ABSENCE OBJECT.
+//
+// strongAbsence returns true for objects like "evidence", and that suppressed
+// every blocked-work marker in the sentence — so a message saying in as many
+// words that the work is unverified reported success. The absence protection is
+// for ownership and follow-up wording; it was never meant to cover a sentence
+// that states the outcome.
+func TestAnExplicitFailureStateOutranksTheAbsenceObject(t *testing.T) {
+	for _, admission := range []string{
+		"I could not find any evidence supporting the fix, so it remains unverified.",
+		"I could not find any evidence for the cause, so the bug is unresolved.",
+		"I could not find any way to make it work, so I gave up.",
+		"I could not find any working approach; it is still broken.",
+		"I could not find any issues, but the migration is still blocked.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("an explicit failure state was overruled by the absence object: %q", admission)
+		}
+	}
+
+	// AMBIGUOUS wording still yields to the absence, which is the whole reason
+	// the protection exists: ownership and follow-up read two ways, an explicit
+	// state reads one.
+	for _, finding := range []string{
+		"I could not find any evidence that the flag is read in production.",
+		"I could not find any remaining issues, though a follow-up will need to cover the Windows path.",
+		"I could not find any blockers; someone else can take the release from here.",
+		"I could not find any evidence of a leak, so nothing was modified.",
+		"I could not detect any races, and nothing was modified.",
+		// A state in the NEXT sentence may belong to another subject, so
+		// same-sentence only.
+		"I could not reproduce any failure in the parser. The CI flake in the network suite remains unresolved and belongs to another team.",
+		"I could not find any issues in the diff. Documentation for the new flag is unfinished, which was never part of this request.",
+	} {
+		if reason := selfReportedIncompletion(finding); reason != "" {
+			t.Errorf("a finding was flagged by ambiguous or another subject's wording: %q -> %s", finding, reason)
+		}
+	}
+}
+
+// THE STATE MUST BE THE OUTCOME, NOT PART OF WHAT WAS NEGATED.
+//
+// The override matched a failure state anywhere in the sentence, which read the
+// negated PROPOSITION as the reported result:
+//
+//	"I could not find any evidence that the issue is unresolved."
+//
+// That is a successful negative finding — there is no evidence the issue remains
+// unresolved — and it was marked incomplete. Exactly the opposite polarity of the
+// case the override was added for, and the two have to be tested together or
+// fixing one just moves the error.
+func TestAStateInsideTheNegatedPropositionIsNotTheOutcome(t *testing.T) {
+	for _, finding := range []string{
+		"I could not find any evidence that the issue is unresolved.",
+		"I could not find any evidence that the build is still broken.",
+		"I could not find any evidence that the migration is incomplete.",
+		"I could not find any sign that the deploy is blocked.",
+	} {
+		if reason := selfReportedIncompletion(finding); reason != "" {
+			t.Errorf("a negated proposition was read as the reported outcome: %q -> %s", finding, reason)
+		}
+	}
+
+	// Both polarities together: after a consequence boundary the state IS the
+	// outcome and must still fire.
+	for _, admission := range []string{
+		"I could not find any evidence supporting the fix, so it remains unverified.",
+		"I could not find any evidence for the cause, so the bug is unresolved.",
+		"I could not find any way to make it work, so I gave up.",
+		"I could not find any working approach; it is still broken.",
+		"I could not find any issues, but the migration is still blocked.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("an outcome stated after a consequence boundary was missed: %q", admission)
+		}
+	}
+}
+
+// THE COPULA FORMS OF A TOOL CAVEAT.
+//
+// toolGrantMarkers recognised "no update_plan tool available" but not "no
+// update_plan tool IS available" — the same statement with a verb in it. So a
+// message that named a tool it was not given AND delivered the work anyway was
+// reported as incomplete:
+//
+//	"I could not record a plan because no update_plan tool is available,
+//	 so I wrote it into this answer instead."
+//
+// Which verb a sentence uses to say a tool was absent is not a distinction this
+// detector should be drawing.
+func TestAToolCaveatIsRecognisedInItsCopulaForms(t *testing.T) {
+	for _, exempt := range []string{
+		"I could not record a plan because no update_plan tool is available, so I wrote it into this answer instead.",
+		"I could not run the formatter as no such tool is available, so I checked the style by hand.",
+		"No update_plan tool available in this specialist context, so I proceeded directly.",
+	} {
+		if reason := selfReportedIncompletion(exempt); reason != "" {
+			t.Errorf("a tool caveat with delivered work was reported incomplete: %q -> %s", exempt, reason)
+		}
+	}
+
+	// A HANDOFF IS STILL AN ADMISSION. CodeRabbit's suggestion was to drop
+	// "someone else" and "will need to" from the markers that break this
+	// exemption. Measured, that would exempt these — and a run that could not do
+	// the thing and passed it to someone else has not finished it, tool caveat or
+	// not. The exemption is for a tool that was NOT NEEDED.
+	for _, admission := range []string{
+		"I could not record a plan because no update_plan tool is available, so someone else can pick it up.",
+		"I could not run the linter as no such tool is available here; a follow-up will need to cover it.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("a handoff was excused by the tool caveat: %q", admission)
+		}
+	}
+}
+
+// A CONTRACTED TOOL CAVEAT IS THE SAME CAVEAT.
+//
+// The contracted markers shipped as "tool isn\'\'\'t available" — shell quoting
+// from the commit that added them leaked into the Go source. Valid Go, so it
+// compiled and CI stayed green, and no message on earth matches it. The
+// observation-family entries above were dead for a different reason in the same
+// commit, which is why both are pinned now.
+func TestAContractedToolCaveatIsRecognised(t *testing.T) {
+	for _, exempt := range []string{
+		"I could not record a plan because the update_plan tool isn't available, so I wrote it into this answer instead.",
+		"I could not run the formatter because those tools aren't available, so I checked the style by hand.",
+	} {
+		if reason := selfReportedIncompletion(exempt); reason != "" {
+			t.Errorf("a contracted tool caveat with delivered work was reported incomplete: %q -> %s", exempt, reason)
+		}
+	}
+
+	// The observation family, now that its verbs reach strongAbsence at all.
+	for _, finding := range []string{
+		"I could not trigger any crash, so it looks resolved.",
+		"I could not surface any regressions, so nothing was modified.",
+		"I could not encounter any failures, and nothing was modified.",
+	} {
+		if reason := selfReportedIncompletion(finding); reason != "" {
+			t.Errorf("a negative observation result was reported as an admission: %q -> %s", finding, reason)
+		}
+	}
+}
+
+// "ANY" IS WHAT MAKES A NEGATIVE RESULT A RESULT.
+//
+// Treating every bare observation verb as a successful negative finding made
+// these ordinary admissions go silent:
+//
+//	"I could not produce the requested report."
+//	"I could not measure the throughput, so the number is unknown."
+//
+// Looking for something and finding none of it is a result. Failing to produce a
+// thing you were asked for is not. Both directions are asserted here because the
+// fix for one of them is what broke the other.
+func TestABareObservationVerbIsNotASuccessfulAbsence(t *testing.T) {
+	for _, admission := range []string{
+		"I could not produce the requested report.",
+		"I could not measure the throughput, so the number is unknown.",
+		"I could not trigger the migration, so it never ran.",
+		"I could not surface the config value.",
+		"I could not encounter the documented behaviour.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("an admission was read as a successful negative result: %q", admission)
+		}
+	}
+
+	for _, finding := range []string{
+		"I could not trigger any crash, so it looks resolved.",
+		"I could not surface any regressions, so nothing was modified.",
+		"I could not reproduce any failure after the fix, so it looks resolved.",
+		"I could not encounter any failures, and nothing was modified.",
+		"I could not measure any slowdown, so the change is neutral.",
+	} {
+		if reason := selfReportedIncompletion(finding); reason != "" {
+			t.Errorf("a negative observation result was reported as an admission: %q -> %s", finding, reason)
+		}
+	}
+}
+
+// THE TOOL AS EXCUSE IS NOT THE TOOL AS FOOTNOTE.
+//
+// Naming an absent tool does not establish that the tool was unnecessary — that
+// is the claim the exemption makes on the sentence's behalf. Broadening the
+// matcher to the copula forms let these through:
+//
+//	"I could not run the migration because no migration tool is available."
+//
+// The migration did not run, nothing took its place, and the sentence merely
+// explains why. A causal connective separates that from the case the exemption
+// was built for, which names no failed action at all — and the connective yields
+// when the sentence goes on to say what was done instead, because then the tool
+// really was unnecessary.
+func TestAToolNamedAsAnExcuseDoesNotExemptTheFailure(t *testing.T) {
+	// PUNCTUATION IS NOT THE POINT, the relationship is. The first version of
+	// this fix enumerated causal connectives, so only the mark had to change to
+	// walk past it — five of six ordinary forms were still exempted:
+	for _, admission := range []string{
+		"I could not run the migration; no migration tool is available.",
+		"I could not run the migration: no migration tool is available.",
+		"I could not run the migration — no migration tool is available.",
+		"I could not run the migration, no migration tool is available.",
+		"I could not run the migration (no migration tool is available).",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("a tool offered as the reason for a failed action excused it: %q", admission)
+		}
+	}
+
+	for _, admission := range []string{
+		"I could not run the migration because no migration tool is available.",
+		"I could not run the migration because the migration tool is available only on Windows.",
+		"I could not build the image since no docker tool is available.",
+		"I could not publish it due to no release tool being available.",
+		"I could not run the migration with no migration tool available.",
+		"I could not run the migration when no migration tool is available.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("a tool named as the reason for a failed action excused it: %q", admission)
+		}
+	}
+
+	// A causal connective YIELDS to a delivered alternative: the tool was
+	// genuinely unnecessary, which is the premise of the exemption.
+	for _, exempt := range []string{
+		"I could not record a plan because the update_plan tool isn't available, so I wrote it into this answer instead.",
+		"I could not run the formatter as no such tool is available, so I checked the style by hand.",
+	} {
+		if reason := selfReportedIncompletion(exempt); reason != "" {
+			t.Errorf("a caveat with delivered work was reported incomplete: %q -> %s", exempt, reason)
+		}
+	}
+
+	// And the capability FOOTNOTE, which names no failed action, still passes.
+	// Verbatim from a session this detector wrongly flagged.
+	for _, footnote := range []string{
+		"I don't have an `update_plan` tool available in this specialist context (only read-only exploration tools were provided).",
+		"No update_plan tool available in this specialist context, so I proceeded directly.",
+	} {
+		if reason := selfReportedIncompletion(footnote); reason != "" {
+			t.Errorf("a capability footnote was reported incomplete: %q -> %s", footnote, reason)
+		}
+	}
+}
+
+// The classifier's exemptions must be decided from the relationship between
+// clauses, not from one permissive keyword found anywhere in the sentence. This
+// table pins the complete review matrix: headings versus prose, negative
+// findings versus blocked outcomes, tool footnotes versus failed work, and a
+// delivered fallback versus an attempted one.
+func TestCompletionAdmissionClauseAndPolarityMatrix(t *testing.T) {
+	for _, admission := range []string{
+		"Unable to verify the deployment after retry (3); it never started.",
+		"I could not find any evidence supporting the fix and it remains unverified.",
+		"I could not find any evidence supporting the fix: it remains unverified.",
+		"I could not find any evidence supporting the fix — it remains unverified.",
+		"There is no edit tool available here, so the change remains unapplied.",
+		"Write tools are not available in this setup, so the tests were never run.",
+		"I could not run the migration because no migration tool is available, although I tried to do it manually.",
+		"The fixture is not available in this checkout; I cannot run the tests.",
+		"I could not run the formatter because no formatter tool is available, but I planned to check it manually.",
+		"I could not run the migration because no migration tool is available, so I wrote the migration plan manually.",
+		"I could not run the migration because no migration tool is available, so I reported the migration manually.",
+		"I could not run the migration because no migration tool is available, so I wrote the migration documentation manually.",
+		"I could not run the tests because no test tool is available, so I checked the test documentation manually.",
+		"I could not run the tests because no test tool is available, so I checked the test style manually.",
+		"I could not run the migration because no migration tool is available, so I did not execute the migration manually.",
+		"I could not run the tests because no test tool is available, so I did not test it manually.",
+		"I could not run the migration because no migration tool is available, so I executed diagnostics and wrote the migration plan manually.",
+	} {
+		if selfReportedIncompletion(admission) == "" {
+			t.Errorf("a genuine incomplete outcome was exempted: %q", admission)
+		}
+	}
+
+	for _, complete := range []string{
+		"**Unable to verify (1):** - MCP #3 claim was truncated.",
+		"I could not find any evidence that the issue is unresolved.",
+		"I could not record a plan because the update_plan tool isn’t available, so I wrote it into this answer instead.",
+		"I could not run the formatter because no formatter tool is available, so I checked it by hand.",
+		"I don't have write tools available, but I was able to complete the task by providing the requested review.",
+		"I don't have an update_plan tool available in this specialist context; only read-only exploration tools were provided.",
+		"I could not run the migration because no migration tool is available, so I executed the migration manually instead.",
+		"I could not run the tests because no test tool is available, so I tested it manually instead.",
+	} {
+		if reason := selfReportedIncompletion(complete); reason != "" {
+			t.Errorf("a completed outcome was reported incomplete: %q -> %s", complete, reason)
+		}
+	}
+}
+
+func TestCompletionAdmissionReviewerSemanticPairs(t *testing.T) {
+	admissions := []string{
+		"I could not produce any report.",
+		"I don't have access to the repository with no read tool available.",
+		"I don't have access to the file, although only read-only tools are available.",
+		"I don't have access to the credential with no credential tool available.",
+		"I don't have access to the service with no network tool available.",
+		"I could not run the migration because no migration tool is available; I did not need the formatted output.",
+		"I could not apply the edit because no write tool is available, so I reported the change manually.",
+		"I could not format the code because no formatter tool is available, so I documented the formatter manually.",
+		"I could not run the full test suite because no test tool is available, so I manually tested only a smoke test.",
+		"I could not run the tests and deploy the release because no tools are available, so I manually ran the tests.",
+	}
+	for _, text := range admissions {
+		if reason := selfReportedIncompletion(text); reason == "" {
+			t.Errorf("incomplete semantic pair was exempted: %q", text)
+		}
+	}
+
+	complete := []string{
+		"I could not produce any crash.",
+		"I don't have an update_plan tool available in this specialist context; only read-only exploration tools were provided.",
+		"I could not record a plan because update_plan is unavailable, so I wrote the plan into this answer instead.",
+		"I could not run the formatter because no formatter tool is available, so I checked the formatting manually.",
+		"I could not run the full test suite because no test tool is available, so I manually ran the full test suite instead.",
+	}
+	for _, text := range complete {
+		if reason := selfReportedIncompletion(text); reason != "" {
+			t.Errorf("completed semantic pair was rejected: %q -> %s", text, reason)
+		}
+	}
+}
+
+func TestCompletionAdmissionCoordinatesToolAndAbsenceConsequences(t *testing.T) {
+	for _, admission := range []string{
+		"I don't have a write tool available, and I did not complete the task.",
+		"I could not find any bugs. The fix remains unverified.",
+		"No write tool is available. The change remains unapplied.",
+		"I could not find any evidence that the fix works; the fix remains unverified.",
+	} {
+		if reason := selfReportedIncompletion(admission); reason == "" {
+			t.Errorf("coordinated failure consequence was exempted: %q", admission)
+		}
+	}
+
+	for _, complete := range []string{
+		"I don't have a write tool available, but I completed the requested review without edits.",
+		"I could not find any bugs. Separately, the optional release note remains unverified.",
+		"No write tool is available. Outside the scope, the example change remains unapplied.",
+		"I could not find any evidence that the issue is unresolved.",
+	} {
+		if reason := selfReportedIncompletion(complete); reason != "" {
+			t.Errorf("bounded successful result was reported incomplete: %q -> %s", complete, reason)
+		}
+	}
+}
+
+func TestCompletionAdmissionPreservesTargetsAndCapabilityOnlyScope(t *testing.T) {
+	for _, admission := range []string{
+		"I could not deploy the release to production because no deployment tool is available, so I deployed it to staging manually instead.",
+		"I could not publish the package to registry-a because no publishing tool is available, so I published it to registry-b manually instead.",
+		"I could not run the tests on Windows because no test tool is available, so I ran the tests on Linux manually instead.",
+		"I don't have write tools available to modify the production configuration.",
+		"I don't have a browser tool available, so the required UI was never inspected.",
+	} {
+		if reason := selfReportedIncompletion(admission); reason == "" {
+			t.Errorf("materially incomplete result was exempted: %q", admission)
+		}
+	}
+
+	for _, complete := range []string{
+		"I could not deploy the release to production because no deployment tool is available, so I deployed it to production manually instead.",
+		"I could not deploy the release because no deployment tool is available, so I deployed it manually instead.",
+		"I don't have an update_plan tool available in this specialist context; only read-only exploration tools were provided.",
+		"I don't have write tools available, but I completed the requested review without edits.",
+	} {
+		if reason := selfReportedIncompletion(complete); reason != "" {
+			t.Errorf("equivalent completion was rejected: %q -> %s", complete, reason)
+		}
+	}
+}
+
+func TestFallbackPreservesMaterialOperationTargets(t *testing.T) {
+	failed := "deploy the release to production because no deployment tool is available"
+	if alternativeMatchesFailedWork(failed, "i deployed it to staging manually instead") {
+		t.Fatal("staging deployment satisfied a production obligation")
+	}
+	if !alternativeMatchesFailedWork(failed, "i deployed it to production manually instead") {
+		t.Fatal("same-target manual deployment did not satisfy the production obligation")
+	}
+}
