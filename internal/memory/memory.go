@@ -773,6 +773,12 @@ func refuseTrackedLocalStore(handle *os.Root, relative, dir string) error {
 	}
 	for _, repo := range repos {
 		tracked, err := trackedStoreEntries(repo, resolved)
+		if errors.Is(err, gitsafe.ErrRepositoryDefinesCommands) {
+			// Still a refusal, but git was never run, so it must not read as
+			// git failing to answer.
+			return fmt.Errorf("%w: %s is inside the git repository at %s, and %w; without asking git, Zero cannot confirm that nothing there is tracked",
+				ErrNotPrivate, dir, repo, err)
+		}
 		if err != nil {
 			return fmt.Errorf("%w: %s is inside the git repository at %s, and git could not say which files there are tracked: %v",
 				ErrNotPrivate, dir, repo, err)
@@ -996,6 +1002,12 @@ func readBounded(handle *os.Root, relativePath string) ([]byte, error) {
 	return body, nil
 }
 
+// syncNote flushes a note's temporary file to stable storage before the rename
+// publishes it. It is a variable so tests can fail it.
+var syncNote = func(file *os.File) error {
+	return file.Sync()
+}
+
 // Write stores a note, replacing any note of the same name in the same scope.
 //
 // Every step runs against a handle on the containment root, so the directory
@@ -1046,6 +1058,11 @@ func Write(paths Paths, scope Scope, name, description, body string) (string, er
 	}
 	writeErr := func() error {
 		if _, err := file.WriteString(content); err != nil {
+			return err
+		}
+		// Synced before the rename, or the rename can reach the disk ahead of
+		// the content and a crash leaves an empty note where the previous one was.
+		if err := syncNote(file); err != nil {
 			return err
 		}
 		return file.Close()

@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/Twigpine/zero/internal/gitsafe"
 )
 
 // linkDir uses a junction on Windows: it needs no privilege, unlike a symlink,
@@ -573,14 +575,17 @@ func TestAStoreBehindAReparsePointIsRefusedOnEveryPlatform(t *testing.T) {
 
 // runStoreGit runs one git command in dir and fails the test if it does not
 // succeed. Identity comes from the environment rather than repository config so
-// nothing here depends on a git new enough for GIT_CONFIG_GLOBAL.
+// nothing here depends on a git new enough for GIT_CONFIG_GLOBAL. The inherited
+// environment goes through gitDiscoveryEnv, as the production query's does, so
+// a repository or index redirect exported by a hook cannot point the fixture at
+// a different repository from dir.
 func runStoreGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(gitDiscoveryEnv(os.Environ()),
 		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.invalid",
 		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.invalid",
 	)
@@ -601,6 +606,35 @@ func seedStoreRepo(t *testing.T, root string) {
 	}
 	runStoreGit(t, root, "add", "README.md")
 	runStoreGit(t, root, "commit", "-m", "seed")
+}
+
+// THE FIXTURE HELPER MUST BUILD THE REPOSITORY IT NAMES. `go test` started from
+// a git hook inherits GIT_DIR and GIT_INDEX_FILE, and `git -C` overrides
+// neither, so seeding a fixture would init, stage and commit into whatever
+// repository and index the hook belonged to — and every privacy test built on
+// it would be checking a different repository from the one its name claims.
+func TestStoreFixturesIgnoreInheritedRepositoryRedirects(t *testing.T) {
+	decoy := t.TempDir()
+	decoyDir := filepath.Join(decoy, "redirected.git")
+	decoyIndex := filepath.Join(decoy, "redirected.index")
+	t.Setenv("GIT_DIR", decoyDir)
+	t.Setenv("GIT_INDEX_FILE", decoyIndex)
+
+	root := t.TempDir()
+	seedStoreRepo(t, root)
+
+	for _, path := range []string{decoyDir, decoyIndex} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Errorf("fixture git followed an inherited redirect to %s (err = %v)", path, err)
+		}
+	}
+	tracked, err := trackedStoreEntries(root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(tracked, ",") != "README.md" {
+		t.Errorf("the fixture repository's own index holds %q, want README.md", tracked)
+	}
 }
 
 // writeStoreFile creates one file under the local store, making the store
@@ -946,6 +980,31 @@ func TestACorruptRepositoryStillRefusesLocalWrites(t *testing.T) {
 	}
 }
 
+// A REPOSITORY THAT DEFINES FILTER OR DIFF COMMANDS IS NOT ASKED, so the local
+// write stays refused — but the refusal has to say that, not that git failed:
+// git was never run, and "git could not say" sends the reader looking for a
+// broken repository instead of at the config that made Zero decline to ask.
+func TestALocalWriteInAFilterRepositoryNamesTheConfigRefusal(t *testing.T) {
+	root := t.TempDir()
+	paths := DefaultPaths(root)
+	seedStoreRepo(t, root)
+	runStoreGit(t, root, "config", "filter.crypt.clean", "cat")
+
+	_, err := Write(paths, ScopeLocal, "private", "d", "machine-local secret")
+	if !errors.Is(err, ErrNotPrivate) {
+		t.Fatalf("Write in a repository defining a filter command = %v, want ErrNotPrivate", err)
+	}
+	if !errors.Is(err, gitsafe.ErrRepositoryDefinesCommands) {
+		t.Errorf("the refusal does not carry the config cause: %v", err)
+	}
+	if strings.Contains(err.Error(), "git could not say") {
+		t.Errorf("the refusal blames git, which was never run: %v", err)
+	}
+	if _, statErr := os.Lstat(filepath.Join(paths.LocalDir, "private.md")); !os.IsNotExist(statErr) {
+		t.Errorf("the refused note was written anyway: %v", statErr)
+	}
+}
+
 // AN INHERITED INDEX REDIRECT MUST NOT ANSWER FOR THE CHECKOUT.
 //
 // A hook, a rebase, or any git wrapper exports GIT_INDEX_FILE and GIT_DIR into
@@ -1044,5 +1103,60 @@ func TestALocalWriteIsRefusedInsideALinkedWorktree(t *testing.T) {
 	}
 	if status := runStoreGit(t, linked, "status", "--porcelain"); strings.TrimSpace(status) != "" {
 		t.Errorf("the refused write still left an index-visible change:\n%s", status)
+	}
+}
+
+// THE CONTENT REACHES THE DISK BEFORE THE NAME DOES. Write promises that a crash
+// mid-write leaves the previous note; renaming an unsynced temporary file over
+// it does not keep that promise on filesystems that delay allocation, where a
+// power loss after the rename can leave the published name empty. So the sync
+// runs on the temporary file while the published name still holds the previous
+// note, and a sync that fails aborts the publish instead of being skipped.
+func TestAWriteSyncsTheNoteBeforePublishingIt(t *testing.T) {
+	paths := DefaultPaths(t.TempDir())
+	if _, err := Write(paths, ScopeProject, "findings", "d", "first"); err != nil {
+		t.Fatal(err)
+	}
+	notePath := filepath.Join(paths.ProjectDir, "findings.md")
+	prior := syncNote
+	t.Cleanup(func() { syncNote = prior })
+
+	synced := 0
+	syncNote = func(file *os.File) error {
+		synced++
+		if filepath.Base(file.Name()) == "findings.md" {
+			t.Errorf("synced the published name %q rather than the temporary file", file.Name())
+		}
+		if body, err := os.ReadFile(notePath); err != nil || !strings.Contains(string(body), "first") {
+			t.Errorf("the previous note was replaced before the new content was synced: %q, %v", body, err)
+		}
+		return prior(file)
+	}
+	if _, err := Write(paths, ScopeProject, "findings", "d", "second"); err != nil {
+		t.Fatal(err)
+	}
+	if synced != 1 {
+		t.Fatalf("the note was published after %d syncs, want 1", synced)
+	}
+
+	syncNote = func(*os.File) error { return errors.New("injected sync failure") }
+	if _, err := Write(paths, ScopeProject, "findings", "d", "third"); err == nil || !strings.Contains(err.Error(), "injected sync failure") {
+		t.Fatalf("Write with a failing sync = %v, want the sync failure", err)
+	}
+	note, err := Read(paths, ScopeProject, "findings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if note.Body != "second\n" {
+		t.Errorf("a failed sync replaced the note: body = %q, want %q", note.Body, "second\n")
+	}
+	entries, err := os.ReadDir(paths.ProjectDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), tempExt) {
+			t.Errorf("a failed sync left the temporary file %s behind", entry.Name())
+		}
 	}
 }
