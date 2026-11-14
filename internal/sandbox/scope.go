@@ -58,6 +58,56 @@ func (s *Scope) WorkspaceRoot() string {
 	return s.workspaceRoot
 }
 
+// ExtraRoots returns only the write roots granted beyond the workspace. Child
+// agents run in an isolated worktree and must inherit explicitly granted roots
+// without reopening the parent's workspace.
+func (s *Scope) ExtraRoots() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]string(nil), s.extraRoots...)
+}
+
+// SessionExtraRoots is ExtraRoots without the turn-scoped grants: only write
+// roots that outlive the current turn (configured roots, --add-dir, /add-dir and
+// session-scoped request_permissions grants). It is what a child that may
+// outlive the turn may be handed.
+//
+// ExtraRoots alone cannot answer that: a root held by AddTemporaryWrite is in
+// the same list, and once it left in a child's argv as --add-dir the parent's
+// release at the end of the turn could no longer take it back. A root that is
+// both (a permanent grant promoted over a temporary one) is permanent.
+func (s *Scope) SessionExtraRoots() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	roots := make([]string, 0, len(s.extraRoots))
+	for _, root := range s.extraRoots {
+		if !s.temporaryWriteLocked(root) {
+			roots = append(roots, root)
+		}
+	}
+	return roots
+}
+
+// SessionExtraReadRoots is ExtraReadRoots without the turn-scoped grants, read
+// or write: what a child that may outlive the current turn may be handed to
+// READ. The read counterpart of SessionExtraRoots, for the same reason.
+func (s *Scope) SessionExtraReadRoots() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	roots := make([]string, 0, len(s.extraRoots)+len(s.readRoots))
+	for _, root := range s.extraRoots {
+		if !s.temporaryWriteLocked(root) {
+			roots = append(roots, root)
+		}
+	}
+	for _, root := range s.readRoots {
+		if !s.temporaryReadLocked(root) {
+			roots = append(roots, root)
+		}
+	}
+	return dedupeScopeRoots(roots)
+}
+
 // Roots returns the workspace root first, then the extra roots, as a copy.
 func (s *Scope) Roots() []string {
 	s.mu.RLock()
@@ -76,6 +126,19 @@ func (s *Scope) ReadRoots() []string {
 	defer s.mu.RUnlock()
 	roots := make([]string, 0, 1+len(s.extraRoots)+len(s.readRoots))
 	roots = append(roots, s.workspaceRoot)
+	roots = append(roots, s.extraRoots...)
+	roots = append(roots, s.readRoots...)
+	return dedupeScopeRoots(roots)
+}
+
+// ExtraReadRoots returns every path readable beyond the workspace. Write roots
+// are included because write authority also confers read authority. Like
+// ExtraRoots, this deliberately omits the parent workspace when propagating a
+// request_permissions grant to an isolated child.
+func (s *Scope) ExtraReadRoots() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	roots := make([]string, 0, len(s.extraRoots)+len(s.readRoots))
 	roots = append(roots, s.extraRoots...)
 	roots = append(roots, s.readRoots...)
 	return dedupeScopeRoots(roots)

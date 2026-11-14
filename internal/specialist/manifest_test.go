@@ -92,14 +92,31 @@ Review.`)
 		t.Fatalf("ReasoningEffort = %q, want high", manifest.Metadata.ReasoningEffort)
 	}
 
-	_, err = ParseMarkdown(`---
+	// AN UNCURATED MODEL IS NO LONGER REFUSED HERE, and that is a deliberate
+	// reversal of what this test used to assert.
+	//
+	// The registry is a curated subset — thirteen models across OpenAI,
+	// Anthropic and Google — used for aliases, pricing and display. It is not an
+	// inventory of what a provider serves. Refusing everything outside it meant a
+	// specialist could not name a model the active provider actually offers: an
+	// xAI account serves half a dozen Grok models and an Ollama one serves its
+	// own, none curated, all of them listed in the model picker with their
+	// context window, tool support and price.
+	//
+	// A name the provider genuinely cannot serve still fails, in
+	// providers/factory.go ("zero model X belongs to ..."), which is the
+	// component that knows. The check moves; it does not disappear.
+	manifest, err = ParseMarkdown(`---
 name: reviewer
 description: Reviews code
 model: fake-9000
 ---
 Review.`)
-	if err == nil || !strings.Contains(err.Error(), "unknown model") {
-		t.Fatalf("expected unknown model error, got %v", err)
+	if err != nil {
+		t.Fatalf("an uncurated model must pass through for the provider to judge: %v", err)
+	}
+	if manifest.Metadata.Model != "fake-9000" {
+		t.Fatalf("Model = %q, want it carried through unchanged", manifest.Metadata.Model)
 	}
 
 	_, err = ParseMarkdown(`---

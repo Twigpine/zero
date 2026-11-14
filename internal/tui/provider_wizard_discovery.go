@@ -180,7 +180,10 @@ func (m model) checkExistingAimlapiBalance() (model, tea.Cmd) {
 		balance, err := aimlapi.NewClient(endpoints, nil).GetBalance(ctx, key)
 		return aimlapiExistingBalanceMsg{wizard: wizard, gen: gen, balance: balance, err: err}
 	}
-	return m, tea.Batch(cmd, m.ensureSpinnerTick())
+	// Sequenced: see the note in provider_wizard.go — the pointer receiver
+	// must run before m is copied into the return.
+	tick := m.ensureSpinnerTick()
+	return m, tea.Batch(cmd, tick)
 }
 
 func (m model) applyExistingAimlapiBalance(msg aimlapiExistingBalanceMsg) (model, tea.Cmd) {

@@ -576,6 +576,17 @@ func assertSandboxPolicyJSONGolden(t *testing.T, mustList string) string {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(emptyHome, ".config"))
 	t.Setenv("CLOUDSDK_CONFIG", "")
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+	// XDG_CONFIG_HOME as well, or HOME is not actually the answer to "where is
+	// the config directory". credentialDenyReadPathsForEnvironment reads
+	// XDG_CONFIG_HOME FIRST and only falls back to $HOME/.config, so on a host
+	// that sets it — every ubuntu GitHub runner does — redirecting HOME alone
+	// left configHome pointing at the real /home/runner/.config. Other packages
+	// in the same `go test ./...` write zero/config.json and zero/trust.json
+	// there, `go test` runs packages in parallel, and this golden then failed or
+	// passed depending on who won the race. macOS and Windows runners leave
+	// XDG_CONFIG_HOME unset, which is the whole reason it only ever went red on
+	// one platform.
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(emptyHome, ".config"))
 	t.Setenv("NPM_CONFIG_USERCONFIG", "")
 	t.Setenv("npm_config_userconfig", "")
 	t.Setenv("GH_CONFIG_DIR", "")

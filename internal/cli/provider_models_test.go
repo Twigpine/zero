@@ -42,6 +42,31 @@ func TestRunProvidersModelsListsDiscoveredModels(t *testing.T) {
 	}
 }
 
+// The directory shows each model's SIZE where the id names one, so a reader sees
+// light/medium/heavy at a glance — the classification routing uses, made visible.
+// A cloud id with no size gets no invented label.
+func TestRunProvidersModelsShowsModelSize(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	deps := commandCenterDeps(t)
+	deps.discoverProviderModels = func(_ context.Context, _ config.ProviderProfile) ([]providermodeldiscovery.Model, error) {
+		return []providermodeldiscovery.Model{
+			{ID: "gpt-oss:20b"},
+			{ID: "team/cloud-model"}, // no size in the id
+		}, nil
+	}
+
+	if exitCode := runWithDeps([]string{"providers", "models"}, &stdout, &stderr, deps); exitCode != exitSuccess {
+		t.Fatalf("exit = %d: %s", exitCode, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "gpt-oss:20b [20B]") {
+		t.Fatalf("the directory did not show the model size:\n%s", out)
+	}
+	if strings.Contains(out, "team/cloud-model [") {
+		t.Fatalf("a cloud model with no size got an invented size label:\n%s", out)
+	}
+}
+
 func TestRunProvidersModelsJSON(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

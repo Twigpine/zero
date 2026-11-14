@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -53,4 +54,22 @@ func grantOutsideDefaults(t *testing.T) (*Scope, string) {
 		t.Fatalf("%s is writable before any grant exists; the assertions below would prove nothing", granted)
 	}
 	return scope, granted
+}
+
+func TestExtraReadRootsCarriesAReadGrantThatExtraRootsOmits(t *testing.T) {
+	scope, granted := grantOutsideDefaults(t)
+	readRoot, err := scope.AddRead(granted)
+	if err != nil {
+		t.Fatalf("AddRead: %v", err)
+	}
+
+	if slices.Contains(scope.ExtraRoots(), readRoot) {
+		t.Fatalf("ExtraRoots carried the read grant %q", readRoot)
+	}
+	if !slices.Contains(scope.ExtraReadRoots(), readRoot) {
+		t.Fatalf("ExtraReadRoots omitted the read grant %q: %v", readRoot, scope.ExtraReadRoots())
+	}
+	if slices.Contains(scope.ExtraReadRoots(), scope.WorkspaceRoot()) {
+		t.Fatalf("ExtraReadRoots reopened the parent workspace %q", scope.WorkspaceRoot())
+	}
 }

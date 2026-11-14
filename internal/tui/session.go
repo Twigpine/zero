@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/Twigpine/zero/internal/agent"
 	"github.com/Twigpine/zero/internal/execution"
@@ -44,6 +45,9 @@ func (m model) ensureActiveSession(prompt string) (model, error) {
 		return m, err
 	}
 	m.activeSession = session
+	if m.planProgress != nil {
+		m.planProgress.SelectSession(session.SessionID)
+	}
 	m.pendingSessionTitle = ""
 	m.sessionEvents = []sessions.Event{}
 	if manuallyNamed {
@@ -68,6 +72,9 @@ func (m model) startNewSession() model {
 	previousID := m.activeSession.SessionID
 
 	m.activeSession = sessions.Metadata{}
+	if m.planProgress != nil {
+		m.planProgress.SelectSession("")
+	}
 	m.pendingSessionTitle = ""
 	m.sessionEvents = nil
 
@@ -214,6 +221,9 @@ func tuiSessionTitle(prompt string) string {
 }
 
 func (m model) handleResumeCommand(args string) (model, string) {
+	if m.planProgress != nil && m.planProgress.BackgroundPlanLive() {
+		return m, "Sessions\nCannot switch sessions while a background plan is running. Wait for it to finish or run /plans stop first."
+	}
 	args = strings.TrimSpace(args)
 	if args == "" {
 		return m, m.resumeText()
@@ -233,6 +243,9 @@ func (m model) handleResumeCommand(args string) (model, string) {
 	// the already-active session, whose loops belong to it, not a "previous" one.
 	previousID := m.activeSession.SessionID
 	m.activeSession = *session
+	if m.planProgress != nil {
+		m.planProgress.SelectSession(session.SessionID)
+	}
 	m.pendingSessionTitle = ""
 	m.sessionEvents = append([]sessions.Event{}, events...)
 	if m.providerName == "" {
@@ -700,12 +713,12 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 				rows = append(rows, transcriptRow{kind: rowSystem, text: "forked from session: " + parentID})
 			}
 		case sessions.EventSpecialistStart:
-			info := specialistInfoFromPayload(payload)
+			info := specialistInfoFromPayload(payload, sessionEventTime(event))
 			if info != nil {
 				rows = append(rows, transcriptRow{kind: rowSpecialist, specialistInfo: info})
 			}
 		case sessions.EventSpecialistStop:
-			info := specialistInfoFromPayload(payload)
+			info := specialistInfoFromPayload(payload, sessionEventTime(event))
 			if info != nil {
 				// Reconcile: update the existing Start row with the same
 				// childSessionID instead of appending a duplicate. On resume
@@ -714,6 +727,11 @@ func transcriptRowsFromSessionEvents(events []sessions.Event) []transcriptRow {
 				for i := range rows {
 					if rows[i].kind == rowSpecialist && rows[i].specialistInfo != nil &&
 						rows[i].specialistInfo.childSessionID == info.childSessionID {
+						// THE START TIME COMES FROM THE START EVENT. Replacing
+						// the row wholesale would drop it and leave the card
+						// computing its elapsed from the stop against itself.
+						info.completedAt = info.startedAt
+						info.startedAt = rows[i].specialistInfo.startedAt
 						rows[i].specialistInfo = info
 						found = true
 						break
@@ -960,7 +978,16 @@ func firstNonEmptyString(values ...string) string {
 // specialistInfoFromPayload builds a specialistInfo from a specialist_start or
 // specialist_stop session event payload. Returns nil if the payload lacks a
 // childSessionId (the minimum required field).
-func specialistInfoFromPayload(payload map[string]any) *specialistInfo {
+// at is the event's own timestamp, which is what makes a RESTORED card able to
+// report how long its agent ran.
+//
+// WITHOUT IT THE CARD SHOWED 153722867m16s — exactly math.MaxInt64 nanoseconds,
+// Go's largest time.Duration. specialist_card.go computes `m.now().Sub(startedAt)`
+// with no zero guard, so a rebuilt row whose startedAt was never set subtracted
+// the year-1 zero time and clamped. Every agent in a resumed session rendered
+// that, alongside "0 tool calls", which read as four sub-agents that had done
+// nothing for 292 years.
+func specialistInfoFromPayload(payload map[string]any, at time.Time) *specialistInfo {
 	childSessionID := payloadString(payload, "childSessionId")
 	if childSessionID == "" {
 		return nil
@@ -969,6 +996,7 @@ func specialistInfoFromPayload(payload map[string]any) *specialistInfo {
 		name:           payloadString(payload, "specialist"),
 		description:    payloadString(payload, "description"),
 		childSessionID: childSessionID,
+		startedAt:      at,
 	}
 	statusStr := payloadString(payload, "status")
 	switch statusStr {
@@ -985,4 +1013,15 @@ func specialistInfoFromPayload(payload map[string]any) *specialistInfo {
 		info.errorMsg = errMsg
 	}
 	return info
+}
+
+// sessionEventTime parses an event's recorded timestamp, zero when absent or
+// unparseable — which the card's own guard then treats as "unknown" rather than
+// as the year 1.
+func sessionEventTime(event sessions.Event) time.Time {
+	stamp, err := time.Parse(time.RFC3339, strings.TrimSpace(event.CreatedAt))
+	if err != nil {
+		return time.Time{}
+	}
+	return stamp
 }

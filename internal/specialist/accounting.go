@@ -39,6 +39,12 @@ type specialistAccountingInput struct {
 	// sub-agent lifecycle to observe. The zero value is "started", so a caller
 	// that forgets to set it never silently suppresses hooks.
 	LaunchFailed bool
+	// Model is what the child actually ran on. Written into the usage rollup so
+	// the tokens are priced against THAT model rather than the parent session's.
+	// The payload has always supported it; only escalation runs ever set it, so
+	// every plan task was priced as if it had run on the session's model — which
+	// stopped being true the moment tasks could name their own.
+	Model string
 }
 
 // recordSpecialistStart records the internal attempt accounting. It deliberately
@@ -221,6 +227,12 @@ func (executor Executor) recordBackgroundTaskAccounting(task background.Task, su
 		Background:      true,
 		PID:             task.PID,
 	}
+	// Reapers can run in a different process, without the launch manifest. The
+	// child exec persists its resolved model before emitting usage, so recover
+	// it from the child session rather than pricing against the parent's model.
+	if child, err := accountingStore(executor.SessionStore).Get(input.ChildSessionID); err == nil && child != nil {
+		input.Model = child.ModelID
+	}
 	rolledUp := executor.rollUpSpecialistUsage(input, summary)
 	executor.recordSpecialistStop(input, summary, string(task.Status), task.ExitCode, nil, rolledUp)
 }
@@ -254,7 +266,23 @@ func appendSpecialistUsageRollup(store *sessions.Store, input specialistAccounti
 	payload["promptTokens"] = summary.Usage.PromptTokens
 	payload["completionTokens"] = summary.Usage.CompletionTokens
 	payload["totalTokens"] = summary.Usage.EffectiveTotalTokens()
+	// PRICING FIELDS, written on exactly the same terms as usage.EventUsagePayload
+	// (non-zero only) because BuildReport reads both records with one reader.
+	// Their absence is what made every sub-agent turn cost as though nothing had
+	// been cached.
+	if summary.Usage.CachedInputTokens > 0 {
+		payload["cachedInputTokens"] = summary.Usage.CachedInputTokens
+	}
+	if summary.Usage.CacheWriteTokens > 0 {
+		payload["cacheWriteTokens"] = summary.Usage.CacheWriteTokens
+	}
+	if summary.Usage.ReasoningTokens > 0 {
+		payload["reasoningTokens"] = summary.Usage.ReasoningTokens
+	}
 	payload["usageEvents"] = summary.Usage.Events
+	if model := strings.TrimSpace(input.Model); model != "" {
+		payload["model"] = model
+	}
 	// Atomic check+append under the session lock so the TaskOutput poll and the
 	// onExit path cannot both pass the existence check and double-count usage.
 	return appendSpecialistEventOnce(store, input.ParentSessionID, sessions.EventUsage, payload, input.ChildSessionID, summary.RunID)

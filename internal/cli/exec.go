@@ -24,6 +24,7 @@ import (
 	"github.com/Twigpine/zero/internal/providers"
 	"github.com/Twigpine/zero/internal/sandbox"
 	"github.com/Twigpine/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/specialist"
 	"github.com/Twigpine/zero/internal/specmode"
 	"github.com/Twigpine/zero/internal/streamjson"
 	"github.com/Twigpine/zero/internal/tools"
@@ -150,6 +151,11 @@ type execOptions struct {
 	// additional write roots for this run. Unioned with
 	// config.SandboxConfig.AdditionalWriteRoots at scope construction time.
 	addDirs []string
+	// readDirs holds directories passed via --add-read-dir: READ-ONLY roots added
+	// with scope.AddRead after construction. This is how a specialist child
+	// inherits the parent's request_permissions read grants without gaining write
+	// access to them — a plan auditing a granted external path reads it here.
+	readDirs []string
 	// tracePath, when set, writes a per-turn NDJSON trace (agenteval-compatible)
 	// to the given file path — or to stderr when the value is "-". Falls back to
 	// the ZERO_TRACE env var when the flag is absent. Off by default: a run
@@ -189,6 +195,15 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// mode-supplied model flows through the same resolution (and deprecation
 	// notice) path as an explicit --model. Explicit flags still win: applyExecMode
 	// only fills fields the caller left unset.
+	// --reasoning-effort zeromaxing selects the POSTURE, not a provider effort
+	// level. Normalize it into the profile selection before mode/profile
+	// expansion so /effort zeromaxing and --exec-profile zeromaxing resolve to
+	// exactly the same state, and so the posture name can never survive into a
+	// provider request. Runs before applyExecMode, leaving the documented
+	// precedence ordering (flag > mode > profile) exactly as it was.
+	if err := normalizeZeromaxingEffort(&options); err != nil {
+		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
+	}
 	if err := applyExecMode(&options); err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
 	}
@@ -196,6 +211,10 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// runs after it so the mode's fills count as "set" and win. MaxTurns is
 	// deferred to config resolution below, where the displaced resolved budget
 	// is known and becomes the escalation restore target.
+	// Captured BEFORE the profile expands: applyExecProfile arms self-correction
+	// as a side effect, so reading options.selfCorrect afterwards would always
+	// report "already on" and the delta would describe a change it just made.
+	selfCorrectBeforeProfile := options.selfCorrect
 	execProfile, execProfileFilledEffort, err := applyExecProfile(&options)
 	if err != nil {
 		return writeExecFormatUsageError(stdout, stderr, options.outputFormat, err.Error())
@@ -255,17 +274,103 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		registry.Register(tools.NewEscalateModelTool())
 	}
 	var specialistRuntime *agentToolRuntime
+	var planGate *specialist.PostureGate
+	// Created before registration so the tool can hold it; its inner exec
+	// recorder is attached once the session exists (below). A nil inner is a
+	// no-op, so events before that point are simply not recorded — recording is
+	// best-effort and must never be the thing that fails a run.
+	planRecorder := &planSessionRecorder{}
+	// DECLARED HERE, built further down. The specialist wiring below closes over
+	// it so a child launched later is confined to the same roots this run holds;
+	// reading it at registration time would capture nil forever, which is the
+	// same reason planGate is a pointer.
+	var execScope *sandbox.Scope
 	if shouldRegisterExecSpecialistTools(options) {
 		// Specialist tools register before the full config resolve below (so
 		// --list-tools stays offline). swarm.maxTeamSize is not affected by
 		// overrides, so an empty-overrides resolve yields the same value; a resolve
 		// error falls back to the swarm's built-in default (0 => 8).
 		maxTeamSize := 0
-		if swarmCfg, cfgErr := deps.resolveConfig(workspaceRoot, config.Overrides{}); cfgErr == nil {
-			maxTeamSize = swarmCfg.Swarm.MaxTeamSize
+		// planSize resolves to the DEFAULT tier when this early resolve fails —
+		// the same ceiling an unset value gets, never "no ceiling". A config
+		// error must not be the thing that removes a bound.
+		planSize := config.DefaultPlanSize
+		// The provider profile is captured alongside the other early config so
+		// auto_assign can list this provider's models. Hoisted out of the if
+		// because the wiring below needs it; the zero value simply means
+		// discovery is unavailable and a plan asking for it is told so.
+		var planProvider config.ProviderProfile
+		var planModelPrefs config.PlanModelsConfig
+		if earlyCfg, cfgErr := deps.resolveConfig(workspaceRoot, config.Overrides{}); cfgErr == nil {
+			maxTeamSize = earlyCfg.Swarm.MaxTeamSize
+			planSize = earlyCfg.Profiles.PlanSizeTier()
+			planProvider = earlyCfg.Provider
+			planModelPrefs = earlyCfg.Profiles.PlanModels
 		}
 		var err error
-		specialistRuntime, err = registerSpecialistTools(registry, workspaceRoot, maxTeamSize)
+		// The posture is fixed for a headless run, so the gate is set once here
+		// rather than flipping. It is still a POINTER for the same reason the
+		// TUI needs one: the tool holds it for the process's life.
+		planGate = &specialist.PostureGate{}
+		planGate.Set(execProfile.IsZeromaxing())
+		// The run's operator filters are final here: applyExecMode has already
+		// expanded any --mode preset onto them. They bound the plan tool's
+		// parent grant, so a task can never hold a tool this run was denied.
+		specialistRuntime, err = registerSpecialistTools(registry, workspaceRoot, maxTeamSize,
+			options.enabledTools, options.disabledTools, planRecorder, orchestrateWiring{
+				DiscoverModels: planModelDiscoverer(workspaceRoot, planProvider),
+				// The run's EXTRA write roots only — the grants beyond the
+				// workspace — exactly as the TUI wires them (scope.ExtraRoots).
+				// Passing execScope.Roots() here handed the child the PARENT
+				// WORKSPACE ROOT as an extra writable --add-dir, and for an
+				// ISOLATED plan that defeats the isolation outright: the
+				// worktree exists so a write-capable plan cannot touch the
+				// parent tree, and this line was handing the parent tree back.
+				// A child's own workspace comes from its --cwd; only explicit
+				// grants ride along.
+				//
+				// A CLOSURE OVER THE VARIABLE, not over its value: the scope is
+				// built further down this function, and a child is launched long
+				// after both. Reading it here would capture nil forever — the same
+				// reason planGate above is a pointer.
+				ExtraWriteRoots: func(withinTurn bool) []string {
+					return childWriteRoots(execScope, withinTurn)
+				},
+				// The read counterpart: a request_permissions READ grant lands in a
+				// separate scope list the write roots above do not cover, so without
+				// this a plan auditing a granted path fails "outside the workspace" in
+				// every task. Same live-scope closure, same reason.
+				ExtraReadRoots: func(withinTurn bool) []string {
+					return childReadRoots(execScope, withinTurn)
+				},
+				// Proves a model will actually run before a task is assigned it,
+				// so the plan never dispatches onto something the provider only
+				// advertises.
+				ProbeModel:    planModelProber(workspaceRoot, planProvider, deps.newProvider),
+				ProbeIdentity: planModelProbeIdentity(workspaceRoot, planProvider),
+				ModelPrefs:    planModelPreferences(planModelPrefs),
+				Gate:          planGate,
+				PlanContext: specialist.PlanTaskContext{
+					PostureReasoningEffort: string(execprofile.Zeromaxing.ReasoningEffort),
+					Cwd:                    workspaceRoot,
+					// Resolved permission mode is not available this early; the
+					// executor applies its own fail-safe mapping from an empty mode
+					// (never unsafe), so a plan task can never exceed the parent.
+					PermissionMode: "",
+					// This run's nesting depth. Left unset, the admission
+					// headroom check and the executor's own depth check both
+					// measured a depth that was always zero, so neither could
+					// ever fire — an inert guard someone would later trust.
+					Depth: options.depth,
+				},
+				Size: planSize,
+				// The SAME pair of directories the TUI uses, so a plan saved in
+				// one surface is found by the other.
+				Plans: execPlanPaths(workspaceRoot),
+				// Headless runs isolate too: --worktree already exists here, and
+				// a write-capable plan must not be the one path that skips it.
+				Isolate: newPlanIsolator(workspaceRoot),
+			})
 		if err != nil {
 			return writeExecProviderError(stdout, stderr, options.outputFormat, "specialist_error", err.Error())
 		}
@@ -329,11 +434,44 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", err.Error())
 	}
 	resolved.MaxTurns = execTurnBudget(resolved)
+	// Profile selection refusal, evaluated once config is resolved (the disable
+	// flag lives there). execprofile.SelectionRefusal is the ONE rule; the TUI
+	// /effort and /profile paths call the same function, so the selection
+	// decision cannot drift between surfaces — see
+	// TestSelectionRefusalAgreesAcrossPaths.
+	if refusal := execprofile.SelectionRefusal(execProfile, resolved.Profiles.DisableZeromaxing); refusal != "" {
+		return writeExecFormatUsageError(stdout, stderr, options.outputFormat,
+			fmt.Sprintf("cannot use execution profile %q: %s.", execProfile.Name, refusal))
+	}
+	// State what it actually changes, at selection time. Burying the real delta
+	// in a PR body is how a posture ends up documented as doing things it does
+	// not do.
+	if execProfile.IsZeromaxing() {
+		delta := execprofile.Delta(execprofile.DeltaState{
+			// resolved.MaxTurns is still the pre-posture budget here: the Delta
+			// notice is printed BEFORE applyProfileTurnBudget displaces it.
+			CurrentMaxTurns: resolved.MaxTurns,
+			Effort:          execEffortTransition(execProfileFilledEffort),
+			SelfCorrect:     execSelfCorrectTransition(selfCorrectBeforeProfile),
+		})
+		if _, err := fmt.Fprintln(stderr, delta); err != nil {
+			return exitCrash
+		}
+	}
 	var displacedMaxTurns int
 	resolved.MaxTurns, displacedMaxTurns = applyProfileTurnBudget(execProfile, options.maxTurns, resolved.MaxTurns)
-	execScope, err := sandbox.NewScope(workspaceRoot, append(append([]string{}, resolved.Sandbox.AdditionalWriteRoots...), options.addDirs...))
+	execScope, err = sandbox.NewScope(workspaceRoot, append(append([]string{}, resolved.Sandbox.AdditionalWriteRoots...), options.addDirs...))
 	if err != nil {
 		return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", err.Error())
+	}
+	// READ-ONLY roots from --add-read-dir, added after construction so they never
+	// become write roots: this is how a specialist child reads the parent's
+	// request_permissions grants without gaining write access. A bad path fails
+	// closed (the run stops) rather than silently dropping the grant.
+	for _, dir := range options.readDirs {
+		if _, err := execScope.AddRead(dir); err != nil {
+			return writeExecProviderError(stdout, stderr, options.outputFormat, "sandbox_error", fmt.Sprintf("--add-read-dir %q: %v", dir, err))
+		}
 	}
 	for _, tool := range tools.CoreToolsScoped(workspaceRoot, execScope) {
 		registry.Register(tool)
@@ -614,6 +752,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	}
 
 	sessionRecorder := execSessionRecorder{prepared: preparedSession}
+	planRecorder.recorder = &sessionRecorder
 	// Surface a best-effort session-recording failure once, on every exit path.
 	defer sessionRecorder.warnIfRecordingFailed(stderr)
 	userPayload := map[string]any{
@@ -659,6 +798,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	emitTrustNotice(stderr, hookSkip, pluginActivation.trustSkip, mcpSkip)
 	result, err := agent.Run(runCtx, agentPrompt, provider, agent.Options{
 		MaxTurns:             resolved.MaxTurns,
+		MaxTokens:            execProfile.MaxTokens,
 		ContextWindow:        resolveAgentContextWindow(runCtx, modelRegistry, resolved.Provider),
 		DeferThreshold:       effectiveDeferThreshold,
 		Specialists:          specialistRuntime.specialistInfos(),
@@ -670,6 +810,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		Depth:                options.depth,
 		SessionTitle:         sessionTitle,
 		ProviderName:         resolved.Provider.Name,
+		ModelFamily:          providercatalog.ModelFamilyFor(resolved.Provider.CatalogID),
 		Model:                resolved.Provider.Model,
 		ModelSwitcher:        modelSwitcher,
 		TurnSessionProvider:  turnSessions,
@@ -691,6 +832,13 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		SelfCorrect:     selfCorrector,
 		FileDiagnostics: fileDiagnostics,
 		Profile:         execProfile.Policy(displacedMaxTurns, execProfileFilledEffort),
+		// A headless run that selected the posture is by definition entering it:
+		// the process starts, runs once, exits, so there is no earlier turn for
+		// it to have been active across.
+		Zeromaxing: execZeromaxing(execProfile),
+		// Whether the enter notice may NAME the orchestrate tool. Derived from
+		// the registry rather than passed as a flag — see orchestrateAvailable.
+		OrchestrateAvailable: orchestrateAvailable(registry),
 		// Headless exec: don't accept a no-tool-call turn as "done" while work
 		// clearly remains (pending plan items / a mid-step continuation cue) —
 		// nudge to continue, and finalize as INCOMPLETE rather than false success
@@ -829,6 +977,14 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// {"type":"done","exit_code":0} that would otherwise mask the incomplete exit.
 	// An `error` event (not just a warning) is emitted so log/cron consumers that
 	// scan for type=="error" can recover the reason.
+	// A plan that did not fully complete is work left undone, which is exactly
+	// what exitIncomplete exists for. Folded into the EXISTING incomplete path
+	// rather than a second exit route, so a plan and a stalled loop report the
+	// same way. Does not override an incompleteness the loop already found.
+	if reason, planIncomplete := planRecorder.Incomplete(); planIncomplete && !result.Incomplete {
+		result.Incomplete = true
+		result.IncompleteReason = reason
+	}
 	if result.Incomplete {
 		reason := result.IncompleteReason
 		if reason == "" {
@@ -1244,6 +1400,64 @@ func applyExecProfile(options *execOptions) (execprofile.Profile, bool, error) {
 	return profile, effortFilled, nil
 }
 
+// normalizeZeromaxingEffort folds `--reasoning-effort zeromaxing` into
+// `--exec-profile zeromaxing`. The posture is one thing with one name, reachable
+// from either flag, so this is a rename rather than a second implementation.
+//
+// A conflicting explicit --exec-profile is a usage error rather than a silent
+// winner: the user asked for two different postures and deserves to be told,
+// not to have one quietly discarded.
+func normalizeZeromaxingEffort(options *execOptions) error {
+	if !strings.EqualFold(strings.TrimSpace(options.reasoningEffort), execprofile.Name) {
+		return nil
+	}
+	if selected := strings.TrimSpace(options.execProfile); selected != "" &&
+		!strings.EqualFold(selected, execprofile.Name) {
+		return execUsageError{fmt.Sprintf(
+			"--reasoning-effort %s selects the %s execution profile, which conflicts with --exec-profile %s. Pass one of them.",
+			execprofile.Name, execprofile.Name, selected)}
+	}
+	options.execProfile = execprofile.Name
+	// Clear the effort so the profile FILLS it (with "high"). Leaving the
+	// posture name here would carry it into forwardedReasoningEffort.
+	options.reasoningEffort = ""
+	return nil
+}
+
+// execEffortTransition reports what the posture did to reasoning effort for
+// this run. applyExecProfile reports whether it actually filled the effort; it
+// backs off when the caller passed one explicitly. The headless path does not
+// gate the fill on model support (forwardedReasoningEffort coerces later, and
+// prints its own notice), so EffortNotSupported is not reachable here.
+func execEffortTransition(effortFilled bool) execprofile.EffortTransition {
+	if effortFilled {
+		return execprofile.EffortRaised
+	}
+	return execprofile.EffortKeptExplicit
+}
+
+// execSelfCorrectTransition reports what the posture did to post-edit
+// verification for THIS run. A headless run has no way to override the profile
+// after it applies (--self-correct is presence-only and read before), so the
+// Overridden state is unreachable here — it is a TUI-only condition.
+func execSelfCorrectTransition(selfCorrectBefore bool) execprofile.SelfCorrectTransition {
+	if selfCorrectBefore {
+		return execprofile.SelfCorrectAlreadyOn
+	}
+	return execprofile.SelfCorrectRaised
+}
+
+// execZeromaxing maps a selected profile onto the run's posture lifecycle. A
+// headless exec run is one process for one run, so selecting the posture means
+// entering it and anything else means off — the Active/Exiting states only
+// arise in a session that outlives a single run (the TUI).
+func execZeromaxing(profile execprofile.Profile) agent.Zeromaxing {
+	if profile.IsZeromaxing() {
+		return agent.ZeromaxingEntering
+	}
+	return agent.ZeromaxingOff
+}
+
 // specProfileEffortFilled reports whether the profile's effort fill actually
 // governs the spec-draft run. An explicit --spec-reasoning-effort replaces the
 // filled effort for the draft, so the escalation's effort restore must not arm
@@ -1375,6 +1589,16 @@ func forwardedReasoningEffort(registry modelregistry.Registry, modelID string, r
 	if requested == "" {
 		return ""
 	}
+	// LOAD-BEARING GUARD. "zeromaxing" is a Zero posture name, never a provider
+	// effort level. normalizeZeromaxingEffort already converts it into a profile
+	// selection long before this point, so reaching here means something
+	// upstream regressed — and the failure mode would be a provider request
+	// carrying a parameter value no provider defines. Refuse it at the boundary
+	// rather than trusting the caller. Pinned by
+	// TestZeromaxingIsNeverForwardedToAProvider.
+	if strings.EqualFold(requested, execprofile.Name) {
+		return ""
+	}
 	entry, ok := registry.Get(strings.TrimSpace(modelID))
 	if !ok {
 		return requested
@@ -1504,4 +1728,49 @@ func writeTraceSnapshot(snapshot *trace.TurnTrace, dest string, stderr io.Writer
 	}
 	defer file.Close()
 	return trace.WriteNDJSON(file, snapshot)
+}
+
+// execPlanPaths locates saved plans for a headless run, from the same pair of
+// directories the TUI uses. A resolve failure yields the project directory
+// alone rather than nothing: a plan checked into the repo must still run when
+// the user config directory is unavailable.
+func execPlanPaths(workspaceRoot string) specialist.PlanPaths {
+	userConfigDir, _ := config.UserConfigDir()
+	return specialist.DefaultPlanPaths(workspaceRoot, userConfigDir)
+}
+
+// childWriteRoots is what a run's children may WRITE beyond their own
+// workspace: the run's granted extra roots, and never the parent workspace root
+// itself. It returned execScope.Roots() — workspace included — and for an
+// ISOLATED plan that defeats the isolation outright: the worktree exists so a
+// write-capable plan cannot touch the parent tree, and the wiring was handing
+// the parent tree back as a writable --add-dir. Both surfaces (TUI and headless)
+// use this one function.
+//
+// TURN-SCOPED GRANTS ONLY FOR A CHILD THAT ENDS WITHIN THE TURN. A root in a
+// child's argv is permanent for the child's life; the parent's end-of-turn
+// release cannot reach it. So a child that may outlive the turn (background
+// Task, plan task, swarm member) gets only the roots that outlive it as well.
+func childWriteRoots(scope *sandbox.Scope, withinTurn bool) []string {
+	if scope == nil {
+		return nil
+	}
+	if withinTurn {
+		return scope.ExtraRoots()
+	}
+	return scope.SessionExtraRoots()
+}
+
+// childReadRoots is childWriteRoots for READ grants: every path the run may
+// read beyond its workspace (write roots included, since they confer read),
+// turn-scoped grants only for a child that ends within the turn. The executor
+// emits these as --add-read-dir only.
+func childReadRoots(scope *sandbox.Scope, withinTurn bool) []string {
+	if scope == nil {
+		return nil
+	}
+	if withinTurn {
+		return scope.ExtraReadRoots()
+	}
+	return scope.SessionExtraReadRoots()
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/Twigpine/zero/internal/execution"
 	"github.com/Twigpine/zero/internal/modelregistry"
 	"github.com/Twigpine/zero/internal/notify"
+	"github.com/Twigpine/zero/internal/providercatalog"
 	"github.com/Twigpine/zero/internal/sandbox"
 	"github.com/Twigpine/zero/internal/sessions"
 	"github.com/Twigpine/zero/internal/specmode"
@@ -123,6 +124,7 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 		SessionID:     draftSession.SessionID,
 		SessionTitle:  run.sessionTitle,
 		ProviderName:  run.resolved.Provider.Name,
+		ModelFamily:   providercatalog.ModelFamilyFor(run.resolved.Provider.CatalogID),
 		Model:         run.resolved.Provider.Model,
 		SupportsVision: func(modelID string) bool {
 			return modelregistry.SupportsVision(run.modelRegistry, modelID)

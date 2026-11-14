@@ -26,6 +26,8 @@ const (
 	commandDebug
 	commandDoctor
 	commandPlan
+	commandPlans
+	commandWorkers
 	commandSearch
 	commandResume
 	commandRename
@@ -120,6 +122,29 @@ var commandDefinitions = []commandDefinition{
 		group:       commandGroupSession,
 		description: "Show plan status, or enter/exit read-only planning mode.",
 		kind:        commandPlan,
+	},
+	{
+		name:  "/plans",
+		usage: "/plans [stop|pause|restart|save <name>|list|show <name>|run <name>|resume <name>]",
+		group: commandGroupSession,
+		// Deliberately close to /plan, and they are different things: /plan is
+		// planning-mode status (the update_plan TODO list), /plans is the
+		// orchestrate plan's task graph. The description says so, because the
+		// names alone do not.
+		description: "Show or control the orchestrate plan: stop/pause/resume the running one, or save, list and run a named plan.",
+		kind:        commandPlans,
+	},
+	{
+		name:  "/workers",
+		usage: "/workers",
+		group: commandGroupSession,
+		// DISTINCT FROM /plans, which shows the plan running right now. This is
+		// everything this SESSION has set going — plan tasks and direct Task
+		// delegations alike, finished ones included — because a session that
+		// spawned a background child had no way to ask what became of it short
+		// of reading events.jsonl by hand.
+		description: "List every sub-agent this session has started, with status and token spend.",
+		kind:        commandWorkers,
 	},
 	{
 		name:        "/permissions",
@@ -281,7 +306,7 @@ var commandDefinitions = []commandDefinition{
 	},
 	{
 		name:        "/effort",
-		usage:       "/effort [list|level|auto]",
+		usage:       "/effort [list|low|medium|high|zeromaxing|auto]",
 		group:       commandGroupModel,
 		description: "Show or set reasoning effort for supported models.",
 		kind:        commandEffort,

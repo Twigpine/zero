@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -151,13 +152,30 @@ func (tool *OutputTool) readOutput(task background.Task) tools.Result {
 			LifecycleHooks: tool.LifecycleHooks,
 		}.recordBackgroundTaskAccounting(task, summary)
 	}
+	meta := map[string]string{
+		"task_id": string(task.ID),
+		"status":  string(task.Status),
+	}
+	// THE CHILD'S SPEND, so the AGENTS panel can show it for a BACKGROUND agent.
+	//
+	// A background child is detached — it never streams via OnToolProgress, so
+	// the live token/tool bridge never sees it, and its row sat at "0 tok · 0
+	// tools" while the real numbers (this summary; also a provider_usage event
+	// in the store) went unshown. TaskOutput is the one channel a background
+	// child has to the parent, so it carries them.
+	if tokens := summary.Usage.EffectiveTotalTokens(); tokens > 0 {
+		meta["tokens"] = strconv.Itoa(tokens)
+	}
+	// CALLS, not distinct names: the panel's live count increments once per
+	// call, so publishing len(summary.Tools) made a background agent that ran
+	// read_file forty times read "1 tool" beside a foreground one reading 40.
+	if n := summary.ToolCalls; n > 0 {
+		meta["tool_calls"] = strconv.Itoa(n)
+	}
 	return tools.Result{
 		Status: tools.StatusOK,
 		Output: formatTaskOutputSummary(task, summary, rawLines),
-		Meta: map[string]string{
-			"task_id": string(task.ID),
-			"status":  string(task.Status),
-		},
+		Meta:   meta,
 	}
 }
 

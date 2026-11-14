@@ -1,0 +1,37 @@
+{
+  "name": "research",
+  "description": "Answer a question about ${subject} by searching several ways at once, then checking the answer against the code rather than against itself.",
+  "tasks": [
+    {
+      "id": "by_name",
+      "phase": "search",
+      "prompt": "Find where ${subject} is DEFINED. Search by identifier: type names, function names, constants, struct fields. Report every definition site as file:line with a one-line description. If you find nothing, say so plainly — a wrong guess is worse than an empty result."
+    },
+    {
+      "id": "by_use",
+      "phase": "search",
+      "prompt": "Find where ${subject} is USED. Search by call site, not by definition: who calls it, who reads it, who writes it, what configures it. Report every site as file:line. Independent of the definition search on purpose — one search angle finds one kind of thing."
+    },
+    {
+      "id": "by_test",
+      "phase": "search",
+      "prompt": "Find what TESTS ${subject}. Report each test as file:line with what it actually asserts, and name any that assert nothing meaningful. A behaviour with no test is a finding; say so."
+    },
+    {
+      "id": "synthesise",
+      "phase": "answer",
+      "depends_on": ["by_name", "by_use", "by_test"],
+      "prompt": "Using the three searches above, answer this: ${subject}. State the answer first, then the file:line evidence for each claim. Where the three searches disagree, say which one you believe and why — do not average them."
+    },
+    {
+      "id": "refute",
+      "phase": "verify",
+      "depends_on": ["synthesise"],
+      "prompt": "Try to REFUTE the answer above. Default to refuted if uncertain. For each claim: open the cited file:line and check the claim is what the code actually does, look for a second call path that behaves differently, and look for a case the answer does not cover. Report each claim as VERIFIED with the line that proves it, or REFUTED with the line that disproves it. Refuting your own side's answer is the job; agreeing is not."
+    }
+  ],
+  "budget": {
+    "max_workers": 1,
+    "max_retries": 1
+  }
+}

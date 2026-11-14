@@ -42,7 +42,7 @@ func TestBuildSystemPromptAppendsModelAddendum(t *testing.T) {
 		t.Fatalf("the claude prompt must not contain the OpenAI addendum")
 	}
 	// Unknown / unset model gets no family block.
-	if got := modelPromptAddendum(""); got != "" {
+	if got := modelPromptAddendum("", ""); got != "" {
 		t.Fatalf("expected no addendum without a model, got %q", got)
 	}
 	if strings.Contains(buildSystemPrompt(Options{}), "<model_guidance>") {

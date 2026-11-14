@@ -97,12 +97,24 @@ type Event struct {
 	CachedInputTokens *int              `json:"cachedInputTokens,omitempty"`
 	CacheWriteTokens  *int              `json:"cacheWriteTokens,omitempty"`
 	TotalTokens       *int              `json:"totalTokens,omitempty"`
-	CostUSD           *float64          `json:"costUsd,omitempty"`
-	Text              string            `json:"text,omitempty"`
-	Message           string            `json:"message,omitempty"`
-	Code              string            `json:"code,omitempty"`
-	Recoverable       *bool             `json:"recoverable,omitempty"`
-	ExitCode          *int              `json:"exitCode,omitempty"`
+	// ReasoningTokens completes the usage breakdown a parent needs to price a
+	// child's turn; cached input and cache-write counts are carried above.
+	//
+	// Without them a sub-agent's usage rolled up to its parent with no cache
+	// information at all, and BuildReport priced every one of those turns as if
+	// nothing had been cached. That is not a rounding error: a measured plan task
+	// had 49,280 of 49,894 prompt tokens served from cache — 98.8% — and plan
+	// tasks are the ideal cache case, re-sending a large stable prompt every
+	// turn. The counts were right and the money was wrong.
+	//
+	// It is emitted only when non-zero, matching usage.EventUsagePayload.
+	ReasoningTokens *int     `json:"reasoningTokens,omitempty"`
+	CostUSD         *float64 `json:"costUsd,omitempty"`
+	Text            string   `json:"text,omitempty"`
+	Message         string   `json:"message,omitempty"`
+	Code            string   `json:"code,omitempty"`
+	Recoverable     *bool    `json:"recoverable,omitempty"`
+	ExitCode        *int     `json:"exitCode,omitempty"`
 }
 
 type InputEvent struct {

@@ -17,7 +17,7 @@ import (
 
 func TestRegisterSpecialistToolsWiresLifecycleHooksIntoTaskOutput(t *testing.T) {
 	registry := tools.NewRegistry()
-	runtime, err := registerSpecialistTools(registry, t.TempDir(), 0)
+	runtime, err := registerSpecialistTools(registry, t.TempDir(), 0, nil, nil, nil, orchestrateWiring{})
 	if err != nil {
 		t.Fatalf("registerSpecialistTools returned error: %v", err)
 	}

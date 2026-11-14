@@ -38,7 +38,7 @@ func TestLookupIsCaseAndSpaceInsensitive(t *testing.T) {
 }
 
 func TestNamesAreSorted(t *testing.T) {
-	want := []string{"balanced", "fast", "thorough"}
+	want := []string{"balanced", "fast", "thorough", "zeromaxing"}
 	if got := Names(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("Names() = %v, want %v", got, want)
 	}
