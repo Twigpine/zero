@@ -1,6 +1,7 @@
 package agentsessions
 
 import (
+	"slices"
 	"sync"
 	"time"
 )
@@ -44,7 +45,7 @@ func DiscoverAllCached(env Env, cwd string) ([]ForeignSession, []error) {
 		// Copy: callers sort and filter the slice they are handed, and a shared
 		// backing array would let one caller reorder another's results.
 		discoveryMu.Unlock()
-		return append([]ForeignSession{}, entry.sessions...), entry.problems
+		return append([]ForeignSession{}, entry.sessions...), slices.Clone(entry.problems)
 	}
 	epoch := discoveryEpoch
 	discoveryMu.Unlock()
@@ -60,12 +61,12 @@ func DiscoverAllCached(env Env, cwd string) ([]ForeignSession, []error) {
 	// but do not repopulate the cache with a pre-invalidation snapshot.
 	now = discoveryNow()
 	if entry, ok := discoveryCache[cwd]; ok && now.Sub(entry.at) < discoveryTTL {
-		return append([]ForeignSession{}, entry.sessions...), entry.problems
+		return append([]ForeignSession{}, entry.sessions...), slices.Clone(entry.problems)
 	}
 	if epoch == discoveryEpoch {
 		discoveryCache[cwd] = discoveryEntry{sessions: found, problems: problems, at: now}
 	}
-	return append([]ForeignSession{}, found...), problems
+	return append([]ForeignSession{}, found...), slices.Clone(problems)
 }
 
 // InvalidateDiscovery drops the memo so the next discovery re-reads the stores.
