@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -980,28 +981,23 @@ func TestACorruptRepositoryStillRefusesLocalWrites(t *testing.T) {
 	}
 }
 
-// A REPOSITORY THAT DEFINES FILTER OR DIFF COMMANDS IS NOT ASKED, so the local
-// write stays refused — but the refusal has to say that, not that git failed:
-// git was never run, and "git could not say" sends the reader looking for a
-// broken repository instead of at the config that made Zero decline to ask.
-func TestALocalWriteInAFilterRepositoryNamesTheConfigRefusal(t *testing.T) {
+// The fixed cached-index query can establish privacy without reading worktree
+// contents. General status/diff commands still refuse repository-defined drivers.
+func TestLocalPrivacyQueryDoesNotWeakenGeneralFilterRefusal(t *testing.T) {
 	root := t.TempDir()
 	paths := DefaultPaths(root)
 	seedStoreRepo(t, root)
 	runStoreGit(t, root, "config", "filter.crypt.clean", "cat")
 
-	_, err := Write(paths, ScopeLocal, "private", "d", "machine-local secret")
-	if !errors.Is(err, ErrNotPrivate) {
-		t.Fatalf("Write in a repository defining a filter command = %v, want ErrNotPrivate", err)
-	}
+	_, err := gitsafe.Command(context.Background(), root, "status", "--porcelain")
 	if !errors.Is(err, gitsafe.ErrRepositoryDefinesCommands) {
-		t.Errorf("the refusal does not carry the config cause: %v", err)
+		t.Fatalf("general Git commands no longer refuse filter definitions: %v", err)
 	}
-	if strings.Contains(err.Error(), "git could not say") {
-		t.Errorf("the refusal blames git, which was never run: %v", err)
+	if _, err := Write(paths, ScopeLocal, "private", "d", "machine-local secret"); err != nil {
+		t.Fatalf("fixed index-only privacy query refused the local write: %v", err)
 	}
-	if _, statErr := os.Lstat(filepath.Join(paths.LocalDir, "private.md")); !os.IsNotExist(statErr) {
-		t.Errorf("the refused note was written anyway: %v", statErr)
+	if _, err := os.Lstat(filepath.Join(paths.LocalDir, "private.md")); err != nil {
+		t.Fatalf("private note was not saved: %v", err)
 	}
 }
 

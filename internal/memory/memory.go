@@ -773,12 +773,6 @@ func refuseTrackedLocalStore(handle *os.Root, relative, dir string) error {
 	}
 	for _, repo := range repos {
 		tracked, err := trackedStoreEntries(repo, resolved)
-		if errors.Is(err, gitsafe.ErrRepositoryDefinesCommands) {
-			// Still a refusal, but git was never run, so it must not read as
-			// git failing to answer.
-			return fmt.Errorf("%w: %s is inside the git repository at %s, and %w; without asking git, Zero cannot confirm that nothing there is tracked",
-				ErrNotPrivate, dir, repo, err)
-		}
 		if err != nil {
 			return fmt.Errorf("%w: %s is inside the git repository at %s, and git could not say which files there are tracked: %v",
 				ErrNotPrivate, dir, repo, err)
@@ -902,14 +896,10 @@ func trackedStoreEntries(repo, dir string) ([]string, error) {
 	// Query from this repository's root, not the store, where Git could select
 	// a nested repository. Literal pathspecs prevent glob characters in a
 	// directory name from selecting a different set of indexed paths.
-	cmd, err := gitsafe.Command(ctx, repo, "ls-files", "-z", "--", filepath.ToSlash(relative))
-	if err != nil {
-		return nil, err
-	}
+	cmd := gitsafe.IndexEntriesCommand(ctx, repo, filepath.ToSlash(relative))
 	// Cancelling the context does not by itself return control here: WaitDelay is
 	// what stops a git holding its pipes open from outliving the deadline.
 	cmd.WaitDelay = gitIndexTimeout
-	cmd.Env = append(gitDiscoveryEnv(cmd.Env), "GIT_LITERAL_PATHSPECS=1")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

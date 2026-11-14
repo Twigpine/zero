@@ -14,7 +14,9 @@
 //
 // The single-key cases are switched off on the command line. Filter and diff
 // driver commands are named per driver, so they cannot be switched off without
-// knowing the names; a repository whose own config defines any is skipped instead.
+// knowing the names; Command and Check skip repositories defining any instead.
+// IndexEntriesCommand has fixed index-only arguments that never read file content,
+// so that narrower query does not need to refuse driver definitions.
 // Commands defined in the user's own global config, such as git-lfs, are the
 // user's choice and are not affected.
 package gitsafe
