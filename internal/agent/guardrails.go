@@ -352,7 +352,7 @@ func attachCountedHeadingEntries(text string) string {
 				continue
 			}
 			if (countedHeadingIsOperational(strings.TrimSpace(trimmed)) ||
-				containsFailureConsequence(content)) &&
+				containsFailureConsequence(content) || !countedContentIsBenignFinding(content)) &&
 				!countedOperationResolved(trimmed, content) {
 				joined = append(joined, line+" - "+content)
 				index = firstEntry
@@ -2123,6 +2123,12 @@ func fallbackContradictedByNextSentence(claim inabilityClaim) bool {
 	if next == "" {
 		return false
 	}
+	// A process exit summary reports the substitute's result, even without a
+	// pronoun or an operation name. Keep zero exits affirmative and avoid
+	// interpreting documentation that merely mentions an exit code as a result.
+	if match := fallbackExitResultPattern.FindStringSubmatch(next); match != nil {
+		return strings.TrimLeft(match[1], "+-0") != ""
+	}
 	if nonAffirmativeFallbackPattern.MatchString(next) ||
 		negatedFallbackPredicatePattern.MatchString(next) ||
 		containsFailureConsequence(next) {
@@ -2146,6 +2152,8 @@ func fallbackContradictedByNextSentence(claim inabilityClaim) bool {
 
 var affirmativePassiveResultPattern = regexp.MustCompile(`^(?:[[:alnum:]_-]+\s+){1,6}(?:is|are|was|were|has\s+been|have\s+been)\s+(?:fully\s+)?(?:formatted|migrated|deployed|published|released|verified|validated|tested|checked|completed|done)(?:\s+successfully)?[.!]?$`)
 
+var fallbackExitResultPattern = regexp.MustCompile(`^(?:(?:exit|return)\s+(?:code|status)|(?:the\s+)?(?:process|command|run|execution|step|attempt)\s+(?:exited|returned)\s+(?:with\s+)?(?:exit\s+)?(?:code|status))\s*(?:of\s+)?[:=]?\s*([+-]?[0-9]+)\s*$`)
+
 var resultSubjectBoundary = regexp.MustCompile(`\b(?:is|are|was|were|remain|remains|need|needs|still|got|completed|succeeded|explains)\b`)
 
 // Relate the grammatical subject to the obligation and its material objects,
@@ -2163,7 +2171,7 @@ func fallbackResultIsRelated(failed, next string) bool {
 	if containsAlternativeTerm(subject, []string{"i", "we"}) {
 		return true
 	}
-	if containsAlternativeTerm(subject, []string{"it", "that", "this", "they", "run", "check"}) {
+	if containsAlternativeTerm(subject, []string{"it", "that", "this", "they", "run", "check", "process", "command", "execution", "operation", "attempt", "result"}) {
 		if containsAlternativeTerm(next, []string{"documented", "documentation", "readme"}) &&
 			!containsAlternativeTerm(failed, []string{"document", "documentation"}) {
 			return false
