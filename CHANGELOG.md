@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once the first release is
 tagged. Until then, source builds report the version `dev`.
 
+## [0.14.0](https://github.com/Twigpine/zero/compare/v0.13.0...v0.14.0) (2026-11-14)
+
+
+### Features
+
+* **memory:** durable note store and memory tool ([#1224](https://github.com/Twigpine/zero/issues/1224)) ([ffd7bb2](https://github.com/Twigpine/zero/commit/ffd7bb21798919f5f975fd5886a6c099be0be64a))
+
+
+### Bug Fixes
+
+* **agent:** stop a denied tool looping past the repeated-failure halt ([#866](https://github.com/Twigpine/zero/issues/866)) ([b32f7ce](https://github.com/Twigpine/zero/commit/b32f7ce4d6e21a5cae1fb4d63079cd0ff7b54886))
+* bump Go to 1.26.11 for GO-2026-6859 ([#1218](https://github.com/Twigpine/zero/issues/1218)) ([9117d77](https://github.com/Twigpine/zero/commit/9117d77cd8c9254948a93d7f2acdbf36aa7ca51c))
+* **codex:** forward tool input that only arrives whole on an output item ([#1215](https://github.com/Twigpine/zero/issues/1215)) ([15ff170](https://github.com/Twigpine/zero/commit/15ff1704a4c1807f6ad9fe68ef87c510cdb31e18)), closes [#1194](https://github.com/Twigpine/zero/issues/1194)
+* **mcp:** scrub the injected AI/ML API key from server responses ([#1197](https://github.com/Twigpine/zero/issues/1197)) ([8e9c3ec](https://github.com/Twigpine/zero/commit/8e9c3ec4ce385a69e1ae831df24981eee6dc5ebd))
+* **tools:** publish file writes atomically instead of truncating in place ([#1214](https://github.com/Twigpine/zero/issues/1214)) ([88ec97d](https://github.com/Twigpine/zero/commit/88ec97d5630be8721e0a3d956f5b198868d0da84))
+* **update:** authenticate GitHub release checks (supersedes [#504](https://github.com/Twigpine/zero/issues/504)) ([#1216](https://github.com/Twigpine/zero/issues/1216)) ([17fcd26](https://github.com/Twigpine/zero/commit/17fcd26602dc685fd1596739c4d718932d856d9e))
+
+
+### Performance Improvements
+
+* **tui:** cache transcript row renders, grow caches with the live tail, and scan the provider catalog without cloning ([#1223](https://github.com/Twigpine/zero/issues/1223)) ([426867d](https://github.com/Twigpine/zero/commit/426867ddd4c7a2e07376ab0113de169c418538ab))
+
 ## [0.13.0](https://github.com/Twigpine/zero/compare/v0.12.0...v0.13.0) (2026-11-09)
 
 
