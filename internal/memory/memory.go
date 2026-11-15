@@ -909,6 +909,13 @@ func trackedStoreEntries(repo, dir string) ([]string, error) {
 		}
 		return nil, err
 	}
+	// Some Git versions report an unreadable sparse tree on stderr but return
+	// success with no entries. That is not proof of privacy. Harmless sparse
+	// expansion advice is suppressed by the fixed query; other diagnostics fail
+	// closed just like a nonzero exit.
+	if detail := singleLine(stderr.String()); detail != "" {
+		return nil, fmt.Errorf("git index query emitted diagnostics: %s", detail)
+	}
 	entries := make([]string, 0, 4)
 	prefix := filepath.ToSlash(relative)
 	if prefix == "." {
