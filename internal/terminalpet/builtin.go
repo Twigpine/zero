@@ -199,8 +199,8 @@ type builtinFrame struct {
 	pixels *image.NRGBA
 }
 
-// draw paints the frame. The renderer calls it once per frame and keeps only
-// its own encoding, so nothing is retained here.
+// draw paints the frame and keeps nothing. Callers cache what they make from
+// it: framePNG keeps the encoded PNG, so a frame shown again is not redrawn.
 func (f *builtinFrame) draw() *image.NRGBA {
 	picture := petart.ImageWithHeadroom(f.form, f.mood, f.seconds, builtinArtHeight, builtinHeadroom)
 	if f.mirror {

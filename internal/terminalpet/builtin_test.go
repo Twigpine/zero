@@ -167,6 +167,16 @@ func TestBuiltinFramePicturesAreNotRetainedAfterEncoding(t *testing.T) {
 	if got := drawnFrame(animation.Frame(Running, 2)); got.Bounds() != image.Rect(0, 0, 192, 208) {
 		t.Errorf("drawnFrame bounds = %v", got.Bounds())
 	}
+	// A frame that is already encoded is served from the cache without being
+	// drawn again. Drawing one allocates its 160 KB picture, so a repeat
+	// request that allocates almost nothing proves no draw happened.
+	if allocs := testing.AllocsPerRun(5, func() {
+		if _, _, err := animation.framePNG(Running, 2); err != nil {
+			t.Fatal(err)
+		}
+	}); allocs > 2 {
+		t.Errorf("a cached frame allocated %.0f times per request: it was drawn again", allocs)
+	}
 	plain := image.NewNRGBA(image.Rect(0, 0, 2, 2))
 	if drawnFrame(plain) != image.Image(plain) {
 		t.Error("drawnFrame changed a frame that is not built in")
