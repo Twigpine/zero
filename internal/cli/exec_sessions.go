@@ -67,7 +67,7 @@ func preflightExecSession(options execOptions) error {
 		if session == nil {
 			return execUsageError{"Zero session not found: " + options.resume}
 		}
-		if !sessions.IsResumableKind(session.SessionKind) {
+		if !sessions.ExecResumable(*session, options.callingSessionID, options.tag) {
 			return execUsageError{"Zero session is not resumable: " + options.resume}
 		}
 	case options.resumeLatest:
