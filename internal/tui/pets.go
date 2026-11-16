@@ -88,7 +88,17 @@ func (m model) handlePetsCommand(argument string) (tea.Model, tea.Cmd) {
 		m.petTickSeq++
 		return m.showTransientNoticeInline("Terminal companion hidden. Run /pets to choose another.", transientNoticeInfo), nil
 	}
+	if entry, ok := terminalpet.ResolveBuiltin(argument); ok {
+		// Built-in companions need no catalog, so they can be chosen offline.
+		// An installed pet with that exact slug keeps the name it already
+		// answered to; the built-in is then chosen from the picker.
+		if installed, err := m.petClient.InstalledEntry(argument); err != nil || installed.Builtin {
+			m.petEntries = map[string]terminalpet.Entry{entry.Slug: entry}
+			return m.installPet(entry.Slug)
+		}
+	}
 	m.petRequestedSlug = argument
+	m.petCatalogError = ""
 	localEntries, _ := m.petClient.InstalledEntries()
 	var items []pickerItem
 	m.petEntries, items = petPickerItems(localEntries)
@@ -114,6 +124,12 @@ func (m model) applyPetCatalog(msg petCatalogLoadedMsg) (tea.Model, tea.Cmd) {
 	}
 	var items []pickerItem
 	m.petEntries, items = petPickerItems(msg.entries)
+	m.petCatalogError = ""
+	if msg.err != nil {
+		// The built-in and installed companions are still listed, so say why
+		// the rest are missing instead of failing the whole picker.
+		m.petCatalogError = "Community catalog unavailable"
+	}
 	if requested := strings.TrimSpace(m.petRequestedSlug); requested != "" {
 		m.petRequestedSlug = ""
 		if requested == terminalpet.DisabledID {
@@ -121,6 +137,10 @@ func (m model) applyPetCatalog(msg petCatalogLoadedMsg) (tea.Model, tea.Cmd) {
 		}
 		if _, ok := m.petEntries[requested]; !ok {
 			m.picker = nil
+			if msg.err != nil {
+				// The pet may well exist: the catalog that would list it did not load.
+				return m.appendSystemNotice("Could not load the pet catalog: " + msg.err.Error()), nil
+			}
 			return m.appendSystemNotice(fmt.Sprintf("No pet named %q. Run /pets to search the catalog.", requested)), nil
 		}
 		return m.installPet(requested)
@@ -141,7 +161,10 @@ func petPickerItems(entries []terminalpet.Entry) (map[string]terminalpet.Entry, 
 	for _, entry := range entries {
 		entryBySlug[entry.Slug] = entry
 		group := "Discover"
-		if entry.Local {
+		switch {
+		case entry.Builtin:
+			group = "Built in"
+		case entry.Local:
 			group = "Installed"
 		}
 		items = append(items, pickerItem{Group: group, Label: entry.Label(), Value: entry.Slug, Local: entry.Local, Remote: !entry.Local})
@@ -329,9 +352,13 @@ func (m model) petPickerOverlay(width int) string {
 			lines = append(lines, listLine(surface(zeroTheme.accent).Render(marker)+surface(zeroTheme.ink).Render(name)))
 		}
 	}
-	if m.picker.loading {
+	switch {
+	case m.picker.loading:
 		lines = append(lines, listLine(zeroTheme.accent.Render("Discover")))
 		lines = append(lines, listLine(zeroTheme.faint.Render("  Fetching companions…")))
+	case m.petCatalogError != "":
+		lines = append(lines, listLine(zeroTheme.accent.Render("Discover")))
+		lines = append(lines, listLine(zeroTheme.faint.Render("  "+m.petCatalogError)))
 	}
 	if sidePreview && m.petPreview != nil {
 		for len(lines)-listStartRow < petImageRows {

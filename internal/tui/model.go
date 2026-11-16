@@ -180,6 +180,7 @@ type model struct {
 	petPreview                    *terminalpet.Animation
 	petPreviewSlug                string
 	petPreviewError               string
+	petCatalogError               string
 	petPreviewLoading             bool
 	petPreviewSeq                 uint64
 	petPreviewCancel              context.CancelFunc

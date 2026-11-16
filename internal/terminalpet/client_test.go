@@ -59,6 +59,7 @@ func TestCatalogPreviewInstallAndOfflineReload(t *testing.T) {
 	root := t.TempDir()
 	client := testClient(t, root, server)
 	entries, err := client.Catalog(context.Background())
+	entries = communityEntries(t, entries)
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("Catalog() = %#v, %v", entries, err)
 	}
@@ -82,6 +83,7 @@ func TestCatalogPreviewInstallAndOfflineReload(t *testing.T) {
 	}
 	server.Close()
 	offlineEntries, err := client.Catalog(context.Background())
+	offlineEntries = communityEntries(t, offlineEntries)
 	if err != nil || len(offlineEntries) != 1 || !offlineEntries[0].Local {
 		t.Fatalf("offline Catalog() = %#v, %v", offlineEntries, err)
 	}
@@ -285,7 +287,7 @@ func TestCatalogOrdersRankedPetsBeforeAlphabeticalRemainder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := entrySlugs(entries); !slices.Equal(got, []string{"zeta", "alpha", "beta"}) {
+	if got := entrySlugs(communityEntries(t, entries)); !slices.Equal(got, []string{"zeta", "alpha", "beta"}) {
 		t.Fatalf("ranked catalog = %v", got)
 	}
 
@@ -295,7 +297,7 @@ func TestCatalogOrdersRankedPetsBeforeAlphabeticalRemainder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := entrySlugs(entries); !slices.Equal(got, []string{"alpha", "beta", "zeta"}) {
+	if got := entrySlugs(communityEntries(t, entries)); !slices.Equal(got, []string{"alpha", "beta", "zeta"}) {
 		t.Fatalf("fallback catalog = %v", got)
 	}
 }
