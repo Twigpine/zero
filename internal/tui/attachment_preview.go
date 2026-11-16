@@ -37,7 +37,7 @@ func (m model) attachmentThumbnailVisible(width int) bool {
 }
 
 func (m model) attachmentThumbnailSlots(width int) int {
-	innerWidth := maxInt(1, width-m.petComposerReservedColumns(width)-4)
+	innerWidth := m.composerInnerWidth(width)
 	slots := maxInt(1, innerWidth/(attachmentPreviewCols+1))
 	return min(attachmentPreviewMaxImages, min(slots, len(m.attachmentRenderers)))
 }

@@ -2018,3 +2018,51 @@ func TestTextPetChosenInANarrowWindowSaysWhenItShows(t *testing.T) {
 		t.Fatalf("no explanation for the missing companion:\n%s", plain)
 	}
 }
+
+func TestComposerClicksAndArrowsFollowTheRowsBesideACompanion(t *testing.T) {
+	m := textPetModel(t)
+	m.width = 80
+	words := make([]string, 0, 50)
+	for index := 0; index < 50; index++ {
+		words = append(words, fmt.Sprintf("w%02d", index))
+	}
+	text := strings.Join(words, " ")
+	m.setComposerState(composerState{text: text, cursor: 0})
+	if !m.petLayoutActive() || m.petComposerReservedColumns(m.width) == 0 {
+		t.Fatal("test setup: no docked companion beside the composer")
+	}
+	// The composer must wrap differently with and without the companion's
+	// columns, or a wrong width would map clicks the same way.
+	full := composerWrappedVisualLines(m.input, m.currentComposerState(), maxInt(1, m.width-4))
+	narrow := composerWrappedVisualLines(m.input, m.currentComposerState(), m.composerInnerWidth(m.width))
+	if len(full) == len(narrow) {
+		t.Fatalf("test setup: %d rows at both widths", len(full))
+	}
+
+	lines := strings.Split(plainRender(t, m.View().Content), "\n")
+	width := m.chatColumnWidth()
+	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
+	// The composer's second text row, below its top border and first row. It
+	// is drawn from the narrow wrap: it starts where that wrap's second
+	// segment starts.
+	row := frame.composerRect.y + 2
+	start := narrow[1].start
+	opening := text[start : start+6]
+	column := strings.Index(lines[row], opening)
+	if column < 0 {
+		t.Fatalf("test setup: composer row %q does not start with %q", lines[row], opening)
+	}
+	column = len([]rune(lines[row][:column]))
+
+	// A click on the row's first character puts the cursor there.
+	position, ok := m.composerPositionAtMouse(testMouseClick(tea.MouseLeft, column, row))
+	if !ok || position != start {
+		t.Fatalf("click on %q at column %d gave cursor %d (%v), want %d", opening, column, position, ok, start)
+	}
+
+	// Down from the start of the text moves to the start of the drawn second row.
+	moved, ok := m.moveComposerVisualCursor(1)
+	if !ok || moved.currentComposerState().cursor != start {
+		t.Fatalf("Down moved the cursor to %d (%v), want %d, the start of the second row", moved.currentComposerState().cursor, ok, start)
+	}
+}

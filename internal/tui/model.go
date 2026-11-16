@@ -4546,7 +4546,7 @@ func (m model) moveComposerVisualCursor(direction int) (model, bool) {
 	}
 	previews := validComposerPastePreviews(state, m.composerPastePreviews)
 	displayState := composerDisplayStateForPastePreviews(state, previews)
-	segments := composerWrappedVisualLines(input, displayState, maxInt(1, width-4))
+	segments := composerWrappedVisualLines(input, displayState, m.composerInnerWidth(width))
 	if len(segments) <= 1 {
 		return m, false
 	}
@@ -4641,13 +4641,21 @@ func commandArgumentHintForInput(value string) string {
 	return commandRequiredInputHint(command.name)
 }
 
+// composerInnerWidth is the width the composer wraps its text at: the box
+// less its borders and padding, and less the columns a docked companion
+// takes. Drawing, mouse hit-testing and Up/Down movement must all use it, or
+// a click or arrow lands on a different wrapped row than the one drawn.
+func (m model) composerInnerWidth(width int) int {
+	return maxInt(1, width-m.petComposerReservedColumns(width)-4)
+}
+
 func (m model) composerBox(width int) string {
 	if width < 8 {
 		return fitStyledLine(m.composerLine(width), width)
 	}
 	reserved := m.petComposerReservedColumns(width)
 	boxWidth := width - reserved
-	innerWidth := maxInt(1, boxWidth-4)
+	innerWidth := m.composerInnerWidth(width)
 	content := m.composerLine(innerWidth)
 	lines := strings.Split(content, "\n")
 	rightPad := strings.Repeat(" ", reserved)
