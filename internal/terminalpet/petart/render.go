@@ -3,6 +3,8 @@ package petart
 import (
 	"image"
 	"math"
+	"strconv"
+	"strings"
 )
 
 const (
@@ -74,6 +76,137 @@ func Render(form Form, mood Mood, seconds, scale float64) Frame {
 // Sprite draws the 24x20 frame used for half-block cells.
 func Sprite(form Form, mood Mood, seconds float64) Frame {
 	return Render(form, mood, seconds, SpriteScale)
+}
+
+// RenderWithHeadroom is Render with headroom empty rows above the character,
+// so the frame is that many pixels taller. The design space has no room above
+// the head, and a hopping character would otherwise lose its hat to the top
+// edge.
+func RenderWithHeadroom(form Form, mood Mood, seconds, scale float64, headroom int) Frame {
+	g := draw(form, mood, seconds, scale, max(0, headroom))
+	pixels, _ := g.finish(max(1, int(jsRound(scale))))
+	return Frame{Width: g.width, Height: g.height, Pixels: pixels}
+}
+
+// Mirror flips the frame left to right in place.
+func (f Frame) Mirror() {
+	for y := 0; y < f.Height; y++ {
+		line := f.Pixels[y*f.Width : (y+1)*f.Width]
+		for left, right := 0, len(line)-1; left < right; left, right = left+1, right-1 {
+			line[left], line[right] = line[right], line[left]
+		}
+	}
+}
+
+// HalfBlockLines turns a frame into terminal lines of 24-bit colour. Each cell
+// shows two stacked pixels with an upper or lower half block, and transparent
+// pixels stay as spaces so the terminal background shows through. Every line
+// ends with a style reset.
+func HalfBlockLines(frame Frame) []string {
+	return halfBlockLines(frame, func(selector int, key byte) string {
+		c := palette[key]
+		return sgrColor(selector, c.R, c.G, c.B)
+	})
+}
+
+// HalfBlockLines256 is HalfBlockLines for terminals with 256 colours. Left to
+// a generic conversion, several colours land on the wrong hue (Twig's brown
+// fur turns mauve, Ember's red wings brown), so every palette colour has its
+// own 256-colour value; see palette256.
+func HalfBlockLines256(frame Frame) []string {
+	return halfBlockLines(frame, func(selector int, key byte) string {
+		return strconv.Itoa(selector) + ";5;" + strconv.Itoa(int(palette256[key]))
+	})
+}
+
+// palette256 is, for each palette colour, the closest xterm colour by
+// CIEDE2000 colour difference, which follows how people see colour far better
+// than distance in RGB. It chooses from colours 16 to 255 only: terminals
+// theme 0 to 15 freely, so those could be anything.
+var palette256 = map[byte]uint8{
+	'K': 234,
+	'B': 130,
+	'b': 137,
+	'D': 52,
+	'C': 222,
+	'E': 233,
+	'W': 231,
+	'N': 236,
+	'P': 210,
+	'G': 22,
+	'g': 71,
+	'R': 167,
+	'S': 223,
+	'H': 94,
+	'Y': 221,
+	'X': 252,
+	'p': 141,
+	'Q': 92,
+	'w': 255,
+	'n': 237,
+	'M': 59,
+	'V': 25,
+	'd': 209,
+	'o': 209,
+	'F': 160,
+	'O': 215,
+	'A': 221,
+	'u': 117,
+	'U': 68,
+	'T': 37,
+	't': 79,
+	'L': 234,
+	'l': 59,
+	'h': 251,
+	'a': 244,
+	'c': 45,
+}
+
+func halfBlockLines(frame Frame, color func(selector int, key byte) string) []string {
+	lines := make([]string, 0, (frame.Height+1)/2)
+	for y := 0; y < frame.Height; y += 2 {
+		var line strings.Builder
+		styled := false
+		lastStyle := ""
+		for x := 0; x < frame.Width; x++ {
+			top := frame.Pixels[y*frame.Width+x]
+			bottom := byte(transparent)
+			if y+1 < frame.Height {
+				bottom = frame.Pixels[(y+1)*frame.Width+x]
+			}
+			_, hasTop := Color(top)
+			_, hasBottom := Color(bottom)
+			style, glyph := "", " "
+			switch {
+			case hasTop && hasBottom:
+				style = "\x1b[0;" + color(38, top) + ";" + color(48, bottom) + "m"
+				glyph = "▀"
+			case hasTop:
+				style = "\x1b[0;" + color(38, top) + "m"
+				glyph = "▀"
+			case hasBottom:
+				style = "\x1b[0;" + color(38, bottom) + "m"
+				glyph = "▄"
+			default:
+				style = "\x1b[0m"
+			}
+			if style != lastStyle && (styled || style != "\x1b[0m") {
+				line.WriteString(style)
+				styled = true
+			}
+			lastStyle = style
+			line.WriteString(glyph)
+		}
+		if styled && lastStyle != "\x1b[0m" {
+			line.WriteString("\x1b[0m")
+		}
+		lines = append(lines, line.String())
+	}
+	return lines
+}
+
+func sgrColor(selector int, r, g, b uint8) string {
+	return strconv.Itoa(selector) + ";2;" + strconv.Itoa(int(r)) + ";" + strconv.Itoa(int(g)) + ";" + strconv.Itoa(int(b))
 }
 
 // Image draws one frame as a picture height pixels tall (the width keeps the

@@ -83,6 +83,32 @@ func (a *Animation) Frame(state State, phase int) image.Image {
 	return frame
 }
 
+// Has reports whether the animation has frames of its own for state. Frame
+// shows the idle loop for any state the animation lacks.
+func (a *Animation) Has(state State) bool {
+	return a != nil && len(a.frames[state]) > 0
+}
+
+// HasText reports whether the animation can be drawn as text, for terminals
+// that cannot show images. Only built-in companions can.
+func (a *Animation) HasText() bool {
+	frame, _ := a.frame(Idle, 0)
+	_, ok := frame.(*builtinFrame)
+	return ok
+}
+
+// TextFrame returns one frame as TextRows lines of styled text, TextColumns
+// cells wide, in the given colour depth. The boolean is false for animations
+// made from pictures, which have no text form.
+func (a *Animation) TextFrame(state State, phase int, colors TextColors) ([]string, bool) {
+	frame, _ := a.frame(state, phase)
+	builtin, ok := frame.(*builtinFrame)
+	if !ok {
+		return nil, false
+	}
+	return builtin.textLines(colors), true
+}
+
 func (a *Animation) FrameDelay(state State, phase int) time.Duration {
 	if a == nil {
 		return 0
