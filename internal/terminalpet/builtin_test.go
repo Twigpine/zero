@@ -9,7 +9,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -215,7 +217,7 @@ func TestBuiltinAnimationCoversEveryState(t *testing.T) {
 		t.Fatal("BuiltinAnimation returned an animation for an unknown form")
 	}
 	frameSize := image.Rect(0, 0, 192, 208)
-	for _, state := range []State{Idle, MoveRight, MoveLeft, Waving, Jumping, Running, Waiting, Review, Failed, Dance, Lunge} {
+	for _, state := range []State{Idle, MoveRight, MoveLeft, Waving, Jumping, Running, Waiting, Review, Failed, Dance, Lunge, Thinking, Sleeping} {
 		frame := animation.Frame(state, 0)
 		// The frame must match a pet atlas frame, which the layout assumes.
 		if frame == nil || frame.Bounds() != frameSize {
@@ -226,7 +228,7 @@ func TestBuiltinAnimationCoversEveryState(t *testing.T) {
 		}
 	}
 	// Loops never settle; one-shot states play for their length and then idle.
-	for _, state := range []State{Idle, Running, Waiting, MoveLeft, MoveRight} {
+	for _, state := range []State{Idle, Running, Waiting, MoveLeft, MoveRight, Thinking, Sleeping} {
 		if got := animation.PrimaryDuration(state); got != 0 {
 			t.Errorf("%s should loop, PrimaryDuration = %v", state, got)
 		}
@@ -316,5 +318,109 @@ func TestBuiltinFramesDrawTheCharacterWithHeadroom(t *testing.T) {
 		if left.At(at.X, at.Y) != right.At(191-at.X, at.Y) {
 			t.Errorf("MoveRight is not MoveLeft mirrored at %v", at)
 		}
+	}
+}
+
+func TestBuiltinTextFramesFitTheTextSlot(t *testing.T) {
+	sgr := regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	states := []State{Idle, MoveRight, MoveLeft, Waving, Jumping, Running, Waiting, Review, Failed, Dance, Lunge, Thinking, Sleeping}
+	for _, form := range petart.Forms() {
+		animation := BuiltinAnimation(form)
+		if !animation.HasText() {
+			t.Fatalf("%s has no text form", form)
+		}
+		for _, state := range states {
+			for _, phase := range []int{0, 3, 17} {
+				for _, colors := range []TextColors{TextTrueColor, Text256} {
+					lines, ok := animation.TextFrame(state, phase, colors)
+					if !ok || len(lines) != TextRows {
+						t.Fatalf("%s/%s phase %d: %d text lines, ok=%v", form, state, phase, len(lines), ok)
+					}
+					drawn := 0
+					for index, line := range lines {
+						cells := []rune(sgr.ReplaceAllString(line, ""))
+						if len(cells) != TextColumns {
+							t.Fatalf("%s/%s line %d is %d cells wide, want %d", form, state, index, len(cells), TextColumns)
+						}
+						for _, cell := range cells {
+							if cell != ' ' {
+								drawn++
+							}
+						}
+					}
+					if drawn < 40 {
+						t.Errorf("%s/%s phase %d: only %d cells drawn", form, state, phase, drawn)
+					}
+				}
+			}
+		}
+	}
+
+	// Each colour depth uses its own codes, for the same picture.
+	truecolor, _ := BuiltinAnimation(petart.Twig).TextFrame(Idle, 0, TextTrueColor)
+	limited, _ := BuiltinAnimation(petart.Twig).TextFrame(Idle, 0, Text256)
+	if !strings.Contains(strings.Join(truecolor, ""), ";2;") || strings.Contains(strings.Join(limited, ""), ";2;") ||
+		!strings.Contains(strings.Join(limited, ""), "38;5;") {
+		t.Error("text frames do not use the colour codes of their depth")
+	}
+	if sgr.ReplaceAllString(strings.Join(truecolor, "\n"), "") != sgr.ReplaceAllString(strings.Join(limited, "\n"), "") {
+		t.Error("the 256-colour frame draws a different picture")
+	}
+
+	animation := BuiltinAnimation(petart.Twig)
+	first, _ := animation.TextFrame(Running, 2, TextTrueColor)
+	again, _ := animation.TextFrame(Running, 2, TextTrueColor)
+	if &first[0] != &again[0] {
+		t.Error("a text frame was drawn twice")
+	}
+	// The top pixel row is headroom: tall parts such as Robin's feather reach
+	// it, and a hop rises into it instead of being cut off. A cell whose top
+	// pixel is drawn is an upper half block, so Merlin standing has none on
+	// the first line and has some at the top of a hop.
+	if standing, _ := BuiltinAnimation(petart.Merlin).TextFrame(Idle, 0, TextTrueColor); strings.Contains(sgr.ReplaceAllString(standing[0], ""), "▀") {
+		t.Errorf("Merlin standing fills the headroom: %q", sgr.ReplaceAllString(standing[0], ""))
+	}
+	hopped := false
+	for phase := 0; phase < 23 && !hopped; phase++ {
+		frame, _ := BuiltinAnimation(petart.Merlin).TextFrame(Jumping, phase, TextTrueColor)
+		hopped = strings.Contains(sgr.ReplaceAllString(frame[0], ""), "▀")
+	}
+	if !hopped {
+		t.Error("Merlin never rises into the headroom while celebrating")
+	}
+	// Dragging right shows the mirror image of dragging left.
+	left, _ := animation.TextFrame(MoveLeft, 3, TextTrueColor)
+	right, _ := animation.TextFrame(MoveRight, 3, TextTrueColor)
+	if strings.Join(left, "\n") == strings.Join(right, "\n") {
+		t.Error("MoveRight text is not mirrored")
+	}
+}
+
+func TestPictureAnimationsHaveNoTextOrExtraStates(t *testing.T) {
+	sheet, err := png.Decode(bytes.NewReader(encodedPNG(t, 24*atlasColumns, 26*9)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	atlas, err := AtlasAnimation(sheet, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if atlas.HasText() {
+		t.Error("an atlas pet reports a text form")
+	}
+	if lines, ok := atlas.TextFrame(Idle, 0, TextTrueColor); ok || lines != nil {
+		t.Errorf("TextFrame for an atlas pet = %v, %v", lines, ok)
+	}
+	// Agents fall back to Running and Idle for pets without these states.
+	if atlas.Has(Thinking) || atlas.Has(Sleeping) || !atlas.Has(Running) || !atlas.Has(Idle) {
+		t.Errorf("atlas Has: thinking=%v sleeping=%v running=%v idle=%v",
+			atlas.Has(Thinking), atlas.Has(Sleeping), atlas.Has(Running), atlas.Has(Idle))
+	}
+	var none *Animation
+	if none.Has(Idle) || none.HasText() {
+		t.Error("a nil animation reports frames")
+	}
+	if !BuiltinAnimation(petart.Ember).Has(Thinking) || !BuiltinAnimation(petart.Ember).Has(Sleeping) {
+		t.Error("built-in companions lack the thinking and sleeping states")
 	}
 }

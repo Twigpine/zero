@@ -18,11 +18,40 @@ import (
 // list of companions, even when a community pet has the same name.
 const builtinSlugPrefix = "zero:"
 
-// Dance and Lunge are extra states that only built-in companions have. They
-// play when the companion is clicked.
+// Extra states the built-in companions have. Dance and Lunge play when the
+// companion is clicked. Thinking and Sleeping are agent states: pets without
+// those animations show Running and Idle instead (see Animation.Has), and a
+// community pet whose pet.json defines them gets them too.
 const (
-	Dance State = "dance"
-	Lunge State = "lunge"
+	Dance    State = "dance"
+	Lunge    State = "lunge"
+	Thinking State = "thinking"
+	Sleeping State = "sleeping"
+)
+
+const (
+	// TextColumns and TextRows are the terminal cells a built-in companion
+	// fills when it is drawn as text, for terminals that cannot show images.
+	TextColumns = 18
+	TextRows    = 8
+
+	// textScale draws the 48x40 design at 18x15 pixels. Half-block cells
+	// stack two pixels each, and one empty pixel row on top leaves room for
+	// a hop: 18x16 pixels in 18x8 cells.
+	textScale    = 0.375
+	textHeadroom = 1
+)
+
+// TextColors is the colour depth text frames are drawn for.
+type TextColors uint8
+
+const (
+	// TextTrueColor draws with the art's exact 24-bit colours.
+	TextTrueColor TextColors = iota
+	// Text256 draws with a fixed 256-colour palette, the nearest colour to
+	// each art colour by CIEDE2000, which keeps hues a generic conversion
+	// would lose.
+	Text256
 )
 
 const (
@@ -114,6 +143,8 @@ var (
 		Idle:      {mood: petart.Idle, start: builtinBlinkSkip, length: 5750 * time.Millisecond, loop: true},
 		Running:   {mood: petart.Working, length: 3100 * time.Millisecond, loop: true},
 		Waiting:   {mood: petart.Waiting, start: builtinBlinkSkip, length: 2900 * time.Millisecond, loop: true},
+		Thinking:  {mood: petart.Thinking, length: 6400 * time.Millisecond, loop: true},
+		Sleeping:  {mood: petart.Sleeping, length: 5200 * time.Millisecond, loop: true},
 		Review:    {mood: petart.Happy, length: 1900 * time.Millisecond},
 		Failed:    {mood: petart.Sad, length: 1800 * time.Millisecond},
 		Waving:    {mood: petart.Hello, length: 2400 * time.Millisecond},
@@ -197,6 +228,7 @@ type builtinFrame struct {
 
 	mu     sync.Mutex
 	pixels *image.NRGBA
+	text   [2][]string
 }
 
 // draw paints the frame and keeps nothing. Callers cache what they make from
@@ -218,6 +250,30 @@ func (f *builtinFrame) rendered() *image.NRGBA {
 		f.pixels = f.draw()
 	}
 	return f.pixels
+}
+
+// textLines draws the frame as terminal text, once per colour depth, and
+// keeps it: a frame of text is a few kilobytes, and text frames are redrawn
+// on every repaint.
+func (f *builtinFrame) textLines(colors TextColors) []string {
+	slot := 0
+	if colors == Text256 {
+		slot = 1
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.text[slot] == nil {
+		frame := petart.RenderWithHeadroom(f.form, f.mood, f.seconds, textScale, textHeadroom)
+		if f.mirror {
+			frame.Mirror()
+		}
+		if slot == 1 {
+			f.text[slot] = petart.HalfBlockLines256(frame)
+		} else {
+			f.text[slot] = petart.HalfBlockLines(frame)
+		}
+	}
+	return f.text[slot]
 }
 
 // drawnFrame returns a picture an encoder can read directly: built-in frames

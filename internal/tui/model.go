@@ -15,6 +15,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/colorprofile"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 
@@ -191,6 +192,8 @@ type model struct {
 	petClickAnimationIndex        int
 	petOutcome                    terminalpet.State
 	petOutcomeAt                  time.Time
+	petLastActiveAt               time.Time
+	petColorProfile               colorprofile.Profile
 	petLayoutRendering            bool
 	petPositionSet                bool
 	petPositionX                  int
@@ -1115,6 +1118,7 @@ func newModel(ctx context.Context, options Options) model {
 				if entry, entryErr := m.petClient.InstalledEntry(m.petID); entryErr == nil {
 					m.petName = entry.Label()
 				}
+				m.greetWithPet()
 			}
 		}
 	}
@@ -1692,6 +1696,7 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.burstCount = 0
 		}
 		m.lastKeyTime = now
+		m.petLastActiveAt = now
 		if !keyIs(msg, tea.KeyEnter) {
 			m.lastCharTime = now
 		}
@@ -2734,12 +2739,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.clearStreamingToolCall() // active run finished — drop any lingering "writing" block
-		if msg.err != nil {
-			m.petOutcome = terminalpet.Failed
-		} else {
-			m.petOutcome = terminalpet.Review
-		}
-		m.petOutcomeAt = m.now()
+		finishedAt := m.now()
+		m.petOutcome = m.petTurnOutcome(msg.err, finishedAt)
+		m.petOutcomeAt = finishedAt
+		m.petLastActiveAt = finishedAt
 		m.pending = false
 		m = m.disarmCancelConfirmation() // the run finished on its own — nothing left to confirm cancelling
 		// A newline-triggered redraw deferred by the stream-clear throttle
@@ -3212,6 +3215,9 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.applySetupOAuthDeviceCode(msg)
 	case modelPickerModelsDiscoveredMsg:
 		return m.applyModelPickerModelsDiscovered(msg), nil
+	case tea.ColorProfileMsg:
+		m.petColorProfile = msg.Profile
+		return m, nil
 	case petCatalogLoadedMsg:
 		return m.applyPetCatalog(msg)
 	case petPreviewDebounceMsg:
@@ -3462,27 +3468,29 @@ func (m model) footerView(width int) string {
 	// a faint idle affordance — discoverable key hints on the left, a jump-to-bottom
 	// cue on the right when scrolled up. Always one line (blank when nothing shows),
 	// so the footer height is unchanged.
+	// A docked text companion stands beside these rows, so they end before it.
+	lineWidth := width - m.petTextReservedColumns(width)
 	if copyStatus := strings.TrimSpace(m.copyStatus); copyStatus != "" {
-		footer.WriteString(rightAlignedLine(zeroTheme.ink.Render(copyStatus), width))
-	} else if notice := m.transientNoticeLine(width); notice != "" {
+		footer.WriteString(rightAlignedLine(zeroTheme.ink.Render(copyStatus), lineWidth))
+	} else if notice := m.transientNoticeLine(lineWidth); notice != "" {
 		footer.WriteString(notice)
 	} else if recap := strings.TrimSpace(m.idleRecap); recap != "" {
-		footer.WriteString(fitStyledLine("  "+zeroTheme.faint.Render("※ "+recap), width))
+		footer.WriteString(fitStyledLine("  "+zeroTheme.faint.Render("※ "+recap), lineWidth))
 	} else if left, right := m.composerIdleHint(), m.jumpToBottomHint(); left != "" || right != "" {
-		footer.WriteString(fitStyledLine(joinHeaderLine("  "+left, right, width), width))
+		footer.WriteString(fitStyledLine(joinHeaderLine("  "+left, right, lineWidth), lineWidth))
 	}
 	footer.WriteString("\n")
 	// A message typed while a run is active is queued for the next turn; show its
 	// preview directly ABOVE the input box (not below), so it reads as "waiting to
 	// send" sitting on top of what you're currently typing.
-	if queued := renderQueuedMessagePreview(m.queuedMessage, width); queued != "" {
+	if queued := renderQueuedMessagePreview(m.queuedMessage, lineWidth); queued != "" {
 		footer.WriteString(queued)
 		footer.WriteString("\n")
 	}
 	footer.WriteString(m.composerBox(width))
 	footer.WriteString("\n")
 	footer.WriteString(m.footerStatusLine(width))
-	return footer.String()
+	return m.petTextShelf(footer.String())
 }
 
 // composerIdleHint returns a faint one-line key-shortcut hint shown above the
@@ -4538,7 +4546,7 @@ func (m model) moveComposerVisualCursor(direction int) (model, bool) {
 	}
 	previews := validComposerPastePreviews(state, m.composerPastePreviews)
 	displayState := composerDisplayStateForPastePreviews(state, previews)
-	segments := composerWrappedVisualLines(input, displayState, maxInt(1, width-4))
+	segments := composerWrappedVisualLines(input, displayState, m.composerInnerWidth(width))
 	if len(segments) <= 1 {
 		return m, false
 	}
@@ -4633,13 +4641,21 @@ func commandArgumentHintForInput(value string) string {
 	return commandRequiredInputHint(command.name)
 }
 
+// composerInnerWidth is the width the composer wraps its text at: the box
+// less its borders and padding, and less the columns a docked companion
+// takes. Drawing, mouse hit-testing and Up/Down movement must all use it, or
+// a click or arrow lands on a different wrapped row than the one drawn.
+func (m model) composerInnerWidth(width int) int {
+	return maxInt(1, width-m.petComposerReservedColumns(width)-4)
+}
+
 func (m model) composerBox(width int) string {
 	if width < 8 {
 		return fitStyledLine(m.composerLine(width), width)
 	}
 	reserved := m.petComposerReservedColumns(width)
 	boxWidth := width - reserved
-	innerWidth := maxInt(1, boxWidth-4)
+	innerWidth := m.composerInnerWidth(width)
 	content := m.composerLine(innerWidth)
 	lines := strings.Split(content, "\n")
 	rightPad := strings.Repeat(" ", reserved)
@@ -5631,6 +5647,7 @@ func (m model) beginRun(cancel context.CancelFunc) model {
 	m.runDetailsOpen = false
 	m.turnStartedAt = m.now()
 	m.turnTimer = newActiveTurnTimer(m.turnStartedAt)
+	m.petLastActiveAt = m.turnStartedAt
 	m.lastStreamActivity = m.turnStartedAt
 	m.turnStreamedRunes = 0
 	m.spinnerTicking = true
