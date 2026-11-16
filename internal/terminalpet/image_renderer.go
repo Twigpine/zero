@@ -204,7 +204,7 @@ func (r *ImageRenderer) Render(writer io.Writer) error {
 		}
 	case ImageProtocolSixel:
 		frame := r.desired.Animation.Frame(r.desired.State, r.desired.Phase)
-		sixel, err := renderSixel(frame, r.desired.HeightPixels)
+		sixel, err := renderSixel(drawnFrame(frame), r.desired.HeightPixels)
 		if err != nil {
 			return err
 		}

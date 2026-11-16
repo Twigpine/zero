@@ -118,10 +118,11 @@ func TestPetsPickerShowsLocalChoicesWhileDiscoverLoads(t *testing.T) {
 	if next.picker == nil || !next.picker.loading {
 		t.Fatalf("pet picker = %#v, want local rows plus loading state", next.picker)
 	}
-	want := []pickerItem{
-		{Label: "No companion", Value: terminalpet.DisabledID, Meta: "off"},
-		{Group: "Installed", Label: "Kratos Greek", Value: "kratos", Local: true},
+	want := []pickerItem{{Label: "No companion", Value: terminalpet.DisabledID, Meta: "off"}}
+	for _, entry := range terminalpet.BuiltinEntries() {
+		want = append(want, pickerItem{Group: "Built in", Label: entry.Label(), Value: entry.Slug, Local: true})
 	}
+	want = append(want, pickerItem{Group: "Installed", Label: "Kratos Greek", Value: "kratos", Local: true})
 	if !reflect.DeepEqual(next.picker.items, want) {
 		t.Fatalf("initial pet picker items = %#v, want %#v", next.picker.items, want)
 	}
@@ -129,7 +130,7 @@ func TestPetsPickerShowsLocalChoicesWhileDiscoverLoads(t *testing.T) {
 		t.Fatalf("initial pet picker selection = %#v, %v; want installed current pet", current, ok)
 	}
 	plain := plainRender(t, next.petPickerOverlay(next.width))
-	for _, wantText := range []string{"No companion", "Installed", "Kratos Greek", "Discover", "Fetching companions"} {
+	for _, wantText := range []string{"Installed", "Kratos Greek", "Discover", "Fetching companions"} {
 		if !strings.Contains(plain, wantText) {
 			t.Fatalf("loading pet picker missing %q:\n%s", wantText, plain)
 		}
@@ -1388,5 +1389,156 @@ func TestPetsCommandExplainsUnsupportedTerminal(t *testing.T) {
 	}
 	if got := plainRender(t, nextModel.View().Content); !strings.Contains(got, "Kitty graphics or Sixel") {
 		t.Fatalf("unsupported-terminal guidance is missing: %q", got)
+	}
+}
+
+func TestPetsCommandSelectsBuiltinCompanionByNameWithoutCatalog(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.json")
+	m := newModel(context.Background(), Options{UserConfigPath: configPath})
+	m.userConfigPath = configPath
+	// An unreachable catalog: choosing a built-in must not need it.
+	m.petClient.ManifestURL = "https://127.0.0.1:1/manifest"
+	m.petClient.RankingURL = "https://127.0.0.1:1/ranking"
+
+	updated, cmd := m.handlePetsCommand("  Twig ")
+	next := updated.(model)
+	if next.picker != nil || cmd == nil {
+		t.Fatalf("a built-in name should select directly: picker=%v cmd=%v", next.picker, cmd)
+	}
+	installed, ok := cmd().(petInstalledMsg)
+	if !ok || installed.err != nil || installed.animation == nil {
+		t.Fatalf("install message = %#v", installed)
+	}
+	updated, _ = next.applyPetInstall(installed)
+	next = updated.(model)
+	if next.petID != "zero:twig" || next.petName != "Twig" || next.petAnimation == nil {
+		t.Fatalf("selected pet: id=%q name=%q animation=%v", next.petID, next.petName, next.petAnimation)
+	}
+	saved, err := os.ReadFile(configPath)
+	if err != nil || !strings.Contains(string(saved), `"zero:twig"`) {
+		t.Fatalf("saved config = %q, %v", saved, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "pets")); !os.IsNotExist(err) {
+		t.Fatalf("selecting a built-in companion wrote pet files: %v", err)
+	}
+
+	// The saved choice comes back on the next start, again with no catalog.
+	restarted := newModel(context.Background(), Options{UserConfigPath: configPath, SavedPet: "zero:twig"})
+	if restarted.petAnimation == nil || restarted.petName != "Twig" {
+		t.Fatalf("restart did not restore the built-in companion: name=%q animation=%v", restarted.petName, restarted.petAnimation)
+	}
+}
+
+// installTestPet writes the marker of an installed community pet.
+func installTestPet(t *testing.T, root, slug, name string) {
+	t.Helper()
+	dir := filepath.Join(root, "pets", "installed", slug)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	metadata := fmt.Sprintf(`{"slug":%q,"displayName":%q,"kind":"character","submittedBy":"tester","spriteVersionNumber":1}`, slug, name)
+	if err := os.WriteFile(filepath.Join(dir, "source.json"), []byte(metadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// offlinePetModel has a pet client whose community catalog cannot be reached.
+func offlinePetModel(t *testing.T, root string) model {
+	t.Helper()
+	m := newModel(context.Background(), Options{UserConfigPath: filepath.Join(root, "config.json")})
+	m.width = 100
+	m.petClient.ManifestURL = "https://127.0.0.1:1/manifest"
+	m.petClient.RankingURL = "https://127.0.0.1:1/ranking"
+	return m
+}
+
+func TestPetsCommandKeepsInstalledPetThatSharesABuiltinName(t *testing.T) {
+	root := t.TempDir()
+	installTestPet(t, root, "twig", "Twig the bird")
+	m := offlinePetModel(t, root)
+
+	// The installed pet answered to this name before built-ins existed.
+	updated, _ := m.handlePetsCommand("twig")
+	next := updated.(model)
+	if next.picker == nil || next.petRequestedSlug != "twig" {
+		t.Fatalf("/pets twig did not go to the installed pet: picker=%v requested=%q", next.picker, next.petRequestedSlug)
+	}
+
+	// The built-in stays reachable by its own slug, and by name once nothing
+	// installed claims it.
+	updated, cmd := m.handlePetsCommand("zero:twig")
+	if next := updated.(model); next.picker != nil || cmd == nil {
+		t.Fatalf("/pets zero:twig should select the built-in directly: picker=%v", next.picker)
+	}
+	if installed := cmd().(petInstalledMsg); installed.entry.Slug != "zero:twig" || !installed.entry.Builtin {
+		t.Fatalf("selected %#v, want the built-in", installed.entry)
+	}
+	updated, cmd = offlinePetModel(t, t.TempDir()).handlePetsCommand("twig")
+	if next := updated.(model); next.picker != nil || cmd == nil {
+		t.Fatalf("/pets twig should select the built-in when no installed pet has that slug: picker=%v", next.picker)
+	}
+}
+
+func TestPetsCommandReportsCatalogFailureForUnknownName(t *testing.T) {
+	m := offlinePetModel(t, t.TempDir())
+	updated, _ := m.handlePetsCommand("boba")
+	next := updated.(model)
+	entries, err := next.petClient.Catalog(context.Background())
+	if err == nil {
+		t.Fatal("the test catalog should be unreachable")
+	}
+	updated, _ = next.applyPetCatalog(petCatalogLoadedMsg{entries: entries, err: err})
+	next = updated.(model)
+	if next.picker != nil {
+		t.Fatal("picker should close when the requested pet cannot be found")
+	}
+	plain := plainRender(t, next.View().Content)
+	// "No pet named boba" would be a guess: the catalog that lists it never loaded.
+	if !strings.Contains(plain, "Could not load the pet catalog") || strings.Contains(plain, "No pet named") {
+		t.Fatalf("wrong explanation for an unreachable catalog:\n%s", plain)
+	}
+
+	// With the catalog loaded, an unknown name is simply unknown.
+	m.picker = &commandPicker{kind: pickerPet, loading: true}
+	m.petRequestedSlug = "boba"
+	updated, _ = m.applyPetCatalog(petCatalogLoadedMsg{entries: terminalpet.BuiltinEntries()})
+	if plain := plainRender(t, updated.(model).View().Content); !strings.Contains(plain, `No pet named "boba"`) {
+		t.Fatalf("missing unknown-pet notice:\n%s", plain)
+	}
+}
+
+func TestPetCatalogGroupsBuiltinCompanionsAndReportsMissingCommunityCatalog(t *testing.T) {
+	root := t.TempDir()
+	installTestPet(t, root, "local", "Local")
+	m := offlinePetModel(t, root)
+	m.picker = &commandPicker{kind: pickerPet, loading: true}
+	// What the client really returns offline with a pet installed.
+	entries, err := m.petClient.Catalog(context.Background())
+	if err == nil {
+		t.Fatal("the test catalog should be unreachable")
+	}
+	updated, _ := m.applyPetCatalog(petCatalogLoadedMsg{entries: entries, err: err})
+	next := updated.(model)
+	if next.picker == nil {
+		t.Fatal("a failed community catalog should not close a picker that still has companions")
+	}
+	if first := next.picker.items[1]; first.Group != "Built in" || first.Label != "Twig" || first.Value != "zero:twig" {
+		t.Fatalf("first companion = %#v, want built-in Twig", first)
+	}
+	if last := next.picker.items[len(next.picker.items)-1]; last.Group != "Installed" || last.Value != "local" {
+		t.Fatalf("last companion = %#v, want the installed pet", last)
+	}
+	plain := plainRender(t, next.petPickerOverlay(next.width))
+	for _, want := range []string{"Built in", "Twig", "Community catalog unavailable"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("picker is missing %q:\n%s", want, plain)
+		}
+	}
+
+	// A later successful load clears the note.
+	updated, _ = next.applyPetCatalog(petCatalogLoadedMsg{entries: entries})
+	if plain := plainRender(t, updated.(model).petPickerOverlay(next.width)); strings.Contains(plain, "Community catalog unavailable") {
+		t.Fatalf("stale catalog note:\n%s", plain)
 	}
 }

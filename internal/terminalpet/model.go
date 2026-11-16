@@ -44,6 +44,8 @@ type Entry struct {
 	AssetBase      string `json:"assetBase,omitempty"`
 	SpriteVersion  int    `json:"spriteVersionNumber"`
 	Local          bool   `json:"-"`
+	// Builtin marks a companion that ships inside Zero and is drawn by code.
+	Builtin bool `json:"-"`
 }
 
 func (e Entry) Label() string {
@@ -208,6 +210,7 @@ func (a *Animation) framePNG(state State, phase int) ([]byte, frameCacheKey, err
 	if frame == nil {
 		return nil, key, fmt.Errorf("pet animation has no frames")
 	}
+	frame = drawnFrame(frame)
 	a.pngMu.Lock()
 	defer a.pngMu.Unlock()
 	if cached := a.pngCache[key]; len(cached) > 0 {
