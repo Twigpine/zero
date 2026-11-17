@@ -351,8 +351,10 @@ function buildWrapperPackage(packageName, version, outDir) {
   // no lifecycle scripts and no regular dependencies (the repo's dependencies
   // entries exist only to pin the vendored helpers/ tree that zero-release
   // stages into the platform payloads — see internal/release/release.go).
+  // overrides only steer that same helpers install, so they go with them.
   delete pkg.scripts;
   delete pkg.dependencies;
+  delete pkg.overrides;
   pkg.name = packageName;
   pkg.optionalDependencies = optionalDependencies(packageName, version);
   writeFileSync(join(wrapperDir, 'package.json'), JSON.stringify(pkg, null, 2) + '\n');

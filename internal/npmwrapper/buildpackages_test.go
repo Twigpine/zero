@@ -125,6 +125,7 @@ func TestBuildPlatformPackagesAssemblesPublishPayloads(t *testing.T) {
 		Version      string            `json:"version"`
 		Scripts      map[string]string `json:"scripts"`
 		Dependencies map[string]string `json:"dependencies"`
+		Overrides    map[string]any    `json:"overrides"`
 		Optional     map[string]string `json:"optionalDependencies"`
 	}
 	unmarshalJSONFile(t, filepath.Join(wrapperDir, "package.json"), &wrapperPkg)
@@ -136,6 +137,10 @@ func TestBuildPlatformPackagesAssemblesPublishPayloads(t *testing.T) {
 	}
 	if len(wrapperPkg.Dependencies) != 0 {
 		t.Fatalf("published wrapper has dependencies: %v (helpers are vendored in the platform payloads)", wrapperPkg.Dependencies)
+	}
+	// The repo package.json overrides only steer the vendored helpers install.
+	if len(wrapperPkg.Overrides) != 0 {
+		t.Fatalf("published wrapper has overrides: %v (they belong to the vendored helpers install)", wrapperPkg.Overrides)
 	}
 	wantAliases := map[string]string{
 		"@twigpine/zero-darwin-arm64": "npm:@twigpine/zero@" + version + "-darwin-arm64",

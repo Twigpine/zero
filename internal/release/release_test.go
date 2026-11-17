@@ -7,9 +7,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -526,10 +528,78 @@ func TestLocalControlHelperDependenciesRequiresConfiguredPackages(t *testing.T) 
 	root := t.TempDir()
 	mustWriteFile(t, filepath.Join(root, "package.json"), `{"version":"0.1.0","dependencies":{"agent-browser":"0.30.1"}}`)
 
-	_, err := localControlHelperDependencies(root)
+	_, _, err := localControlHelperPins(root)
 	if err == nil || !strings.Contains(err.Error(), `dependency "tuistory"`) {
-		t.Fatalf("localControlHelperDependencies error = %v, want missing tuistory", err)
+		t.Fatalf("localControlHelperPins error = %v, want missing tuistory", err)
 	}
+}
+
+// The release copies the repo lockfile into the helpers dir, and that lockfile
+// is resolved under the repo's overrides (zod is overridden under tuistory for
+// GHSA-mrhx-c7xc-m3w5). Real npm ci rejects the pair when the manifest drops
+// the overrides ("Missing: zod@4.3.6 from lock file"), so they must be staged.
+func TestStageLocalControlHelpersCarriesPackageOverrides(t *testing.T) {
+	manifest := stageHelpersWithPackageJSON(t, `{
+  "version": "0.1.0",
+  "dependencies": {
+    "agent-browser": "0.30.1",
+    "tuistory": "0.10.0"
+  },
+  "overrides": {
+    "tuistory": {
+      "zod": "^4.6.6"
+    },
+    "ws": "8.18.0"
+  }
+}`)
+	want := map[string]any{
+		"tuistory": map[string]any{"zod": "^4.6.6"},
+		"ws":       "8.18.0",
+	}
+	if got := manifest["overrides"]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("helper package.json overrides = %#v, want %#v", got, want)
+	}
+}
+
+func TestStageLocalControlHelpersOmitsAbsentOverrides(t *testing.T) {
+	for name, extra := range map[string]string{
+		"absent": "",
+		"null":   `, "overrides": null`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			manifest := stageHelpersWithPackageJSON(t, `{"version":"0.1.0","dependencies":{"agent-browser":"0.30.1","tuistory":"0.10.0"}`+extra+`}`)
+			if got, ok := manifest["overrides"]; ok {
+				t.Fatalf("helper package.json has overrides %#v, want none", got)
+			}
+		})
+	}
+}
+
+// stageHelpersWithPackageJSON stages the helpers from a repo root holding the
+// given package.json and a minimal lockfile, with a fake npm on PATH, and
+// returns the decoded helper package.json.
+func stageHelpersWithPackageJSON(t *testing.T, packageJSON string) map[string]any {
+	t.Helper()
+	root := t.TempDir()
+	helpers := filepath.Join(t.TempDir(), "helpers")
+	mustWriteFile(t, filepath.Join(root, "package.json"), packageJSON)
+	mustWriteFile(t, filepath.Join(root, "package-lock.json"), `{"lockfileVersion":3,"requires":true,"packages":{}}`)
+	fakeBin := t.TempDir()
+	writeFakeNPM(t, fakeBin)
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := stageLocalControlHelpers(context.Background(), root, helpers); err != nil {
+		t.Fatalf("stageLocalControlHelpers: %v", err)
+	}
+	bytes, err := os.ReadFile(filepath.Join(helpers, "package.json"))
+	if err != nil {
+		t.Fatalf("ReadFile helper package.json: %v", err)
+	}
+	var manifest map[string]any
+	if err := json.Unmarshal(bytes, &manifest); err != nil {
+		t.Fatalf("parse helper package.json: %v\n%s", err, bytes)
+	}
+	return manifest
 }
 
 func packageStagingFixture(t *testing.T, binaryName string) string {
