@@ -128,6 +128,8 @@ func TestRecommendedProvidersAreTopOfCatalog(t *testing.T) {
 	}
 }
 
+// TestRecommendedProviderEndpoint pins the OpenGateway descriptor: name, base
+// URL, the "auto" default model and transport.
 func TestRecommendedProviderEndpoint(t *testing.T) {
 	descriptor, ok := Get("gitlawb-opengateway")
 	if !ok {
@@ -140,8 +142,9 @@ func TestRecommendedProviderEndpoint(t *testing.T) {
 		t.Fatalf("OpenGateway base URL = %q, want %q", descriptor.DefaultBaseURL, "https://api.twigpine.com/v1")
 	}
 	// The default must be an exact id from the live /v1/models list (not a
-	// gateway alias such as "twigpine/auto"): onboarding keeps the default
-	// selected after live discovery only on an exact id match. It is the smart
+	// gateway alias such as "twigpine/auto"): onboarding and the provider
+	// wizard keep the default selected after live discovery only on an exact id
+	// match. It is the smart
 	// router so a new account with no credits is routed to a free model.
 	if descriptor.DefaultModel != "auto" {
 		t.Fatalf("OpenGateway default model = %q, want %q", descriptor.DefaultModel, "auto")

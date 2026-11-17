@@ -931,6 +931,103 @@ func TestProviderWizardRendersDiscoveredModelMetadata(t *testing.T) {
 	assertContains(t, view, "reasoning")
 }
 
+// openGatewayWizardModelStepForTest opens the wizard on the OpenGateway model
+// step with the built-in model list loaded, as it is while discovery runs.
+func openGatewayWizardModelStepForTest(t *testing.T) model {
+	t.Helper()
+	m := newModel(context.Background(), Options{})
+	m = openProviderWizardForTest(t, m)
+	m.providerWizard.selectedProvider = providerWizardProviderIndex(t, m.providerWizard, "gitlawb-opengateway")
+	m.providerWizard.step = providerWizardStepModel
+	if got, want := m.providerWizard.currentModel().ID, m.providerWizard.currentProvider().DefaultModel; got != want {
+		t.Fatalf("model before discovery = %q, want provider default %q", got, want)
+	}
+	return m
+}
+
+// TestProviderWizardKeepsDefaultModelAfterDiscovery: discovery sorts models by
+// ID, and the gateway lists paid models whose IDs sort before "auto". The
+// wizard must still save "auto", or an account without credits gets HTTP 402
+// on its first request.
+func TestProviderWizardKeepsDefaultModelAfterDiscovery(t *testing.T) {
+	m := openGatewayWizardModelStepForTest(t)
+	provider := m.providerWizard.currentProvider()
+
+	updated, _ := m.Update(providerModelsDiscoveredMsg{
+		providerID: provider.ID,
+		token:      m.providerWizard.discoveryToken,
+		models: []providermodeldiscovery.Model{
+			{ID: "anthropic/claude-haiku-5.5", Source: "live"},
+			{ID: "anthropic/claude-opus-5.5", Source: "live"},
+			{ID: "auto", Source: "live"},
+			{ID: "xiaomi/mimo-v2.6-pro", Source: "live"},
+		},
+	})
+	next := updated.(model)
+	if got := next.providerWizard.currentModel().ID; got != provider.DefaultModel {
+		t.Fatalf("model after discovery = %q, want provider default %q", got, provider.DefaultModel)
+	}
+
+	updated, _ = next.Update(testKey(tea.KeyEnter))
+	next = updated.(model)
+	if next.providerWizard.step != providerWizardStepDone {
+		t.Fatalf("enter from model step = %v, want done", next.providerWizard.step)
+	}
+	if got := next.providerWizard.currentModel().ID; got != provider.DefaultModel {
+		t.Fatalf("model to save = %q, want provider default %q", got, provider.DefaultModel)
+	}
+}
+
+// TestProviderWizardDiscoverySelectionFallsBackInOrder: after discovery the
+// cursor stays on the model it was on, else moves to the provider default, else
+// to the first row.
+func TestProviderWizardDiscoverySelectionFallsBackInOrder(t *testing.T) {
+	tests := []struct {
+		name       string
+		moves      int
+		discovered []string
+		want       string
+	}{
+		{
+			name:       "keeps the model the cursor was on",
+			moves:      1, // xiaomi/mimo-v2.6-pro
+			discovered: []string{"anthropic/claude-haiku-5.5", "auto", "xiaomi/mimo-v2.6-pro"},
+			want:       "xiaomi/mimo-v2.6-pro",
+		},
+		{
+			name:       "falls back to the provider default",
+			moves:      2, // xiaomi/mimo-v2.6-flash, not discovered
+			discovered: []string{"anthropic/claude-haiku-5.5", "auto", "xiaomi/mimo-v2.6-pro"},
+			want:       "auto",
+		},
+		{
+			name:       "falls back to the first row",
+			moves:      2,
+			discovered: []string{"anthropic/claude-haiku-5.5", "xiaomi/mimo-v2.6-pro"},
+			want:       "anthropic/claude-haiku-5.5",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := openGatewayWizardModelStepForTest(t)
+			m.providerWizard.move(tt.moves)
+			models := make([]providermodeldiscovery.Model, 0, len(tt.discovered))
+			for _, id := range tt.discovered {
+				models = append(models, providermodeldiscovery.Model{ID: id, Source: "live"})
+			}
+
+			next := m.applyProviderModelsDiscovered(providerModelsDiscoveredMsg{
+				providerID: "gitlawb-opengateway",
+				token:      m.providerWizard.discoveryToken,
+				models:     models,
+			})
+			if got := next.providerWizard.currentModel().ID; got != tt.want {
+				t.Fatalf("model after discovery = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestProviderWizardModelStepUsesFriendlyNamesAndStaysCompact(t *testing.T) {
 	wizard := &providerWizardState{
 		step:        providerWizardStepModel,

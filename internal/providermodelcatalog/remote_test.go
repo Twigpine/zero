@@ -67,6 +67,8 @@ func TestParseModelsDevProviderScopesAndMapsMetadata(t *testing.T) {
 	}
 }
 
+// TestParseOpenGatewayCatalogSkipsRetiredModels checks that retired gateway
+// models are dropped and that null metadata on "auto" parses as unknown.
 func TestParseOpenGatewayCatalogSkipsRetiredModels(t *testing.T) {
 	// Mirrors GET https://api.twigpine.com/v1/models?status=all once the gateway
 	// retires models: the smart router (listed with null metadata, since the

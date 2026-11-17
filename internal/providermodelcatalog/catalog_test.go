@@ -7,6 +7,8 @@ import (
 	"github.com/Twigpine/zero/internal/providercatalog"
 )
 
+// TestModelsAreProviderScoped checks that each provider's offline model list
+// holds its own models and none borrowed from another provider.
 func TestModelsAreProviderScoped(t *testing.T) {
 	tests := []struct {
 		provider string

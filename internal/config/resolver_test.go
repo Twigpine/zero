@@ -1357,6 +1357,8 @@ func TestResolveAppliesProviderCatalogDefaults(t *testing.T) {
 	}
 }
 
+// A profile that names only the OpenGateway catalog ID gets the catalog's
+// base URL, the "auto" default model and the env-var credential at load time.
 func TestResolveAppliesOpenGatewayCatalogDefaults(t *testing.T) {
 	path := writeConfig(t, `{
 		"activeProvider": "gitlawb-opengateway",
