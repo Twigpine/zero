@@ -48,7 +48,7 @@ func TestTranscriptBodyItemsShiftSelectableLinesByItemStart(t *testing.T) {
 func TestTranscriptBodyItemsKeepPendingInterimSelectableLocal(t *testing.T) {
 	m := mouseTestModel()
 	m.pending = true
-	m.streamingReasoning = "private thought"
+	m.streamingReasoning = []byte("private thought")
 	width := m.chatColumnWidth()
 
 	layout := layoutTranscriptBodyItems(m.transcriptBodyItems(width, "", false))

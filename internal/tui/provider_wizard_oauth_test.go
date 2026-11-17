@@ -258,7 +258,7 @@ func TestProviderWizardChatGPTOAuthModelsUseCodexSet(t *testing.T) {
 	for _, model := range models {
 		got[model.ID] = true
 	}
-	for _, want := range []string{"gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"} {
+	for _, want := range []string{"gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-luna"} {
 		if !got[want] {
 			t.Fatalf("ChatGPT OAuth models missing %q; got %#v", want, providerWizardModelIDs(models))
 		}
@@ -266,8 +266,8 @@ func TestProviderWizardChatGPTOAuthModelsUseCodexSet(t *testing.T) {
 	if got["gpt-5"] {
 		t.Fatalf("ChatGPT OAuth models should not include stale gpt-5 fallback; got %#v", providerWizardModelIDs(models))
 	}
-	if models[0].ID != "gpt-5.5" {
-		t.Fatalf("default ChatGPT OAuth model = %q, want gpt-5.5", models[0].ID)
+	if models[0].ID != "gpt-6.1-sol" {
+		t.Fatalf("default ChatGPT OAuth model = %q, want gpt-6.1-sol", models[0].ID)
 	}
 }
 

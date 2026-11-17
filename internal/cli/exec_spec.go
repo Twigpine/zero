@@ -148,7 +148,7 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 				"name":      call.Name,
 				"arguments": call.Arguments,
 			})
-			if checkpoint, ok := sessionRecorder.captureCheckpoint(run.workspaceRoot, call); ok {
+			if checkpoint, ok := sessionRecorder.captureCheckpoint(run.workspaceRoot, run.registry, call); ok {
 				writer.checkpoint(checkpoint)
 			}
 		},
@@ -201,7 +201,7 @@ func runExecSpecDraft(run execSpecDraftRun) int {
 			}
 			return exitInterrupted
 		}
-		sessionRecorder.append(sessions.EventError, map[string]any{"message": err.Error()})
+		sessionRecorder.append(sessions.EventError, sessions.ErrorEventPayload(err))
 		return writeExecSpecDraftProviderError(&writer, run.options.outputFormat, err.Error())
 	}
 	if result.StopReason != agent.StopReasonSpecReviewRequired || draftInfo.SpecID == "" || draftInfo.SpecFilePath == "" {

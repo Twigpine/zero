@@ -39,10 +39,10 @@ func (s ImageSupport) Supported() bool {
 
 func DetectImageSupport(getenv func(string) string) ImageSupport {
 	if strings.TrimSpace(getenv("TMUX")) != "" || strings.TrimSpace(getenv("TMUX_PANE")) != "" {
-		return ImageSupport{Reason: "Terminal companions are disabled in tmux because terminal images are not reliably pane-local."}
+		return ImageSupport{Reason: "tmux does not pass terminal images through reliably."}
 	}
 	if strings.TrimSpace(getenv("ZELLIJ")) != "" || strings.TrimSpace(getenv("ZELLIJ_SESSION_NAME")) != "" || strings.TrimSpace(getenv("ZELLIJ_VERSION")) != "" {
-		return ImageSupport{Reason: "Terminal companions are disabled in Zellij because terminal images are not reliably pane-local."}
+		return ImageSupport{Reason: "Zellij does not pass terminal images through reliably."}
 	}
 	if strings.TrimSpace(getenv("KITTY_WINDOW_ID")) != "" || strings.TrimSpace(getenv("WEZTERM_EXECUTABLE")) != "" || strings.TrimSpace(getenv("WEZTERM_VERSION")) != "" {
 		return ImageSupport{Protocol: ImageProtocolKitty}
@@ -53,7 +53,7 @@ func DetectImageSupport(getenv func(string) string) ImageSupport {
 		if dottedVersionAtLeast(getenv("TERM_PROGRAM_VERSION"), 3, 6, 0) {
 			return ImageSupport{Protocol: ImageProtocolKittyLocalFile}
 		}
-		return ImageSupport{Reason: "Terminal companions require iTerm2 3.6 or newer."}
+		return ImageSupport{Reason: "Terminal images need iTerm2 3.6 or newer."}
 	}
 	if strings.Contains(term, "ghostty") || strings.Contains(program, "ghostty") || strings.TrimSpace(getenv("GHOSTTY_RESOURCES_DIR")) != "" ||
 		strings.Contains(term, "kitty") || strings.Contains(program, "kitty") || strings.Contains(term, "wezterm") || strings.Contains(program, "wezterm") {
@@ -62,7 +62,7 @@ func DetectImageSupport(getenv func(string) string) ImageSupport {
 	if strings.TrimSpace(getenv("WT_SESSION")) != "" || strings.Contains(term, "sixel") || strings.Contains(term, "mlterm") || strings.Contains(term, "foot") {
 		return ImageSupport{Protocol: ImageProtocolSixel}
 	}
-	return ImageSupport{Reason: "Terminal companions need Kitty graphics or Sixel image support."}
+	return ImageSupport{Reason: "This terminal does not show Kitty or Sixel images."}
 }
 
 type ImageDraw struct {
@@ -204,7 +204,7 @@ func (r *ImageRenderer) Render(writer io.Writer) error {
 		}
 	case ImageProtocolSixel:
 		frame := r.desired.Animation.Frame(r.desired.State, r.desired.Phase)
-		sixel, err := renderSixel(frame, r.desired.HeightPixels)
+		sixel, err := renderSixel(drawnFrame(frame), r.desired.HeightPixels)
 		if err != nil {
 			return err
 		}

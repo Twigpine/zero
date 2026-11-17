@@ -63,6 +63,14 @@ import (
 // rest of a key from prose written after a whole one: that prose would be eaten,
 // and a following JWT would lose its header.
 //
+// CALLER-SUPPLIED SECRETS (Options.ExtraSecretValues) get the same treatment
+// from redactExtraSecretValues. Such a value is often opaque, matching no shape
+// here, so without its own gap-tolerant match a separator inside it left both
+// fragments in the output. Unlike a shape, the value is known exactly and has no
+// word boundary to judge, so it is found in a copy with the separators removed
+// and mapped back. RedactString runs it first, before any shape matcher, so a
+// caller that clips or reformats the result afterwards never sees a fragment.
+//
 // WHAT THIS DELIBERATELY DOES NOT TREAT AS A SEPARATOR: tab, newline and
 // carriage return. Those three are real text structure rather than invisible
 // filler, so a credential broken across a line boundary is still two visible
@@ -433,6 +441,125 @@ func openAIShapeIsSecret(match string) bool {
 		return true
 	}
 	return !strings.Contains(strings.TrimPrefix(match, "sk-"), "-")
+}
+
+// redactExtraSecretValues replaces every occurrence of every caller-supplied
+// secret, whole or with runs of invisible separators between its characters.
+//
+// All occurrences, overlapping ones included, are found in the same text and
+// overlapping spans are merged before anything is replaced. Replacing one at a
+// time let each replacement consume bytes another occurrence needed: a shorter
+// value inside a split longer one, a periodic value ("abcabc" in
+// "abc<NUL>abcabc"), a value whose first and last characters match, or two
+// values that overlap all left a fragment visible. Occurrences that only touch
+// stay separate replacements, as they always were.
+//
+// Separators inside a match are covered by its replacement; a split match never
+// starts or ends on one, so those beside it stay, unless the value as written
+// starts or ends with them. Tab, newline and carriage return are not separators
+// (see above).
+func redactExtraSecretValues(value string, secrets []string, replacement string) string {
+	haystack, offsets := value, []int(nil)
+	if containsSplitSeparator(value) {
+		haystack, offsets = compactSplitSeparators(value)
+	}
+	var spans [][2]int
+	for _, secret := range secrets {
+		if strings.TrimSpace(secret) == "" {
+			continue
+		}
+		needle := secret
+		if offsets != nil {
+			// The value as written always matches, as it did before split
+			// matching existed. The compacted match cannot stand in for it: a
+			// value made only of separators compacts to nothing, and separators
+			// at either end of a value fall outside its compacted match.
+			if strings.Contains(value, secret) {
+				for _, at := range overlappingIndexes(value, secret) {
+					spans = append(spans, [2]int{at, at + len(secret)})
+				}
+			}
+			needle = stripSplitSeparators(secret)
+		}
+		if needle == "" || !strings.Contains(haystack, needle) {
+			continue
+		}
+		for _, at := range overlappingIndexes(haystack, needle) {
+			start, end := at, at+len(needle)
+			if offsets != nil {
+				start, end = offsets[start], offsets[end-1]+1
+			}
+			spans = append(spans, [2]int{start, end})
+		}
+	}
+	if len(spans) == 0 {
+		return value
+	}
+	sort.Slice(spans, func(i, j int) bool { return spans[i][0] < spans[j][0] })
+	var out strings.Builder
+	out.Grow(len(value))
+	written := 0
+	for i := 0; i < len(spans); {
+		start, end := spans[i][0], spans[i][1]
+		for i++; i < len(spans) && spans[i][0] < end; i++ {
+			end = max(end, spans[i][1])
+		}
+		out.WriteString(value[written:start])
+		out.WriteString(replacement)
+		written = end
+	}
+	out.WriteString(value[written:])
+	return out.String()
+}
+
+// compactSplitSeparators returns value with every splitSecretSeparator removed,
+// and for each byte of the result the offset of that byte in value.
+func compactSplitSeparators(value string) (string, []int) {
+	var builder strings.Builder
+	builder.Grow(len(value))
+	offsets := make([]int, 0, len(value))
+	for offset := 0; offset < len(value); {
+		r, width := utf8.DecodeRuneInString(value[offset:])
+		if !splitSecretSeparator(r) {
+			builder.WriteString(value[offset : offset+width])
+			for i := 0; i < width; i++ {
+				offsets = append(offsets, offset+i)
+			}
+		}
+		offset += width
+	}
+	return builder.String(), offsets
+}
+
+// overlappingIndexes returns the start of every occurrence of needle in
+// haystack, overlapping ones included, in one linear Knuth-Morris-Pratt pass:
+// restarting a search one byte after each match is quadratic for a periodic
+// value over text full of it.
+func overlappingIndexes(haystack, needle string) []int {
+	fallback := make([]int, len(needle))
+	for i, k := 1, 0; i < len(needle); i++ {
+		for k > 0 && needle[i] != needle[k] {
+			k = fallback[k-1]
+		}
+		if needle[i] == needle[k] {
+			k++
+		}
+		fallback[i] = k
+	}
+	var starts []int
+	for i, k := 0, 0; i < len(haystack); i++ {
+		for k > 0 && haystack[i] != needle[k] {
+			k = fallback[k-1]
+		}
+		if haystack[i] == needle[k] {
+			k++
+		}
+		if k == len(needle) {
+			starts = append(starts, i-len(needle)+1)
+			k = fallback[k-1]
+		}
+	}
+	return starts
 }
 
 // redactControlSplitSecrets replaces credentials whose body is interrupted by

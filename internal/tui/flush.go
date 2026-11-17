@@ -159,6 +159,10 @@ func (m *model) resetFlushFrontier(divider string) {
 	m.altScreenSettledItems = nil
 	m.altScreenSettledWidth = 0
 	m.altScreenSettledFrontier = 0
+	// The rebuilt transcript shares no working set with the old one; release the
+	// caches (and any auto-growth they earned) instead of holding dead entries.
+	m.transcriptBodyHeights.reset()
+	defaultTranscriptBodyRenders.reset()
 	// Renumbers every row's bodyY from the top (used by /clear, /resume, /rewind,
 	// /compact); a transcript-hover target's bodyY would otherwise risk
 	// coincidentally matching an unrelated row in the rebuilt transcript.

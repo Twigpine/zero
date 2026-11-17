@@ -36,6 +36,7 @@ type webFetchTool struct {
 	baseTool
 	client   *http.Client
 	resolver webFetchResolver
+	aimlapi  webFetchAIMLAPIBackend
 }
 
 type webFetchResolver interface {
@@ -118,14 +119,14 @@ func newWebFetchToolWithClientAndResolver(client *http.Client, resolver webFetch
 					},
 					"max_bytes": {
 						Type:        "integer",
-						Description: "Maximum raw response body bytes to download before conversion.",
+						Description: "Maximum raw response body bytes to download before conversion. With the AI/ML API Toolbox backend (ZERO_WEBFETCH_PROVIDER=aimlapi), the maximum bytes of crawled Markdown returned.",
 						Default:     defaultWebFetchMaxBytes,
 						Minimum:     intPtr(1),
 						Maximum:     intPtr(maxWebFetchMaxBytes),
 					},
 					"format": {
 						Type:        "string",
-						Description: "auto (default): HTML responses are converted to compact markdown, everything else is returned as-is. raw: never convert. markdown: force conversion.",
+						Description: "auto (default): HTML responses are converted to compact markdown, everything else is returned as-is. raw: never convert. markdown: force conversion. With the AI/ML API Toolbox backend (ZERO_WEBFETCH_PROVIDER=aimlapi), the page is always returned as crawled Markdown and raw is rejected.",
 						Enum:        []string{"auto", "raw", "markdown"},
 						Default:     "auto",
 					},
@@ -147,6 +148,7 @@ func newWebFetchToolWithClientAndResolver(client *http.Client, resolver webFetch
 		},
 		client:   client,
 		resolver: resolver,
+		aimlapi:  defaultWebFetchAIMLAPIBackend(),
 	}
 }
 
@@ -164,6 +166,15 @@ func (tool webFetchTool) RejectBeforePermission(args map[string]any) (Result, bo
 	}
 	if err := validateWebFetchURLBeforePermission(rawURL); err != nil {
 		return errorResult("Error: Unsafe URL for web_fetch: " + err.Error()), true
+	}
+	if webFetchAIMLAPISelected() {
+		format, err := stringArg(args, "format", "auto", false)
+		if err != nil {
+			return errorResult("Error: Invalid arguments for web_fetch: " + err.Error()), true
+		}
+		if strings.EqualFold(strings.TrimSpace(format), "raw") {
+			return webFetchAIMLAPIRawFormatError(), true
+		}
 	}
 	return Result{}, false
 }
@@ -198,6 +209,10 @@ func (tool webFetchTool) run(ctx context.Context, args map[string]any) Result {
 	}
 	if err := validateWebFetchURLBeforePermission(rawURL); err != nil {
 		return errorResult("Error: Unsafe URL for web_fetch: " + err.Error())
+	}
+	// Opt-in only: an AI/ML API key alone never switches the backend.
+	if webFetchAIMLAPISelected() {
+		return tool.runAIMLAPI(ctx, rawURL, maxBytes, format)
 	}
 
 	parsedURL, err := validateWebFetchURL(ctx, rawURL, tool.resolver)

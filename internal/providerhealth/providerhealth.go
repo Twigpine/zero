@@ -675,10 +675,12 @@ func blockedAddrReason(addr netip.Addr) string {
 }
 
 // overrideHealthEndpoint returns a provider-specific connectivity probe URL when
-// the default {baseURL}+/models path does not exist. GitLawb OpenGateway is a
-// smart-routing gateway whose flat /v1/models endpoint 404s by design ("Use
-// /v1/<provider>/<path>"), so probe its public /health endpoint at the host root
-// instead, which reports real reachability without a per-model call.
+// the default {baseURL}+/models path is not the right reachability check.
+// Twigpine OpenGateway (formerly GitLawb OpenGateway) is a smart-routing gateway
+// whose flat /v1/models 404'd on older deployments, so probe its public /health
+// endpoint at the host root instead (served by api.twigpine.com and the legacy
+// opengateway.gitlawb.com host), which reports real reachability without a
+// per-model call.
 func overrideHealthEndpoint(profile config.ProviderProfile, baseURL string) (string, bool) {
 	if profile.CatalogID != "gitlawb-opengateway" {
 		return "", false

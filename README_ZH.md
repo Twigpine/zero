@@ -12,9 +12,10 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue"></a>
-  <img alt="Go 1.26.10+" src="https://img.shields.io/badge/Go-1.26.10+-00ADD8?logo=go&logoColor=white">
+  <img alt="Go 1.26.11+" src="https://img.shields.io/badge/Go-1.26.11+-00ADD8?logo=go&logoColor=white">
   <img alt="25+ providers" src="https://img.shields.io/badge/providers-25+-34E2EA">
   <a href="https://discord.gg/CaQDS6wdFn"><img alt="Discord" src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white"></a>
+  <a href="https://vercel.com/open-source-program"><img alt="Vercel OSS Program" src="https://vercel.com/oss/program-badge-2026.svg"></a>
   <br>
   <a href="README.md">English</a> | <strong>中文</strong>
 </p>
@@ -85,9 +86,18 @@ zero exec --output-format stream-json < turns.jsonl
         </picture>
       </a>
     </td>
+    <td align="center" width="150" height="80">
+      <a href="https://vercel.com/">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/assets/vercel-logo-dark.svg">
+          <img src="docs/assets/vercel-logo.svg" alt="Vercel logo" width="120">
+        </picture>
+      </a>
+    </td>
   </tr>
   <tr>
     <td align="center"><a href="https://www.gmicloud.ai/"><strong>GMI Cloud</strong></a></td>
+    <td align="center"><a href="https://vercel.com/"><strong>Vercel</strong></a></td>
   </tr>
 </table>
 
@@ -136,7 +146,7 @@ irm https://raw.githubusercontent.com/Twigpine/zero/main/scripts/install.ps1 | i
 
 ### 从源码构建
 
-源码构建需要 Go 1.26.10+。
+源码构建需要 Go 1.26.11+。
 
 ```bash
 git clone https://github.com/Twigpine/zero.git

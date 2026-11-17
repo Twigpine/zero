@@ -10,17 +10,21 @@ type messagesRequest struct {
 	System any `json:"system,omitempty"`
 	// Thinking enables extended thinking when a reasoning effort was requested.
 	// Omitted (nil) for normal requests so behavior is unchanged.
-	Thinking *thinkingConfig `json:"thinking,omitempty"`
-	Tools    []anthropicTool `json:"tools,omitempty"`
-	Stream   bool            `json:"stream"`
+	Thinking     *thinkingConfig `json:"thinking,omitempty"`
+	OutputConfig *outputConfig   `json:"output_config,omitempty"`
+	Tools        []anthropicTool `json:"tools,omitempty"`
+	Stream       bool            `json:"stream"`
 }
 
-// thinkingConfig requests extended thinking with a token budget. Type is always
-// "enabled"; BudgetTokens is how many tokens the model may spend thinking (it is
-// counted against max_tokens).
+// thinkingConfig requests extended thinking. Anthropic uses "enabled" with a
+// token budget; MiniMax-M3.1-Flash uses "adaptive" with output_config.effort.
 type thinkingConfig struct {
 	Type         string `json:"type"`
-	BudgetTokens int    `json:"budget_tokens"`
+	BudgetTokens int    `json:"budget_tokens,omitempty"`
+}
+
+type outputConfig struct {
+	Effort string `json:"effort"`
 }
 
 type anthropicMessage struct {

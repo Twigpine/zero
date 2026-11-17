@@ -74,10 +74,36 @@ func TestAllHasStableUniqueIDs(t *testing.T) {
 	}
 }
 
+func TestFindReturnsMatchingDescriptorAsClone(t *testing.T) {
+	descriptor, ok := Find(func(candidate Descriptor) bool {
+		return candidate.DefaultBaseURL == "https://api.openai.com/v1"
+	})
+	if !ok {
+		t.Fatal("Find() did not locate the OpenAI catalog entry by base URL")
+	}
+	if descriptor.ID != "openai" {
+		t.Fatalf("Find() returned ID %q, want %q", descriptor.ID, "openai")
+	}
+	// Find must hand back a clone like Get: mutating the returned slices must
+	// not corrupt the internal catalog for later lookups.
+	if len(descriptor.AuthEnvVars) > 0 {
+		descriptor.AuthEnvVars[0] = "MUTATED"
+	}
+	if again, ok := Find(func(candidate Descriptor) bool { return candidate.ID == "openai" }); !ok {
+		t.Fatal("Find() lost the OpenAI entry after the first result was mutated")
+	} else if len(again.AuthEnvVars) > 0 && again.AuthEnvVars[0] == "MUTATED" {
+		t.Fatal("Find() returned an internal catalog slice without cloning")
+	}
+	if _, ok := Find(func(Descriptor) bool { return false }); ok {
+		t.Fatal("Find() reported a match for a predicate that never holds")
+	}
+}
+
 func TestRecommendedProvidersAreTopOfCatalog(t *testing.T) {
 	descriptors := All()
 	// The recommended providers are badged and pinned to the top of the catalog,
-	// in this order (OpenGateway remains the default; aimlapi.com is also badged).
+	// in this order (Twigpine OpenGateway remains the default; aimlapi.com is also
+	// badged).
 	wantTop := []string{"gitlawb-opengateway", "aimlapi"}
 	if len(descriptors) < len(wantTop) {
 		t.Fatalf("All() returned %d descriptors, want at least %d", len(descriptors), len(wantTop))
@@ -102,16 +128,74 @@ func TestRecommendedProvidersAreTopOfCatalog(t *testing.T) {
 	}
 }
 
+// TestRecommendedProviderEndpoint pins the OpenGateway descriptor: name, base
+// URL, the "auto" default model and transport.
 func TestRecommendedProviderEndpoint(t *testing.T) {
 	descriptor, ok := Get("gitlawb-opengateway")
 	if !ok {
 		t.Fatal("gitlawb-opengateway not found in catalog")
 	}
-	if descriptor.DefaultBaseURL != "https://opengateway.gitlawb.com/v1" {
-		t.Fatalf("OpenGateway base URL = %q, want %q", descriptor.DefaultBaseURL, "https://opengateway.gitlawb.com/v1")
+	if descriptor.Name != "Twigpine OpenGateway" {
+		t.Fatalf("OpenGateway name = %q, want %q", descriptor.Name, "Twigpine OpenGateway")
+	}
+	if descriptor.DefaultBaseURL != "https://api.twigpine.com/v1" {
+		t.Fatalf("OpenGateway base URL = %q, want %q", descriptor.DefaultBaseURL, "https://api.twigpine.com/v1")
+	}
+	// The default must be an exact id from the live /v1/models list (not a
+	// gateway alias such as "twigpine/auto"): onboarding and the provider
+	// wizard keep the default selected after live discovery only on an exact id
+	// match. It is the smart
+	// router so a new account with no credits is routed to a free model.
+	if descriptor.DefaultModel != "auto" {
+		t.Fatalf("OpenGateway default model = %q, want %q", descriptor.DefaultModel, "auto")
 	}
 	if descriptor.Transport != TransportOpenAICompatible {
 		t.Fatalf("OpenGateway transport = %q, want %q", descriptor.Transport, TransportOpenAICompatible)
+	}
+	// Saved configs keep the original credential env var.
+	if !reflect.DeepEqual(descriptor.AuthEnvVars, []string{"GITLAWB_OPENGATEWAY_API_KEY"}) {
+		t.Fatalf("OpenGateway auth env vars = %#v, want GITLAWB_OPENGATEWAY_API_KEY", descriptor.AuthEnvVars)
+	}
+	// Old and new names both resolve to the same stable catalog id.
+	for _, name := range []string{"gitlawb-opengateway", "GitLawb OpenGateway", "opengateway", "Twigpine OpenGateway", "twigpine"} {
+		got, ok := Get(name)
+		if !ok || got.ID != "gitlawb-opengateway" {
+			t.Fatalf("Get(%q) = (%q, %v), want gitlawb-opengateway", name, got.ID, ok)
+		}
+	}
+}
+
+func TestIsCatalogBaseURLAcceptsDefaultAndLegacyHosts(t *testing.T) {
+	gateway, ok := Get("gitlawb-opengateway")
+	if !ok {
+		t.Fatal("gitlawb-opengateway not found in catalog")
+	}
+	for _, baseURL := range []string{
+		"https://api.twigpine.com/v1",
+		"https://API.twigpine.com/v1/ ",
+		"https://opengateway.gitlawb.com/v1",
+		"https://opengateway.gitlawb.com/v1/",
+	} {
+		if !IsCatalogBaseURL(gateway, baseURL) {
+			t.Fatalf("IsCatalogBaseURL(gateway, %q) = false, want true", baseURL)
+		}
+	}
+	for _, baseURL := range []string{"", "https://gateway.example.com/v1", "https://opengateway.gitlawb.com/v2"} {
+		if IsCatalogBaseURL(gateway, baseURL) {
+			t.Fatalf("IsCatalogBaseURL(gateway, %q) = true, want false", baseURL)
+		}
+	}
+	openrouter, ok := Get("openrouter")
+	if !ok {
+		t.Fatal("openrouter not found in catalog")
+	}
+	if !IsCatalogBaseURL(openrouter, "https://openrouter.ai/api/v1") || IsCatalogBaseURL(openrouter, "https://opengateway.gitlawb.com/v1") {
+		t.Fatal("legacy hosts must only match their own descriptor")
+	}
+	// Get returns a copy: mutating it must not leak into the catalog.
+	gateway.LegacyBaseURLs[0] = "https://mutated.example.com/v1"
+	if again, _ := Get("gitlawb-opengateway"); again.LegacyBaseURLs[0] != "https://opengateway.gitlawb.com/v1" {
+		t.Fatalf("LegacyBaseURLs aliased the catalog: %#v", again.LegacyBaseURLs)
 	}
 }
 
@@ -385,6 +469,8 @@ func TestLookupNormalizesIDsAndAliases(t *testing.T) {
 		"custom_openai_compatible":     "custom-openai-compatible",
 		"custom--anthropic compatible": "custom-anthropic-compatible",
 		"GitLawb OpenGateway":          "gitlawb-opengateway",
+		"Twigpine OpenGateway":         "gitlawb-opengateway",
+		"twigpine":                     "gitlawb-opengateway",
 	}
 	for input, want := range cases {
 		descriptor, ok := Get(input)

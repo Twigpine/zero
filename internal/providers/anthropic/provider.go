@@ -49,6 +49,19 @@ func thinkingBudgetForEffort(effort string) int {
 	}
 }
 
+func miniMaxM31FlashEffort(model, effort string) string {
+	if !strings.EqualFold(strings.TrimSpace(model), "MiniMax-M3.1-Flash") {
+		return ""
+	}
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	switch effort {
+	case "low", "medium", "high", "xhigh", "max":
+		return effort
+	default:
+		return ""
+	}
+}
+
 // resolveThinking returns the thinking budget and the max_tokens to send. When a
 // budget is requested, max_tokens is raised if needed so the budget plus a
 // minimum response both fit (Anthropic rejects budget >= max_tokens). enabled is
@@ -377,11 +390,15 @@ func (provider *Provider) anthropicRequest(request zeroruntime.CompletionRequest
 		Messages:  messages,
 		Stream:    true,
 	}
-	// Extended thinking: enable when a reasoning effort was requested. The budget
-	// is counted against max_tokens, so raise max_tokens to leave room for the
-	// response. Temperature is intentionally left unset (Anthropic requires the
-	// default when thinking is on).
-	if budget, effectiveMax, enabled := resolveThinking(request.ReasoningEffort, provider.maxTokens); enabled {
+	// MiniMax-M3.1-Flash uses adaptive thinking with output_config.effort instead
+	// of Anthropic's token budget. For other models, the budget is counted against
+	// max_tokens, so raise max_tokens to leave room for the response. Temperature
+	// is intentionally left unset (Anthropic requires the default when thinking
+	// is on).
+	if effort := miniMaxM31FlashEffort(provider.model, request.ReasoningEffort); effort != "" {
+		mapped.Thinking = &thinkingConfig{Type: "adaptive"}
+		mapped.OutputConfig = &outputConfig{Effort: effort}
+	} else if budget, effectiveMax, enabled := resolveThinking(request.ReasoningEffort, provider.maxTokens); enabled {
 		mapped.MaxTokens = effectiveMax
 		mapped.Thinking = &thinkingConfig{Type: "enabled", BudgetTokens: budget}
 	}

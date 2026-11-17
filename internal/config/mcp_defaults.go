@@ -3,24 +3,46 @@ package config
 import (
 	"reflect"
 	"strings"
+
+	"github.com/Twigpine/zero/internal/aimlapi"
 )
 
-// DefaultMCPServers returns the MCP servers Zero ships ENABLED by default so
-// web search and page fetching work out of the box with no setup and no API
-// key. They are seeded before user/project config is merged (see ResolveMCP),
-// so a user can override any field — for example add an API-key header to lift
-// Exa's anonymous rate limit — or disable it entirely with
+// DefaultMCPServers returns the MCP servers Zero ships built in. Exa is ENABLED
+// by default so web search and page fetching work out of the box with no setup
+// and no API key. They are seeded before user/project config is merged (see
+// ResolveMCP), so a user can override any field — for example add an API-key
+// header to lift Exa's anonymous rate limit — or disable it entirely with
 // `zero mcp disable <name>` (which writes `"disabled": true`).
 //
 // Exa's hosted MCP server works anonymously with rate limits. Users can add an
 // Exa API key for higher limits.
+//
+// The AI/ML API server ships DISABLED: its tool runs and generations are billed
+// to the user's AI/ML API balance, so it only connects after
+// `zero mcp enable aimlapi` (which writes `"disabled": false`). The disable is
+// marked as explicitly set so the lower-trust project layer cannot lift it
+// (see mergeMCPServer); only the user and CLI-override scopes can. The key is
+// attached per request by the MCP client and is never part of this config.
 func DefaultMCPServers() map[string]MCPServerConfig {
 	return map[string]MCPServerConfig{
 		"exa": {
 			Type: "http",
 			URL:  "https://mcp.exa.ai/mcp",
 		},
+		"aimlapi": {
+			Type:        "http",
+			URL:         aimlapi.MCPServerURL,
+			Disabled:    true,
+			disabledSet: true,
+		},
 	}
+}
+
+// IsDefaultMCPServerDisabled reports whether name is a built-in default that
+// ships disabled, so enabling it has to be written out as `"disabled": false`
+// rather than by dropping the flag.
+func IsDefaultMCPServerDisabled(name string) bool {
+	return DefaultMCPServers()[strings.TrimSpace(name)].Disabled
 }
 
 // IsDefaultMCPServer reports whether name is one of Zero's built-in default MCP

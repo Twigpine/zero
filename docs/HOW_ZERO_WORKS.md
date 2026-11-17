@@ -634,6 +634,10 @@ Core tool groups include:
   `HTTP_PROXY`/`HTTPS_PROXY` set, the proxy is dialed instead and resolves the
   target itself, so destination enforcement ends at the proxy; see the note in
   the README.
+  With `ZERO_WEBFETCH_PROVIDER=aimlapi` (opt-in; a key alone does not select
+  it), the same URL checks run and the page is then fetched as Markdown by the
+  billed AI/ML API Toolbox tool `search1api/crawl`, with no fallback to a
+  direct fetch; see the README.
 - **Local-control tools**: config-gated wrappers for browser, terminal, desktop,
   and artifact helpers backed by packages such as `internal/localcontrol` and
   `internal/browser`.

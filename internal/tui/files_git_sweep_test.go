@@ -152,12 +152,12 @@ func TestTouchedFilesMergesGitSweep(t *testing.T) {
 func TestOpenFileViewGitOnlyFallsBackToFull(t *testing.T) {
 	m := filesPanelTestModel()
 	m.gitTouched = []gitSweepFile{{path: "kanban/board.tsx", created: true}}
-	m = m.openFileView("kanban/board.tsx")
+	m, _ = m.openFileView("kanban/board.tsx")
 	if m.fileView.mode != fileViewFull {
 		t.Fatal("git-only file should open in full mode")
 	}
 	m = m.exitFileView()
-	m = m.openFileView("web/app.js")
+	m, _ = m.openFileView("web/app.js")
 	if m.fileView.mode != fileViewDiff {
 		t.Fatal("a file with edit cards still opens in diff mode")
 	}
