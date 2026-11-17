@@ -111,11 +111,14 @@ var descriptors = []Descriptor{
 	// Bearer ogw_live_… key; listed first and badged in every picker. The public
 	// GET /v1/models lists only active models and is what pickers show when
 	// reachable. DefaultModel must be an exact id from that list (not an alias)
-	// so onboarding keeps it selected after live discovery. The id and env var
+	// so onboarding keeps it selected after live discovery. It is the gateway's
+	// smart router, "auto": an account with no credits is routed to a free
+	// model instead of failing with 402 on a paid one. Only new setups and
+	// profiles that name no model get it; a saved model is kept. The id and env var
 	// keep their gitlawb names so saved configs keep resolving; the old host
 	// (opengateway.gitlawb.com) still serves clients and stays a legacy catalog
 	// endpoint so profiles saved against it resolve unchanged.
-	recommended(withLegacyBaseURLs(openAICompat("gitlawb-opengateway", "Twigpine OpenGateway", "https://api.twigpine.com/v1", "xiaomi/mimo-v2.6-pro", []string{"GITLAWB_OPENGATEWAY_API_KEY"}, "gitlawb opengateway", "opengateway", "twigpine opengateway", "twigpine"), "https://opengateway.gitlawb.com/v1")),
+	recommended(withLegacyBaseURLs(openAICompat("gitlawb-opengateway", "Twigpine OpenGateway", "https://api.twigpine.com/v1", "auto", []string{"GITLAWB_OPENGATEWAY_API_KEY"}, "gitlawb opengateway", "opengateway", "twigpine opengateway", "twigpine"), "https://opengateway.gitlawb.com/v1")),
 	// aimlapi.com — OpenAI-compatible aggregating gateway, also badged as
 	// recommended (second, right after the OpenGateway default). The built-in TUI
 	// onboarding can register/top up an account and save the issued key; the partner
