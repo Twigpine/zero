@@ -22,7 +22,7 @@ const permissionProfileScopeNote = "permissionProfile is derived from this proce
 
 func runSandbox(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	if len(args) == 0 {
-		return writeExecUsageError(stderr, "sandbox subcommand required. Use `zero sandbox policy` or `zero sandbox grants list`.")
+		return writeExecUsageError(stderr, "sandbox subcommand required. Use `zero sandbox policy`, `zero sandbox exec`, or `zero sandbox grants list`.")
 	}
 	switch args[0] {
 	case "-h", "--help", "help":
@@ -36,6 +36,8 @@ func runSandbox(args []string, stdout io.Writer, stderr io.Writer, deps appDeps)
 		return runSandboxSetup(args[1:], stdout, stderr, deps)
 	case "check":
 		return runSandboxCheck(args[1:], stdout, stderr, deps)
+	case "exec":
+		return runSandboxExec(args[1:], stdout, stderr, deps)
 	case "grants":
 		return runSandboxGrants(args[1:], stdout, stderr, deps)
 	default:
@@ -174,10 +176,17 @@ func runSandboxSetup(args []string, stdout io.Writer, stderr io.Writer, deps app
 	if !setupHelper.Available() {
 		return writeAppError(stderr, "Windows sandbox setup helper is not available", exitProvider)
 	}
+	// Resolved here, in the shell the user typed `zero sandbox setup` into, and
+	// carried in the args. The helper may be launched elevated, and an elevated
+	// process does not inherit this shell's environment. Stated explicitly rather
+	// than left nil (which resolves the same way) because this is the call site
+	// the opt-in is about.
+	principalOptIn := zeroSandbox.WindowsSandboxPrincipalOptIn(nil)
 	setupArgs, err := zeroSandbox.BuildWindowsSandboxSetupArgs(zeroSandbox.WindowsSandboxSetupArgsOptions{
 		CommandCWD:        workspaceRoot,
 		WorkspaceRoots:    []string{workspaceRoot},
 		PermissionProfile: profile,
+		PrincipalOptIn:    &principalOptIn,
 	})
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
@@ -646,6 +655,7 @@ Commands:
   policy      Inspect active sandbox policy and platform backend
   setup       Run native platform sandbox setup
   check       Evaluate the sandbox decision for a hypothetical tool action
+  exec        Run one command through the real sandbox
   grants      Manage persistent sandbox grants
 
 `)

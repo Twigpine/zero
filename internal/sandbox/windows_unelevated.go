@@ -146,3 +146,7 @@ func recordWindowsUnelevatedAppliedPlan(sandboxHome string, applied WindowsUnele
 	}
 	return nil
 }
+
+// windowsACLPlanDeniedPath lives in windows_command_runner_windows.go, beside
+// its only caller. Defining it here, in the portable file, would make it dead
+// code on every non-Windows build and fail the static analysis gate.

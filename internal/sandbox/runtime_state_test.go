@@ -10,6 +10,7 @@ import (
 )
 
 func TestPrepareSandboxRuntimeStaysOutsideWorkspace(t *testing.T) {
+	isolateSandboxRuntimeRoots(t)
 	workspace := t.TempDir()
 	cacheRoot := t.TempDir()
 	original := sandboxUserCacheDir
@@ -39,6 +40,7 @@ func TestPrepareSandboxRuntimeStaysOutsideWorkspace(t *testing.T) {
 }
 
 func TestPrepareSandboxRuntimeCleansExpiredSibling(t *testing.T) {
+	isolateSandboxRuntimeRoots(t)
 	workspace := t.TempDir()
 	cacheRoot := t.TempDir()
 	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
@@ -70,6 +72,7 @@ func TestPrepareSandboxRuntimeCleansExpiredSibling(t *testing.T) {
 }
 
 func TestPrepareSandboxRuntimeFallsBackWhenUserCacheIsInsideWorkspace(t *testing.T) {
+	isolateSandboxRuntimeRoots(t)
 	workspace := t.TempDir()
 	original := sandboxUserCacheDir
 	sandboxUserCacheDir = func() (string, error) { return filepath.Join(workspace, ".cache"), nil }
@@ -89,6 +92,7 @@ func TestPrepareSandboxRuntimeFallsBackWhenUserCacheIsInsideWorkspace(t *testing
 }
 
 func TestCleanupSandboxRuntimeSkipsActiveLease(t *testing.T) {
+	isolateSandboxRuntimeRoots(t)
 	workspace := t.TempDir()
 	cacheRoot := t.TempDir()
 	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
@@ -328,4 +332,107 @@ func TestEngineCommandPlanCarriesManagedRuntime(t *testing.T) {
 		t.Fatalf("runtime lease after plan cleanup = lease %v inUse %t err %v", cleanupLease, inUse, err)
 	}
 	cleanupLease.release()
+}
+
+// sandboxRuntimeRootFor compares the workspace root against the derived runtime
+// root to decide whether to fall back to a private temp tree. Both sides
+// therefore have to be the same spelling of the same path.
+//
+// Canonicalizing only the workspace root broke this on CI: the workspace
+// resolved (/var to /private/var on macOS, an 8.3 short name to its long form
+// on Windows) while the cache root kept its original spelling, so the
+// containment check compared two different strings, the fallback never fired,
+// and the runtime tree was placed inside the workspace it exists to stay out of.
+//
+// A symlink is the portable way to produce a spelling that only resolution
+// reconciles — Clean cannot see through one. Windows refuses to create symlinks
+// without privilege, so this skips there; the platforms that CI caught the bug
+// on are the ones that run it.
+func TestPrepareSandboxRuntimeNormalizesTheCacheRootBeforeComparingIt(t *testing.T) {
+	isolateSandboxRuntimeRoots(t)
+	workspace := t.TempDir()
+	link := filepath.Join(t.TempDir(), "workspace-link")
+	if err := os.Symlink(workspace, link); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+	// The cache root reaches us spelled through the symlink; the workspace does
+	// not. Resolved, it is plainly inside the workspace and the fallback must
+	// fire. Unresolved, the two strings share no prefix and it does not.
+	original := sandboxUserCacheDir
+	sandboxUserCacheDir = func() (string, error) { return filepath.Join(link, ".cache"), nil }
+	t.Cleanup(func() { sandboxUserCacheDir = original })
+
+	runtimeState, release, err := prepareSandboxRuntime(workspace)
+	if err != nil {
+		t.Fatalf("prepareSandboxRuntime: %v", err)
+	}
+	if release != nil {
+		defer release()
+	}
+	// Resolve before comparing. Spelled through the link the runtime root shares
+	// no textual prefix with the workspace, so an unresolved comparison would
+	// call it "outside" while it sits physically inside — the test would pass
+	// against the very bug it exists for.
+	resolved := runtimeState.Root
+	if actual, err := filepath.EvalSymlinks(runtimeState.Root); err == nil {
+		resolved = actual
+	}
+	if pathWithinRoot(workspace, resolved) {
+		t.Fatalf("runtime root %q resolves to %q, inside workspace %q; the containment check did not see through the cache root's spelling", runtimeState.Root, resolved, workspace)
+	}
+}
+
+// A path whose final segments do not exist yet must still normalize the same
+// way as one that does. This is the shape macOS CI hit: t.TempDir() sits under
+// /var, a symlink to /private/var, and the cache root it derives has not been
+// created when it is first normalized. Resolving only the workspace left the
+// two sides of the containment check spelled differently.
+func TestCanonicalSandboxWorkspaceRootResolvesThroughAMissingLeaf(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+
+	existing := canonicalSandboxWorkspaceRoot(link)
+	if existing != canonicalSandboxWorkspaceRoot(real) {
+		t.Fatalf("an existing symlinked dir did not resolve: %q vs %q", existing, canonicalSandboxWorkspaceRoot(real))
+	}
+
+	// The leaf, and its parent, do not exist.
+	missing := filepath.Join(link, ".cache", "zero")
+	got := canonicalSandboxWorkspaceRoot(missing)
+	want := filepath.Join(existing, ".cache", "zero")
+	if got != want {
+		t.Errorf("missing leaf normalized to %q, want %q — the ancestor was not resolved", got, want)
+	}
+	if !pathWithinRoot(existing, got) {
+		t.Errorf("%q should be inside %q once both are canonical", got, existing)
+	}
+}
+
+// isolateSandboxRuntimeRoots gives a test its own cache root AND its own temp
+// root, so every runtime tree the production code can select, the preferred
+// cache-derived one and the temp-derived fallback, lands under the fixture.
+// Workspace isolation is not runtime-storage isolation: those paths come from
+// separate resolver inputs, and a test that redirected only the workspace ran
+// real setup, preparation and reclamation against the developer's own cache
+// and temp. Both roots are returned for assertions on where things landed.
+func isolateSandboxRuntimeRoots(t *testing.T) (cacheRoot, tempRoot string) {
+	t.Helper()
+	cacheRoot = filepath.Join(t.TempDir(), "cache")
+	tempRoot = filepath.Join(t.TempDir(), "temp")
+	for _, dir := range []string{cacheRoot, tempRoot} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	previous := sandboxUserCacheDir
+	sandboxUserCacheDir = func() (string, error) { return cacheRoot, nil }
+	t.Cleanup(func() { sandboxUserCacheDir = previous })
+	// os.TempDir reads these at call time on every platform this runs on.
+	t.Setenv("TMP", tempRoot)
+	t.Setenv("TEMP", tempRoot)
+	t.Setenv("TMPDIR", tempRoot)
+	return cacheRoot, tempRoot
 }

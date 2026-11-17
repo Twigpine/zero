@@ -104,12 +104,21 @@ const (
 	BlockNetwork            BlockCode = "network"
 	BlockDestructiveCommand BlockCode = "destructive_command"
 	BlockPersistentDeny     BlockCode = "persistent_deny"
+	BlockNestedGitInit      BlockCode = "nested_git_init"
 	// BlockDenied is the catch-all for a denied decision that carries no more
 	// specific block code.
 	BlockDenied BlockCode = "denied"
 )
 
 const ReasonNetworkBlocked = "network access requires approval"
+
+// ReasonNestedGitInit explains a refusal the operator can act on: the remedy is
+// to run git init outside the sandbox, or to open the repository itself as the
+// workspace rather than a subdirectory of it.
+const ReasonNestedGitInit = "this workspace sits inside an existing git repository, so the sandbox has no git protection here to extend to a new one: " +
+	"a repository created now would carry a writable config and hooks. " +
+	"Every git init in the command is refused, because the sandbox does not resolve which directory each one targets. " +
+	"Run git init outside the sandbox, or open the repository root as the workspace"
 const ReasonEscalatedSandboxRequired = "unsandboxed shell command requires approval"
 
 const (

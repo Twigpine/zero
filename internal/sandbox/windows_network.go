@@ -62,14 +62,189 @@ func BuildWindowsNetworkInfraPlan(config WindowsSandboxCommandConfig) (WindowsNe
 	if err != nil {
 		return WindowsNetworkPlan{}, err
 	}
+	// The offline-marker SID stays first: the setup marker records
+	// IdentitySIDs[0] as the offline filter identity.
+	identitySIDs := []string{offlineSID}
+	// A sandbox principal cannot carry the offline-marker SID, because LogonUser
+	// builds a token from an account's real group memberships and the marker is a
+	// synthetic capability SID. So the same filters additionally match a real
+	// local group that network-denied principals belong to.
+	//
+	// Gated on THIS home's opt-in, not merely on the group existing.
+	//
+	// The group is machine-global, so keying off its existence meant the first
+	// workspace to opt in changed the computed plan for every OTHER sandbox home
+	// on the machine. The plan is hashed into the setup marker and compared on
+	// every command, so those homes started failing every command with "setup is
+	// out of date" until each was re-run from an elevated terminal, having never
+	// opted into anything. Existing markers have to keep validating.
+	//
+	// Reading the opt-in instead keeps an opted-out home computing exactly the
+	// plan it computed before any of this existed. An opted-in home records the
+	// group in its own marker, and setup and the command path both derive the
+	// flag from the same environment, so they agree. Opting in AFTER setup does
+	// invalidate that home's marker, which is correct: it has no principals yet
+	// and setup is genuinely required.
+	if windowsSandboxIdentityEnabled(config.Env) && resolveWindowsSandboxOfflineGroupSIDHook != nil {
+		groupSID, err := resolveWindowsSandboxOfflineGroupSIDHook()
+		if err != nil {
+			return WindowsNetworkPlan{}, err
+		}
+		if trimmed := strings.TrimSpace(groupSID); trimmed != "" {
+			identitySIDs = append(identitySIDs, trimmed)
+		}
+	}
 	return WindowsNetworkPlan{
 		Mode:         NetworkDeny,
 		ProviderKey:  windowsWFPProviderKey,
 		SubLayerKey:  windowsWFPSubLayerKey,
-		IdentitySIDs: []string{offlineSID},
+		IdentitySIDs: identitySIDs,
 		Filters:      windowsDenyWFPFilterSpecs(),
 	}, nil
 }
+
+// WindowsNetworkPlanForApply returns the plan to INSTALL, which is not always
+// the plan a home fingerprints.
+//
+// The filters are machine-global and every setup installs them by deleting and
+// recreating the fixed set. So an opted-OUT setup for workspace B was replacing
+// filters that workspace A's opted-in setup had installed, dropping the offline
+// group SID as it went. A's offline principal still passed the runtime
+// membership check and A's marker still validated, but no filter matched its
+// token any more, so a NetworkDeny command in A quietly gained egress. Nothing
+// on either side reported anything: B did exactly what it was asked to.
+//
+// The gate in BuildWindowsNetworkInfraPlan stays as it is, and this is
+// deliberately a SEPARATE function rather than a change to it. That gate exists
+// because the plan is hashed into each home's setup marker: keying it on the
+// group's existence made the first workspace to opt in invalidate every other
+// home's marker on the machine, and those homes then failed every command with
+// "setup is out of date" having opted into nothing. That has to keep working.
+//
+// The two questions are simply different. What a home RECORDS is about that
+// home's own configuration; what setup INSTALLS is about the machine, where the
+// group either exists or does not. Answering both from one plan is what forced a
+// choice between stale markers and a silent hole.
+//
+// The group not existing is the ordinary opted-out machine, and it adds nothing.
+//
+// A resolution FAILURE is a different answer and is fatal, because the filters
+// are replaced wholesale. The earlier reasoning here was that refusing to
+// install would trade a partial denial for no denial at all, and that is wrong:
+// the alternative to installing is leaving the filters that are already there
+// alone. Returning a marker-only plan does not decline to add coverage, it
+// actively REMOVES coverage another workspace is relying on. An opted-out home
+// skips assertWindowsNetworkPlanCoversOfflineGroup entirely (it is gated on
+// provisioned), so this is the only thing between a transient lookup error and
+// workspace A silently regaining egress under NetworkDeny.
+//
+// "Absent" and "could not be read" have to be different answers, which is the
+// same distinction the marker/apply split above is built on.
+func WindowsNetworkPlanForApply(plan WindowsNetworkPlan, resolveOfflineGroupSID func() (string, error)) (WindowsNetworkPlan, error) {
+	if resolveOfflineGroupSID == nil {
+		return plan, nil
+	}
+	groupSID, err := resolveOfflineGroupSID()
+	if err != nil {
+		return WindowsNetworkPlan{}, fmt.Errorf("resolve the sandbox offline group before replacing the machine network filters: %w", err)
+	}
+	trimmed := strings.TrimSpace(groupSID)
+	if trimmed == "" {
+		return plan, nil
+	}
+	for _, existing := range plan.IdentitySIDs {
+		if strings.EqualFold(strings.TrimSpace(existing), trimmed) {
+			return plan, nil
+		}
+	}
+	// Copied rather than appended in place: the caller's plan is what gets
+	// fingerprinted, and growing its backing array would risk changing the
+	// recorded plan as a side effect of installing one.
+	augmented := plan
+	augmented.IdentitySIDs = append(append([]string{}, plan.IdentitySIDs...), trimmed)
+	return augmented, nil
+}
+
+// WindowsNetworkPlanCoversPrincipals reports whether a plan's block filters name
+// the offline group, which is the only thing that makes them apply to a sandbox
+// principal.
+//
+// This exists to be asserted, not consulted. The plan must be built AFTER
+// provisioning, because provisioning is what creates the group it resolves; a
+// plan built first names only the offline marker and leaves every offline
+// principal with an open network while setup reports success. That is a control
+// that enforces nothing while claiming to work, and the ordering which prevents
+// it is invisible at the call site, so a later refactor can undo it silently.
+func WindowsNetworkPlanCoversPrincipals(plan WindowsNetworkPlan, offlineGroupSID string) bool {
+	offlineGroupSID = strings.TrimSpace(offlineGroupSID)
+	if offlineGroupSID == "" {
+		// No group provisioned on this host, so there is no principal for the
+		// filters to miss and nothing to assert.
+		return true
+	}
+	for _, sid := range plan.IdentitySIDs {
+		if strings.EqualFold(strings.TrimSpace(sid), offlineGroupSID) {
+			return true
+		}
+	}
+	return false
+}
+
+// assertWindowsNetworkPlanCoversOfflineGroup is the post-provisioning check that
+// setup runs before it installs filters and reports success.
+//
+// It fails closed on every answer that is not a definite yes, because the thing
+// it guards is invisible when it goes wrong: filters that do not name the
+// offline group leave every offline principal with an open network on a machine
+// whose setup marker says it is protected. Nobody sees an error, and the sandbox
+// looks correctly installed.
+//
+// Two answers other than "the plan omits the group" also mean the check did not
+// happen and must not be treated as a pass:
+//
+//   - The lookup failed. Whether the group is covered is then unknown, and the
+//     Win32 reason is worth surfacing: an operator seeing "access is denied"
+//     knows to re-run elevated.
+//   - The lookup succeeded and found nothing. ("", nil) means the group does not
+//     exist, which is the ordinary state BEFORE provisioning and an impossible
+//     one after it, so here it means the group vanished or was never created.
+//     WindowsNetworkPlanCoversPrincipals answers true for an empty SID, correctly
+//     for the pre-provisioning callers that ask it, so the emptiness has to be
+//     rejected here rather than delegated to it.
+//
+// provisioned says whether principals were actually provisioned on this run.
+// When they were not there is no offline group, no principal carrying it, and
+// nothing for the filters to miss, so there is nothing to assert. Running the
+// check anyway turns the ordinary opt-out setup into a hard failure, because a
+// machine with no group resolves to ("", nil) and the empty-SID rejection below
+// is correct only after provisioning.
+func assertWindowsNetworkPlanCoversOfflineGroup(plan WindowsNetworkPlan, resolve func() (string, error), provisioned bool) error {
+	if !provisioned {
+		return nil
+	}
+	if resolve == nil {
+		return errors.New("sandbox offline group resolver is not wired up, so filter coverage cannot be verified")
+	}
+	groupSID, err := resolve()
+	if err != nil {
+		return fmt.Errorf("resolve the sandbox offline group after provisioning, so filter coverage cannot be verified: %w", err)
+	}
+	if strings.TrimSpace(groupSID) == "" {
+		return errors.New("the sandbox offline group does not exist after provisioning, so the block filters would not apply to any sandbox principal")
+	}
+	if !WindowsNetworkPlanCoversPrincipals(plan, groupSID) {
+		return errors.New("network block filters do not name the sandbox offline group, so they would not apply to any sandbox principal; the network plan must be built after principals are provisioned")
+	}
+	return nil
+}
+
+// resolveWindowsSandboxOfflineGroupSIDHook resolves the local group that
+// network-denied principals belong to. It is wired up on Windows only, so this
+// file stays free of Win32 calls and the plan on other platforms is unchanged.
+//
+// Returning ("", nil) means the group does not exist yet, which is the state
+// before principals have ever been provisioned.
+var resolveWindowsSandboxOfflineGroupSIDHook func() (string, error)
 
 // WindowsNetworkInfraHash fingerprints the provisioned (mode-independent) network
 // infrastructure so the setup marker validates against the same setup for BOTH

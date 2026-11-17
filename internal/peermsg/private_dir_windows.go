@@ -12,7 +12,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func ensurePrivateDir(path string) (resultErr error) {
+func EnsurePrivateDir(path string) (resultErr error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return err
