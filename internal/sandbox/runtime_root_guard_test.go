@@ -192,7 +192,7 @@ func TestPreparingTheRuntimeRefusesALinkedRoot(t *testing.T) {
 
 	runtimeState, cleanup, err := prepareSandboxRuntime(canonical, "")
 	if cleanup != nil {
-		cleanup()
+		t.Cleanup(cleanup)
 	}
 	if err == nil {
 		t.Fatalf("the runtime was prepared at %s through a link; %s would have been bound read-write into the sandbox with TMPDIR and the build caches inside it", runtimeState.Root, target)

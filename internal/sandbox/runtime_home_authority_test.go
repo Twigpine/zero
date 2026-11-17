@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -70,5 +71,50 @@ func TestAnEmptyCommandHomeFallsBackToTheAmbientEnvironment(t *testing.T) {
 	writeRecordedRoot(t, home, preferred)
 	if got := pinnedSandboxRuntimeRoot(t.TempDir(), preferred, filepath.Join(t.TempDir(), "fallback"), ""); got != preferred {
 		t.Errorf("pinned %q with no command home, want the ambient one to decide (%q)", got, preferred)
+	}
+}
+
+// BuildCommandPlan must not run runtime preparation when the command's own env
+// makes sandbox-home resolution fail; otherwise selection pins against the
+// ambient home while Windows planning later uses spec.Env.
+func TestBuildCommandPlanFailsClosedOnInvalidCommandSandboxHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("relative grant path with deleted cwd is exercised on Unix CI")
+	}
+	workspace := t.TempDir()
+	engine := NewEngine(EngineOptions{
+		WorkspaceRoot: workspace,
+		Policy:        DefaultPolicy(),
+		Backend: Backend{
+			Name:            BackendLinuxBwrap,
+			Available:       true,
+			Platform:        "linux",
+			Executable:      "/usr/bin/zero-linux-sandbox",
+			CommandWrapping: true,
+			NativeIsolation: true,
+		},
+	})
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+
+	removed := t.TempDir()
+	if err := os.Chdir(removed); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	if err := os.RemoveAll(removed); err != nil {
+		t.Fatalf("remove cwd parent: %v", err)
+	}
+
+	_, err = engine.BuildCommandPlan(CommandSpec{
+		Name: "/bin/true",
+		Dir:  workspace,
+		Env:  []string{"ZERO_SANDBOX_GRANTS_PATH=relative/grants.json"},
+	})
+	if err == nil {
+		t.Fatal("want BuildCommandPlan to fail when command env prevents sandbox-home resolution")
 	}
 }

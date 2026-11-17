@@ -397,7 +397,7 @@ func openWindowsACLTarget(path string) (windows.Handle, bool, error) {
 	// Everything else here is the user's own tree, where an ancestor reparse point
 	// is ordinary configuration and following it is correct.
 	if _, _, owned := windowsSandboxRuntimeOwnedTail(path); owned {
-		handle, err := openWindowsRuntimeTailDirectory(path, windows.READ_CONTROL|windows.WRITE_DAC|windows.FILE_TRAVERSE)
+		handle, err := openWindowsRuntimeTailDirectory(path, windows.READ_CONTROL|windows.WRITE_DAC|windows.FILE_TRAVERSE|windowsFileAddFile)
 		if err != nil {
 			return 0, false, err
 		}

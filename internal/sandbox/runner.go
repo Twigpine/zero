@@ -196,9 +196,11 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 		// pinnedSandboxRuntimeRoot.
 		commandSandboxHome := ""
 		if spec.Env != nil {
-			if resolved, err := ResolveWindowsSandboxHome(envListToMap(spec.Env)); err == nil {
-				commandSandboxHome = resolved
+			resolved, err := ResolveWindowsSandboxHome(envListToMap(spec.Env))
+			if err != nil {
+				return CommandPlan{}, err
 			}
+			commandSandboxHome = resolved
 		}
 		runtimeState, cleanup, runtimeErr := prepareSandboxRuntime(workspaceRoot, commandSandboxHome)
 		if runtimeErr != nil {
