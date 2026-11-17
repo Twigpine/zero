@@ -79,6 +79,10 @@ type ToolResult struct {
 	// The full result may be recoverable through Meta["spill_path"].
 	Truncated bool
 	Meta      map[string]string
+	// EnforcementNotices mirrors tools.Result.EnforcementNotices so the
+	// disclosure survives the conversion into the agent-facing result and
+	// reaches the model, the transcript and the interactive display.
+	EnforcementNotices []string
 	// Images the tool produced, delivered to the model as a following user
 	// message rather than on this result. See tools.Result.Images.
 	Images       []zeroruntime.ImageBlock
@@ -110,22 +114,40 @@ type ToolResult struct {
 	RequestedModel string
 }
 
-// ModelOutput returns the bounded provider-facing result while preserving
-// compatibility with synthetic and restored results created before outcomes
-// were finalized.
-func (result ToolResult) ModelOutput() string {
+// BaseModelOutput is the bounded provider-facing result WITHOUT the enforcement
+// disclosure composed into it, mirroring tools.Result.BaseModelOutput.
+//
+// A surface that renders the typed EnforcementNotices itself must build its body
+// from here, or the disclosure appears twice. Decoration has exactly one owner
+// per surface: either the text carries it or the surface draws it, never both.
+func (result ToolResult) BaseModelOutput() string {
 	if result.Outcome.Finalized() {
 		return result.Outcome.ModelView
 	}
 	return result.Output
 }
 
-// HumanDisplay returns the presentation intended for interactive surfaces.
-func (result ToolResult) HumanDisplay() tools.Display {
+// BaseDisplay is BaseModelOutput's presentation half, and carries no enforcement
+// notices for the same reason.
+func (result ToolResult) BaseDisplay() tools.Display {
 	if result.Outcome.Finalized() {
 		return result.Outcome.HumanView
 	}
 	return result.Display
+}
+
+// ModelOutput returns the bounded provider-facing result while preserving
+// compatibility with synthetic and restored results created before outcomes
+// were finalized.
+func (result ToolResult) ModelOutput() string {
+	return tools.WithEnforcementNotices(result.BaseModelOutput(), result.EnforcementNotices)
+}
+
+// HumanDisplay returns the presentation intended for interactive surfaces.
+func (result ToolResult) HumanDisplay() tools.Display {
+	display := result.BaseDisplay()
+	display.Summary = tools.WithEnforcementNotices(display.Summary, result.EnforcementNotices)
+	return display
 }
 
 // DenialCategory classifies why a tool call was blocked before it executed.

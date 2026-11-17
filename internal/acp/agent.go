@@ -962,16 +962,25 @@ func toolCallEvent(call agent.ToolCall) sessions.AppendEventInput {
 	}
 }
 
+// toolResultEvent persists a tool result through the ONE session contract every
+// writer shares, agent.ToolResultSessionPayload.
+//
+// This used to spell its own payload and wrote result.Output. After the
+// output/notice split that field is the UNDECORATED text, and nothing else in
+// the payload carried the enforcement notices, so the disclosure was dropped at
+// the moment of persisting. The live tool_call_update for the same result had
+// shown it (toolResultContent reads ModelOutput), and then session/load
+// replayed the call with the sandbox's narrowing gone. Fixing only the live
+// translation could not reach this: the text was already lost on disk.
+//
+// The session store is shared with the TUI and headless exec, so the same
+// payload is also what lets a TUI resume of an ACP-written session draw the
+// notice as card furniture, from the typed field and the undecorated body.
+// Reported by @jatmn.
 func toolResultEvent(result agent.ToolResult) sessions.AppendEventInput {
 	return sessions.AppendEventInput{
-		Type: sessions.EventToolResult,
-		Payload: map[string]any{
-			"toolCallId":   result.ToolCallID,
-			"name":         result.Name,
-			"status":       result.Status,
-			"output":       result.Output,
-			"changedFiles": append([]string(nil), result.ChangedFiles...),
-		},
+		Type:    sessions.EventToolResult,
+		Payload: agent.ToolResultSessionPayload(result),
 	}
 }
 
@@ -1144,13 +1153,14 @@ func replayToolUpdate(event sessions.Event) *ToolCallUpdate {
 		return nil
 	}
 	var payload struct {
-		Name         string   `json:"name"`
-		ToolCallID   string   `json:"toolCallId"`
-		ID           string   `json:"id"`
-		Arguments    string   `json:"arguments"`
-		Status       string   `json:"status"`
-		Output       string   `json:"output"`
-		ChangedFiles []string `json:"changedFiles"`
+		Name               string   `json:"name"`
+		ToolCallID         string   `json:"toolCallId"`
+		ID                 string   `json:"id"`
+		Arguments          string   `json:"arguments"`
+		Status             string   `json:"status"`
+		Output             string   `json:"output"`
+		ChangedFiles       []string `json:"changedFiles"`
+		EnforcementNotices []string `json:"enforcementNotices"`
 	}
 	if json.Unmarshal(raw, &payload) != nil {
 		return nil
@@ -1170,12 +1180,27 @@ func replayToolUpdate(event sessions.Event) *ToolCallUpdate {
 	if status == "" {
 		status = tools.StatusOK
 	}
+	// THE DISCLOSURE IS RESTORED AS WHAT IT WAS: typed notices beside undecorated
+	// text, so toolCallResult composes it the way it did live and the client
+	// sees it exactly once. The stored output already has the notices composed
+	// in (that is the shared contract, because output is the provider-facing
+	// text), so handing it to ModelOutput together with the typed field would
+	// draw the disclosure twice, and dropping the typed field would make this
+	// reader depend on every writer having decorated the text. Taking the
+	// notices back off the front covers both: a record whose output was never
+	// decorated comes through unchanged and still gets its notice.
+	//
+	// displayPreview is deliberately not read. It is the card body for a
+	// terminal, and the ACP wire has no card: the live update sends the model
+	// text, so a replay that sent the preview instead would not match it.
+	notices := append([]string(nil), payload.EnforcementNotices...)
 	upd := toolCallResult(agent.ToolResult{
-		ToolCallID:   id,
-		Name:         payload.Name,
-		Status:       status,
-		Output:       payload.Output,
-		ChangedFiles: append([]string(nil), payload.ChangedFiles...),
+		ToolCallID:         id,
+		Name:               payload.Name,
+		Status:             status,
+		Output:             tools.WithoutEnforcementNotices(payload.Output, notices),
+		EnforcementNotices: notices,
+		ChangedFiles:       append([]string(nil), payload.ChangedFiles...),
 	})
 	return &upd
 }
