@@ -158,6 +158,8 @@ Hooks fire shell commands on lifecycle events. Configure them in JSON:
 - User: `~/.config/zero/hooks.json`
 - Project: `./.zero/hooks.json`
 
+Concurrent `zero hooks` commands serialize on a lock file so no update is lost. The user config locks its sibling `hooks.json.lock`; the project config locks a digest-keyed file under the user state directory (`$XDG_STATE_HOME/zero/hooks/config-locks/`, `%LOCALAPPDATA%\zero\hooks\config-locks` on Windows), so nothing besides the config itself is ever added to the project directory.
+
 ```json
 {
   "enabled": true,

@@ -245,14 +245,13 @@ func LoadConfig(options LoadOptions) (LoadResult, error) {
 }
 
 // WriteConfig durably publishes config at path. It takes the same
-// <path>.lock used by ConfigStore mutations, so a direct caller cannot
-// interleave with a CLI mutation, and it replaces the file with a synced temp
-// file, an atomic rename, and a parent-directory sync.
-func WriteConfig(path string, config Config) (err error) {
-	resolved, err := filepath.Abs(path)
-	if err != nil {
-		return err
-	}
+// cross-process config lock used by ConfigStore mutations — a sibling of the
+// user config, and a user-state lock keyed by the canonical path for project
+// configs — so a direct caller cannot interleave with a CLI mutation, and it
+// replaces the file with a synced temp file, an atomic rename, and a
+// parent-directory sync.
+func WriteConfig(path string, config Config) error {
+	resolved := canonicalConfigPath(path)
 	return withConfigLock(resolved, func() error {
 		return writeConfigLocked(resolved, config)
 	})
@@ -442,10 +441,7 @@ func NewConfigStore(options StoreOptions) (*ConfigStore, error) {
 		}
 		path = paths.ProjectConfigPath
 	}
-	resolved, err := filepath.Abs(path)
-	if err != nil {
-		return nil, err
-	}
+	resolved := canonicalConfigPath(path)
 	return &ConfigStore{configPath: resolved}, nil
 }
 

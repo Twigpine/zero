@@ -1,18 +1,22 @@
 package hooks
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"time"
 
 	"github.com/Twigpine/zero/internal/lockutil"
 )
 
-// Cross-process lock tuning for the audit log. The lock is held only across a
-// single read-then-append (milliseconds), so the timeout is generous relative
-// to any real hold.
+// Cross-process lock tuning for the audit log and hook configs. The locks are
+// held only across a single read-modify-write (milliseconds), so the timeouts
+// are generous relative to any real hold.
 const (
 	auditLockTimeout     = 10 * time.Second
 	auditLockRetryDelay  = 20 * time.Millisecond
@@ -21,12 +25,22 @@ const (
 )
 
 // lockConfigFile takes the cross-process advisory lock that serializes every
-// mutation of a hooks config. The lock file is a stable sibling of the config
-// (<path>.lock): the kernel releases it when the holder exits, so a crash never
-// leaves a lock that needs reclaiming and the path must never be renamed or
-// removed.
+// mutation of a hooks config. The lock file is stable: the kernel releases it
+// when the holder exits, so a crash never leaves a lock that needs reclaiming
+// and the path must never be renamed or removed.
+//
+// Where the lock lives depends on the config. The user config is already user
+// state and keeps a stable sibling. The project config lives inside the user's
+// repository — EXTENDING.md invites committing .zero/hooks.json — and a stable
+// sibling there would sit in every repository where a hooks command ever ran,
+// so its lock lives under the user state directory keyed by the config's
+// canonical path instead. That scope is per user: two different accounts
+// mutating the same project do not contend.
 func lockConfigFile(path string) (func() error, error) {
-	lockPath := path + ".lock"
+	lockPath, err := configLockPath(path)
+	if err != nil {
+		return nil, err
+	}
 	if err := ensureConfigDir(filepath.Dir(lockPath)); err != nil {
 		return nil, err
 	}
@@ -70,5 +84,102 @@ func (store *AuditStore) lockAudit() (func(), error) {
 			return nil, fmt.Errorf("hooks: timed out acquiring audit lock")
 		}
 		time.Sleep(auditLockRetryDelay)
+	}
+}
+
+// configLockPath returns the stable lock file for the hooks config at path.
+// The user config keeps its sibling; every other config (the project's
+// .zero/hooks.json above all) locks a digest of its canonical path under the
+// user state directory, which keeps hostile project path characters out of the
+// lock file name and lets two spellings of the same location — macOS /var vs
+// /private/var, a linked project directory — contend on one lock.
+func configLockPath(path string) (string, error) {
+	canonical := canonicalConfigPath(path)
+	if isUserConfigPath(canonical) {
+		return canonical + ".lock", nil
+	}
+	root, err := configLockRoot()
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256([]byte(canonical))
+	return filepath.Join(root, hex.EncodeToString(digest[:])+".lock"), nil
+}
+
+// isUserConfigPath reports whether path is the user-level hooks config the
+// loader resolves by default. That file is user state, so it may keep a stable
+// sibling lock; anything else is treated as inside a tree the user may commit.
+func isUserConfigPath(path string) bool {
+	userConfigPath, err := defaultUserConfigPath()
+	if err != nil {
+		return false
+	}
+	return userConfigPath == path
+}
+
+// defaultUserConfigPath resolves the default user-layer hooks config from the
+// environment the same way ResolvePaths does, without needing a cwd.
+func defaultUserConfigPath() (string, error) {
+	home := strings.TrimSpace(firstNonEmpty(os.Getenv("HOME"), os.Getenv("USERPROFILE")))
+	if home == "" {
+		var err error
+		home, err = os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve user home: %w", err)
+		}
+	}
+	configHome := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME"))
+	if configHome == "" {
+		configHome = filepath.Join(home, ".config")
+	}
+	return canonicalConfigPath(filepath.Join(configHome, "zero", "hooks.json")), nil
+}
+
+// configLockRoot resolves the user state directory that holds the locks of
+// project hook configs, mirroring worktrees.DefaultBaseDir: LOCALAPPDATA on
+// Windows, XDG_STATE_HOME elsewhere, and ~/.local/state as the final fallback.
+func configLockRoot() (string, error) {
+	if runtime.GOOS == "windows" {
+		if localAppData := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); localAppData != "" {
+			return filepath.Join(localAppData, "zero", "hooks", "config-locks"), nil
+		}
+		if profile := strings.TrimSpace(os.Getenv("USERPROFILE")); profile != "" {
+			return filepath.Join(profile, "AppData", "Local", "zero", "hooks", "config-locks"), nil
+		}
+	}
+	if stateHome := strings.TrimSpace(os.Getenv("XDG_STATE_HOME")); stateHome != "" {
+		return filepath.Join(stateHome, "zero", "hooks", "config-locks"), nil
+	}
+	home := strings.TrimSpace(firstNonEmpty(os.Getenv("HOME"), os.Getenv("USERPROFILE")))
+	if home == "" {
+		var err error
+		home, err = os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("hooks: resolve user state directory: %w", err)
+		}
+	}
+	return filepath.Join(home, ".local", "state", "zero", "hooks", "config-locks"), nil
+}
+
+// canonicalConfigPath resolves path to the physical form its existing
+// ancestors resolve to, keeping the not-yet-created tail spelled under the
+// resolved ancestor. A directory another writer creates concurrently resolves
+// to the same physical ancestor either way, so both sides of that race key the
+// same lock; the walk never fails, falling back to the cleaned absolute path.
+func canonicalConfigPath(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	var missing []string
+	for current := filepath.Clean(path); ; {
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			return filepath.Join(append([]string{resolved}, missing...)...)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return path
+		}
+		missing = append([]string{filepath.Base(current)}, missing...)
+		current = parent
 	}
 }

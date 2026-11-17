@@ -29,7 +29,20 @@ func projectHooks(t *testing.T, cwd string) hooks.Config {
 	return config
 }
 
+// isolateHooksStateRoot points the user directory roots the hooks config lock
+// resolves at a throwaway root: mutating a hooks config takes its lock in the
+// user state directory (XDG_STATE_HOME, LOCALAPPDATA on Windows), and a test
+// must never create that state in the developer's real one.
+func isolateHooksStateRoot(t *testing.T) {
+	t.Helper()
+	root := t.TempDir()
+	for _, name := range []string{"HOME", "USERPROFILE", "XDG_STATE_HOME", "LOCALAPPDATA"} {
+		t.Setenv(name, root)
+	}
+}
+
 func TestRunHooksAddPersistsToProjectConfig(t *testing.T) {
+	isolateHooksStateRoot(t)
 	cwd := t.TempDir()
 	var stdout, stderr bytes.Buffer
 	code := runHooksAdd([]string{"zero.preflight", "--event", "beforeTool", "--matcher", "bash", "--command", "sh", "--arg", "-c", "--arg", "echo hi"}, &stdout, &stderr, hooksManageDeps(cwd))
@@ -75,6 +88,7 @@ func TestRunHooksAddRejectsMissingRequiredFlags(t *testing.T) {
 }
 
 func TestRunHooksAddRejectsUnknownEvent(t *testing.T) {
+	isolateHooksStateRoot(t)
 	cwd := t.TempDir()
 	var stdout, stderr bytes.Buffer
 	if code := runHooksAdd([]string{"h1", "--event", "bogusEvent", "--command", "sh"}, &stdout, &stderr, hooksManageDeps(cwd)); code == exitSuccess {
@@ -86,6 +100,7 @@ func TestRunHooksAddRejectsUnknownEvent(t *testing.T) {
 }
 
 func TestRunHooksAddJSONRedactsSecretArgs(t *testing.T) {
+	isolateHooksStateRoot(t)
 	cwd := t.TempDir()
 	secret := "sk-proj-" + strings.Repeat("z", 23) + "0"
 	var stdout, stderr bytes.Buffer
@@ -102,6 +117,7 @@ func TestRunHooksAddJSONRedactsSecretArgs(t *testing.T) {
 }
 
 func TestRunHooksToggleAndRemove(t *testing.T) {
+	isolateHooksStateRoot(t)
 	cwd := t.TempDir()
 	deps := hooksManageDeps(cwd)
 	var out, errBuf bytes.Buffer
