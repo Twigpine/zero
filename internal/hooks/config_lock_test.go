@@ -460,6 +460,204 @@ func TestWriteConfigCreatesMissingDirectories(t *testing.T) {
 	}
 }
 
+// TestConfigLockRootFor exercises every branch of the state-directory
+// resolution on any host: the Windows variables, the XDG_STATE_HOME default,
+// and the HOME/USERPROFILE fallbacks. configLockRoot's Windows branches never
+// run on a Linux unit-test host, and isolateStateRoot satisfies every lookup
+// in the integration tests, so the parameterized form carries the coverage
+// AGENTS.md requires for path-sensitive logic.
+func TestConfigLockRootFor(t *testing.T) {
+	// isolateStateRoot points every per-user root at a throwaway root first;
+	// the explicit HOME/USERPROFILE override below then makes the
+	// os.UserHomeDir fallback cases deterministic on every platform.
+	isolateStateRoot(t)
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	env := func(values map[string]string) func(string) string {
+		return func(key string) string { return values[key] }
+	}
+	lockRoot := func(base string) string {
+		return filepath.Join(base, "zero", "hooks", "config-locks")
+	}
+	localAppData := filepath.Join("c", "local")
+	profile := filepath.Join("c", "profile")
+	stateHome := filepath.Join("s", "state")
+
+	for _, tc := range []struct {
+		name string
+		goos string
+		env  map[string]string
+		want string
+	}{
+		{"windows prefers LOCALAPPDATA", "windows", map[string]string{"LOCALAPPDATA": localAppData}, lockRoot(localAppData)},
+		{"windows falls back to USERPROFILE", "windows", map[string]string{"USERPROFILE": profile}, lockRoot(filepath.Join(profile, "AppData", "Local"))},
+		{"windows falls through to XDG_STATE_HOME", "windows", map[string]string{"XDG_STATE_HOME": stateHome}, lockRoot(stateHome)},
+		{"windows falls back to the home directory", "windows", map[string]string{}, lockRoot(filepath.Join(homeDir, ".local", "state"))},
+		{"non-windows prefers XDG_STATE_HOME", "darwin", map[string]string{"XDG_STATE_HOME": stateHome}, lockRoot(stateHome)},
+		{"non-windows falls back to HOME", "linux", map[string]string{"HOME": homeDir}, lockRoot(filepath.Join(homeDir, ".local", "state"))},
+		{"non-windows falls back to USERPROFILE", "linux", map[string]string{"USERPROFILE": profile}, lockRoot(filepath.Join(profile, ".local", "state"))},
+		{"non-windows falls back to the home directory", "linux", map[string]string{}, lockRoot(filepath.Join(homeDir, ".local", "state"))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := configLockRootFor(tc.goos, env(tc.env))
+			if err != nil {
+				t.Fatalf("configLockRootFor: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("configLockRootFor(%s) = %s, want %s", tc.goos, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestWriteConfigRollsBackCreatedDirectoriesOnSyncFailure pins the failure
+// path of ensureConfigDir: when the barrier for a directory this call created
+// fails, the call must remove only the directories it created and report the
+// failure. The write to a/b/hooks.json fails while syncing the barrier of a,
+// so both a and its child b must be rolled back and a must not exist again.
+func TestWriteConfigRollsBackCreatedDirectoriesOnSyncFailure(t *testing.T) {
+	isolateStateRoot(t)
+	base := t.TempDir()
+	path := filepath.Join(base, "a", "b", "hooks.json")
+
+	origDir := syncHooksDirFn
+	t.Cleanup(func() { syncHooksDirFn = origDir })
+	dirSyncErr := errors.New("sync failed")
+	// WriteConfig canonicalizes the path before touching the filesystem, so
+	// the barrier for a is synced under its physical spelling.
+	failingDir := canonicalConfigPath(filepath.Join(base, "a"))
+	syncHooksDirFn = func(dir string) error {
+		if dir == failingDir {
+			return dirSyncErr
+		}
+		return origDir(dir)
+	}
+
+	config := Config{Enabled: true, Hooks: []Definition{{ID: "a", Event: EventAfterTool, Command: "node"}}}
+	err := WriteConfig(path, config)
+	if !errors.Is(err, dirSyncErr) {
+		t.Fatalf("WriteConfig error = %v, want it to wrap %v", err, dirSyncErr)
+	}
+	if _, statErr := os.Lstat(filepath.Join(base, "a", "b")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("the deepest directory created by the failed call survived: %v", statErr)
+	}
+	if _, statErr := os.Lstat(filepath.Join(base, "a")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("the directory created by the failed call survived: %v", statErr)
+	}
+	if _, statErr := os.Lstat(base); statErr != nil {
+		t.Fatalf("rollback removed a pre-existing directory: %v", statErr)
+	}
+}
+
+// TestWriteConfigDirSyncFailureAfterRenameKeepsNewConfig pins the other
+// directory barrier: the rename has already published the new config when the
+// final directory sync fails, so the call reports the error and the new
+// document stays readable — there is no rollback of an already-visible file.
+func TestWriteConfigDirSyncFailureAfterRenameKeepsNewConfig(t *testing.T) {
+	isolateStateRoot(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hooks.json")
+	oldConfig := Config{Enabled: true, Hooks: []Definition{{ID: "old", Event: EventAfterTool, Command: "node"}}}
+	if err := WriteConfig(path, oldConfig); err != nil {
+		t.Fatalf("seed WriteConfig: %v", err)
+	}
+
+	origDir := syncHooksDirFn
+	t.Cleanup(func() { syncHooksDirFn = origDir })
+	dirSyncErr := errors.New("sync failed")
+	// The final barrier targets the canonical config directory, since
+	// WriteConfig canonicalizes the path before touching the filesystem.
+	configDir := canonicalConfigPath(filepath.Dir(path))
+	syncHooksDirFn = func(dir string) error {
+		if dir == configDir {
+			return dirSyncErr
+		}
+		return origDir(dir)
+	}
+
+	newConfig := Config{Enabled: true, Hooks: []Definition{{ID: "new", Event: EventAfterTool, Command: "node"}}}
+	err := WriteConfig(path, newConfig)
+	if !errors.Is(err, dirSyncErr) {
+		t.Fatalf("WriteConfig error = %v, want it to wrap %v", err, dirSyncErr)
+	}
+
+	store, err := NewConfigStore(StoreOptions{ConfigPath: path})
+	if err != nil {
+		t.Fatalf("NewConfigStore: %v", err)
+	}
+	config, err := store.List()
+	if err != nil {
+		t.Fatalf("List after failed directory sync: %v", err)
+	}
+	if findHook(config.Hooks, "new") == nil {
+		t.Fatalf("the published config was lost: %v", hookIDs(config.Hooks))
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".hooks-") && strings.HasSuffix(entry.Name(), ".tmp") {
+			t.Fatalf("failed write left temp file %s", entry.Name())
+		}
+	}
+}
+
+// TestConfigLockAcquireTimesOut pins the give-up path of lockConfigFile: a
+// mutation that cannot take the config lock fails with a timeout error that
+// names the lock, instead of blocking forever.
+func TestConfigLockAcquireTimesOut(t *testing.T) {
+	isolateStateRoot(t)
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	store, err := NewConfigStore(StoreOptions{ConfigPath: path})
+	if err != nil {
+		t.Fatalf("NewConfigStore: %v", err)
+	}
+	if _, err := store.Upsert(Definition{ID: "seed", Event: EventAfterTool, Command: "node"}); err != nil {
+		t.Fatalf("seed hook: %v", err)
+	}
+
+	lockPath, err := configLockPath(path)
+	if err != nil {
+		t.Fatalf("configLockPath: %v", err)
+	}
+	held, err := lockutil.TryAcquireFileLock(lockPath)
+	if err != nil {
+		t.Fatalf("acquire config lock: %v", err)
+	}
+	defer func() {
+		if err := held.Release(); err != nil {
+			t.Errorf("release config lock: %v", err)
+		}
+	}()
+
+	origTimeout := configLockTimeout
+	configLockTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { configLockTimeout = origTimeout })
+
+	start := time.Now()
+	_, err = store.Upsert(Definition{ID: "blocked", Event: EventAfterTool, Command: "node"})
+	if err == nil {
+		t.Fatal("Upsert succeeded while the config lock was held elsewhere")
+	}
+	if !strings.Contains(err.Error(), "timed out acquiring config lock") || !strings.Contains(err.Error(), lockPath) {
+		t.Fatalf("Upsert error = %v, want a config-lock timeout naming %s", err, lockPath)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("Upsert took %s to time out, want a prompt failure", elapsed)
+	}
+
+	config, err := store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if findHook(config.Hooks, "blocked") != nil || findHook(config.Hooks, "seed") == nil {
+		t.Fatalf("a timed-out mutation must write nothing: %v", hookIDs(config.Hooks))
+	}
+}
+
 // TestCanonicalConfigPath pins the physical-form rule the project lock key
 // relies on: two spellings of the same location resolve to one path, and a
 // not-yet-created tail is kept spelled under the resolved ancestor, so a

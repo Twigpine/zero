@@ -20,9 +20,13 @@ import (
 const (
 	auditLockTimeout     = 10 * time.Second
 	auditLockRetryDelay  = 20 * time.Millisecond
-	configLockTimeout    = 10 * time.Second
 	configLockRetryDelay = 20 * time.Millisecond
 )
+
+// configLockTimeout bounds how long a mutation waits for a competing
+// config-lock holder before giving up. It is a variable so the timeout test
+// can shrink the wait; production callers must not write it.
+var configLockTimeout = 10 * time.Second
 
 // lockConfigFile takes the cross-process advisory lock that serializes every
 // mutation of a hooks config. The lock file is stable: the kernel releases it
@@ -139,18 +143,25 @@ func defaultUserConfigPath() (string, error) {
 // project hook configs, mirroring worktrees.DefaultBaseDir: LOCALAPPDATA on
 // Windows, XDG_STATE_HOME elsewhere, and ~/.local/state as the final fallback.
 func configLockRoot() (string, error) {
-	if runtime.GOOS == "windows" {
-		if localAppData := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); localAppData != "" {
+	return configLockRootFor(runtime.GOOS, os.Getenv)
+}
+
+// configLockRootFor is configLockRoot parameterized over the platform and the
+// environment lookup, so the Windows branches and the HOME fallback that never
+// run on a Linux unit-test host stay exercised by table tests on every host.
+func configLockRootFor(goos string, getenv func(string) string) (string, error) {
+	if goos == "windows" {
+		if localAppData := strings.TrimSpace(getenv("LOCALAPPDATA")); localAppData != "" {
 			return filepath.Join(localAppData, "zero", "hooks", "config-locks"), nil
 		}
-		if profile := strings.TrimSpace(os.Getenv("USERPROFILE")); profile != "" {
+		if profile := strings.TrimSpace(getenv("USERPROFILE")); profile != "" {
 			return filepath.Join(profile, "AppData", "Local", "zero", "hooks", "config-locks"), nil
 		}
 	}
-	if stateHome := strings.TrimSpace(os.Getenv("XDG_STATE_HOME")); stateHome != "" {
+	if stateHome := strings.TrimSpace(getenv("XDG_STATE_HOME")); stateHome != "" {
 		return filepath.Join(stateHome, "zero", "hooks", "config-locks"), nil
 	}
-	home := strings.TrimSpace(firstNonEmpty(os.Getenv("HOME"), os.Getenv("USERPROFILE")))
+	home := strings.TrimSpace(firstNonEmpty(getenv("HOME"), getenv("USERPROFILE")))
 	if home == "" {
 		var err error
 		home, err = os.UserHomeDir()
