@@ -261,6 +261,9 @@ func (m model) providerModelDiscoveryCmd() tea.Cmd {
 	}
 }
 
+// applyProviderModelsDiscovered replaces the wizard's model list with a live
+// discovery result. It ignores stale results, and on an error or an empty list
+// it keeps the built-in list and records why.
 func (m model) applyProviderModelsDiscovered(msg providerModelsDiscoveredMsg) model {
 	wizard := m.providerWizard
 	if wizard == nil || wizard.step != providerWizardStepModel || wizard.currentProvider().ID != msg.providerID || msg.token != wizard.discoveryToken {
@@ -280,14 +283,39 @@ func (m model) applyProviderModelsDiscovered(msg providerModelsDiscoveredMsg) mo
 		wizard.refreshModels()
 		return m
 	}
+	// Discovery returns models sorted by ID, so row 0 is whatever sorts first,
+	// not the model the cursor was on. Keep that model, else the provider
+	// default, so discovery does not move the cursor from a free default such
+	// as OpenGateway's "auto" onto a paid model that happens to sort first.
+	currentID := wizard.currentModel().ID
 	wizard.models = models
-	wizard.selectedModel = 0
 	wizard.modelSource = providerWizardModelsSource(msg.models)
 	if wizard.modelSource == "" {
 		wizard.modelSource = "live"
 	}
 	wizard.modelLoadError = ""
+	wizard.selectModelID(currentID, wizard.currentProvider().DefaultModel)
 	return m
+}
+
+// selectModelID puts the cursor on the first of ids that the filtered model
+// list contains, trying them in order. It falls back to the first row when none
+// of them is listed.
+func (wizard *providerWizardState) selectModelID(ids ...string) {
+	models := wizard.filteredModels()
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		for index, model := range models {
+			if model.ID == id {
+				wizard.selectedModel = index
+				return
+			}
+		}
+	}
+	wizard.selectedModel = 0
 }
 
 func providerWizardModelsFromDiscovery(models []providermodeldiscovery.Model) []providerWizardModel {

@@ -229,12 +229,15 @@ var curatedModels = map[string][]Model{
 	// GET /v1/models; pickers and onboarding show that list whenever it is
 	// reachable (see providermodeldiscovery.DiscoverCatalog). This is only the
 	// offline fallback, so keep it to ids the gateway is expected to keep
-	// serving: the smart router, the catalog default, and its fast sibling. Do
-	// not add promo or time-limited models here. Users can still type any id
-	// the gateway accepts.
+	// serving: the smart router (the catalog default), MiMo V2.6 Pro, and its
+	// fast sibling. Do not add promo or time-limited models here. Users can
+	// still type any id the gateway accepts. "auto" carries no context window on
+	// purpose: the gateway reports none (the serving model varies per request),
+	// so compaction sizes itself from modelregistry.FallbackContextWindow and
+	// the context gauges show no guessed denominator.
 	"gitlawb-opengateway": {
-		{ID: "xiaomi/mimo-v2.6-pro", Description: "catalog default", ContextWindow: 262_144},
-		{ID: "auto", Description: "smart routing (picks a capable model per request)"},
+		{ID: "auto", Description: "catalog default"},
+		{ID: "xiaomi/mimo-v2.6-pro", Description: "general model (Xiaomi MiMo V2.6 Pro)", ContextWindow: 262_144},
 		{ID: "xiaomi/mimo-v2.6-flash", Description: "fast model (Xiaomi MiMo V2.6 Flash)", ContextWindow: 262_144},
 	},
 	"atomic-chat": {

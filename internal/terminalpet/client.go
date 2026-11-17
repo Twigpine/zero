@@ -98,6 +98,10 @@ func NewClient(rootDir string) *Client {
 	return client
 }
 
+// Catalog lists every companion: the built-in ones first, then installed
+// pets, then the rest of the community catalog. The built-in ones are always
+// returned. When the community catalog cannot be loaded the error comes back
+// alongside whatever could be listed, so a caller can show both.
 func (c *Client) Catalog(ctx context.Context) ([]Entry, error) {
 	remote, remoteErr := c.remoteCatalog(ctx)
 	local, localErr := c.localCatalog()
@@ -107,13 +111,16 @@ func (c *Client) Catalog(ctx context.Context) ([]Entry, error) {
 		ranking, _ := c.installedRanking(rankingCtx)
 		cancel()
 		sortEntriesByRanking(entries, ranking)
-		return entries, nil
+		return append(BuiltinEntries(), entries...), remoteErr
 	}
-	return nil, errors.Join(remoteErr, localErr)
+	return BuiltinEntries(), errors.Join(remoteErr, localErr)
 }
 
+// InstalledEntries lists the companions that need no download: the built-in
+// ones, then installed pets.
 func (c *Client) InstalledEntries() ([]Entry, error) {
-	return c.localCatalog()
+	local, err := c.localCatalog()
+	return append(BuiltinEntries(), local...), err
 }
 
 type rankingPayload struct {
@@ -170,6 +177,9 @@ func decodeRanking(data []byte) ([]string, error) {
 }
 
 func (c *Client) Preview(ctx context.Context, entry Entry) (*Animation, error) {
+	if form, ok := builtinForm(entry.Slug); ok {
+		return BuiltinAnimation(form), nil
+	}
 	if entry.Local {
 		if animation, err := c.LoadInstalled(entry.Slug); err == nil {
 			return animation, nil
@@ -211,6 +221,10 @@ func (c *Client) Preview(ctx context.Context, entry Entry) (*Animation, error) {
 }
 
 func (c *Client) Install(ctx context.Context, entry Entry) (*Animation, error) {
+	if form, ok := builtinForm(entry.Slug); ok {
+		// Nothing to download or write: the art is part of the binary.
+		return BuiltinAnimation(form), nil
+	}
 	if err := validateSlug(entry.Slug); err != nil {
 		return nil, err
 	}
@@ -307,6 +321,9 @@ func (c *Client) Install(ctx context.Context, entry Entry) (*Animation, error) {
 }
 
 func (c *Client) LoadInstalled(slug string) (*Animation, error) {
+	if form, ok := builtinForm(slug); ok {
+		return BuiltinAnimation(form), nil
+	}
 	if err := validateSlug(slug); err != nil {
 		return nil, err
 	}
@@ -418,6 +435,9 @@ func (m petAnimationMetadata) rowIndex() (int, error) {
 }
 
 func (c *Client) InstalledEntry(slug string) (Entry, error) {
+	if form, ok := builtinForm(slug); ok {
+		return builtinEntry(form), nil
+	}
 	if err := validateSlug(slug); err != nil {
 		return Entry{}, err
 	}
