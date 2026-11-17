@@ -29,14 +29,14 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 	// tools with DenyRead under the narrow restricting-SID set (PR #640).
 	if err := windowsDenyReadRestrictedTokenUnsupportedProfile(config.PermissionProfile); err != nil {
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
-		return 1
+		return WindowsSandboxSetupUnpublishedExitCode
 	}
 	// Applying the WFP network filters and workspace ACLs requires Administrator
 	// rights; without them WFP fails deep inside with a raw ACCESS_DENIED (0x5).
 	// Check up front and return an actionable message instead.
 	if !windowsSetupProcessIsElevated() {
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": Administrator rights are required. Re-run `zero sandbox setup` from an elevated (Run as administrator) terminal.")
-		return 1
+		return WindowsSandboxSetupUnpublishedExitCode
 	}
 	// THE CONSUMER IS CARRIED, AND VALIDATED BEFORE ANYTHING IS PROVISIONED.
 	//
@@ -59,17 +59,17 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 		consumer, sidErr := windows.StringToSid(trimmed)
 		if sidErr != nil {
 			fmt.Fprintln(stderr, WindowsSandboxSetupName+": the calling user SID could not be parsed: "+sidErr.Error())
-			return 1
+			return WindowsSandboxSetupUnpublishedExitCode
 		}
 		installer, installerErr := windowsSetupInstallerSID()
 		if installerErr != nil {
 			fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+installerErr.Error())
-			return 1
+			return WindowsSandboxSetupUnpublishedExitCode
 		}
 		if !strings.EqualFold(strings.TrimSpace(installer), trimmed) {
 			fmt.Fprintln(stderr, WindowsSandboxSetupName+": setup is running as "+installer+" but the stamp would be provisioned for "+trimmed+
 				". Alternate-account setup is not supported: run `zero sandbox setup` from a terminal elevated as the account that will use Zero.")
-			return 1
+			return WindowsSandboxSetupUnpublishedExitCode
 		}
 		restore := setWindowsSetupConsumerSID(consumer)
 		defer restore()
@@ -85,15 +85,17 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 	unlockSetup, lockErr := lockWindowsSandboxSetup(config.SandboxHome)
 	if lockErr != nil {
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+lockErr.Error())
-		return 1
+		return WindowsSandboxSetupUnpublishedExitCode
 	}
+	published := false
 	defer func() {
-		// Released after whichever return below ran, so a failed release is
-		// reported on top of that result, and a setup that could not confirm it
-		// let go of the lock does not exit 0. See lockWindowsSandboxSetup.
 		if releaseErr := unlockSetup(); releaseErr != nil {
-			fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+releaseErr.Error())
-			code = 1
+			message := releaseErr.Error()
+			if published {
+				message = "setup marker was published, but releasing the setup lock failed: " + message
+				code = 1
+			}
+			fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+message)
 		}
 	}()
 
@@ -118,7 +120,7 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 		lease, leaseErr := prepareSandboxRuntimeLease(root)
 		if leaseErr != nil {
 			fmt.Fprintln(stderr, WindowsSandboxSetupName+": reserve the sandbox runtime root "+root+" for setup: "+leaseErr.Error())
-			return 1
+			return WindowsSandboxSetupUnpublishedExitCode
 		}
 		defer lease.release()
 	}
@@ -137,7 +139,7 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 	// non-empty one, so a pre-existing cache or temp tree is never touched.
 	failed := func(cause error) int {
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+runWindowsSandboxSetupCompensations(cause, nil, runtimeRollback).Error())
-		return 1
+		return WindowsSandboxSetupUnpublishedExitCode
 	}
 	if err != nil {
 		return failed(err)
@@ -194,7 +196,7 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 	// failing is the moment the others matter most.
 	failedAfterACL := func(cause error) int {
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+runWindowsSandboxSetupCompensations(cause, rollback, runtimeRollback).Error())
-		return 1
+		return WindowsSandboxSetupUnpublishedExitCode
 	}
 	if err := windowsSetupApplyNetworkPlan(networkPlan); err != nil {
 		return failedAfterACL(err)
@@ -206,6 +208,7 @@ func runWindowsSandboxSetup(config WindowsSandboxSetupConfig, stderr io.Writer) 
 	if err := writeWindowsSandboxSetupMarkerFile(config, marker); err != nil {
 		return failedAfterACL(err)
 	}
+	published = true
 	return 0
 }
 

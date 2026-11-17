@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -19,6 +21,8 @@ type sandboxCommandOptions struct {
 }
 
 const permissionProfileScopeNote = "permissionProfile is derived from this process's environment and working directory; a command run with its own environment can add further credential deny-read entries."
+
+var errSandboxSetupHelperNotStarted = errors.New("sandbox setup helper did not start")
 
 func runSandbox(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	if len(args) == 0 {
@@ -183,15 +187,17 @@ func runSandboxSetup(args []string, stdout io.Writer, stderr io.Writer, deps app
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
 	setupArgs := append(append([]string{}, setupHelper.ArgsPrefix...), setupPlan.Args...)
-	// BUILDING THE ARGS ALREADY WROTE TO DISK. Selecting the runtime root takes a
-	// lease, and taking a lease creates the runtime tree and the lease file when
-	// they are not there. A helper that never publishes a marker leaves that tree
-	// behind, attested by nothing, so the undo belongs on this side of the process
-	// boundary where the record of it lives.
 	if err := deps.runSandboxSetupHelper(setupHelper.Name, setupArgs, stdout, stderr); err != nil {
 		message := "Windows sandbox setup failed: " + err.Error()
-		if undo := setupPlan.Rollback(); undo != nil {
-			message += "\nleftover sandbox runtime state could not be removed: " + undo.Error()
+		// Argument preparation may have created the runtime lease and its parent
+		// directories. Undo those writes only if this helper could not have
+		// published a marker. A generic process error leaves that outcome unknown.
+		var exitErr *exec.ExitError
+		if errors.Is(err, errSandboxSetupHelperNotStarted) ||
+			(errors.As(err, &exitErr) && exitErr.ExitCode() == zeroSandbox.WindowsSandboxSetupUnpublishedExitCode) {
+			if undo := setupPlan.Rollback(); undo != nil {
+				message += "\nleftover sandbox runtime state could not be removed: " + undo.Error()
+			}
 		}
 		return writeAppError(stderr, message, exitProvider)
 	}

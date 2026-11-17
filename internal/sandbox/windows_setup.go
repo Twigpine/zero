@@ -16,6 +16,10 @@ import (
 
 const WindowsSandboxSetupName = "zero-windows-sandbox-setup.exe"
 
+// WindowsSandboxSetupUnpublishedExitCode confirms that this invocation failed
+// before publishing its marker, so the caller may undo its own preparation.
+const WindowsSandboxSetupUnpublishedExitCode = 3
+
 // Bumped to 6 when the SELECTED RUNTIME ROOT itself became part of the marker,
 // so a command consumes setup's choice instead of re-deriving one. A marker
 // written by the previous version records no root, and honouring it would pin
@@ -338,11 +342,11 @@ func RunWindowsSandboxSetup(args []string, stderr io.Writer) int {
 	config, err := ParseWindowsSandboxSetupArgs(args)
 	if err != nil {
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
-		return 2
+		return WindowsSandboxSetupUnpublishedExitCode
 	}
 	if err := windowsDenyReadRestrictedTokenUnsupportedProfile(config.PermissionProfile); err != nil {
 		fmt.Fprintln(stderr, WindowsSandboxSetupName+": "+err.Error())
-		return 1
+		return WindowsSandboxSetupUnpublishedExitCode
 	}
 	return runWindowsSandboxSetup(config, stderr)
 }

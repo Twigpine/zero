@@ -56,8 +56,8 @@ func TestWindowsSandboxSetupPathForRunner(t *testing.T) {
 func TestRunWindowsSandboxSetupRejectsInvalidArgs(t *testing.T) {
 	var stderr bytes.Buffer
 	code := RunWindowsSandboxSetup([]string{"--command-cwd", `C:\workspace`}, &stderr)
-	if code != 2 {
-		t.Fatalf("exit code = %d, want usage error", code)
+	if code != WindowsSandboxSetupUnpublishedExitCode {
+		t.Fatalf("exit code = %d, want unpublished status after invalid arguments", code)
 	}
 	if !strings.Contains(stderr.String(), WindowsSandboxSetupName) {
 		t.Fatalf("stderr = %q, want setup helper name", stderr.String())
@@ -87,8 +87,8 @@ func TestRunWindowsSandboxSetupRejectsDenyReadUpfront(t *testing.T) {
 	t.Cleanup(func() { _ = setupPlan.Rollback() })
 	var stderr bytes.Buffer
 	code := RunWindowsSandboxSetup(setupPlan.Args, &stderr)
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1 for unsupported DenyRead", code)
+	if code != WindowsSandboxSetupUnpublishedExitCode {
+		t.Fatalf("exit code = %d, want unpublished status for unsupported DenyRead", code)
 	}
 	if !strings.Contains(stderr.String(), "DenyRead is not supported") {
 		t.Fatalf("stderr = %q, want DenyRead unsupported rejection before elevation check", stderr.String())

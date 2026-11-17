@@ -65,8 +65,11 @@ func TestSetupDoesNotReportSuccessOverAFailedLockRelease(t *testing.T) {
 			stageWindowsSetupLockRelease(t, tc.unlockErr, tc.closeErr)
 
 			code, output := runWindowsSetupTransaction(preparedWindowsSetupConfig(t, workspace, home, bareWindowsProfile(workspace)))
-			if code == 0 {
-				t.Fatalf("setup exited 0 although releasing its lock failed:\n%s", output)
+			if code == 0 || code == WindowsSandboxSetupUnpublishedExitCode {
+				t.Fatalf("setup exit = %d, want a failure that keeps published state:\n%s", code, output)
+			}
+			if !strings.Contains(output, "setup marker was published") {
+				t.Errorf("the output does not say that setup published its marker:\n%s", output)
 			}
 			for _, want := range tc.want {
 				if !strings.Contains(output, want) {
@@ -79,6 +82,28 @@ func TestSetupDoesNotReportSuccessOverAFailedLockRelease(t *testing.T) {
 				t.Errorf("the transaction did not publish its marker before the release: %v", err)
 			}
 		})
+	}
+}
+
+func TestSetupKeepsUnpublishedStatusOverAFailedLockRelease(t *testing.T) {
+	workspace, _ := windowsRuntimeTestRoots(t)
+	home := t.TempDir()
+	windowsSetupTransactionSeams(t, func(WindowsNetworkPlan) error {
+		return errors.New("staged network failure")
+	})
+	stageWindowsSetupLockRelease(t, errors.New("staged unlock failure"), nil)
+
+	code, output := runWindowsSetupTransaction(preparedWindowsSetupConfig(t, workspace, home, bareWindowsProfile(workspace)))
+	if code != WindowsSandboxSetupUnpublishedExitCode {
+		t.Fatalf("setup exit = %d, want unpublished status:\n%s", code, output)
+	}
+	for _, want := range []string{"staged network failure", "staged unlock failure"} {
+		if !strings.Contains(output, want) {
+			t.Errorf("the output does not name %q:\n%s", want, output)
+		}
+	}
+	if _, err := os.Stat(WindowsSandboxSetupMarkerPath(home)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("setup left a marker after failure before publication: %v", err)
 	}
 }
 
