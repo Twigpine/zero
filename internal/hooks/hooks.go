@@ -183,6 +183,12 @@ var (
 	storeLocks    = map[string]*sync.Mutex{}
 )
 
+// ErrInvalidConfig marks a hooks.json that exists but cannot be read or
+// parsed, or that contains a schema-invalid hook definition. A missing file is
+// the documented default and is not an error; callers turn this sentinel into
+// a fail-closed beforeTool gate.
+var ErrInvalidConfig = errors.New("invalid hook config")
+
 func ResolvePaths(options ResolvePathOptions) (Paths, error) {
 	cwd, err := resolveCwd(options.Cwd)
 	if err != nil {
@@ -206,6 +212,10 @@ func ResolvePaths(options ResolvePathOptions) (Paths, error) {
 	}, nil
 }
 
+// LoadConfig merges the user and project hook layers. It returns the partial
+// result together with ErrInvalidConfig when an existing layer cannot be read,
+// parsed, or validated; a missing file is the documented default and is not an
+// error.
 func LoadConfig(options LoadOptions) (LoadResult, error) {
 	paths, err := ResolvePaths(ResolvePathOptions{Cwd: options.Cwd, Env: options.Env})
 	if err != nil {
@@ -234,6 +244,18 @@ func LoadConfig(options LoadOptions) (LoadResult, error) {
 
 	paths.UserConfigPath = userConfigPath
 	paths.ProjectConfigPath = projectConfigPath
+	for _, diagnostic := range diagnostics {
+		// A malformed or unreadable layer means the policy it contained is
+		// unknown. Do not merge past it and run with a partial policy.
+		switch diagnostic.Kind {
+		case DiagnosticIO, DiagnosticJSON, DiagnosticSchema:
+			return LoadResult{
+				Config:      mergeLayers(layers, &diagnostics),
+				Diagnostics: diagnostics,
+				Paths:       paths,
+			}, fmt.Errorf("%w: %s: %s", ErrInvalidConfig, diagnostic.Path, diagnostic.Message)
+		}
+	}
 	return LoadResult{
 		Config:      mergeLayers(layers, &diagnostics),
 		Diagnostics: diagnostics,
@@ -629,6 +651,13 @@ func readLayer(source ConfigSource, path string, diagnostics *[]Diagnostic) (hoo
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			// os.ReadFile follows symlinks, so a dangling hooks.json symlink (or a
+			// dangling parent such as a trusted workspace's .zero) also reports
+			// ENOENT. Lstat tells "never existed" from "exists but its target is
+			// gone"; the latter is an unreadable policy, not a default.
+			if danglingSymlinkInPath(path) {
+				*diagnostics = append(*diagnostics, Diagnostic{Kind: DiagnosticIO, Source: source, Path: path, Message: "hooks.json path contains a symlink whose target does not exist"})
+			}
 			return hookLayer{}, false
 		}
 		*diagnostics = append(*diagnostics, Diagnostic{Kind: DiagnosticIO, Source: source, Path: path, Message: err.Error()})
@@ -646,6 +675,25 @@ func readLayer(source ConfigSource, path string, diagnostics *[]Diagnostic) (hoo
 		return hookLayer{}, false
 	}
 	return hookLayer{source: source, path: path, config: config, enabledSet: enabledSet, hookEnabledSet: hookEnabledSet}, true
+}
+
+// danglingSymlinkInPath reports whether path or any parent component is a
+// symlink whose target does not exist. os.ReadFile follows symlinks and
+// reports ENOENT for both a missing file and a dangling one; this check lets
+// the loader treat the latter as an unreadable policy instead of a first run.
+func danglingSymlinkInPath(path string) bool {
+	for current := path; ; current = filepath.Dir(current) {
+		if _, err := os.Lstat(current); err == nil {
+			if _, statErr := os.Stat(current); errors.Is(statErr, os.ErrNotExist) {
+				return true
+			}
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+	}
+	return false
 }
 
 func readSingleConfig(path string) (Config, error) {

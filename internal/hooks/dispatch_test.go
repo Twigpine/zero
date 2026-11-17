@@ -270,3 +270,57 @@ func TestDispatchBeforeToolFailsClosedWhenHookTimesOut(t *testing.T) {
 		t.Fatalf("Reason = %q, want a timeout reason", outcome.Reason)
 	}
 }
+
+func TestDispatchBeforeToolFailsClosedWhenConfigCouldNotBeLoaded(t *testing.T) {
+	dispatcher := NewDispatcher(DispatcherOptions{ConfigError: "invalid hook config: /tmp/hooks.json: unexpected EOF"})
+
+	outcome := dispatcher.Dispatch(context.Background(), DispatchInput{Event: EventBeforeTool, ToolName: "bash"})
+
+	if !outcome.Blocked {
+		t.Fatalf("outcome = %#v, want blocked", outcome)
+	}
+	if outcome.Ran != 0 {
+		t.Fatalf("Ran = %d, want 0", outcome.Ran)
+	}
+	if !strings.Contains(outcome.Reason, "hook config could not be loaded") {
+		t.Fatalf("Reason = %q", outcome.Reason)
+	}
+}
+
+func TestDispatchNonBlockingEventDoesNotVetoOnConfigError(t *testing.T) {
+	dispatcher := NewDispatcher(DispatcherOptions{ConfigError: "invalid hook config: /tmp/hooks.json: unexpected EOF"})
+
+	outcome := dispatcher.Dispatch(context.Background(), DispatchInput{Event: EventAfterTool, ToolName: "bash"})
+
+	if outcome.Blocked {
+		t.Fatalf("outcome = %#v, want non-blocking", outcome)
+	}
+}
+
+func TestDispatchAdvisoryHookRunsWhenConfigCouldNotBeLoaded(t *testing.T) {
+	ran := 0
+	runner := func(context.Context, string, []string, []byte, string, []string) commandResult {
+		ran++
+		return commandResult{ExitCode: 0}
+	}
+	config := Config{Enabled: true, Hooks: []Definition{{
+		ID:      "zero.advisory",
+		Event:   EventAfterTool,
+		Command: "audit",
+		Enabled: true,
+	}}}
+	dispatcher := NewDispatcher(DispatcherOptions{
+		Config:      config,
+		ConfigError: "invalid hook config: /tmp/hooks.json: unexpected EOF",
+		run:         runner,
+	})
+
+	outcome := dispatcher.Dispatch(context.Background(), DispatchInput{Event: EventAfterTool, ToolName: "bash"})
+
+	if outcome.Blocked {
+		t.Fatalf("outcome = %#v, want non-blocking", outcome)
+	}
+	if ran != 1 || outcome.Ran != 1 {
+		t.Fatalf("advisory hook ran=%d outcome.Ran=%d, want 1", ran, outcome.Ran)
+	}
+}
