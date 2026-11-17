@@ -1,6 +1,6 @@
 {
   "name": "@twigpine/zero",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "description": "Zero — a fast, multi-provider terminal coding agent.",
   "type": "module",
   "module": "bin/zero.js",
@@ -17,6 +17,12 @@
   "dependencies": {
     "agent-browser": "^0.30.1",
     "tuistory": "^0.10.0"
+  },
+  "overrides": {
+    "tuistory": {
+      "@hono/node-server": "^2.1.6",
+      "zod": "^4.6.6"
+    }
   },
   "os": [
     "linux",
