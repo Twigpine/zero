@@ -245,6 +245,7 @@ func TestConfirmOnlyCommitsAnOfferTheFooterShowed(t *testing.T) {
 // ctrl+g cannot. Wider and pet-free layouts are the controls, so the rule
 // cannot pass by refusing confirmation everywhere.
 func TestOfferConfirmsOnlyWhereTheFooterShowsItsKey(t *testing.T) {
+	chipWidth := ansi.StringWidth("  ● " + unsafeOfferLabel)
 	for _, testCase := range []struct {
 		name        string
 		width       int
@@ -254,6 +255,8 @@ func TestOfferConfirmsOnlyWhereTheFooterShowsItsKey(t *testing.T) {
 		{"24 columns with a docked pet", 24, true, false},
 		{"30 columns with a docked pet", 30, true, false},
 		{"30 columns without a pet", 30, false, true},
+		{"offer chip fits exactly without a pet", chipWidth, false, true},
+		{"offer chip fits exactly with a docked pet", chipWidth + petReservedColumns, true, true},
 		{"96 columns with a docked pet", 96, true, true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {

@@ -9,6 +9,11 @@ import (
 	"strings"
 )
 
+// optionWordPattern keeps quoted and escaped fragments together, including
+// when a quoted value is attached to its option with "=". Backslashes can also
+// be literal in Windows paths, so the fallback accepts either reading.
+const optionWordPattern = `(?:\\[^\r\n]|[^\s"';&|()<>]|"(?:\\[^\r\n]|[^"\r\n])*"|'[^'\r\n]*')+`
+
 // leadingOptionsPattern spans the global options a package manager accepts
 // before its subcommand, including the word an option consumes as its value:
 // `npm --prefix ./web run dev` and `pnpm -C ./web run dev` are documented usage,
@@ -19,7 +24,7 @@ import (
 // direction this fallback is already documented to favour: it runs only after
 // the command was declared too complex to parse, where catching an obvious
 // network program matters more than proving exact shell syntax.
-const leadingOptionsPattern = `(\s+-{1,2}\S+(\s+\S+)?)*`
+const leadingOptionsPattern = `(?:\s+-{1,2}` + optionWordPattern + `(?:\s+` + optionWordPattern + `)?)*`
 
 var (
 	// destructiveCommandPattern matches the highest-risk shell forms:

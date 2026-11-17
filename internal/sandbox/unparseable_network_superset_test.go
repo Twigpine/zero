@@ -172,3 +172,41 @@ func TestUnparseableFallbackCoversEveryPythonLauncher(t *testing.T) {
 		})
 	}
 }
+
+func TestPackageManagerOptionsPreserveNetworkApproval(t *testing.T) {
+	engine := NewEngine(EngineOptions{Policy: Policy{Mode: ModeEnforce, Network: NetworkDeny}})
+	for _, testCase := range []struct {
+		name        string
+		command     string
+		wantNetwork bool
+	}{
+		{"double quoted fetch", `npm --prefix "./web app" ci`, true},
+		{"quoted Windows path", `npm --prefix "C:\work\web app" ci`, true},
+		{"single quoted fetch", `npm --prefix './web app' ci`, true},
+		{"escaped space", `npm --prefix ./web\ app ci`, true},
+		{"attached quoted value", `npm --prefix="./web app folder" ci`, true},
+		{"quoted value before serving", `pnpm --silent -C "./web app" run dev`, true},
+		{"valueless flag", `npm --silent ci`, true},
+		{"local version check", `npm --prefix "./web app" --version`, false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			unparseable := `if "%OS%"=="Windows_NT" (` + testCase.command + ") else (true)"
+			if AnalyzeCommand(testCase.command).TooComplex || !AnalyzeCommand(unparseable).TooComplex {
+				t.Fatal("expected the standalone command to parse and the conditional to use the fallback")
+			}
+			for _, command := range []string{testCase.command, unparseable} {
+				decision := engine.Evaluate(t.Context(), Request{
+					ToolName:          "bash",
+					SideEffect:        SideEffectShell,
+					PermissionGranted: true,
+					Args:              map[string]any{"command": command},
+				})
+				network := HasRiskCategory(decision.Risk, "network")
+				prompt := decision.Action == ActionPrompt && decision.Reason == ReasonNetworkBlocked
+				if network != testCase.wantNetwork || prompt != testCase.wantNetwork {
+					t.Errorf("%q: network=%v, decision=%s (%s), want network approval=%v", command, network, decision.Action, decision.Reason, testCase.wantNetwork)
+				}
+			}
+		})
+	}
+}
