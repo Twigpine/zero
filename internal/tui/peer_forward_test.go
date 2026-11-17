@@ -153,12 +153,18 @@ func TestFullAutoConfirmationReleasesAHeldPeerMessageWithoutBlockingTheLoop(t *t
 // peerMessageMsg eligible, so the later Update admitted and executed it.
 func TestPeerAdmitTimeoutRefusesWithoutLaterDispatch(t *testing.T) {
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	// Unblock the drainer before stop. A failure before the success-path
+	// close would otherwise leave stop waiting on a deliver that is stuck
+	// in <-release, and the test process would not exit.
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
 	delivered := make(chan tea.Msg, 1)
 	forwarder := newPeerForwarder(func(msg tea.Msg) {
 		<-release
 		delivered <- msg
 	})
 	defer forwarder.stop()
+	defer unblock()
 	service := &fakePeerService{}
 	if !wirePeerService(service, forwarder.send) {
 		t.Fatal("wiring reported the service did not start")
@@ -177,7 +183,7 @@ func TestPeerAdmitTimeoutRefusesWithoutLaterDispatch(t *testing.T) {
 	case <-time.After(peerAdmitTimeout + 2*time.Second):
 		t.Fatal("the inbound handler did not return after the admit timeout")
 	}
-	close(release)
+	unblock()
 
 	var msg tea.Msg
 	select {

@@ -67,6 +67,7 @@ func TestCLILaunchHelpersLeaveUserStateAlone(t *testing.T) {
 			_, _, _ = runExecWithSandbox(t, []string{"exec", "hello"}, unavailableTestSandbox, config.SandboxConfig{})
 		}},
 		{"launchTUIWithSandbox", func(t *testing.T) { _ = launchTUIWithSandbox(t, config.SandboxConfig{}) }},
+		{"rpmTestDeps", func(t *testing.T) { _ = rpmTestDeps(t, &rpmExecProvider{}) }},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			seedRoot, configPath, seeded, before := seedEmulatedUserConfig(t)
