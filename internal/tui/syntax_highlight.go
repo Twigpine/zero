@@ -203,7 +203,15 @@ func highlightCodeAuto(code []string, lang string, measure int) ([]string, bool)
 }
 
 func highlightCodeForPath(code []string, path string, measure int, bg color.Color) ([]string, bool) {
-	return highlightCodeWithLexer(cachedLexerForPath(path), code, measure, bg)
+	return highlightCodeForPathWithTheme(code, path, measure, bg, zeroTheme)
+}
+
+func highlightCodeForPathWithTheme(code []string, path string, measure int, bg color.Color, theme tuiTheme) ([]string, bool) {
+	backgrounds := make([]color.Color, len(code))
+	for index := range backgrounds {
+		backgrounds[index] = bg
+	}
+	return highlightCodeWithLexerThemeAndLineBackgrounds(cachedLexerForPath(path), code, measure, theme, backgrounds, nil)
 }
 
 // highlightSpan overlays a background on a rune range in one source line while
@@ -285,6 +293,10 @@ func highlightCodeWithLexerAndSpans(lexer chroma.Lexer, code []string, measure i
 }
 
 func highlightCodeWithLexerAndLineBackgrounds(lexer chroma.Lexer, code []string, measure int, backgrounds []color.Color, spans []highlightSpan) ([]string, bool) {
+	return highlightCodeWithLexerThemeAndLineBackgrounds(lexer, code, measure, zeroTheme, backgrounds, spans)
+}
+
+func highlightCodeWithLexerThemeAndLineBackgrounds(lexer chroma.Lexer, code []string, measure int, theme tuiTheme, backgrounds []color.Color, spans []highlightSpan) ([]string, bool) {
 	if measure < 4 {
 		return nil, false
 	}
@@ -367,7 +379,7 @@ func highlightCodeWithLexerAndLineBackgrounds(lexer chroma.Lexer, code []string,
 
 	line, column := 0, 0
 	for _, token := range iterator.Tokens() {
-		style := tokenStyle(token.Type)
+		style := tokenStyleForTheme(theme, token.Type)
 		for index, part := range strings.Split(token.Value, "\n") {
 			if index > 0 {
 				flushLine()

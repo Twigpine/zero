@@ -128,6 +128,15 @@ func (c *staticRenderCache) stats() renderCacheStats {
 	return c.statsData
 }
 
+func fileViewCacheStatsForTest() fileViewCacheStats {
+	return defaultFileViewCache.stats()
+}
+
+func resetFileViewCacheForTest() {
+	defaultFileViewCache.clear()
+	defaultFileViewCache.resetStats()
+}
+
 func renderSelectableList(options selectableListOptions) string {
 	if len(options.Items) == 0 {
 		return ""

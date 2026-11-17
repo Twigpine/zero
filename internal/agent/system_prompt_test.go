@@ -1,13 +1,19 @@
 package agent
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Twigpine/zero/internal/config"
 	"github.com/Twigpine/zero/internal/sandbox"
+	"github.com/Twigpine/zero/internal/testutil"
 )
+
+// isolatedUserDirsRoot is where TestMain points every per-user directory.
+var isolatedUserDirsRoot string
 
 // TestMain points userConfigDirForPrompt at an empty, package-wide temp
 // directory for every test in this package. Without this, buildSystemPrompt
@@ -17,15 +23,54 @@ import (
 // across contributor machines. Tests that specifically exercise user
 // guidelines stub userConfigDirForPrompt themselves via
 // withSystemPromptTestUserConfigDir(Func) and restore this default on cleanup.
+//
+// It also points every per-user directory root at the same temp directory:
+// sandboxed tool runs keep their runtime state and lease files under the user
+// cache dir, so without this they land in the developer's real cache.
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "zero-agent-tests-*")
 	if err != nil {
 		panic(err)
 	}
+	isolatedUserDirsRoot = dir
+	restore, err := testutil.IsolateUserDirs(dir)
+	if err != nil {
+		os.RemoveAll(dir)
+		panic(err)
+	}
 	userConfigDirForPrompt = func() (string, error) { return dir, nil }
 	code := m.Run()
+	if err := restore(); err != nil {
+		fmt.Fprintln(os.Stderr, "agent tests: restore user dirs:", err)
+		code = 1
+	}
 	os.RemoveAll(dir)
 	os.Exit(code)
+}
+
+// Guards TestMain: the per-user directories the package can read or write
+// must resolve inside the isolated root on every OS.
+func TestUserDirsAreIsolatedFromTheDeveloperHome(t *testing.T) {
+	if isolatedUserDirsRoot == "" {
+		t.Fatal("TestMain did not record an isolated root")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	userConfig, err := config.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, dir := range map[string]string{"home": home, "config": userConfig, "cache": cache} {
+		if !testutil.PathWithin(isolatedUserDirsRoot, dir) {
+			t.Errorf("%s dir %q is outside the isolated root %q", name, dir, isolatedUserDirsRoot)
+		}
+	}
 }
 
 func TestCoreSystemPromptIncludesCodingQualityRules(t *testing.T) {

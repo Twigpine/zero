@@ -73,7 +73,7 @@ func (tool *skillTool) Run(_ context.Context, args map[string]any) Result {
 	names := make([]string, 0, len(loaded))
 	for _, skill := range loaded {
 		if skill.Name == name {
-			return okResult(skill.Content)
+			return okResult(skills.ToolOutput(skill))
 		}
 		names = append(names, skill.Name)
 	}

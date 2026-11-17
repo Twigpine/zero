@@ -713,7 +713,7 @@ func copyPackageFiles(rootDir string, stagingDir string, artifactPath string, st
 var localControlHelperPackages = []string{"agent-browser", "tuistory"}
 
 func stageLocalControlHelpers(ctx context.Context, rootDir string, helpersDir string) error {
-	dependencies, err := localControlHelperDependencies(rootDir)
+	dependencies, overrides, err := localControlHelperPins(rootDir)
 	if err != nil {
 		return err
 	}
@@ -724,6 +724,12 @@ func stageLocalControlHelpers(ctx context.Context, rootDir string, helpersDir st
 		"private":      true,
 		"type":         "module",
 		"dependencies": dependencies,
+	}
+	// The repo lockfile is copied as-is below, so it was resolved under the
+	// repo's overrides. npm ci refuses a lockfile whose overridden versions
+	// the manifest does not ask for, so the overrides travel with it.
+	if overrides != nil {
+		manifest["overrides"] = overrides
 	}
 	bytes, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
@@ -764,26 +770,35 @@ func stageLocalControlHelpers(ctx context.Context, rootDir string, helpersDir st
 	return nil
 }
 
-func localControlHelperDependencies(rootDir string) (map[string]string, error) {
+// localControlHelperPins reads the helper dependency pins from the repo
+// package.json, plus its overrides (verbatim, nil when absent), which pin
+// transitive versions the helpers' own ranges would not pick, such as a
+// security fix.
+func localControlHelperPins(rootDir string) (map[string]string, json.RawMessage, error) {
 	bytes, err := os.ReadFile(filepath.Join(rootDir, "package.json"))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var payload struct {
 		Dependencies map[string]string `json:"dependencies"`
+		Overrides    json.RawMessage   `json:"overrides"`
 	}
 	if err := json.Unmarshal(bytes, &payload); err != nil {
-		return nil, fmt.Errorf("parse package.json: %w", err)
+		return nil, nil, fmt.Errorf("parse package.json: %w", err)
 	}
 	dependencies := map[string]string{}
 	for _, name := range localControlHelperPackages {
 		version := strings.TrimSpace(payload.Dependencies[name])
 		if version == "" {
-			return nil, fmt.Errorf("package.json dependency %q is required for packaged local-control helpers", name)
+			return nil, nil, fmt.Errorf("package.json dependency %q is required for packaged local-control helpers", name)
 		}
 		dependencies[name] = version
 	}
-	return dependencies, nil
+	var overrides json.RawMessage
+	if len(payload.Overrides) > 0 && string(payload.Overrides) != "null" {
+		overrides = payload.Overrides
+	}
+	return dependencies, overrides, nil
 }
 
 func verifyStagedLocalControlHelpers(helpersDir string, goos string) error {

@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -343,6 +344,76 @@ func TestDiscoverCatalogOpenGatewayUsesLiveListWithoutKey(t *testing.T) {
 		if model.ID == "live-only-model" && model.ContextWindow != 64000 {
 			t.Fatalf("live-only metadata = %#v", model)
 		}
+	}
+}
+
+// TestDiscoverCatalogOpenGatewayDropsRetiredAndKeepsDefault checks that live
+// OpenGateway discovery hides retired models and still returns the default.
+func TestDiscoverCatalogOpenGatewayDropsRetiredAndKeepsDefault(t *testing.T) {
+	// Both the catalog fetch and the live /v1/models probe return the smart
+	// router, active and retired entries, and a paid model whose id sorts
+	// before "auto", as the live list does. Users must only ever see the active
+	// ones, and the catalog's default model must be among the ids discovery
+	// returns (onboarding and the provider wizard keep the default selected only
+	// on an exact id match). It need not be first: results are sorted by id.
+	const body = `{"object":"list","data":[
+		{"id":"auto","name":"Auto (smart routing)","context_window":null,"pricing":null,"supports_tools":null,"status":"active"},
+		{"id":"anthropic/claude-haiku-5.5","name":"Claude Haiku 5.5","context_window":204800,"supports_tools":true,"status":"active"},
+		{"id":"xiaomi/mimo-v2.6-pro","name":"MiMo V2.6-Pro","context_window":262144,"supports_tools":true,"status":"active"},
+		{"id":"qwen/qwen-plus","name":"Qwen Plus","context_window":131072,"status":"retired","successor":"qwen/qwen3.7-max"}
+	]}`
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		switch r.URL.Path {
+		case "/catalog/v1/models", "/v1/models":
+			_, _ = w.Write([]byte(body))
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	descriptor, ok := providercatalog.Get("gitlawb-opengateway")
+	if !ok {
+		t.Fatal("gitlawb-opengateway missing from catalog")
+	}
+	provider := descriptor
+	provider.DefaultBaseURL = server.URL + "/v1"
+	models, err := DiscoverCatalog(context.Background(), provider, config.ProviderProfile{
+		CatalogID:    "gitlawb-opengateway",
+		ProviderKind: config.ProviderKindOpenAICompatible,
+		BaseURL:      server.URL + "/v1",
+		Model:        descriptor.DefaultModel,
+	}, Options{
+		HTTPClient:     server.Client(),
+		OpenGatewayURL: server.URL + "/catalog/v1/models",
+	})
+	if err != nil {
+		t.Fatalf("DiscoverCatalog: %v", err)
+	}
+	if got := strings.Join(modelIDs(models), ","); got != "anthropic/claude-haiku-5.5,auto,xiaomi/mimo-v2.6-pro" {
+		t.Fatalf("models = %q, want only the active entries", got)
+	}
+	if !slices.Contains(modelIDs(models), descriptor.DefaultModel) {
+		t.Fatalf("default model %q missing from discovered %v", descriptor.DefaultModel, modelIDs(models))
+	}
+	if strings.Join(paths, ",") != "/catalog/v1/models,/v1/models" {
+		t.Fatalf("requests = %v, want catalog fetch then live probe", paths)
+	}
+}
+
+func TestParseModelsResponseSkipsRetiredStatus(t *testing.T) {
+	models, err := parseModelsResponse([]byte(`{"data":[
+		{"id":"active-model","status":"active"},
+		{"id":"retired-model","status":"Retired"},
+		{"id":"no-status-model"}
+	]}`))
+	if err != nil {
+		t.Fatalf("parseModelsResponse: %v", err)
+	}
+	if got := strings.Join(modelIDs(models), ","); got != "active-model,no-status-model" {
+		t.Fatalf("models = %q, want retired entry dropped", got)
 	}
 }
 

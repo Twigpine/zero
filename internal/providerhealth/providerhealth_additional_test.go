@@ -179,6 +179,10 @@ func TestOverrideHealthEndpointOpenGateway(t *testing.T) {
 	if got != "https://opengateway.gitlawb.com/health" {
 		t.Fatalf("OpenGateway health endpoint = %q, want host-root /health", got)
 	}
+	got, ok = overrideHealthEndpoint(config.ProviderProfile{CatalogID: "gitlawb-opengateway"}, "https://api.twigpine.com/v1")
+	if !ok || got != "https://api.twigpine.com/health" {
+		t.Fatalf("Twigpine OpenGateway health endpoint = (%q, %v), want https://api.twigpine.com/health", got, ok)
+	}
 
 	if _, ok := overrideHealthEndpoint(config.ProviderProfile{CatalogID: "openai"}, "https://api.openai.com/v1"); ok {
 		t.Fatal("non-OpenGateway providers must not override the health endpoint")

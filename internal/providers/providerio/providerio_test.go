@@ -288,10 +288,11 @@ func TestScanSSEDataWithContextContentResetsOnData(t *testing.T) {
 	pr, pw := io.Pipe()
 
 	go func() {
-		// One data line every 30ms for ~300ms (well past the 120ms content window,
-		// with comfortable slack under the 100ms idle timeout), so the content
-		// watchdog keeps resetting, then close cleanly.
-		for i := 0; i < 10; i++ {
+		// One data line every 30ms for ~750ms (well past the 600ms content window,
+		// with ~470ms of slack under the 500ms idle timeout, so a scheduling stall
+		// on a busy shared runner does not trip it), so the content watchdog keeps
+		// resetting, then close cleanly.
+		for i := 0; i < 25; i++ {
 			if _, err := io.WriteString(pw, "data: chunk\n\n"); err != nil {
 				return
 			}
@@ -303,7 +304,7 @@ func TestScanSSEDataWithContextContentResetsOnData(t *testing.T) {
 	n := 0
 	done := make(chan error, 1)
 	go func() {
-		done <- ScanSSEDataWithContext(context.Background(), func() {}, pr, 100*time.Millisecond, func(string) bool { n++; return true })
+		done <- ScanSSEDataWithContext(context.Background(), func() {}, pr, 500*time.Millisecond, func(string) bool { n++; return true })
 	}()
 
 	select {
@@ -314,8 +315,8 @@ func TestScanSSEDataWithContextContentResetsOnData(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("ScanSSEDataWithContext hung on a producing stream")
 	}
-	if n != 10 {
-		t.Fatalf("handled %d data lines, want 10", n)
+	if n != 25 {
+		t.Fatalf("handled %d data lines, want 25", n)
 	}
 }
 

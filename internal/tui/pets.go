@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Twigpine/zero/internal/config"
@@ -31,6 +33,19 @@ const (
 	petPickerMaxWidth               = 58
 	petSidePreviewMin               = 50
 	petPreviewPaneGap               = 2
+	// petTextMinWidth keeps the composer usable beside a text companion,
+	// which is twice as wide as an image one.
+	petTextMinWidth = 60
+	// petSleepAfter is how long the companion waits, with no turn running, no
+	// key pressed and no reaction playing, before it falls asleep.
+	// model.petLastActiveAt records the last key press or turn boundary, from
+	// clock readings Zero already takes there, so the key and turn paths read
+	// the clock no more often than before. Paste and mouse wheel input do not
+	// count.
+	petSleepAfter = 5 * time.Minute
+	// petBigTurn is how long a turn has to run for the companion to celebrate
+	// when it succeeds, instead of the usual hop.
+	petBigTurn = time.Minute
 )
 
 type petCatalogLoadedMsg struct {
@@ -70,8 +85,9 @@ func (m model) handlePetsCommand(argument string) (tea.Model, tea.Cmd) {
 	if m.petClient == nil {
 		return m.appendSystemNotice("Pets are unavailable because the user config directory could not be resolved."), nil
 	}
-	if m.petRenderer != nil && !m.petRenderer.Support().Supported() {
-		return m.appendSystemNotice(m.petRenderer.Support().Reason), nil
+	textOnly := m.petRenderer != nil && !m.petRenderer.Support().Supported()
+	if textOnly && !m.petTextMode() {
+		return m.appendSystemNotice(m.petRenderer.Support().Reason + " Text companions need 256 colours."), nil
 	}
 	argument = strings.ToLower(strings.TrimSpace(argument))
 	switch argument {
@@ -88,7 +104,20 @@ func (m model) handlePetsCommand(argument string) (tea.Model, tea.Cmd) {
 		m.petTickSeq++
 		return m.showTransientNoticeInline("Terminal companion hidden. Run /pets to choose another.", transientNoticeInfo), nil
 	}
+	if entry, ok := terminalpet.ResolveBuiltin(argument); ok {
+		// Built-in companions need no catalog, so they can be chosen offline.
+		// An installed pet with that exact slug keeps the name it already
+		// answered to; the built-in is then chosen from the picker.
+		if installed, err := m.petClient.InstalledEntry(argument); err != nil || installed.Builtin {
+			m.petEntries = map[string]terminalpet.Entry{entry.Slug: entry}
+			return m.installPet(entry.Slug)
+		}
+	}
+	if textOnly {
+		return m.openTextPetPicker(argument)
+	}
 	m.petRequestedSlug = argument
+	m.petCatalogError = ""
 	localEntries, _ := m.petClient.InstalledEntries()
 	var items []pickerItem
 	m.petEntries, items = petPickerItems(localEntries)
@@ -104,6 +133,30 @@ func (m model) handlePetsCommand(argument string) (tea.Model, tea.Cmd) {
 	return m, batchCommands(previewCmd, catalogCmd)
 }
 
+// openTextPetPicker offers the built-in companions on a terminal that cannot
+// show images. Community pets are pictures, so they are not listed and the
+// catalog is not fetched.
+func (m model) openTextPetPicker(requested string) (tea.Model, tea.Cmd) {
+	if requested != "" {
+		return m.appendSystemNotice(fmt.Sprintf("%q needs terminal images. Run /pets for the built-in companions.", requested)), nil
+	}
+	var items []pickerItem
+	m.petEntries, items = petPickerItems(terminalpet.BuiltinEntries())
+	m.petCatalogError = "Community pets need images"
+	selected := selectedPetPickerItem(items, m.petID)
+	if selected == 0 && m.petID != "" && m.petID != terminalpet.DisabledID {
+		// The current pet is a community pet, which this picker cannot list.
+		// Start on the first companion rather than "No companion", so Enter
+		// cannot switch the pet off by accident.
+		selected = minInt(1, len(items)-1)
+	}
+	m.picker = &commandPicker{
+		kind: pickerPet, title: "Choose a companion",
+		items: items, allItems: append([]pickerItem{}, items...), selected: selected,
+	}
+	return m.schedulePetPreview()
+}
+
 func (m model) applyPetCatalog(msg petCatalogLoadedMsg) (tea.Model, tea.Cmd) {
 	if m.picker == nil || m.picker.kind != pickerPet {
 		return m, nil
@@ -114,6 +167,12 @@ func (m model) applyPetCatalog(msg petCatalogLoadedMsg) (tea.Model, tea.Cmd) {
 	}
 	var items []pickerItem
 	m.petEntries, items = petPickerItems(msg.entries)
+	m.petCatalogError = ""
+	if msg.err != nil {
+		// The built-in and installed companions are still listed, so say why
+		// the rest are missing instead of failing the whole picker.
+		m.petCatalogError = "Community catalog unavailable"
+	}
 	if requested := strings.TrimSpace(m.petRequestedSlug); requested != "" {
 		m.petRequestedSlug = ""
 		if requested == terminalpet.DisabledID {
@@ -121,6 +180,10 @@ func (m model) applyPetCatalog(msg petCatalogLoadedMsg) (tea.Model, tea.Cmd) {
 		}
 		if _, ok := m.petEntries[requested]; !ok {
 			m.picker = nil
+			if msg.err != nil {
+				// The pet may well exist: the catalog that would list it did not load.
+				return m.appendSystemNotice("Could not load the pet catalog: " + msg.err.Error()), nil
+			}
 			return m.appendSystemNotice(fmt.Sprintf("No pet named %q. Run /pets to search the catalog.", requested)), nil
 		}
 		return m.installPet(requested)
@@ -141,7 +204,10 @@ func petPickerItems(entries []terminalpet.Entry) (map[string]terminalpet.Entry, 
 	for _, entry := range entries {
 		entryBySlug[entry.Slug] = entry
 		group := "Discover"
-		if entry.Local {
+		switch {
+		case entry.Builtin:
+			group = "Built in"
+		case entry.Local:
 			group = "Installed"
 		}
 		items = append(items, pickerItem{Group: group, Label: entry.Label(), Value: entry.Slug, Local: entry.Local, Remote: !entry.Local})
@@ -267,10 +333,13 @@ func (m model) applyPetInstall(msg petInstalledMsg) (tea.Model, tea.Cmd) {
 	m.petAnimation = msg.animation
 	m.petPhase = 0
 	m.petTickSeq++
-	m.petPlaybackState = terminalpet.Idle
 	m.petClickAnimationIndex = 0
-	m.petOutcome = terminalpet.Idle
-	m = m.showTransientNoticeInline(msg.entry.Label()+" is now your terminal companion. Use /pets off to hide it.", transientNoticeSuccess)
+	m.greetWithPet()
+	notice := msg.entry.Label() + " is now your terminal companion. Use /pets off to hide it."
+	if m.petTextMode() && m.width < petTextMinWidth {
+		notice = fmt.Sprintf("%s shows once the window is %d+ columns wide.", msg.entry.Label(), petTextMinWidth)
+	}
+	m = m.showTransientNoticeInline(notice, transientNoticeSuccess)
 	if m.reducedMotion {
 		return m, nil
 	}
@@ -289,9 +358,16 @@ func (m model) petPickerOverlay(width int) string {
 	item, hasItem := m.picker.current()
 	hasPreviewTarget := hasItem && item.Value != terminalpet.DisabledID
 	sidePreview := hasPreviewTarget && innerWidth >= petSidePreviewMin
+	previewColumns, previewRows := m.petSlotColumns(), m.petSlotRows()
+	// On a text-only terminal the preview is drawn into the overlay itself;
+	// otherwise the image is placed over the blank pane afterwards.
+	var previewText []string
+	if m.petTextMode() && m.petPreview != nil {
+		previewText, _ = m.petPreview.TextFrame(terminalpet.Idle, m.petPhase, m.petTextColors())
+	}
 	listWidth := innerWidth
 	if sidePreview {
-		listWidth -= petImageColumns + petPreviewPaneGap
+		listWidth -= previewColumns + petPreviewPaneGap
 	}
 	previewDivider := zeroTheme.line.Render("│") + " "
 	listLine := func(line string) string {
@@ -299,7 +375,7 @@ func (m model) petPickerOverlay(width int) string {
 		if !sidePreview {
 			return line
 		}
-		return padStyledLine(line, listWidth) + previewDivider + strings.Repeat(" ", petImageColumns)
+		return padStyledLine(line, listWidth) + previewDivider + strings.Repeat(" ", previewColumns)
 	}
 	listHeight := minInt(8, len(m.picker.items))
 	start := 0
@@ -329,19 +405,32 @@ func (m model) petPickerOverlay(width int) string {
 			lines = append(lines, listLine(surface(zeroTheme.accent).Render(marker)+surface(zeroTheme.ink).Render(name)))
 		}
 	}
-	if m.picker.loading {
+	switch {
+	case m.picker.loading:
 		lines = append(lines, listLine(zeroTheme.accent.Render("Discover")))
 		lines = append(lines, listLine(zeroTheme.faint.Render("  Fetching companions…")))
+	case m.petCatalogError != "":
+		lines = append(lines, listLine(zeroTheme.accent.Render("Discover")))
+		lines = append(lines, listLine(zeroTheme.faint.Render("  "+m.petCatalogError)))
 	}
 	if sidePreview && m.petPreview != nil {
-		for len(lines)-listStartRow < petImageRows {
+		// Images start on the title row; text starts on the row below it.
+		needed := previewRows
+		if previewText != nil {
+			needed = len(previewText) + 1
+		}
+		for len(lines)-listStartRow < needed {
 			lines = append(lines, listLine(""))
 		}
 	}
 	if sidePreview && len(lines) > listStartRow {
-		previewTitle := centerRenderedBlock(zeroTheme.accent.Render("Preview"), petImageColumns)
+		previewTitle := centerRenderedBlock(zeroTheme.accent.Render("Preview"), previewColumns)
 		lines[listStartRow] = padStyledLine(ansi.Cut(lines[listStartRow], 0, listWidth), listWidth) +
 			previewDivider + previewTitle
+		for index, previewLine := range previewText {
+			row := listStartRow + 1 + index
+			lines[row] = padStyledLine(ansi.Cut(lines[row], 0, listWidth), listWidth) + previewDivider + previewLine
+		}
 	}
 	lines = append(lines, zeroTheme.line.Render(strings.Repeat("─", innerWidth)))
 	switch {
@@ -349,6 +438,8 @@ func (m model) petPickerOverlay(width int) string {
 		lines = append(lines, zeroTheme.faint.Render("Loading preview…"))
 	case m.petPreviewError != "":
 		lines = append(lines, zeroTheme.faint.Render(m.petPreviewError))
+	case m.petPreview != nil && !sidePreview && previewText != nil:
+		lines = append(lines, strings.Split(centerRenderedBlock(strings.Join(previewText, "\n"), innerWidth), "\n")...)
 	case m.petPreview != nil && !sidePreview:
 		for range petImageRows {
 			lines = append(lines, "")
@@ -393,10 +484,15 @@ func (m model) petLayoutActive() bool {
 		return false
 	}
 	if m.petRenderer != nil && !m.petRenderer.Support().Supported() {
-		return false
+		// Without images, only a companion that can be drawn as text shows.
+		// A permission card is drawn in the transcript, where the companion
+		// would cover its options, so the companion steps aside for it.
+		if !m.petTextMode() || !m.petAnimation.HasText() || m.width < petTextMinWidth || m.pendingPermission != nil {
+			return false
+		}
 	}
 	layoutWidth := m.width
-	if !m.altScreen || layoutWidth < petImageColumns+4 || m.height < petImageRows+8 || m.subchat.active || m.transcriptDetailed {
+	if !m.altScreen || layoutWidth < m.petSlotColumns()+4 || m.height < m.petSlotRows()+8 || m.subchat.active || m.transcriptDetailed {
 		return false
 	}
 	if m.petObscuringModalActive() || m.suggestionsActive() || m.setup.visible || m.helpOverlay || m.leaderHelpOverlay {
@@ -421,10 +517,15 @@ func (m model) petComposerReservedColumns(width int) int {
 	if m.petSupportsAlphaOverlay() && (m.petPositionSet || (m.petDragActive && !m.petDragStartedDocked)) {
 		return 0
 	}
-	return minInt(petReservedColumns, maxInt(0, width-8))
+	return minInt(m.petSlotReservedColumns(), maxInt(0, width-8))
 }
 
 func (m model) footerStatusLine(width int) string {
+	// A text companion ends one row above the status line, so the line keeps
+	// its full width.
+	if m.petTextDocked() {
+		return m.statusLine(width)
+	}
 	reserved := m.petComposerReservedColumns(width)
 	return m.statusLine(width-reserved) + strings.Repeat(" ", reserved)
 }
@@ -433,7 +534,113 @@ func (m model) floatingPetTranscriptView() string {
 	chatModel := m
 	chatModel.petLayoutRendering = true
 	chat := m.reservePetImageSlot(viewLines(chatModel.transcriptView()), m.width)
+	if m.petTextMode() {
+		chat = m.paintPetText(chat, m.width)
+	}
 	return strings.Join(chat, "\n")
+}
+
+// petTextMode reports whether companions are drawn as text: the terminal
+// cannot show images, but it has the colours the half-block art needs.
+// model.petColorProfile is the profile Bubble Tea detected.
+func (m model) petTextMode() bool {
+	return m.petRenderer != nil && !m.petRenderer.Support().Supported() && m.petColorProfile >= colorprofile.ANSI256
+}
+
+// petTextDocked reports whether a text companion stands in its slot in the
+// view being drawn or measured. Like petComposerReservedColumns it holds both
+// while the floating layout renders and for callers that measure the footer
+// outside it, such as mouse hit-testing, so every measurement agrees.
+func (m model) petTextDocked() bool {
+	return m.petTextMode() && (m.petLayoutRendering || m.petLayoutActive())
+}
+
+// petTextReservedColumns is how many columns at the right of the footer rows a
+// docked text companion takes, or zero.
+func (m model) petTextReservedColumns(width int) int {
+	if !m.petTextDocked() {
+		return 0
+	}
+	return m.petComposerReservedColumns(width)
+}
+
+// petTextShelf makes room for a docked text companion. It is taller than the
+// composer, and the rows above the footer belong to the transcript, whose
+// right-hand columns it would hide. Blank rows above the footer push the
+// transcript up instead, so the companion stands only beside footer rows,
+// which end before it.
+func (m model) petTextShelf(footer string) string {
+	if !m.petTextDocked() {
+		return footer
+	}
+	// The companion's bottom row is one above the last line, the status line.
+	missing := m.petSlotRows() + 1 - (strings.Count(footer, "\n") + 1)
+	if missing <= 0 {
+		return footer
+	}
+	return strings.Repeat("\n", missing) + footer
+}
+
+// petTextColors is the colour depth to draw text companions in. A
+// 256-colour terminal gets the art's own 256-colour palette rather than
+// Bubble Tea's generic conversion, which turns several of its hues.
+func (m model) petTextColors() terminalpet.TextColors {
+	if m.petColorProfile == colorprofile.ANSI256 {
+		return terminalpet.Text256
+	}
+	return terminalpet.TextTrueColor
+}
+
+// petSlotColumns and petSlotRows are the cells the companion occupies.
+func (m model) petSlotColumns() int {
+	if m.petTextMode() {
+		return terminalpet.TextColumns
+	}
+	return petImageColumns
+}
+
+func (m model) petSlotRows() int {
+	if m.petTextMode() {
+		return terminalpet.TextRows
+	}
+	return petImageRows
+}
+
+func (m model) petSlotReservedColumns() int {
+	return m.petSlotColumns() + petWrapGapColumns
+}
+
+// paintPetText draws a text companion into the slot reservePetImageSlot
+// cleared, where petHit looks for it.
+func (m model) paintPetText(chat []string, width int) []string {
+	state, phase := m.petTextPlayback()
+	lines, ok := m.petAnimation.TextFrame(state, phase, m.petTextColors())
+	if !ok {
+		return chat
+	}
+	x, y := m.ambientPetPosition(width, len(chat))
+	for index, line := range lines {
+		row := y + index
+		if row < 0 || row >= len(chat) {
+			continue
+		}
+		left := padStyledLine(ansi.Cut(fitStyledLine(chat[row], width), 0, x), x)
+		// Reset first: the sprite's blank cells must not take a style left
+		// open by the text beside it.
+		chat[row] = left + "\x1b[0m" + line + strings.Repeat(" ", maxInt(0, width-x-terminalpet.TextColumns))
+	}
+	return chat
+}
+
+// petTextPlayback is the state and phase of the ambient companion's current
+// frame, as petImageDraw computes them for images.
+func (m model) petTextPlayback() (terminalpet.State, int) {
+	state := m.petState()
+	phase := m.petPhase
+	if state != m.petPlaybackState {
+		phase = 0
+	}
+	return state, phase
 }
 
 func (m model) reservePetImageSlot(lines []string, width int) []string {
@@ -441,9 +648,10 @@ func (m model) reservePetImageSlot(lines []string, width int) []string {
 	if m.petSupportsAlphaOverlay() {
 		return chat
 	}
-	start := maxInt(0, len(chat)-petImageRows-1)
-	rightStart := maxInt(0, width-petReservedColumns)
-	for row := start; row < minInt(len(chat)-1, start+petImageRows); row++ {
+	rows := m.petSlotRows()
+	start := maxInt(0, len(chat)-rows-1)
+	rightStart := maxInt(0, width-m.petSlotReservedColumns())
+	for row := start; row < minInt(len(chat)-1, start+rows); row++ {
 		line := fitStyledLine(chat[row], width)
 		chat[row] = padStyledLine(ansi.Cut(line, 0, rightStart), rightStart) + strings.Repeat(" ", width-rightStart)
 	}
@@ -560,8 +768,8 @@ func (m model) petImageHeightPixels(animation *terminalpet.Animation, state term
 }
 
 func (m model) ambientPetPosition(width, height int) (int, int) {
-	maxX := maxInt(0, width-petImageColumns)
-	maxY := maxInt(0, height-petImageRows)
+	maxX := maxInt(0, width-m.petSlotColumns())
+	maxY := maxInt(0, height-m.petSlotRows())
 	if m.petSupportsAlphaOverlay() {
 		if m.petDragActive {
 			return clampInt(m.petDragTargetX, 0, maxX), clampInt(m.petDragTargetY, 0, maxY)
@@ -612,9 +820,10 @@ func resizePetCoordinate(value, oldMaximum, newMaximum, edgeThreshold int) int {
 }
 
 func (m model) petHomePosition(width, height int) (int, int) {
-	maxX := maxInt(0, width-petImageColumns)
-	maxY := maxInt(0, height-petImageRows)
-	return clampInt(width-petImageColumns-2, 0, maxX), clampInt(height-petImageRows-1, 0, maxY)
+	columns, rows := m.petSlotColumns(), m.petSlotRows()
+	maxX := maxInt(0, width-columns)
+	maxY := maxInt(0, height-rows)
+	return clampInt(width-columns-2, 0, maxX), clampInt(height-rows-1, 0, maxY)
 }
 
 func (m model) ambientPetOffset(x, y, width, height int) (int, int) {
@@ -702,7 +911,7 @@ func (m model) petHit(x, y int) bool {
 		return false
 	}
 	petX, petY := m.ambientPetPosition(m.width, m.height)
-	return x >= petX && x < petX+petImageColumns && y >= petY && y < petY+petImageRows
+	return x >= petX && x < petX+m.petSlotColumns() && y >= petY && y < petY+m.petSlotRows()
 }
 
 func (m model) handlePetMouse(msg tea.MouseMsg) (model, tea.Cmd, bool) {
@@ -736,8 +945,9 @@ func (m model) handlePetMouse(msg tea.MouseMsg) (model, tea.Cmd, bool) {
 		}
 		return m, batchCommands(petImageFlushCmd(), animationCmd), true
 	case mouseMotion(msg) && m.petDragActive && !m.petSupportsAlphaOverlay():
-		// Sixel images are part of the terminal cell grid. Keep them in the
-		// dedicated dock so moving one can never overwrite cells Bubble Tea owns.
+		// Sixel images and text companions are part of the terminal cell grid.
+		// Keep them in the dedicated dock so moving one can never overwrite
+		// cells Bubble Tea owns.
 		return m, nil, true
 	case mouseMotion(msg) && m.petDragActive:
 		oldX, oldY := m.petDragTargetX, m.petDragTargetY
@@ -1020,8 +1230,17 @@ func (m model) petState() terminalpet.State {
 		return terminalpet.Waiting
 	}
 	if m.pending {
+		if m.petAnimation.Has(terminalpet.Thinking) && m.petAgentThinking() {
+			return terminalpet.Thinking
+		}
 		return terminalpet.Running
 	}
+	sleeps := m.petAnimation.Has(terminalpet.Sleeping)
+	if m.petOutcome == "" && !sleeps {
+		return terminalpet.Idle
+	}
+	// One clock reading serves both checks below.
+	now := m.now()
 	if m.petOutcome != "" {
 		hold := petOutcomeHold
 		if duration, customClick := m.petAnimation.ClickDuration(m.petOutcome); customClick && duration > 0 {
@@ -1029,11 +1248,54 @@ func (m model) petState() terminalpet.State {
 		} else if duration := m.petAnimation.PrimaryDuration(m.petOutcome); duration > hold {
 			hold = duration
 		}
-		if m.now().Sub(m.petOutcomeAt) < hold {
+		if now.Sub(m.petOutcomeAt) < hold {
 			return m.petOutcome
 		}
 	}
+	if sleeps {
+		// A reaction, such as the one a click starts, counts as activity too.
+		lastActive := m.petLastActiveAt
+		if m.petOutcomeAt.After(lastActive) {
+			lastActive = m.petOutcomeAt
+		}
+		if !lastActive.IsZero() && now.Sub(lastActive) >= petSleepAfter {
+			return terminalpet.Sleeping
+		}
+	}
 	return terminalpet.Idle
+}
+
+// petAgentThinking reports whether a running turn is between visible actions:
+// no tool call is streaming or running, and no answer text is arriving. It
+// mirrors the "thinking" phase of the working status line.
+func (m model) petAgentThinking() bool {
+	if m.streamCallName != "" || len(bytes.TrimSpace(m.streamingText)) > 0 {
+		return false
+	}
+	_, toolRunning := m.activeToolCall()
+	return !toolRunning
+}
+
+// greetWithPet starts the companion's wave, as when it first appears.
+func (m *model) greetWithPet() {
+	m.petOutcome = terminalpet.Waving
+	m.petOutcomeAt = m.now()
+	m.petPlaybackState = terminalpet.Waving
+	// The default waving row begins with the same neutral stance as idle.
+	m.petPhase = 1
+}
+
+// petTurnOutcome is the companion's reaction to a finished turn: a flinch for
+// a failure, a celebration for a long success, a hop otherwise.
+func (m model) petTurnOutcome(err error, finishedAt time.Time) terminalpet.State {
+	switch {
+	case err != nil:
+		return terminalpet.Failed
+	case !m.turnStartedAt.IsZero() && m.activeTurnElapsedAt(m.turnStartedAt, finishedAt) >= petBigTurn:
+		return terminalpet.Jumping
+	default:
+		return terminalpet.Review
+	}
 }
 
 func (m model) petPlayback() (*terminalpet.Animation, terminalpet.State) {

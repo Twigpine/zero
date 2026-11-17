@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -533,5 +534,114 @@ func TestBTWCtrlCDuringRunDoesNotClearDraft(t *testing.T) {
 	}
 	if !transcriptContains(got.transcript, "BTW response is still running") {
 		t.Fatalf("missing in-flight return guidance: %#v", got.transcript)
+	}
+}
+
+// TestBTWLeaveRevokesSideFileLoad verifies that leaving BTW revokes the side
+// surface's file-view lifetime so a still-queued side load cannot run or land
+// after the view closes, without cancelling the restored parent's own load.
+func TestBTWLeaveRevokesSideFileLoad(t *testing.T) {
+	resetFileViewCacheForTest()
+	m := newBTWTestModel(t)
+	dir := t.TempDir()
+	m.cwd = dir
+	name := "side_view.go"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("package side\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Open a full view so the side surface inherits an active file view.
+	m, parentLoadCmd := m.openFileView(name)
+	if parentLoadCmd == nil {
+		t.Fatal("expected a pending parent load command")
+	}
+	parentLiveSeq := m.fileView.liveSeq
+	if parentLiveSeq == nil {
+		t.Fatal("parent load token missing")
+	}
+	parentSeq := parentLiveSeq.Load()
+
+	// Enter BTW: the side surface detaches and schedules its own load.
+	side, sideLoadCmd := m.handleBTWCommand("")
+	if !side.btw.active || side.btw.parent == nil {
+		t.Fatal("expected an active BTW conversation")
+	}
+	if sideLoadCmd == nil {
+		t.Fatal("side surface should schedule its own file load")
+	}
+	sideLiveSeq := side.fileView.liveSeq
+	if sideLiveSeq == nil || sideLiveSeq == parentLiveSeq {
+		t.Fatal("side load must own a detached lifetime token")
+	}
+	sideSeq := sideLiveSeq.Load()
+
+	// Return while the side load is still queued.
+	parent, _ := side.leaveBTW()
+	if sideLiveSeq.Load() == sideSeq {
+		t.Fatal("leaveBTW must revoke the side file-view request")
+	}
+	if parentLiveSeq.Load() != parentSeq || parentLiveSeq == sideLiveSeq {
+		t.Fatal("leaveBTW must not revoke the restored parent's request")
+	}
+
+	// The held side command must now be a superseded no-op.
+	held := sideLoadCmd()
+	loaded, ok := held.(fileViewLoadedMsg)
+	if !ok {
+		t.Fatalf("held side command produced %T, want fileViewLoadedMsg", held)
+	}
+	if !errors.Is(loaded.err, errFileViewSuperseded) {
+		t.Fatalf("queued side load must be superseded after leaving BTW, got %v", loaded.err)
+	}
+
+	// The parent's own load still completes and settles its snapshot.
+	parent = deliverCommandMessages(t, parent, parentLoadCmd)
+	if parent.fileView.loading {
+		t.Fatal("parent load must remain valid after the side revocation")
+	}
+	if !strings.Contains(plainRender(t, parent.renderFileViewFull(80)), "package side") {
+		t.Fatal("restored parent must keep its snapshot")
+	}
+}
+
+// TestBTWForkOfErroredFileViewShowsLoadingPlaceholder verifies that a side
+// surface forked from a full view whose last snapshot was a read error does
+// not render an empty body while its own load is pending. The inherited error
+// snapshot is invalidated by the fork, so the side must show the loading
+// placeholder until its load lands, then the side's own error snapshot.
+func TestBTWForkOfErroredFileViewShowsLoadingPlaceholder(t *testing.T) {
+	resetFileViewCacheForTest()
+	m := newBTWTestModel(t)
+	m.cwd = t.TempDir()
+
+	// A missing file opens straight in full mode and settles on a read error.
+	m, loadCmd := m.openFileView("missing.go")
+	if loadCmd == nil || m.fileView.mode != fileViewFull {
+		t.Fatal("expected a full-view load for a file without recorded edits")
+	}
+	m = deliverCommandMessages(t, m, loadCmd)
+	if !m.fileView.hasError {
+		t.Fatal("parent full view should settle on a read error")
+	}
+	if got := plainRender(t, m.renderFileViewFull(80)); !strings.Contains(got, "Could not read file") {
+		t.Fatalf("parent should show the read error, got %q", got)
+	}
+
+	side, sideLoadCmd := m.handleBTWCommand("")
+	if !side.btw.active || sideLoadCmd == nil {
+		t.Fatal("expected an active BTW surface with its own pending file load")
+	}
+	if got := plainRender(t, side.renderFileViewFull(80)); !strings.Contains(got, fileViewLoadingPlaceholder) {
+		t.Fatalf("pending side load must show the loading placeholder, got %q", got)
+	}
+	if got := plainRender(t, side.btw.parent.renderFileViewFull(80)); !strings.Contains(got, "Could not read file") {
+		t.Fatalf("hidden parent must keep its own error snapshot, got %q", got)
+	}
+
+	side = deliverCommandMessages(t, side, sideLoadCmd)
+	if side.fileView.loading {
+		t.Fatal("side load should settle")
+	}
+	if got := plainRender(t, side.renderFileViewFull(80)); !strings.Contains(got, "Could not read file") {
+		t.Fatalf("settled side load should show its read error, got %q", got)
 	}
 }

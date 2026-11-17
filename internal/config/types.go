@@ -724,6 +724,39 @@ func (cfg LocalControlDriverConfig) MarshalJSON() ([]byte, error) {
 	return json.Marshal(raw)
 }
 
+// MarshalJSON writes "disabled" whenever it was explicitly set, not only when
+// true. A read-modify-write of config.json (SetTheme, SetActiveProvider, ...)
+// would otherwise drop `"disabled": false`, which turns a default that ships
+// disabled (aimlapi) back off and lets project config override a user's
+// explicit enable (see mergeMCPServer).
+func (server MCPServerConfig) MarshalJSON() ([]byte, error) {
+	type rawServer struct {
+		Type     string            `json:"type,omitempty"`
+		Command  string            `json:"command,omitempty"`
+		Args     []string          `json:"args,omitempty"`
+		Env      map[string]string `json:"env,omitempty"`
+		URL      string            `json:"url,omitempty"`
+		Headers  map[string]string `json:"headers,omitempty"`
+		Auth     string            `json:"auth,omitempty"`
+		OAuth    *MCPOAuthConfig   `json:"oauth,omitempty"`
+		Disabled *bool             `json:"disabled,omitempty"`
+	}
+	raw := rawServer{
+		Type:    server.Type,
+		Command: server.Command,
+		Args:    server.Args,
+		Env:     server.Env,
+		URL:     server.URL,
+		Headers: server.Headers,
+		Auth:    server.Auth,
+		OAuth:   server.OAuth,
+	}
+	if server.disabledSet || server.Disabled {
+		raw.Disabled = &server.Disabled
+	}
+	return json.Marshal(raw)
+}
+
 func (server *MCPServerConfig) UnmarshalJSON(data []byte) error {
 	type rawServer struct {
 		Type     string            `json:"type"`

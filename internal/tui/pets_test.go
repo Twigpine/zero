@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -14,7 +15,12 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/Twigpine/zero/internal/terminalpet"
+	"github.com/Twigpine/zero/internal/terminalpet/petart"
+	"github.com/Twigpine/zero/internal/tools"
+	"github.com/Twigpine/zero/internal/zeroruntime"
+	"github.com/charmbracelet/colorprofile"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -118,10 +124,11 @@ func TestPetsPickerShowsLocalChoicesWhileDiscoverLoads(t *testing.T) {
 	if next.picker == nil || !next.picker.loading {
 		t.Fatalf("pet picker = %#v, want local rows plus loading state", next.picker)
 	}
-	want := []pickerItem{
-		{Label: "No companion", Value: terminalpet.DisabledID, Meta: "off"},
-		{Group: "Installed", Label: "Kratos Greek", Value: "kratos", Local: true},
+	want := []pickerItem{{Label: "No companion", Value: terminalpet.DisabledID, Meta: "off"}}
+	for _, entry := range terminalpet.BuiltinEntries() {
+		want = append(want, pickerItem{Group: "Built in", Label: entry.Label(), Value: entry.Slug, Local: true})
 	}
+	want = append(want, pickerItem{Group: "Installed", Label: "Kratos Greek", Value: "kratos", Local: true})
 	if !reflect.DeepEqual(next.picker.items, want) {
 		t.Fatalf("initial pet picker items = %#v, want %#v", next.picker.items, want)
 	}
@@ -129,7 +136,7 @@ func TestPetsPickerShowsLocalChoicesWhileDiscoverLoads(t *testing.T) {
 		t.Fatalf("initial pet picker selection = %#v, %v; want installed current pet", current, ok)
 	}
 	plain := plainRender(t, next.petPickerOverlay(next.width))
-	for _, wantText := range []string{"No companion", "Installed", "Kratos Greek", "Discover", "Fetching companions"} {
+	for _, wantText := range []string{"Installed", "Kratos Greek", "Discover", "Fetching companions"} {
 		if !strings.Contains(plain, wantText) {
 			t.Fatalf("loading pet picker missing %q:\n%s", wantText, plain)
 		}
@@ -1388,5 +1395,674 @@ func TestPetsCommandExplainsUnsupportedTerminal(t *testing.T) {
 	}
 	if got := plainRender(t, nextModel.View().Content); !strings.Contains(got, "Kitty graphics or Sixel") {
 		t.Fatalf("unsupported-terminal guidance is missing: %q", got)
+	}
+}
+
+func TestPetsCommandSelectsBuiltinCompanionByNameWithoutCatalog(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.json")
+	m := newModel(context.Background(), Options{UserConfigPath: configPath})
+	m.userConfigPath = configPath
+	// An unreachable catalog: choosing a built-in must not need it.
+	m.petClient.ManifestURL = "https://127.0.0.1:1/manifest"
+	m.petClient.RankingURL = "https://127.0.0.1:1/ranking"
+
+	updated, cmd := m.handlePetsCommand("  Twig ")
+	next := updated.(model)
+	if next.picker != nil || cmd == nil {
+		t.Fatalf("a built-in name should select directly: picker=%v cmd=%v", next.picker, cmd)
+	}
+	installed, ok := cmd().(petInstalledMsg)
+	if !ok || installed.err != nil || installed.animation == nil {
+		t.Fatalf("install message = %#v", installed)
+	}
+	updated, _ = next.applyPetInstall(installed)
+	next = updated.(model)
+	if next.petID != "zero:twig" || next.petName != "Twig" || next.petAnimation == nil {
+		t.Fatalf("selected pet: id=%q name=%q animation=%v", next.petID, next.petName, next.petAnimation)
+	}
+	saved, err := os.ReadFile(configPath)
+	if err != nil || !strings.Contains(string(saved), `"zero:twig"`) {
+		t.Fatalf("saved config = %q, %v", saved, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "pets")); !os.IsNotExist(err) {
+		t.Fatalf("selecting a built-in companion wrote pet files: %v", err)
+	}
+
+	// The saved choice comes back on the next start, again with no catalog.
+	restarted := newModel(context.Background(), Options{UserConfigPath: configPath, SavedPet: "zero:twig"})
+	if restarted.petAnimation == nil || restarted.petName != "Twig" {
+		t.Fatalf("restart did not restore the built-in companion: name=%q animation=%v", restarted.petName, restarted.petAnimation)
+	}
+}
+
+// installTestPet writes the marker of an installed community pet.
+func installTestPet(t *testing.T, root, slug, name string) {
+	t.Helper()
+	dir := filepath.Join(root, "pets", "installed", slug)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	metadata := fmt.Sprintf(`{"slug":%q,"displayName":%q,"kind":"character","submittedBy":"tester","spriteVersionNumber":1}`, slug, name)
+	if err := os.WriteFile(filepath.Join(dir, "source.json"), []byte(metadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// offlinePetModel has a pet client whose community catalog cannot be reached.
+func offlinePetModel(t *testing.T, root string) model {
+	t.Helper()
+	m := newModel(context.Background(), Options{UserConfigPath: filepath.Join(root, "config.json")})
+	m.width = 100
+	m.petClient.ManifestURL = "https://127.0.0.1:1/manifest"
+	m.petClient.RankingURL = "https://127.0.0.1:1/ranking"
+	return m
+}
+
+func TestPetsCommandKeepsInstalledPetThatSharesABuiltinName(t *testing.T) {
+	root := t.TempDir()
+	installTestPet(t, root, "twig", "Twig the bird")
+	m := offlinePetModel(t, root)
+
+	// The installed pet answered to this name before built-ins existed.
+	updated, _ := m.handlePetsCommand("twig")
+	next := updated.(model)
+	if next.picker == nil || next.petRequestedSlug != "twig" {
+		t.Fatalf("/pets twig did not go to the installed pet: picker=%v requested=%q", next.picker, next.petRequestedSlug)
+	}
+
+	// The built-in stays reachable by its own slug, and by name once nothing
+	// installed claims it.
+	updated, cmd := m.handlePetsCommand("zero:twig")
+	if next := updated.(model); next.picker != nil || cmd == nil {
+		t.Fatalf("/pets zero:twig should select the built-in directly: picker=%v", next.picker)
+	}
+	if installed := cmd().(petInstalledMsg); installed.entry.Slug != "zero:twig" || !installed.entry.Builtin {
+		t.Fatalf("selected %#v, want the built-in", installed.entry)
+	}
+	updated, cmd = offlinePetModel(t, t.TempDir()).handlePetsCommand("twig")
+	if next := updated.(model); next.picker != nil || cmd == nil {
+		t.Fatalf("/pets twig should select the built-in when no installed pet has that slug: picker=%v", next.picker)
+	}
+}
+
+func TestPetsCommandReportsCatalogFailureForUnknownName(t *testing.T) {
+	m := offlinePetModel(t, t.TempDir())
+	updated, _ := m.handlePetsCommand("boba")
+	next := updated.(model)
+	entries, err := next.petClient.Catalog(context.Background())
+	if err == nil {
+		t.Fatal("the test catalog should be unreachable")
+	}
+	updated, _ = next.applyPetCatalog(petCatalogLoadedMsg{entries: entries, err: err})
+	next = updated.(model)
+	if next.picker != nil {
+		t.Fatal("picker should close when the requested pet cannot be found")
+	}
+	plain := plainRender(t, next.View().Content)
+	// "No pet named boba" would be a guess: the catalog that lists it never loaded.
+	if !strings.Contains(plain, "Could not load the pet catalog") || strings.Contains(plain, "No pet named") {
+		t.Fatalf("wrong explanation for an unreachable catalog:\n%s", plain)
+	}
+
+	// With the catalog loaded, an unknown name is simply unknown.
+	m.picker = &commandPicker{kind: pickerPet, loading: true}
+	m.petRequestedSlug = "boba"
+	updated, _ = m.applyPetCatalog(petCatalogLoadedMsg{entries: terminalpet.BuiltinEntries()})
+	if plain := plainRender(t, updated.(model).View().Content); !strings.Contains(plain, `No pet named "boba"`) {
+		t.Fatalf("missing unknown-pet notice:\n%s", plain)
+	}
+}
+
+func TestPetCatalogGroupsBuiltinCompanionsAndReportsMissingCommunityCatalog(t *testing.T) {
+	root := t.TempDir()
+	installTestPet(t, root, "local", "Local")
+	m := offlinePetModel(t, root)
+	m.picker = &commandPicker{kind: pickerPet, loading: true}
+	// What the client really returns offline with a pet installed.
+	entries, err := m.petClient.Catalog(context.Background())
+	if err == nil {
+		t.Fatal("the test catalog should be unreachable")
+	}
+	updated, _ := m.applyPetCatalog(petCatalogLoadedMsg{entries: entries, err: err})
+	next := updated.(model)
+	if next.picker == nil {
+		t.Fatal("a failed community catalog should not close a picker that still has companions")
+	}
+	if first := next.picker.items[1]; first.Group != "Built in" || first.Label != "Twig" || first.Value != "zero:twig" {
+		t.Fatalf("first companion = %#v, want built-in Twig", first)
+	}
+	if last := next.picker.items[len(next.picker.items)-1]; last.Group != "Installed" || last.Value != "local" {
+		t.Fatalf("last companion = %#v, want the installed pet", last)
+	}
+	plain := plainRender(t, next.petPickerOverlay(next.width))
+	for _, want := range []string{"Built in", "Twig", "Community catalog unavailable"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("picker is missing %q:\n%s", want, plain)
+		}
+	}
+
+	// A later successful load clears the note.
+	updated, _ = next.applyPetCatalog(petCatalogLoadedMsg{entries: entries})
+	if plain := plainRender(t, updated.(model).petPickerOverlay(next.width)); strings.Contains(plain, "Community catalog unavailable") {
+		t.Fatalf("stale catalog note:\n%s", plain)
+	}
+}
+
+// textPetModel is a full-screen session on a terminal without image support
+// but with true colour, showing built-in Twig.
+func textPetModel(t *testing.T) model {
+	t.Helper()
+	m := newModel(context.Background(), Options{AltScreen: true, UserConfigPath: filepath.Join(t.TempDir(), "config.json")})
+	m.width, m.height = 100, 30
+	m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowUser, text: "hello"})
+	m.petRenderer = terminalpet.NewImageRenderer(terminalpet.ImageSupport{Reason: "tmux does not pass terminal images through reliably."})
+	m.petColorProfile = colorprofile.TrueColor
+	m.petID, m.petName, m.petAnimation = "zero:twig", "Twig", terminalpet.BuiltinAnimation(petart.Twig)
+	m.petOutcome = ""
+	return m
+}
+
+func TestColorProfileMessageIsRecorded(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	updated, _ := m.Update(tea.ColorProfileMsg{Profile: colorprofile.ANSI256})
+	if got := updated.(model).petColorProfile; got != colorprofile.ANSI256 {
+		t.Fatalf("petColorProfile = %v, want ANSI256", got)
+	}
+}
+
+func TestTextPetDrawsInItsSlotWhereClicksLand(t *testing.T) {
+	m := textPetModel(t)
+	if !m.petTextMode() || !m.petLayoutActive() {
+		t.Fatalf("text companion inactive: textMode=%v layout=%v", m.petTextMode(), m.petLayoutActive())
+	}
+	if m.petImageDraw("") != nil {
+		t.Fatal("a text companion must not send an image")
+	}
+	if got := m.petComposerReservedColumns(m.width); got != terminalpet.TextColumns+petWrapGapColumns {
+		t.Fatalf("composer reserves %d columns, want %d", got, terminalpet.TextColumns+petWrapGapColumns)
+	}
+	content := m.View().Content
+	lines := strings.Split(plainRender(t, content), "\n")
+	if len(lines) != m.height {
+		t.Fatalf("view has %d lines, want the terminal height %d", len(lines), m.height)
+	}
+	x, y := m.ambientPetPosition(m.width, m.height)
+	state, phase := m.petTextPlayback()
+	want, ok := m.petAnimation.TextFrame(state, phase, terminalpet.TextTrueColor)
+	if !ok {
+		t.Fatal("no text frame")
+	}
+	for index, spriteLine := range want {
+		row := []rune(lines[y+index])
+		if len(row) < x+terminalpet.TextColumns {
+			t.Fatalf("row %d is %d cells, too short for the companion at column %d:\n%s", y+index, len(row), x, strings.Join(lines, "\n"))
+		}
+		got := string(row[x : x+terminalpet.TextColumns])
+		if wantPlain := ansi.Strip(spriteLine); got != wantPlain {
+			t.Fatalf("row %d of the companion = %q, want %q:\n%s", index, got, wantPlain, strings.Join(lines, "\n"))
+		}
+		// Clicks on any of its cells reach it.
+		if !m.petHit(x, y+index) || !m.petHit(x+terminalpet.TextColumns-1, y+index) {
+			t.Fatalf("row %d of the companion does not take clicks", index)
+		}
+	}
+	if m.petHit(x-1, y) || m.petHit(x, y-1) {
+		t.Fatal("clicks outside the companion reach it")
+	}
+	if !strings.Contains(content, "\x1b[0;38;2;") {
+		t.Fatal("a true-colour terminal did not get the art's exact colours")
+	}
+	// A 256-colour terminal gets the art's own 256-colour palette.
+	m.petColorProfile = colorprofile.ANSI256
+	if limited := m.View().Content; !strings.Contains(limited, "\x1b[0;38;5;") || strings.Contains(limited, "\x1b[0;38;2;") {
+		t.Fatal("a 256-colour terminal did not get the 256-colour palette")
+	}
+}
+
+func TestTextPetNeedsColourRoomAndABuiltin(t *testing.T) {
+	sheet := image.NewNRGBA(image.Rect(0, 0, 12, 12))
+	thumbnail, _ := terminalpet.ThumbnailAnimation(sheet)
+	cases := []struct {
+		name   string
+		change func(*model)
+		text   bool
+		active bool
+	}{
+		{"true colour", func(*model) {}, true, true},
+		{"256 colours", func(m *model) { m.petColorProfile = colorprofile.ANSI256 }, true, true},
+		{"16 colours", func(m *model) { m.petColorProfile = colorprofile.ANSI }, false, false},
+		{"no colour", func(m *model) { m.petColorProfile = colorprofile.ASCII }, false, false},
+		{"profile not yet known", func(m *model) { m.petColorProfile = colorprofile.Unknown }, false, false},
+		{"narrow terminal", func(m *model) { m.width = petTextMinWidth - 1 }, true, false},
+		{"community pet", func(m *model) { m.petID, m.petAnimation = "boba", thumbnail }, true, false},
+		{"image terminal", func(m *model) {
+			m.petRenderer = terminalpet.NewImageRenderer(terminalpet.ImageSupport{Protocol: terminalpet.ImageProtocolKitty})
+		}, false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := textPetModel(t)
+			tc.change(&m)
+			if got := m.petTextMode(); got != tc.text {
+				t.Errorf("petTextMode = %v, want %v", got, tc.text)
+			}
+			if got := m.petLayoutActive(); got != tc.active {
+				t.Errorf("petLayoutActive = %v, want %v", got, tc.active)
+			}
+		})
+	}
+	// An image terminal keeps the image slot.
+	m := textPetModel(t)
+	m.petRenderer = terminalpet.NewImageRenderer(terminalpet.ImageSupport{Protocol: terminalpet.ImageProtocolSixel})
+	if m.petSlotColumns() != petImageColumns || m.petSlotRows() != petImageRows {
+		t.Fatalf("image slot is %dx%d", m.petSlotColumns(), m.petSlotRows())
+	}
+}
+
+func TestPetsCommandOnTextTerminalOffersOnlyBuiltins(t *testing.T) {
+	m := textPetModel(t)
+	updated, _ := m.handlePetsCommand("")
+	next := updated.(model)
+	if next.picker == nil || next.picker.loading {
+		t.Fatalf("picker = %#v, want the built-ins without a catalog fetch", next.picker)
+	}
+	want := []pickerItem{{Label: "No companion", Value: terminalpet.DisabledID, Meta: "off"}}
+	for _, entry := range terminalpet.BuiltinEntries() {
+		want = append(want, pickerItem{Group: "Built in", Label: entry.Label(), Value: entry.Slug, Local: true})
+	}
+	if !reflect.DeepEqual(next.picker.items, want) {
+		t.Fatalf("text picker items = %#v", next.picker.items)
+	}
+	if plain := plainRender(t, next.petPickerOverlay(next.width)); !strings.Contains(plain, "Community pets need images") {
+		t.Fatalf("text picker does not say why community pets are missing:\n%s", plain)
+	}
+
+	// A built-in by name is chosen directly.
+	updated, cmd := m.handlePetsCommand("ember")
+	if next := updated.(model); next.picker != nil || cmd == nil {
+		t.Fatalf("/pets ember did not select the built-in: picker=%v", next.picker)
+	}
+	if installed := cmd().(petInstalledMsg); installed.entry.Slug != "zero:ember" || installed.err != nil {
+		t.Fatalf("installed %#v, %v", installed.entry, installed.err)
+	}
+
+	// A community pet cannot be drawn here, and says so.
+	updated, cmd = m.handlePetsCommand("boba")
+	next = updated.(model)
+	if cmd != nil || next.picker != nil {
+		t.Fatal("/pets boba should not open a picker or fetch on a text terminal")
+	}
+	if plain := plainRender(t, next.View().Content); !strings.Contains(plain, `"boba" needs terminal images. Run /pets for the built-in companions.`) {
+		t.Fatalf("missing explanation for a community pet on a text terminal:\n%s", plain)
+	}
+}
+
+func TestPetsCommandExplainsWhenNeitherImagesNorTextWork(t *testing.T) {
+	m := textPetModel(t)
+	m.petColorProfile = colorprofile.ANSI
+	updated, cmd := m.handlePetsCommand("")
+	next := updated.(model)
+	if cmd != nil || next.picker != nil {
+		t.Fatal("a 16-colour terminal without images should not open the picker")
+	}
+	plain := plainRender(t, next.View().Content)
+	if !strings.Contains(plain, "tmux does not pass terminal images through reliably. Text companions need 256 colours.") {
+		t.Fatalf("missing explanation:\n%s", plain)
+	}
+}
+
+func TestTextPetPickerDrawsThePreview(t *testing.T) {
+	for _, width := range []int{100, 50} {
+		m := textPetModel(t)
+		m.width = width
+		m.petID = "zero:twig" // the picker opens with Twig selected
+		updated, debounce := m.handlePetsCommand("")
+		// Let the real preview load: the debounce, then the preview itself.
+		updated, load := updated.(model).Update(execCmd(debounce))
+		updated, _ = updated.(model).Update(execCmd(load))
+		next := updated.(model)
+		if next.petPreview == nil || next.petPreviewLoading {
+			t.Fatalf("width %d: preview did not load: preview=%v loading=%v", width, next.petPreview, next.petPreviewLoading)
+		}
+		plain := plainRender(t, next.petPickerOverlay(next.width))
+		preview, _ := next.petPreview.TextFrame(terminalpet.Idle, next.petPhase, next.petTextColors())
+		// Every row of the drawing appears whole, on consecutive lines, all
+		// starting in the same column.
+		plainLines := strings.Split(plain, "\n")
+		first, column := -1, -1
+		for index, line := range preview {
+			want := ansi.Strip(line)
+			if first < 0 {
+				for row, candidate := range plainLines {
+					if at := strings.Index(candidate, want); at >= 0 && strings.TrimSpace(want) != "" {
+						first, column = row-index, len([]rune(candidate[:at]))
+						break
+					}
+				}
+				if first < 0 {
+					continue
+				}
+			}
+			row := []rune(plainLines[first+index])
+			if len(row) < column+len([]rune(want)) || string(row[column:column+len([]rune(want))]) != want {
+				t.Fatalf("width %d: preview row %d %q is not in line with the rest:\n%s", width, index, want, plain)
+			}
+		}
+		if first < 0 {
+			t.Fatalf("width %d: preview not drawn:\n%s", width, plain)
+		}
+	}
+}
+
+func TestPetMoodsFollowTheAgent(t *testing.T) {
+	thumbnail, _ := terminalpet.ThumbnailAnimation(image.NewNRGBA(image.Rect(0, 0, 12, 12)))
+	running := func(m model) model {
+		m.pending = true
+		m.petOutcome = ""
+		return m
+	}
+	m := running(textPetModel(t))
+	if got := m.petState(); got != terminalpet.Thinking {
+		t.Fatalf("a turn with nothing streaming yet = %s, want thinking", got)
+	}
+	m.streamingText = []byte("Here is the plan")
+	if got := m.petState(); got != terminalpet.Running {
+		t.Fatalf("a turn writing its answer = %s, want running", got)
+	}
+	m.streamingText = []byte("  \n")
+	if got := m.petState(); got != terminalpet.Thinking {
+		t.Fatalf("whitespace is not an answer: %s, want thinking", got)
+	}
+	m.streamingText = nil
+	m.streamCallName = "bash"
+	if got := m.petState(); got != terminalpet.Running {
+		t.Fatalf("a turn streaming a tool call = %s, want running", got)
+	}
+	// A tool that was called and has no result yet is still running.
+	m.streamCallName = ""
+	m.activeRunID = 7
+	m.transcript = append(m.transcript, transcriptRow{kind: rowToolCall, runID: 7, id: "call-1", tool: "bash"})
+	if got := m.petState(); got != terminalpet.Running {
+		t.Fatalf("a turn running a tool = %s, want running", got)
+	}
+	m.transcript = append(m.transcript, transcriptRow{kind: rowToolResult, runID: 7, id: "call-1", tool: "bash"})
+	if got := m.petState(); got != terminalpet.Thinking {
+		t.Fatalf("after the tool finished = %s, want thinking", got)
+	}
+	// Pets without a thinking animation keep the running one throughout.
+	m = running(textPetModel(t))
+	m.petAnimation = thumbnail
+	if got := m.petState(); got != terminalpet.Running {
+		t.Fatalf("a community pet while thinking = %s, want running", got)
+	}
+}
+
+func TestPetFallsAsleepWhenIdleAndWakesUp(t *testing.T) {
+	base := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	now := base
+	m := textPetModel(t)
+	m.now = func() time.Time { return now }
+	m.petLastActiveAt = base
+	now = base.Add(petSleepAfter - time.Second)
+	if got := m.petState(); got != terminalpet.Idle {
+		t.Fatalf("just before the timeout = %s, want idle", got)
+	}
+	now = base.Add(petSleepAfter)
+	if got := m.petState(); got != terminalpet.Sleeping {
+		t.Fatalf("after %s idle = %s, want sleeping", petSleepAfter, got)
+	}
+	// Pets without a sleeping animation stay idle.
+	community := m
+	community.petAnimation, _ = terminalpet.ThumbnailAnimation(image.NewNRGBA(image.Rect(0, 0, 12, 12)))
+	if got := community.petState(); got != terminalpet.Idle {
+		t.Fatalf("a community pet asleep = %s, want idle", got)
+	}
+	// A key press wakes it.
+	updated, _ := m.Update(testKey('a'))
+	if got := updated.(model).petState(); got != terminalpet.Idle {
+		t.Fatalf("after a key press = %s, want idle", got)
+	}
+	// So does a click on it: the reaction it starts counts as activity.
+	clicked := m
+	clicked.petOutcome, clicked.petOutcomeAt = terminalpet.Waving, now
+	now = now.Add(10 * time.Second)
+	if got := clicked.petState(); got != terminalpet.Idle {
+		t.Fatalf("after a click = %s, want idle", got)
+	}
+	// A running turn is never asleep.
+	busy := m
+	busy.pending = true
+	if got := busy.petState(); got == terminalpet.Sleeping {
+		t.Fatal("asleep during a turn")
+	}
+}
+
+func TestPetCelebratesLongTurnsAndHopsAfterShortOnes(t *testing.T) {
+	m := newModel(context.Background(), Options{})
+	start := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	m.turnStartedAt = start
+	m.turnTimer = newActiveTurnTimer(start)
+	if got := m.petTurnOutcome(nil, start.Add(petBigTurn)); got != terminalpet.Jumping {
+		t.Errorf("a %s turn = %s, want jumping", petBigTurn, got)
+	}
+	if got := m.petTurnOutcome(nil, start.Add(petBigTurn-time.Second)); got != terminalpet.Review {
+		t.Errorf("a short turn = %s, want review", got)
+	}
+	if got := m.petTurnOutcome(errors.New("boom"), start.Add(2*petBigTurn)); got != terminalpet.Failed {
+		t.Errorf("a failed long turn = %s, want failed", got)
+	}
+	m.turnStartedAt, m.turnTimer = time.Time{}, nil
+	if got := m.petTurnOutcome(nil, start.Add(time.Hour)); got != terminalpet.Review {
+		t.Errorf("a turn with no start time = %s, want review", got)
+	}
+}
+
+func TestFinishedTurnSetsThePetReaction(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		duration time.Duration
+		want     terminalpet.State
+	}{
+		{"short", 5 * time.Second, terminalpet.Review},
+		{"long", 90 * time.Second, terminalpet.Jumping},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_DATA_HOME", t.TempDir())
+			provider := &fakeProvider{events: []zeroruntime.StreamEvent{
+				{Type: zeroruntime.StreamEventText, Content: "done"},
+				{Type: zeroruntime.StreamEventDone},
+			}}
+			m := newModel(context.Background(), Options{
+				Cwd: t.TempDir(), ProviderName: "tokenrouter", ModelName: "MiniMax-M3",
+				Provider: provider, Registry: tools.NewRegistry(),
+			})
+			base := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+			current := base
+			m.now = func() time.Time { return current }
+			m.input.SetValue("hello")
+			// The turn starts and runs at base; it finishes tc.duration later.
+			updated, cmd := m.Update(testKey(tea.KeyEnter))
+			finished := execCmd(cmd)
+			current = base.Add(tc.duration)
+			updated, _ = updated.(model).Update(finished)
+			next := updated.(model)
+			if next.pending {
+				t.Fatal("the turn did not finish")
+			}
+			if next.petOutcome != tc.want {
+				t.Fatalf("pet reaction = %s, want %s", next.petOutcome, tc.want)
+			}
+			if !next.petLastActiveAt.Equal(base.Add(tc.duration)) {
+				t.Fatalf("petLastActiveAt = %s, want the turn's end", next.petLastActiveAt)
+			}
+		})
+	}
+}
+
+func TestPetGreetsWhenItAppears(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	started := newModel(context.Background(), Options{UserConfigPath: configPath, SavedPet: "zero:merlin"})
+	// Look a moment after start, on a fixed clock, so the check cannot race
+	// the wave's end.
+	greetedAt := started.petOutcomeAt
+	started.now = func() time.Time { return greetedAt.Add(time.Second) }
+	if started.petAnimation == nil || started.petState() != terminalpet.Waving {
+		t.Fatalf("a saved companion should wave on start: state=%s", started.petState())
+	}
+	if none := newModel(context.Background(), Options{UserConfigPath: configPath}); none.petOutcome != "" {
+		t.Fatalf("no companion, yet a reaction is set: %s", none.petOutcome)
+	}
+
+	m := textPetModel(t)
+	updated, cmd := m.handlePetsCommand("kage")
+	updated, _ = updated.(model).applyPetInstall(cmd().(petInstalledMsg))
+	chosen := updated.(model)
+	chosenAt := chosen.petOutcomeAt
+	chosen.now = func() time.Time { return chosenAt.Add(time.Second) }
+	if got := chosen.petState(); got != terminalpet.Waving {
+		t.Fatalf("a newly chosen companion = %s, want waving", got)
+	}
+}
+
+func TestTextPetHidesNoTranscriptOrFooterText(t *testing.T) {
+	answer := "The last line of the answer runs nearly the width of the screen and ends with a word: lambda."
+	build := func(withPet bool) model {
+		m := textPetModel(t)
+		// Enough conversation to fill the screen, so the answer's last line
+		// sits at the bottom of the transcript, right above the footer.
+		for index := 0; index < 30; index++ {
+			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowUser, text: fmt.Sprintf("question %d", index)})
+		}
+		m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowAssistant, text: answer})
+		m.copyStatus = "Copied 12 lines"
+		if !withPet {
+			m.petID, m.petAnimation = terminalpet.DisabledID, nil
+		}
+		return m
+	}
+	plain := plainRender(t, build(true).View().Content)
+	without := plainRender(t, build(false).View().Content)
+	for _, want := range []string{"ends with a word: lambda.", "Copied 12 lines"} {
+		if !strings.Contains(without, want) {
+			t.Fatalf("test setup: %q is not on screen even without a companion:\n%s", want, without)
+		}
+		if !strings.Contains(plain, want) {
+			t.Fatalf("the text companion hides %q:\n%s", want, plain)
+		}
+	}
+
+	// The companion stands only beside footer rows: the footer grows to its
+	// height, for every caller that measures it, and the transcript ends above.
+	m := build(true)
+	footer := m.footerView(chatWidth(m.width))
+	if got, want := strings.Count(footer, "\n")+1, terminalpet.TextRows+1; got != want {
+		t.Fatalf("footer with a docked text companion is %d rows, want %d", got, want)
+	}
+	plainFooter := strings.Split(ansi.Strip(footer), "\n")
+	reserved := m.petComposerReservedColumns(m.width)
+	for index, line := range plainFooter[:len(plainFooter)-1] {
+		if width := len([]rune(strings.TrimRight(line, " "))); width > m.width-reserved {
+			t.Fatalf("footer row %d runs under the companion (%d cells, %d free): %q", index, width, m.width-reserved, line)
+		}
+	}
+	// The status line is below the companion and keeps its full width.
+	if got := m.footerStatusLine(m.width); lipgloss.Width(got) != lipgloss.Width(m.statusLine(m.width)) || got != m.statusLine(m.width) {
+		t.Fatalf("status line was shortened beside a text companion: %q", ansi.Strip(got))
+	}
+	plainBuild := build(false)
+	if got := strings.Count(plainBuild.footerView(chatWidth(plainBuild.width)), "\n") + 1; got >= terminalpet.TextRows+1 {
+		t.Fatalf("test setup: the footer is %d rows without a companion, so nothing was added", got)
+	}
+}
+
+func TestTextPetStepsAsideForPermissionPrompts(t *testing.T) {
+	m := textPetModel(t)
+	m.pendingPermission = &pendingPermissionPrompt{}
+	if m.petLayoutActive() {
+		t.Fatal("a text companion would cover the permission card's options")
+	}
+	// Image companions are drawn over the grid by the terminal and keep their
+	// behaviour.
+	m.petRenderer = terminalpet.NewImageRenderer(terminalpet.ImageSupport{Protocol: terminalpet.ImageProtocolKitty})
+	if !m.petLayoutActive() {
+		t.Fatal("an image companion should stay beside a permission prompt")
+	}
+}
+
+func TestTextPetPickerDoesNotStartOnNoCompanion(t *testing.T) {
+	m := textPetModel(t)
+	m.petID = "boba" // a community pet, which this picker cannot list
+	updated, _ := m.handlePetsCommand("")
+	current, ok := updated.(model).picker.current()
+	if !ok || current.Value == terminalpet.DisabledID {
+		t.Fatalf("picker starts on %#v: Enter would switch the pet off", current)
+	}
+	m.petID = terminalpet.DisabledID
+	updated, _ = m.handlePetsCommand("")
+	if current, _ := updated.(model).picker.current(); current.Value != terminalpet.DisabledID {
+		t.Fatalf("with no pet, the picker starts on %#v, want No companion", current)
+	}
+}
+
+func TestTextPetChosenInANarrowWindowSaysWhenItShows(t *testing.T) {
+	m := textPetModel(t)
+	m.width = petTextMinWidth - 5
+	updated, cmd := m.handlePetsCommand("nova")
+	updated, _ = updated.(model).applyPetInstall(cmd().(petInstalledMsg))
+	next := updated.(model)
+	if next.petLayoutActive() {
+		t.Fatal("test setup: the window is wide enough to show the companion")
+	}
+	if plain := plainRender(t, next.View().Content); !strings.Contains(plain, fmt.Sprintf("Nova shows once the window is %d+ columns wide.", petTextMinWidth)) {
+		t.Fatalf("no explanation for the missing companion:\n%s", plain)
+	}
+}
+
+func TestComposerClicksAndArrowsFollowTheRowsBesideACompanion(t *testing.T) {
+	m := textPetModel(t)
+	m.width = 80
+	words := make([]string, 0, 50)
+	for index := 0; index < 50; index++ {
+		words = append(words, fmt.Sprintf("w%02d", index))
+	}
+	text := strings.Join(words, " ")
+	m.setComposerState(composerState{text: text, cursor: 0})
+	if !m.petLayoutActive() || m.petComposerReservedColumns(m.width) == 0 {
+		t.Fatal("test setup: no docked companion beside the composer")
+	}
+	// The composer must wrap differently with and without the companion's
+	// columns, or a wrong width would map clicks the same way.
+	full := composerWrappedVisualLines(m.input, m.currentComposerState(), maxInt(1, m.width-4))
+	narrow := composerWrappedVisualLines(m.input, m.currentComposerState(), m.composerInnerWidth(m.width))
+	if len(full) == len(narrow) {
+		t.Fatalf("test setup: %d rows at both widths", len(full))
+	}
+
+	lines := strings.Split(plainRender(t, m.View().Content), "\n")
+	width := m.chatColumnWidth()
+	frame := m.scrollableTranscriptFrame(m.pinnedTitleBar(width), m.footerView(width))
+	// The composer's second text row, below its top border and first row. It
+	// is drawn from the narrow wrap: it starts where that wrap's second
+	// segment starts.
+	row := frame.composerRect.y + 2
+	start := narrow[1].start
+	opening := text[start : start+6]
+	column := strings.Index(lines[row], opening)
+	if column < 0 {
+		t.Fatalf("test setup: composer row %q does not start with %q", lines[row], opening)
+	}
+	column = len([]rune(lines[row][:column]))
+
+	// A click on the row's first character puts the cursor there.
+	position, ok := m.composerPositionAtMouse(testMouseClick(tea.MouseLeft, column, row))
+	if !ok || position != start {
+		t.Fatalf("click on %q at column %d gave cursor %d (%v), want %d", opening, column, position, ok, start)
+	}
+
+	// Down from the start of the text moves to the start of the drawn second row.
+	moved, ok := m.moveComposerVisualCursor(1)
+	if !ok || moved.currentComposerState().cursor != start {
+		t.Fatalf("Down moved the cursor to %d (%v), want %d, the start of the second row", moved.currentComposerState().cursor, ok, start)
 	}
 }

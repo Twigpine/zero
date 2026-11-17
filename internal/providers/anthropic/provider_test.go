@@ -266,6 +266,53 @@ func TestStreamCompletionEnablesThinkingWhenEffortRequested(t *testing.T) {
 	}
 }
 
+func TestStreamCompletionUsesMiniMaxAdaptiveEffort(t *testing.T) {
+	t.Parallel()
+
+	for _, effort := range []string{"low", "xhigh"} {
+		effort := effort
+		t.Run(effort, func(t *testing.T) {
+			t.Parallel()
+			var gotBody map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+					t.Fatalf("decode request body: %v", err)
+				}
+				writeSSEEvent(w, "message_stop", `{"type":"message_stop"}`)
+			}))
+			defer server.Close()
+
+			provider, err := New(Options{BaseURL: server.URL + "/", Model: "MiniMax-M3.1-Flash", MaxTokens: 64_000})
+			if err != nil {
+				t.Fatalf("New returned error: %v", err)
+			}
+			stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+				Messages:        []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+				ReasoningEffort: effort,
+			})
+			if err != nil {
+				t.Fatalf("StreamCompletion returned error: %v", err)
+			}
+			drain(stream)
+
+			thinking, ok := gotBody["thinking"].(map[string]any)
+			if !ok || thinking["type"] != "adaptive" {
+				t.Fatalf("thinking = %#v, want adaptive", gotBody["thinking"])
+			}
+			if _, ok := thinking["budget_tokens"]; ok {
+				t.Fatalf("MiniMax thinking must not include budget_tokens: %#v", thinking)
+			}
+			outputConfig, ok := gotBody["output_config"].(map[string]any)
+			if !ok || outputConfig["effort"] != effort {
+				t.Fatalf("output_config = %#v, want effort %q", gotBody["output_config"], effort)
+			}
+			if mt, _ := gotBody["max_tokens"].(float64); int(mt) != 64_000 {
+				t.Fatalf("max_tokens = %#v, want unchanged 64000", gotBody["max_tokens"])
+			}
+		})
+	}
+}
+
 func TestStreamCompletionOmitsThinkingWithoutEffort(t *testing.T) {
 	t.Parallel()
 	var gotBody map[string]any

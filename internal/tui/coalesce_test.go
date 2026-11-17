@@ -180,3 +180,110 @@ func TestCoalescerTimerFlushes(t *testing.T) {
 		t.Fatalf("timer-flushed message = %#v", got[0])
 	}
 }
+
+// An empty delta can arm a timer whose flush fires against an empty buffer.
+// That fired timer must be cleared, or send() sees a non-nil timer and skips
+// arming a new one, stalling all later deltas until a kind switch or non-stream
+// message happens to flush them.
+func TestCoalescerEmptyDeltaDoesNotStrandTimer(t *testing.T) {
+	rec := &recorder{}
+	c := newTextCoalescer(rec.forward)
+
+	var (
+		mu         sync.Mutex
+		armCount   int
+		fireLatest func()
+	)
+	c.afterFunc = func(fn func()) coalesceTimer {
+		mu.Lock()
+		defer mu.Unlock()
+		armCount++
+		fireLatest = fn
+		return &manualTimer{}
+	}
+
+	// Empty delta arms a timer; it fires against an empty buffer.
+	c.send(agentTextMsg{runID: 1, delta: ""})
+	mu.Lock()
+	first := armCount
+	mu.Unlock()
+	if first != 1 {
+		t.Fatalf("empty delta should arm exactly one timer, armed %d", first)
+	}
+	fireLatest()
+
+	// A real delta after the fired timer must arm a NEW timer, so it can be
+	// delivered on schedule instead of stalling forever.
+	c.send(agentTextMsg{runID: 1, delta: "after stall"})
+	mu.Lock()
+	second := armCount
+	mu.Unlock()
+	if second != 2 {
+		t.Fatalf("delta after empty-buffer timer fire should re-arm the timer (arm count %d), so later deltas stall", second)
+	}
+	fireLatest()
+
+	got := rec.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("expected exactly one forwarded message, got %d: %#v", len(got), got)
+	}
+	if text, ok := got[0].(agentTextMsg); !ok || text.delta != "after stall" {
+		t.Fatalf("forwarded message = %#v, want agentTextMsg{\"after stall\"}", got[0])
+	}
+}
+
+// Rapid reasoning deltas within one frame collapse into a single
+// agentReasoningMsg, exactly like text deltas. Without this, every reasoning
+// token forces a full Update→View cycle that re-renders the whole growing
+// thinking block, so the UI falls behind the stream and keeps "streaming"
+// thoughts long after the provider finished.
+func TestCoalescerBatchesReasoningDeltas(t *testing.T) {
+	rec := &recorder{}
+	c := newTextCoalescer(rec.forward)
+	c.afterFunc = func(func()) coalesceTimer { return &manualTimer{} }
+
+	c.send(agentReasoningMsg{runID: 1, delta: "think"})
+	c.send(agentReasoningMsg{runID: 1, delta: "ing…"})
+
+	if got := rec.snapshot(); len(got) != 0 {
+		t.Fatalf("reasoning deltas should buffer, forwarded %d early: %#v", len(got), got)
+	}
+
+	c.flush()
+
+	got := rec.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 coalesced message, got %d: %#v", len(got), got)
+	}
+	reasoning, ok := got[0].(agentReasoningMsg)
+	if !ok || reasoning.delta != "thinking…" || reasoning.runID != 1 {
+		t.Fatalf("coalesced message = %#v, want agentReasoningMsg{1, \"thinking…\"}", got[0])
+	}
+}
+
+// A text delta following buffered reasoning flushes the reasoning first, and
+// vice versa, so interleaved thinking/prose never reorders.
+func TestCoalescerPreservesReasoningTextOrder(t *testing.T) {
+	rec := &recorder{}
+	c := newTextCoalescer(rec.forward)
+	c.afterFunc = func(func()) coalesceTimer { return &manualTimer{} }
+
+	c.send(agentReasoningMsg{runID: 1, delta: "thought"})
+	c.send(agentTextMsg{runID: 1, delta: "answer"})
+	c.send(agentReasoningMsg{runID: 1, delta: "more thought"})
+	c.flush()
+
+	got := rec.snapshot()
+	if len(got) != 3 {
+		t.Fatalf("expected reasoning, text, reasoning in order, got %d: %#v", len(got), got)
+	}
+	if r, ok := got[0].(agentReasoningMsg); !ok || r.delta != "thought" {
+		t.Fatalf("first message must be the flushed reasoning, got %#v", got[0])
+	}
+	if tx, ok := got[1].(agentTextMsg); !ok || tx.delta != "answer" {
+		t.Fatalf("second message must be the flushed text, got %#v", got[1])
+	}
+	if r, ok := got[2].(agentReasoningMsg); !ok || r.delta != "more thought" {
+		t.Fatalf("third message must be the final reasoning, got %#v", got[2])
+	}
+}
