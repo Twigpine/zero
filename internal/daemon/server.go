@@ -257,6 +257,10 @@ func (s *Server) untrackConn(c net.Conn) {
 func (s *Server) Shutdown() {
 	s.shutdownOnce.Do(func() {
 		close(s.done)
+		// Publish pool shutdown before cancelling session contexts. Otherwise a
+		// Run woken from a retry delay can observe context cancellation before
+		// Drain marks the pool terminal and incorrectly report context.Canceled.
+		s.opts.Pool.beginDrain()
 		s.cancel() // stop in-flight pool runs
 		s.mu.Lock()
 		if s.listener != nil {
