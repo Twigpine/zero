@@ -2,9 +2,9 @@ package sandbox
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
@@ -77,11 +77,18 @@ func TestAnEmptyCommandHomeFallsBackToTheAmbientEnvironment(t *testing.T) {
 // BuildCommandPlan must not run runtime preparation when the command's own env
 // makes sandbox-home resolution fail; otherwise selection pins against the
 // ambient home while Windows planning later uses spec.Env.
+//
+// The failure is injected because a removed working directory makes
+// filepath.Abs fail on Linux and still succeed on macOS, so that setup does
+// not reach this branch on every CI host.
 func TestBuildCommandPlanFailsClosedOnInvalidCommandSandboxHome(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("relative grant path with deleted cwd is exercised on Unix CI")
-	}
 	workspace := t.TempDir()
+	unresolved := errors.New("command sandbox home is unresolved")
+	previous := resolveCommandSandboxHome
+	t.Cleanup(func() { resolveCommandSandboxHome = previous })
+	resolveCommandSandboxHome = func(map[string]string) (string, error) {
+		return "", unresolved
+	}
 	engine := NewEngine(EngineOptions{
 		WorkspaceRoot: workspace,
 		Policy:        DefaultPolicy(),
@@ -95,26 +102,12 @@ func TestBuildCommandPlanFailsClosedOnInvalidCommandSandboxHome(t *testing.T) {
 		},
 	})
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
-
-	removed := t.TempDir()
-	if err := os.Chdir(removed); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	if err := os.RemoveAll(removed); err != nil {
-		t.Fatalf("remove cwd parent: %v", err)
-	}
-
-	_, err = engine.BuildCommandPlan(CommandSpec{
+	_, err := engine.BuildCommandPlan(CommandSpec{
 		Name: "/bin/true",
 		Dir:  workspace,
-		Env:  []string{"ZERO_SANDBOX_GRANTS_PATH=relative/grants.json"},
+		Env:  []string{"ZERO_WINDOWS_SANDBOX_HOME=ignored"},
 	})
-	if err == nil {
-		t.Fatal("want BuildCommandPlan to fail when command env prevents sandbox-home resolution")
+	if !errors.Is(err, unresolved) {
+		t.Fatalf("want sandbox-home resolution failure, got %v", err)
 	}
 }

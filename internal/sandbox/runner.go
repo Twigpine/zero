@@ -20,6 +20,11 @@ import (
 
 var errNativeSandboxUnavailable = errors.New("native sandbox backend is unavailable")
 
+// resolveCommandSandboxHome reads the sandbox home from the command environment.
+// Tests replace it: deleting the working directory makes filepath.Abs fail on
+// Linux and succeed on macOS, so that setup cannot force this error everywhere.
+var resolveCommandSandboxHome = ResolveWindowsSandboxHome
+
 func nativeSandboxUnavailableError(backend Backend) error {
 	message := strings.TrimSpace(backend.Message)
 	if message == "" {
@@ -196,7 +201,7 @@ func (engine *Engine) BuildCommandPlan(spec CommandSpec) (CommandPlan, error) {
 		// pinnedSandboxRuntimeRoot.
 		commandSandboxHome := ""
 		if spec.Env != nil {
-			resolved, err := ResolveWindowsSandboxHome(envListToMap(spec.Env))
+			resolved, err := resolveCommandSandboxHome(envListToMap(spec.Env))
 			if err != nil {
 				return CommandPlan{}, err
 			}
