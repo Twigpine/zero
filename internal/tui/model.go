@@ -1494,7 +1494,8 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if next, cmd, routed := m.routeBTWParentMessage(msg); routed {
 		return next, batchCommands(cmd, resizeCmd)
 	}
-	// CROSS-SESSION TRAFFIC ENDS A FULL-AUTO OFFER, every kind of it.
+	// CROSS-SESSION TRAFFIC ENDS A FULL-AUTO OFFER. BTW parent deliveries
+	// are handled by the router above. Peer deliveries continue here.
 	//
 	// The offer is valid only until the next user-visible input transition,
 	// whatever delivers it (see sttPartialMsg below). Paste, blur, mouse, the
