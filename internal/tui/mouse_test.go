@@ -765,7 +765,7 @@ func TestMouseClickTogglesStreamingReasoning(t *testing.T) {
 	m.mouseCapture = true
 	m.pending = true
 	m.activeRunID = 1
-	m.streamingReasoning = "private **thought**"
+	m.streamingReasoning = []byte("private **thought**")
 
 	width := m.chatColumnWidth()
 	body, selectable := m.transcriptBody(width, "")

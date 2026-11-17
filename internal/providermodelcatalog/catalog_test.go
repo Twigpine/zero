@@ -7,6 +7,8 @@ import (
 	"github.com/Twigpine/zero/internal/providercatalog"
 )
 
+// TestModelsAreProviderScoped checks that each provider's offline model list
+// holds its own models and none borrowed from another provider.
 func TestModelsAreProviderScoped(t *testing.T) {
 	tests := []struct {
 		provider string
@@ -35,8 +37,8 @@ func TestModelsAreProviderScoped(t *testing.T) {
 		},
 		{
 			provider: "chatgpt",
-			want:     []string{"gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"},
-			notWant:  []string{"gpt-5", "gpt-4.1", "openai/gpt-4.1"},
+			want:     []string{"gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-luna"},
+			notWant:  []string{"gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark", "openai/gpt-4.1"},
 		},
 		{
 			provider: "aimlapi",
@@ -65,7 +67,7 @@ func TestModelsAreProviderScoped(t *testing.T) {
 		},
 		{
 			provider: "minimaxi-cn",
-			want:     []string{"MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.1"},
+			want:     []string{"MiniMax-M3", "MiniMax-M3.1-Flash", "MiniMax-M2.7", "MiniMax-M2.1"},
 			notWant:  []string{"gpt-4.1", "claude-sonnet-4.5"},
 		},
 		{
@@ -74,13 +76,15 @@ func TestModelsAreProviderScoped(t *testing.T) {
 			notWant:  []string{"gpt-4.1", "claude-sonnet-4.5"},
 		},
 		{
+			// Offline fallback only; the live /v1/models list is shown when reachable.
 			provider: "gitlawb-opengateway",
-			want: []string{
-				"mimo-v2.5-pro", "tencent/hy3",
-				"xiaomi/mimo-v2.5-pro", "xiaomi/mimo-v2.5", "minimax/minimax-m3", "qwen/qwen3.7-max",
-				"google/gemini-3.1-flash-lite", "z-ai/glm-5.2", "nvidia/nemotron-3-ultra-550b-a55b:free",
+			want:     []string{"auto", "xiaomi/mimo-v2.6-pro", "xiaomi/mimo-v2.6-flash"},
+			notWant: []string{
+				"openai/gpt-4.1", "claude-sonnet-4.5",
+				"mimo-v2.5-pro", "xiaomi/mimo-v2.5-pro", "qwen-plus", "glm-4.6", "gemini-2.5-pro",
+				"MiniMax-M3", "nvidia/llama-3.1-nemotron-70b-instruct",
+				"qwen/qwen3.8-max", "qwen/qwen3.8-flash",
 			},
-			notWant: []string{"openai/gpt-4.1", "claude-sonnet-4.5"},
 		},
 		{
 			provider: "opencode-go-anthropic-compatible",
@@ -111,6 +115,24 @@ func TestModelsAreProviderScoped(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The offline OpenGateway list leads with the smart router, the catalog
+// default. The gateway reports no context window for it (the serving model
+// varies per request), so the curated entry must not invent one: an unknown
+// window sizes compaction from modelregistry.FallbackContextWindow.
+func TestOpenGatewayModelsLeadWithAutoDefault(t *testing.T) {
+	descriptor, ok := providercatalog.Get("gitlawb-opengateway")
+	if !ok {
+		t.Fatal("provider gitlawb-opengateway missing from catalog")
+	}
+	models := Models(descriptor)
+	if len(models) == 0 || models[0].ID != "auto" || models[0].ID != descriptor.DefaultModel {
+		t.Fatalf("OpenGateway models = %#v, want the auto default first", modelIDs(models))
+	}
+	if models[0].ContextWindow != 0 {
+		t.Fatalf("auto context window = %d, want unknown (0)", models[0].ContextWindow)
 	}
 }
 
@@ -165,8 +187,8 @@ func TestMiniMaxModelsExposeCurrentCapabilities(t *testing.T) {
 		t.Fatal("provider minimax missing from catalog")
 	}
 	models := Models(descriptor)
-	if len(models) < 2 || models[0].ID != "MiniMax-M3" || models[1].ID != "MiniMax-M2.7" {
-		t.Fatalf("MiniMax current models = %#v, want MiniMax-M3 followed by MiniMax-M2.7", modelIDs(models))
+	if len(models) < 3 || models[0].ID != "MiniMax-M3" || models[1].ID != "MiniMax-M3.1-Flash" || models[2].ID != "MiniMax-M2.7" {
+		t.Fatalf("MiniMax current models = %#v, want MiniMax-M3, MiniMax-M3.1-Flash, then MiniMax-M2.7", modelIDs(models))
 	}
 
 	m3 := models[0]
@@ -178,7 +200,23 @@ func TestMiniMaxModelsExposeCurrentCapabilities(t *testing.T) {
 		t.Fatalf("MiniMax-M3 modalities = input:%#v output:%#v", m3.InputModalities, m3.OutputModalities)
 	}
 
-	m27 := models[1]
+	m31Flash := models[1]
+	if m31Flash.ContextWindow != 1_000_000 || !m31Flash.ToolCall || !m31Flash.Reasoning {
+		t.Fatalf("MiniMax-M3.1-Flash capabilities = %#v, want 1M context with tools and reasoning", m31Flash)
+	}
+	if !reflect.DeepEqual(m31Flash.ReasoningEfforts, []string{"low", "medium", "high", "xhigh", "max"}) ||
+		m31Flash.DefaultReasoningEffort != "max" {
+		t.Fatalf("MiniMax-M3.1-Flash reasoning efforts = %#v default %q", m31Flash.ReasoningEfforts, m31Flash.DefaultReasoningEffort)
+	}
+	if !reflect.DeepEqual(m31Flash.InputModalities, []string{"text", "image", "video"}) ||
+		!reflect.DeepEqual(m31Flash.OutputModalities, []string{"text"}) {
+		t.Fatalf("MiniMax-M3.1-Flash modalities = input:%#v output:%#v", m31Flash.InputModalities, m31Flash.OutputModalities)
+	}
+	if m31Flash.InputCost != 0.15 || m31Flash.OutputCost != 0.60 {
+		t.Fatalf("MiniMax-M3.1-Flash costs = %f/%f, want 0.15/0.60", m31Flash.InputCost, m31Flash.OutputCost)
+	}
+
+	m27 := models[2]
 	if m27.ContextWindow != 204_800 || !m27.ToolCall || !m27.Reasoning {
 		t.Fatalf("MiniMax-M2.7 capabilities = %#v, want 204.8K context with tools and reasoning", m27)
 	}

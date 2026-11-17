@@ -1,6 +1,6 @@
 //go:build !darwin && !linux && !windows
 
-package observability
+package pathjail
 
 import (
 	"errors"

@@ -964,6 +964,7 @@ func runInteractiveTUIWithSetup(stderr io.Writer, deps appDeps, permissionMode a
 	// report can be combined with the plugin activation's, and emit at most one
 	// notice when project hooks/plugins were dropped for an untrusted workspace.
 	hookDispatcher, hookSkip := newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks, trustRoot, executionRunner)
+	specialistRuntime.attachLifecycleHooks(hookDispatcher)
 	emitTrustNotice(stderr, hookSkip, pluginActivation.trustSkip, mcpSkip)
 	// From the engine the session's commands run through, so the notice
 	// describes the sandbox they actually get.
@@ -1221,6 +1222,9 @@ type agentToolRuntime struct {
 	// the orchestrator's system-prompt delegation section. Populated alongside the
 	// tools, so it is present exactly when the Task tool is.
 	specialists []agent.SpecialistInfo
+	// lifecycleHooks is shared with the specialist executor so the hooks
+	// dispatcher (built later in startup) can be attached before any specialist runs.
+	lifecycleHooks *specialist.LifecycleHooks
 }
 
 // specialistInfos returns the runtime's specialist summaries, nil-safe so the
@@ -1232,12 +1236,26 @@ func (r *agentToolRuntime) specialistInfos() []agent.SpecialistInfo {
 	return r.specialists
 }
 
+func (r *agentToolRuntime) attachLifecycleHooks(dispatcher *hooks.Dispatcher) {
+	if r == nil || r.lifecycleHooks == nil || dispatcher == nil {
+		return
+	}
+	r.lifecycleHooks.Dispatch = func(ctx context.Context, event string, specialistName string, payload map[string]any) {
+		dispatcher.Dispatch(ctx, hooks.DispatchInput{
+			Event:    hooks.Event(event),
+			ToolName: specialistName,
+			Payload:  payload,
+		})
+	}
+}
+
 func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, maxTeamSize int) (*agentToolRuntime, error) {
 	paths, err := specialist.DefaultPaths(workspaceRoot)
 	if err != nil {
 		return nil, err
 	}
-	executor := specialist.Executor{Paths: paths}
+	lifecycleHooks := &specialist.LifecycleHooks{}
+	executor := specialist.Executor{Paths: paths, LifecycleHooks: lifecycleHooks}
 	runtime, err := specialist.RegisterTools(registry, executor)
 	if err != nil {
 		return nil, err
@@ -1256,7 +1274,12 @@ func registerSpecialistTools(registry *tools.Registry, workspaceRoot string, max
 		return nil, err
 	}
 	swarm.RegisterTools(registry, sw)
-	return &agentToolRuntime{specialist: runtime, swarm: sw, specialists: specialistSummaries(paths)}, nil
+	return &agentToolRuntime{
+		specialist:     runtime,
+		swarm:          sw,
+		specialists:    specialistSummaries(paths),
+		lifecycleHooks: lifecycleHooks,
+	}, nil
 }
 
 // specialistSummaries loads the available specialists (built-ins + user/project

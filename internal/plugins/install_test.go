@@ -1181,3 +1181,62 @@ func TestRecoveryLeavesAPrefixCollidingDirectoryAlone(t *testing.T) {
 		t.Errorf("recovery published content it does not own: %v", err)
 	}
 }
+
+// TestNonUTF8FileNamesAreInstalledHashedAndToggled covers a plugin whose tree
+// holds a file and a directory named with bytes that are not valid UTF-8, which
+// Linux allows. copyTree copies them, so hashTree must hash them too: Install
+// records the hash, the toggle refreshes it, and Info sees an edit to that file
+// as drift. A walk that rejects such names breaks all three.
+func TestNonUTF8FileNamesAreInstalledHashedAndToggled(t *testing.T) {
+	src := writeSourcePlugin(t, filepath.Join(t.TempDir(), "src"), validManifest())
+	nested := filepath.Join("assets\xff", "data\xfe.bin")
+	if err := os.Mkdir(filepath.Join(src, "assets\xff"), 0o755); err != nil {
+		t.Skipf("this filesystem rejects non-UTF-8 names: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(src, nested), []byte("original\n"), 0o644); err != nil {
+		t.Skipf("this filesystem rejects non-UTF-8 names: %v", err)
+	}
+
+	destDir := t.TempDir()
+	if _, err := Install(context.Background(), InstallOptions{Source: src, Dir: destDir}); err != nil {
+		t.Fatalf("Install a plugin with a non-UTF-8 file name: %v", err)
+	}
+	pluginDir := filepath.Join(destDir, "zero.demo")
+	if data, err := os.ReadFile(filepath.Join(pluginDir, nested)); err != nil || string(data) != "original\n" {
+		t.Fatalf("installed copy of the non-UTF-8 file = %q, %v", data, err)
+	}
+
+	options := LoadOptions{Roots: []Root{{Source: SourceUser, Path: destDir}}}
+	before, err := ReadLock(destDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetEnabledByID(options, "zero.demo", false); err != nil {
+		t.Fatalf("SetEnabledByID on a plugin with a non-UTF-8 file name: %v", err)
+	}
+	after, err := ReadLock(destDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after["zero.demo"].Hash == before["zero.demo"].Hash {
+		t.Fatal("the toggle did not refresh the lock hash")
+	}
+	info, err := Info(InfoOptions{LoadOptions: options}, "zero.demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.HashDrift {
+		t.Fatal("the toggle left hash drift behind")
+	}
+
+	if err := os.WriteFile(filepath.Join(pluginDir, nested), []byte("edited\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err = Info(InfoOptions{LoadOptions: options}, "zero.demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.HashDrift {
+		t.Fatal("an edit to the non-UTF-8 file was not reported as drift")
+	}
+}

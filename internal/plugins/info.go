@@ -7,7 +7,8 @@ import (
 	"strings"
 )
 
-// ErrNotInstalled is returned when Info cannot find a plugin with the requested id.
+// ErrNotInstalled is returned when a plugin id cannot be found under the given
+// LoadOptions (for example by Info or SetEnabledByID).
 var ErrNotInstalled = errors.New("plugin is not installed")
 
 // PluginInfo combines a loaded plugin with optional lockfile metadata.

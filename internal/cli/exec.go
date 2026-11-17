@@ -655,6 +655,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	// can be combined with the plugin activation's, and emit at most one notice when
 	// project hooks/plugins were dropped for an untrusted workspace.
 	hookDispatcher, hookSkip := newHookDispatcherWithExtra(workspaceRoot, pluginActivation.hooks, trustRoot, executionRunner)
+	specialistRuntime.attachLifecycleHooks(hookDispatcher)
 	emitTrustNotice(stderr, hookSkip, pluginActivation.trustSkip, mcpSkip)
 	result, err := agent.Run(runCtx, agentPrompt, provider, agent.Options{
 		MaxTurns:             resolved.MaxTurns,
@@ -712,7 +713,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 				"arguments": call.Arguments,
 			})
 			// Snapshot before-state of files this call will mutate (safe rewind).
-			if checkpoint, ok := sessionRecorder.captureCheckpoint(workspaceRoot, call); ok {
+			if checkpoint, ok := sessionRecorder.captureCheckpoint(workspaceRoot, registry, call); ok {
 				writer.checkpoint(checkpoint)
 			}
 		},
@@ -798,7 +799,7 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			}
 			return exitInterrupted
 		}
-		sessionRecorder.append(sessions.EventError, map[string]any{"message": err.Error()})
+		sessionRecorder.append(sessions.EventError, sessions.ErrorEventPayload(err))
 		if options.outputFormat == execOutputStreamJSON {
 			writer.errorEvent("provider_error", err.Error(), false)
 			writer.runEnd("error", exitProvider)

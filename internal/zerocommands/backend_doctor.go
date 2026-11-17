@@ -84,6 +84,19 @@ func mcpDoctorChecks(cfg config.MCPConfig) []BackendDoctorCheck {
 	for _, name := range names {
 		raw := cfg.Servers[name]
 		target := redactSnapshotString(name)
+		if raw.Disabled && config.IsUnconfiguredDefault(name, raw) {
+			// A built-in default that ships off (aimlapi) is not a problem to
+			// warn about; it only says how to turn it on.
+			checks = append(checks, BackendDoctorCheck{
+				ID:      "backend.mcp.disabled",
+				Surface: "mcp",
+				Target:  target,
+				Status:  BackendDoctorStatusPass,
+				Message: fmt.Sprintf("MCP server %s is off by default.", target),
+				Action:  "zero mcp enable " + target,
+			})
+			continue
+		}
 		if raw.Disabled {
 			checks = append(checks, BackendDoctorCheck{
 				ID:      "backend.mcp.disabled",

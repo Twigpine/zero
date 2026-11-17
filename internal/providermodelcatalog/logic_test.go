@@ -54,8 +54,21 @@ func TestDefaultedOpenGatewayURL(t *testing.T) {
 	if got := defaultedOpenGatewayURL(providercatalog.Descriptor{DefaultBaseURL: "https://gw.example.com/v1"}, ""); got != "https://gw.example.com/v1/models" {
 		t.Fatalf("derived = %q", got)
 	}
-	if got := defaultedOpenGatewayURL(providercatalog.Descriptor{DefaultBaseURL: "::not a url"}, ""); got != "https://opengateway.gitlawb.com/v1/models" {
+	if got := defaultedOpenGatewayURL(providercatalog.Descriptor{DefaultBaseURL: "::not a url"}, ""); got != "https://api.twigpine.com/v1/models" {
 		t.Fatalf("fallback = %q", got)
+	}
+	// The catalog descriptor points at the Twigpine API host.
+	descriptor, ok := providercatalog.Get("gitlawb-opengateway")
+	if !ok {
+		t.Fatal("gitlawb-opengateway missing from catalog")
+	}
+	if got := defaultedOpenGatewayURL(descriptor, ""); got != "https://api.twigpine.com/v1/models" {
+		t.Fatalf("catalog descriptor = %q, want https://api.twigpine.com/v1/models", got)
+	}
+	// A descriptor still carrying the legacy host keeps deriving from it, so
+	// old-host configs resolve unchanged (the old host still serves clients).
+	if got := defaultedOpenGatewayURL(providercatalog.Descriptor{DefaultBaseURL: "https://opengateway.gitlawb.com/v1"}, ""); got != "https://opengateway.gitlawb.com/v1/models" {
+		t.Fatalf("legacy host = %q, want https://opengateway.gitlawb.com/v1/models", got)
 	}
 }
 

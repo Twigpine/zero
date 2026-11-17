@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Twigpine/zero/internal/skills"
 )
 
 func writeSourceSkillDir(t *testing.T, dir string, content string) string {
@@ -389,5 +391,135 @@ func TestRunDistributionCommandsDoNotLaunchTUI(t *testing.T) {
 		if exit != exitSuccess {
 			t.Fatalf("%v exit = %d, stderr = %s", args, exit, stderr.String())
 		}
+	}
+}
+
+// A reinstall that only changed a bundled script must still read as an update
+// (#584): the SKILL.md hash is the same, so "hash: X -> X" would say nothing.
+func TestRunSkillAddReportsAnUpdateToBundledFilesOnly(t *testing.T) {
+	skillsDir := t.TempDir()
+	src := writeSourceSkillDir(t, filepath.Join(t.TempDir(), "src"),
+		"---\nname: pdf\ndescription: Fill forms.\n---\nRun scripts/fill.py.\n")
+	script := filepath.Join(src, "scripts", "fill.py")
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, []byte("print('v1')\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	deps := appDeps{skillsDir: func() string { return skillsDir }}
+
+	var stdout, stderr bytes.Buffer
+	if exit := runWithDeps([]string{"skill", "add", src}, &stdout, &stderr, deps); exit != 0 {
+		t.Fatalf("first skill add exit = %d, stderr = %s", exit, stderr.String())
+	}
+	if err := os.WriteFile(script, []byte("print('v2')\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if exit := runWithDeps([]string{"skill", "add", src}, &stdout, &stderr, deps); exit != 0 {
+		t.Fatalf("second skill add exit = %d, stderr = %s", exit, stderr.String())
+	}
+	for _, want := range []string{`Updated skill "pdf".`, "SKILL.md is unchanged; the files bundled with it changed"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("second add output does not say %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
+// An install from before tree hashes copied SKILL.md alone and recorded no tree
+// hash. Adding the skill again over that entry must not claim bundled files
+// changed: there are none, or they are installed for the first time.
+func TestRunSkillAddOverAnEntryWithoutATreeHash(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		script  bool
+		want    []string
+		notWant []string
+	}{
+		{
+			name:    "SKILL.md only",
+			want:    []string{`Installed skill "pdf".`},
+			notWant: []string{"Updated skill", "files bundled with it"},
+		},
+		{
+			name:    "with a bundled script",
+			script:  true,
+			want:    []string{`Updated skill "pdf".`, "SKILL.md is unchanged; the files bundled with it are now installed too"},
+			notWant: []string{"files bundled with it changed"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			skillsDir := t.TempDir()
+			src := writeSourceSkillDir(t, filepath.Join(t.TempDir(), "src"),
+				"---\nname: pdf\ndescription: Fill forms.\n---\nRun scripts/fill.py.\n")
+			if tc.script {
+				script := filepath.Join(src, "scripts", "fill.py")
+				if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(script, []byte("print('fill')\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			deps := appDeps{skillsDir: func() string { return skillsDir }}
+
+			var stdout, stderr bytes.Buffer
+			if exit := runWithDeps([]string{"skill", "add", src}, &stdout, &stderr, deps); exit != 0 {
+				t.Fatalf("first skill add exit = %d, stderr = %s", exit, stderr.String())
+			}
+			lock, err := skills.ReadLock(skillsDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			entry := lock["pdf"]
+			entry.TreeHash = ""
+			lock["pdf"] = entry
+			data, err := json.Marshal(lock)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(skillsDir, skills.LockFileName), data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			stdout.Reset()
+			stderr.Reset()
+			if exit := runWithDeps([]string{"skill", "add", src}, &stdout, &stderr, deps); exit != 0 {
+				t.Fatalf("second skill add exit = %d, stderr = %s", exit, stderr.String())
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(stdout.String(), want) {
+					t.Fatalf("second add output does not say %q:\n%s", want, stdout.String())
+				}
+			}
+			for _, notWant := range tc.notWant {
+				if strings.Contains(stdout.String(), notWant) {
+					t.Fatalf("second add output says %q:\n%s", notWant, stdout.String())
+				}
+			}
+		})
+	}
+}
+
+func TestRunSkillAddListsTheSymlinksItDidNotCopy(t *testing.T) {
+	skillsDir := t.TempDir()
+	src := writeSourceSkillDir(t, filepath.Join(t.TempDir(), "src"),
+		"---\nname: pdf\ndescription: Fill forms.\n---\nbody\n")
+	outside := filepath.Join(t.TempDir(), "notes.md")
+	if err := os.WriteFile(outside, []byte("outside\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(src, "notes.md")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	deps := appDeps{skillsDir: func() string { return skillsDir }}
+	if exit := runWithDeps([]string{"skill", "add", src}, &stdout, &stderr, deps); exit != 0 {
+		t.Fatalf("skill add exit = %d, stderr = %s", exit, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "not copied (symlinks): notes.md") {
+		t.Fatalf("add output does not list the skipped symlink:\n%s", stdout.String())
 	}
 }
