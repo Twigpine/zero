@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once the first release is
 tagged. Until then, source builds report the version `dev`.
 
+## [0.15.0](https://github.com/Twigpine/zero/compare/v0.14.0...v0.15.0) (2026-11-17)
+
+
+### Features
+
+* **providers:** default Twigpine OpenGateway to the auto smart-routing model ([#1220](https://github.com/Twigpine/zero/issues/1220)) ([8288ae8](https://github.com/Twigpine/zero/commit/8288ae81bd6a4315e80131db4c2629d887ec7aae))
+
 ## [0.14.0](https://github.com/Twigpine/zero/compare/v0.13.0...v0.14.0) (2026-11-17)
 
 
