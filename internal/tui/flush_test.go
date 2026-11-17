@@ -111,7 +111,7 @@ func TestAltScreenSettledCacheInvalidatesWithFileSelection(t *testing.T) {
 		t.Fatal("precondition: settled cache should be populated")
 	}
 
-	m = m.selectFile("internal/tui/sidebar.go")
+	m, _ = m.selectFile("internal/tui/sidebar.go")
 	if m.altScreenSettledWidth != 0 {
 		t.Fatal("selecting a file touched by a settled row must invalidate the cache")
 	}

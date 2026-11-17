@@ -126,3 +126,23 @@ func assertBackendDoctorCheck(t *testing.T, report BackendDoctorReport, id strin
 	}
 	t.Fatalf("check %s/%s not found in %#v", id, target, report.Checks)
 }
+
+func TestNewBackendDoctorReportPassesShippedDefaults(t *testing.T) {
+	// The aimlapi default ships off on purpose; an untouched install must not
+	// read as a warning, while a server the user disabled still warns.
+	report := NewBackendDoctorReport(BackendDoctorInput{MCP: config.MCPConfig{Servers: config.DefaultMCPServers()}})
+	if report.Status != BackendDoctorStatusPass {
+		t.Fatalf("shipped defaults: report.Status = %q, want %q (%#v)", report.Status, BackendDoctorStatusPass, report.Checks)
+	}
+	assertBackendDoctorCheck(t, report, "backend.mcp.disabled", "aimlapi", BackendDoctorStatusPass, "zero mcp enable aimlapi")
+
+	edited := config.DefaultMCPServers()["aimlapi"]
+	edited.URL = "https://mcp.aimlapi.com/mcp?edited=1"
+	report = NewBackendDoctorReport(BackendDoctorInput{MCP: config.MCPConfig{Servers: map[string]config.MCPServerConfig{"aimlapi": edited}}})
+	assertBackendDoctorCheck(t, report, "backend.mcp.disabled", "aimlapi", BackendDoctorStatusWarn, "zero mcp enable aimlapi")
+
+	userDisabled := config.DefaultMCPServers()["exa"]
+	userDisabled.Disabled = true
+	report = NewBackendDoctorReport(BackendDoctorInput{MCP: config.MCPConfig{Servers: map[string]config.MCPServerConfig{"exa": userDisabled}}})
+	assertBackendDoctorCheck(t, report, "backend.mcp.disabled", "exa", BackendDoctorStatusWarn, "zero mcp enable exa")
+}

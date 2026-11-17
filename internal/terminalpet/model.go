@@ -44,6 +44,8 @@ type Entry struct {
 	AssetBase      string `json:"assetBase,omitempty"`
 	SpriteVersion  int    `json:"spriteVersionNumber"`
 	Local          bool   `json:"-"`
+	// Builtin marks a companion that ships inside Zero and is drawn by code.
+	Builtin bool `json:"-"`
 }
 
 func (e Entry) Label() string {
@@ -79,6 +81,32 @@ type frameCacheKey struct {
 func (a *Animation) Frame(state State, phase int) image.Image {
 	frame, _ := a.frame(state, phase)
 	return frame
+}
+
+// Has reports whether the animation has frames of its own for state. Frame
+// shows the idle loop for any state the animation lacks.
+func (a *Animation) Has(state State) bool {
+	return a != nil && len(a.frames[state]) > 0
+}
+
+// HasText reports whether the animation can be drawn as text, for terminals
+// that cannot show images. Only built-in companions can.
+func (a *Animation) HasText() bool {
+	frame, _ := a.frame(Idle, 0)
+	_, ok := frame.(*builtinFrame)
+	return ok
+}
+
+// TextFrame returns one frame as TextRows lines of styled text, TextColumns
+// cells wide, in the given colour depth. The boolean is false for animations
+// made from pictures, which have no text form.
+func (a *Animation) TextFrame(state State, phase int, colors TextColors) ([]string, bool) {
+	frame, _ := a.frame(state, phase)
+	builtin, ok := frame.(*builtinFrame)
+	if !ok {
+		return nil, false
+	}
+	return builtin.textLines(colors), true
 }
 
 func (a *Animation) FrameDelay(state State, phase int) time.Duration {
@@ -213,8 +241,10 @@ func (a *Animation) framePNG(state State, phase int) ([]byte, frameCacheKey, err
 	if cached := a.pngCache[key]; len(cached) > 0 {
 		return cached, key, nil
 	}
+	// Built-in frames are drawn only on a cache miss, and under the lock, so
+	// a frame is drawn once however many callers ask for it.
 	var encoded bytes.Buffer
-	if err := png.Encode(&encoded, frame); err != nil {
+	if err := png.Encode(&encoded, drawnFrame(frame)); err != nil {
 		return nil, key, fmt.Errorf("encode pet frame: %w", err)
 	}
 	if a.pngCache == nil {

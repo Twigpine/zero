@@ -319,7 +319,7 @@ Flags:
       --command <cmd>        Command to run (required)
       --name <name>          Human-readable hook name
       --description <text>   Hook description
-      --matcher <pattern>    Tool matcher (beforeTool/afterTool only)
+      --matcher <pattern>    Tool/specialist matcher (beforeTool/afterTool/specialistStart/specialistStop)
       --arg <value>          Command argument (repeatable)
       --user                 Write to user config instead of the project
       --json                 Print command result as JSON

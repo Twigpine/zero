@@ -792,7 +792,7 @@ func normalizeDefinition(raw any, field string) (Definition, error) {
 		return Definition{}, err
 	}
 	if matcher != "" && !eventSupportsMatcher(event) {
-		return Definition{}, manifestError{fieldPath: field + ".matcher", message: "matcher is only supported for beforeTool and afterTool hooks."}
+		return Definition{}, manifestError{fieldPath: field + ".matcher", message: "matcher is only supported for beforeTool, afterTool, specialistStart, and specialistStop hooks."}
 	}
 	command, err := requiredString(obj, field+".command")
 	if err != nil {
@@ -856,7 +856,7 @@ func matchesHookMatcher(matcher string, toolName string) bool {
 }
 
 func eventSupportsMatcher(event Event) bool {
-	return event == EventBeforeTool || event == EventAfterTool
+	return event == EventBeforeTool || event == EventAfterTool || event == EventSpecialistStart || event == EventSpecialistStop
 }
 
 func toDiagnostic(err error, source ConfigSource, path string) Diagnostic {

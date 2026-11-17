@@ -50,7 +50,8 @@ plus per-platform payloads carrying the native binaries.
   assembly script strips both from the repo `package.json` and injects the
   exact-version `optionalDependencies`. (The repo `package.json` keeps
   `agent-browser`/`tuistory` in `dependencies` purely as the version pins for
-  the vendored helpers tree; they are never installed by consumers.)
+  the vendored helpers tree; they are never installed by consumers. Its
+  `overrides` steer the same helpers install and are stripped too.)
 - There is **no windows-arm64 build** (matches the release matrix); Windows on
   ARM runs the x64 build under emulation via the first-run fallback.
 
@@ -195,9 +196,9 @@ they must never be unpublished.
 ## Runbook: bumping the vendored helpers
 
 The vendored helper versions are pinned by the repo `package.json`
-`dependencies` + `package-lock.json`; the release build vendors exactly what
-the lockfile resolves. No `^range` surprises ship: a release carries what its
-lockfile pinned at build time.
+`dependencies` and `overrides` + `package-lock.json`; the release build
+vendors exactly what the lockfile resolves. No `^range` surprises ship: a
+release carries what its lockfile pinned at build time.
 
 - Routine bump: `npm install agent-browser@<version>` (or `tuistory@…`) in the
   repo to update pin + lockfile, verify the browser/terminal tools end-to-end,
@@ -205,6 +206,13 @@ lockfile pinned at build time.
 - Security response: if a vendored helper publishes a security fix, the bump
   is release-worthy on its own — cut a patch release of zero carrying only the
   pin change.
+- Transitive security fix a helper's own range will not take (for example
+  tuistory pins `zod` to an exact version): add an entry scoped to that
+  helper under `overrides` in the repo `package.json` (`"tuistory": { "zod":
+  "^4.6.6" }`) and refresh the lockfile. `zero-release package` copies
+  `overrides` into the helpers manifest along with the pins, because `npm ci`
+  rejects a lockfile resolved under overrides its manifest does not declare.
+  Drop the entry once the helper's own range moves past the fix.
 - Attribution: agent-browser is Apache-2.0; its LICENSE ships inside the
   vendored package directory (`helpers/node_modules/agent-browser/`), which
   satisfies redistribution attribution.

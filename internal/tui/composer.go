@@ -273,7 +273,7 @@ func (m model) composerPositionAtMouse(msg tea.MouseMsg) (int, bool) {
 	if contentY < 0 {
 		return 0, false
 	}
-	return m.composerPositionAtVisualCell(localX-2, contentY, maxInt(1, width-4))
+	return m.composerPositionAtVisualCell(localX-2, contentY, m.composerInnerWidth(width))
 }
 
 func (m model) composerMouseSelectionBlocked() bool {

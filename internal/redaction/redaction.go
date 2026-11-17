@@ -463,15 +463,7 @@ func RedactString(value string, options Options) string {
 	replacement := replacement(options)
 	redacted := value
 	if len(options.ExtraSecretValues) > 0 {
-		secrets := append([]string{}, options.ExtraSecretValues...)
-		sort.SliceStable(secrets, func(i, j int) bool {
-			return len(secrets[i]) > len(secrets[j])
-		})
-		for _, secret := range secrets {
-			if strings.TrimSpace(secret) != "" {
-				redacted = strings.ReplaceAll(redacted, secret, replacement)
-			}
-		}
+		redacted = redactExtraSecretValues(redacted, options.ExtraSecretValues, replacement)
 	}
 
 	if strings.Contains(redacted, "-----BEGIN ") && strings.Contains(redacted, "PRIVATE KEY") {
@@ -634,6 +626,19 @@ func secretMatchHasDigit(s string) bool {
 		}
 	}
 	return false
+}
+
+// RedactSecretValues replaces every occurrence of each of secrets in value with
+// RedactedSecret, whole or split by invisible separators, exactly as
+// RedactString treats Options.ExtraSecretValues. Unlike RedactString it runs
+// none of the shape patterns, so text that does not contain one of the values
+// comes back unchanged. That suits content where only known values must go,
+// such as tool output, which a shape pattern could otherwise rewrite.
+func RedactSecretValues(value string, secrets ...string) string {
+	if len(secrets) == 0 {
+		return value
+	}
+	return redactExtraSecretValues(value, secrets, RedactedSecret)
 }
 
 func RedactValue(value any, options Options) any {

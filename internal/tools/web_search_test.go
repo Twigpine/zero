@@ -105,6 +105,7 @@ func TestWebSearchRedactsBackendError(t *testing.T) {
 func TestWebSearchRegisteredInCoreNetworkTools(t *testing.T) {
 	// web_search is registered only when a backend is configured.
 	t.Setenv("ZERO_WEBSEARCH_BASE_URL", "https://search.example/api")
+	t.Setenv("ZERO_WEBSEARCH_PROVIDER", "")
 	found := false
 	for _, tool := range CoreNetworkTools() {
 		if tool.Name() == "web_search" {
@@ -297,6 +298,20 @@ func TestWebSearchDomainsFilterEmptyResultIsError(t *testing.T) {
 	}
 	if !strings.Contains(res.Output, "no web_search results matched domains") {
 		t.Errorf("expected clear allowlist error, got: %s", res.Output)
+	}
+}
+
+func TestWebSearchDomainsUnscopedEmptyResultIsNoResults(t *testing.T) {
+	// A backend that cannot scope by domain never saw the allowlist, so an empty
+	// result is an ordinary "no results", not an allowlist that ate every hit.
+	tool := newWebSearchToolWithBackend(&fakeSearchBackend{})
+
+	res := tool.Run(context.Background(), map[string]any{
+		"query":   "x",
+		"domains": []any{"react.dev"},
+	})
+	if res.Status != StatusOK || !strings.Contains(res.Output, "No results for query") {
+		t.Fatalf("want ordinary no-results for an unscoped backend, got %v: %s", res.Status, res.Output)
 	}
 }
 

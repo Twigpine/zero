@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -146,8 +147,9 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	if priorContentKnown {
 		expectedContent = &priorContent
 	}
-	if err := commitRootedFileContents(root, absolutePath, rootedRelative, priorInfo, expectedContent, content); err != nil {
-		return errorResult("Error writing file " + relativePath + ": " + err.Error())
+	commitErr := commitRootedFileContents(root, absolutePath, rootedRelative, priorInfo, expectedContent, content)
+	if commitErr != nil && !errors.Is(commitErr, errFilePublishedWithCleanupFailure) {
+		return errorResult("Error writing file " + relativePath + ": " + commitErr.Error())
 	}
 	modelKnownContent := content
 	// Optional format-on-write (ZERO_FORMAT_ON_WRITE). Must run BEFORE the
@@ -193,7 +195,13 @@ func (tool writeFileTool) RunWithOptions(ctx context.Context, args map[string]an
 	if finalContentKnown {
 		summary += inlineDiagnostics(ctx, options, absolutePath, relativePath)
 	}
+	if commitErr != nil {
+		summary += "\n" + commitErr.Error()
+	}
 	result := okResult(summary)
+	if commitErr != nil {
+		result.Status = StatusError
+	}
 	result.ChangedFiles = []string{relativePath}
 	// Do not pretend an unreadable overwrite was a creation. The write may be
 	// valid, but ACP only receives an exact before/after pair we actually saw.

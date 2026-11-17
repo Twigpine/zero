@@ -67,6 +67,79 @@ func TestParseModelsDevProviderScopesAndMapsMetadata(t *testing.T) {
 	}
 }
 
+// TestParseOpenGatewayCatalogSkipsRetiredModels checks that retired gateway
+// models are dropped and that null metadata on "auto" parses as unknown.
+func TestParseOpenGatewayCatalogSkipsRetiredModels(t *testing.T) {
+	// Mirrors GET https://api.twigpine.com/v1/models?status=all once the gateway
+	// retires models: the smart router (listed with null metadata, since the
+	// serving model varies per request), an active entry, plus a retired one
+	// carrying a successor.
+	body := []byte(`{
+		"object": "list",
+		"data": [
+			{
+				"id": "auto",
+				"object": "model",
+				"name": "Auto (smart routing)",
+				"description": "picks the cheapest capable model",
+				"aliases": ["twigpine/auto", "gitlawb/auto"],
+				"context_window": null,
+				"pricing": null,
+				"supports_tools": null,
+				"status": "active"
+			},
+			{
+				"id": "xiaomi/mimo-v2.6-pro",
+				"object": "model",
+				"name": "MiMo V2.6-Pro",
+				"description": "flagship omnimodal agent model",
+				"aliases": ["xiaomi/mimo-v2.5-pro", "mimo-v2.5-pro"],
+				"context_window": 262144,
+				"pricing": {"prompt": "0.000001", "completion": "0.000003"},
+				"supports_tools": true,
+				"status": "active"
+			},
+			{
+				"id": "qwen/qwen-plus",
+				"object": "model",
+				"name": "Qwen Plus",
+				"description": "retired general model",
+				"context_window": 131072,
+				"status": "retired",
+				"successor": "qwen/qwen3.7-max"
+			}
+		]
+	}`)
+
+	models, err := ParseOpenGatewayCatalog(body)
+	if err != nil {
+		t.Fatalf("ParseOpenGatewayCatalog returned error: %v", err)
+	}
+	// Sorted by description label (flagship…, picks…).
+	if got := strings.Join(modelIDs(models), ","); got != "xiaomi/mimo-v2.6-pro,auto" {
+		t.Fatalf("models = %q, want only the active entries", got)
+	}
+	// The router's null context window and pricing parse as unknown (0), not
+	// as an error or a guessed value.
+	if auto := models[1]; auto.ContextWindow != 0 || auto.InputCost != 0 || auto.OutputCost != 0 {
+		t.Fatalf("auto metadata = %#v, want unknown context window and pricing", auto)
+	}
+	descriptor, ok := providercatalog.Get("gitlawb-opengateway")
+	if !ok {
+		t.Fatal("gitlawb-opengateway missing from catalog")
+	}
+	// Onboarding keeps the default selected only on an exact id match against
+	// the live list, so the default must be a real active id, not an alias.
+	if !containsModelID(models, descriptor.DefaultModel) {
+		t.Fatalf("default model %q missing from live list %v", descriptor.DefaultModel, modelIDs(models))
+	}
+
+	// A list made only of retired entries is treated as empty, not offered.
+	if _, err := ParseOpenGatewayCatalog([]byte(`{"data":[{"id":"old/model","status":"retired"}]}`)); err == nil {
+		t.Fatal("expected an error when every entry is retired")
+	}
+}
+
 func TestParseOpenGatewayCatalogSupportsRichModelJSON(t *testing.T) {
 	body := []byte(`{
 		"models": [

@@ -96,3 +96,27 @@ func TestSkillToolNoSkillsAvailable(t *testing.T) {
 		t.Fatalf("expected a no-skills message, got: %q", result.Output)
 	}
 }
+
+// A skill that ships files beside its SKILL.md (#584) is no use if the model
+// cannot find them, so the output names their directory and lists them.
+func TestSkillToolPointsAtTheSkillsBundledFiles(t *testing.T) {
+	dir := t.TempDir()
+	writeSkillFile(t, dir, "pdf", "---\nname: pdf\n---\nRun scripts/fill.py.")
+	script := filepath.Join(dir, "pdf", "scripts", "fill.py")
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, []byte("print('fill')\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	result := NewSkillTool(dir).Run(context.Background(), map[string]any{"name": "pdf"})
+	if result.Status != StatusOK {
+		t.Fatalf("Status = %s (output: %s)", result.Status, result.Output)
+	}
+	for _, want := range []string{"Run scripts/fill.py.", filepath.Join(dir, "pdf"), "- scripts/fill.py"} {
+		if !strings.Contains(result.Output, want) {
+			t.Fatalf("output does not contain %q:\n%s", want, result.Output)
+		}
+	}
+}

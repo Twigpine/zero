@@ -45,6 +45,20 @@ var minimaxCuratedModels = []Model{
 		Source:           minimaxModelSource,
 	},
 	{
+		ID:                     "MiniMax-M3.1-Flash",
+		Description:            "fast reasoning model",
+		ContextWindow:          1_000_000,
+		ToolCall:               true,
+		Reasoning:              true,
+		ReasoningEfforts:       []string{"low", "medium", "high", "xhigh", "max"},
+		DefaultReasoningEffort: "max",
+		InputModalities:        []string{"text", "image", "video"},
+		OutputModalities:       []string{"text"},
+		InputCost:              0.15,
+		OutputCost:             0.60,
+		Source:                 minimaxModelSource,
+	},
+	{
 		ID:               "MiniMax-M2.7",
 		Description:      "agentic coding model",
 		ContextWindow:    204_800,
@@ -113,10 +127,12 @@ var curatedModels = map[string][]Model{
 		{ID: "deepseek/deepseek-chat", Description: "coding model"},
 	},
 	"chatgpt": {
-		{ID: "gpt-5.5", Description: "recommended Codex model"},
-		{ID: "gpt-5.4", Description: "strong Codex model"},
-		{ID: "gpt-5.4-mini", Description: "fast Codex model"},
-		{ID: "gpt-5.3-codex-spark", Description: "research preview fast Codex model"},
+		// Suggestions only: availability comes from the authenticated Codex catalog.
+		// https://learn.chatgpt.com/docs/models
+		{ID: "gpt-6.1-sol", Description: "balanced Codex model"},
+		{ID: "gpt-6.1-terra", Description: "fast model for writing, visual understanding, and computer use"},
+		{ID: "gpt-6-astra", Description: "advanced reasoning model"},
+		{ID: "gpt-6-luna", Description: "efficient coding model"},
 	},
 	"deepseek": {
 		{ID: "deepseek-chat", Description: "catalog default"},
@@ -209,26 +225,20 @@ var curatedModels = map[string][]Model{
 	},
 	"zai":    zaiCuratedModels,
 	"zai-cn": zaiCuratedModels,
-	// OpenGateway smart-routes by model id across its upstream providers
-	// (see /health: xiaomi-mimo, minimax, qwen, google, nvidia, tencent, z-ai).
-	// These are the curated coding defaults; the gateway accepts any model its
-	// upstreams expose, so users can also type an id the picker doesn't list.
+	// Twigpine OpenGateway publishes its live, active-only model list at
+	// GET /v1/models; pickers and onboarding show that list whenever it is
+	// reachable (see providermodeldiscovery.DiscoverCatalog). This is only the
+	// offline fallback, so keep it to ids the gateway is expected to keep
+	// serving: the smart router (the catalog default), MiMo V2.6 Pro, and its
+	// fast sibling. Do not add promo or time-limited models here. Users can
+	// still type any id the gateway accepts. "auto" carries no context window on
+	// purpose: the gateway reports none (the serving model varies per request),
+	// so compaction sizes itself from modelregistry.FallbackContextWindow and
+	// the context gauges show no guessed denominator.
 	"gitlawb-opengateway": {
-		{ID: "mimo-v2.5-pro", Description: "catalog default (Xiaomi MiMo)"},
-		{ID: "xiaomi/mimo-v2.5-pro", Description: "Xiaomi MiMo V2.5 Pro"},
-		{ID: "mimo-v2.5-pro-ultraspeed", Description: "fast model (Xiaomi MiMo)"},
-		{ID: "xiaomi/mimo-v2.5", Description: "multimodal model (Xiaomi)"},
-		{ID: "tencent/hy3", Description: "free Tencent HY3 model"},
-		{ID: "MiniMax-M3", Description: "MiniMax model"},
-		{ID: "minimax/minimax-m3", Description: "MiniMax M3 model"},
-		{ID: "qwen-plus", Description: "Qwen model"},
-		{ID: "qwen/qwen3.7-max", Description: "Qwen flagship coding model"},
-		{ID: "gemini-2.5-pro", Description: "long-context model (Google)"},
-		{ID: "google/gemini-3.1-flash-lite", Description: "Google Gemini 3.1 Flash Lite"},
-		{ID: "glm-4.6", Description: "Z.ai model"},
-		{ID: "z-ai/glm-5.2", Description: "GLM coding & reasoning model"},
-		{ID: "nvidia/llama-3.1-nemotron-70b-instruct", Description: "NVIDIA NIM model"},
-		{ID: "nvidia/nemotron-3-ultra-550b-a55b:free", Description: "free Nemotron 3 Ultra reasoning MoE"},
+		{ID: "auto", Description: "catalog default"},
+		{ID: "xiaomi/mimo-v2.6-pro", Description: "general model (Xiaomi MiMo V2.6 Pro)", ContextWindow: 262_144},
+		{ID: "xiaomi/mimo-v2.6-flash", Description: "fast model (Xiaomi MiMo V2.6 Flash)", ContextWindow: 262_144},
 	},
 	"atomic-chat": {
 		{ID: "gpt-4.1", Description: "catalog default"},

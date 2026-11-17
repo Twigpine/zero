@@ -291,3 +291,92 @@ func TestResolveMCPDisabledRetiredEntryStaysReEnableable(t *testing.T) {
 		t.Fatal("the disable must still carry to the successor")
 	}
 }
+
+func writeMCPDefaultsTestConfig(t *testing.T, data string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestResolveMCPSeedsDisabledAIMLAPIDefault(t *testing.T) {
+	if !IsDefaultMCPServer("aimlapi") || !IsDefaultMCPServerDisabled("aimlapi") || IsDefaultMCPServerDisabled("exa") {
+		t.Fatal("aimlapi must be a built-in default that ships disabled, exa one that ships enabled")
+	}
+	// No user config at all, and a user config that never mentions aimlapi.
+	for name, options := range map[string]ResolveOptions{
+		"no config":           {},
+		"unrelated user file": {UserConfigPath: writeMCPDefaultsTestConfig(t, `{"mcp":{"servers":{"exa":{"disabled":true}}}}`)},
+		"user entry with only headers": {UserConfigPath: writeMCPDefaultsTestConfig(t,
+			`{"mcp":{"servers":{"aimlapi":{"headers":{"X-Trace":"1"}}}}}`)},
+	} {
+		cfg, err := ResolveMCP(options)
+		if err != nil {
+			t.Fatalf("%s: ResolveMCP: %v", name, err)
+		}
+		server, ok := cfg.Servers["aimlapi"]
+		if !ok {
+			t.Fatalf("%s: the aimlapi default must be visible in the resolved config", name)
+		}
+		if server.Type != "http" || server.URL != "https://mcp.aimlapi.com/mcp" || !server.Disabled {
+			t.Fatalf("%s: aimlapi default = %#v, want a disabled http server at the MCP URL", name, server)
+		}
+	}
+	cfg, err := ResolveMCP(ResolveOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !IsUnconfiguredDefault("aimlapi", cfg.Servers["aimlapi"]) {
+		t.Fatal("the untouched aimlapi default should be reported as unconfigured")
+	}
+	if exa := cfg.Servers["exa"]; exa.Disabled || !IsUnconfiguredDefault("exa", exa) {
+		t.Fatalf("exa default changed: %#v", exa)
+	}
+}
+
+func TestResolveMCPUserEnablesAIMLAPIDefault(t *testing.T) {
+	path := writeMCPDefaultsTestConfig(t, `{"mcp":{"servers":{"aimlapi":{"disabled":false}}}}`)
+	cfg, err := ResolveMCP(ResolveOptions{UserConfigPath: path})
+	if err != nil {
+		t.Fatalf("ResolveMCP: %v", err)
+	}
+	server := cfg.Servers["aimlapi"]
+	if server.Disabled || server.URL != "https://mcp.aimlapi.com/mcp" || server.Type != "http" {
+		t.Fatalf("user enable did not turn the default on: %#v", server)
+	}
+	if IsUnconfiguredDefault("aimlapi", server) {
+		t.Fatal("an enabled aimlapi is user-configured, so its failures must be reported")
+	}
+
+	enable := MCPServerConfig{Disabled: false, disabledSet: true}
+	cfg, err = ResolveMCP(ResolveOptions{Overrides: Overrides{MCP: MCPConfig{Servers: map[string]MCPServerConfig{"aimlapi": enable}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Servers["aimlapi"].Disabled {
+		t.Fatal("the CLI override scope must be able to enable the aimlapi default")
+	}
+}
+
+func TestResolveMCPProjectCannotEnableAIMLAPIDefault(t *testing.T) {
+	project := writeMCPDefaultsTestConfig(t, `{"mcp":{"servers":{"aimlapi":{"disabled":false}}}}`)
+	cfg, err := ResolveMCP(ResolveOptions{ProjectConfigPath: project})
+	if err != nil {
+		t.Fatalf("ResolveMCP: %v", err)
+	}
+	if !cfg.Servers["aimlapi"].Disabled {
+		t.Fatal("a project config must not turn on the billed aimlapi default")
+	}
+
+	user := writeMCPDefaultsTestConfig(t, `{"mcp":{"servers":{"aimlapi":{"disabled":false}}}}`)
+	projectDisable := writeMCPDefaultsTestConfig(t, `{"mcp":{"servers":{"aimlapi":{"disabled":true}}}}`)
+	cfg, err = ResolveMCP(ResolveOptions{UserConfigPath: user, ProjectConfigPath: projectDisable})
+	if err != nil {
+		t.Fatalf("ResolveMCP: %v", err)
+	}
+	if cfg.Servers["aimlapi"].Disabled {
+		t.Fatal("the user's explicit enable wins over the project layer, as for any server")
+	}
+}
