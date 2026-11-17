@@ -776,8 +776,11 @@ func (m model) sidebarActivityLines(width, budget int) []string {
 			continue
 		}
 		glyph := zeroTheme.green.Render("✓")
-		if row.status == tools.StatusError {
+		switch row.status {
+		case tools.StatusError:
 			glyph = zeroTheme.red.Render("✗")
+		case tools.StatusUnknown:
+			glyph = zeroTheme.faint.Render("•")
 		}
 		work = append(work, " "+glyph+" "+zeroTheme.muted.Render(truncateStep(m.activitySummary(row), room)))
 	}

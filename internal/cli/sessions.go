@@ -5,21 +5,26 @@ import (
 	"io"
 	"strings"
 
+	"github.com/Twigpine/zero/internal/agentsessions"
 	"github.com/Twigpine/zero/internal/redaction"
 	"github.com/Twigpine/zero/internal/sessions"
 	"github.com/Twigpine/zero/internal/zerocommands"
 )
 
 type sessionCommandOptions struct {
-	json           bool
-	kind           sessions.SessionKind
-	sequence       int
-	eventID        string
-	excludeTarget  bool
-	preserveLast   int
-	maxPromptChars int
-	olderThan      string
-	dryRun         bool
+	json             bool
+	kind             sessions.SessionKind
+	sequence         int
+	eventID          string
+	excludeTarget    bool
+	preserveLast     int
+	maxPromptChars   int
+	allWorkspaces    bool
+	agent            string
+	maxEvents        int
+	includeReasoning bool
+	olderThan        string
+	dryRun           bool
 }
 
 func runSessions(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
@@ -74,6 +79,16 @@ func runSessions(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 			return writeExecUsageError(stderr, "sessions compact-plan requires a session id")
 		}
 		return runSessionsCompactPlan(store, remaining[0], options, stdout, stderr)
+	case "discover":
+		if len(remaining) != 0 {
+			return writeExecUsageError(stderr, "sessions discover does not accept positional arguments")
+		}
+		return runSessionsDiscover(options, stdout, stderr)
+	case "import":
+		if len(remaining) != 1 {
+			return writeExecUsageError(stderr, "sessions import requires a reference of the form <agent>:<id>")
+		}
+		return runSessionsImport(store, remaining[0], options, stdout, stderr)
 	case "prune":
 		if len(remaining) != 0 {
 			return writeExecUsageError(stderr, "sessions prune does not accept positional arguments")
@@ -98,6 +113,21 @@ func parseSessionsArgs(args []string) (string, []string, sessionCommandOptions, 
 			options.json = true
 		case "--exclude-target":
 			options.excludeTarget = true
+		case "--all":
+			options.allWorkspaces = true
+		case "--include-reasoning":
+			options.includeReasoning = true
+		case "--agent":
+			value, next, err := nextFlagValue(args, index, arg)
+			if err != nil {
+				return command, remaining, options, false, err
+			}
+			agent, err := parseNonEmptySessionsFlag("--agent", value)
+			if err != nil {
+				return command, remaining, options, false, err
+			}
+			options.agent = agent
+			index = next
 		case "--dry-run":
 			options.dryRun = true
 		case "--kind":
@@ -211,6 +241,32 @@ func parseSessionsArgs(args []string) (string, []string, sessionCommandOptions, 
 				}
 				options.maxPromptChars = maxPromptChars
 				continue
+			case strings.HasPrefix(arg, "--agent="):
+				agent, err := parseNonEmptySessionsFlag("--agent", strings.TrimPrefix(arg, "--agent="))
+				if err != nil {
+					return command, remaining, options, false, err
+				}
+				options.agent = agent
+				continue
+			case arg == "--max-events":
+				value, next, err := nextFlagValue(args, index, arg)
+				if err != nil {
+					return command, remaining, options, false, err
+				}
+				maxEvents, err := parsePositiveIntFlag(arg, value)
+				if err != nil {
+					return command, remaining, options, false, err
+				}
+				options.maxEvents = maxEvents
+				index = next
+				continue
+			case strings.HasPrefix(arg, "--max-events="):
+				maxEvents, err := parsePositiveIntFlag("--max-events", strings.TrimSpace(strings.TrimPrefix(arg, "--max-events=")))
+				if err != nil {
+					return command, remaining, options, false, err
+				}
+				options.maxEvents = maxEvents
+				continue
 			}
 			if strings.HasPrefix(arg, "-") {
 				return command, remaining, options, false, execUsageError{fmt.Sprintf("unknown sessions flag %q", arg)}
@@ -249,7 +305,7 @@ func parseSessionKindFlag(value string) (sessions.SessionKind, error) {
 
 func isSessionsCommand(command string) bool {
 	switch command {
-	case "list", "children", "lineage", "tree", "rewind-plan", "rewind", "compact-plan", "prune":
+	case "list", "children", "lineage", "tree", "rewind-plan", "rewind", "compact-plan", "discover", "import", "prune":
 		return true
 	default:
 		return false
@@ -267,6 +323,12 @@ func validateSessionCommandFlags(command string, options sessionCommandOptions) 
 	hasCompactionFlag := options.preserveLast > 0 || options.maxPromptChars > 0
 	if hasCompactionFlag && command != "compact-plan" {
 		return execUsageError{"--preserve-last and --max-prompt-chars are only valid for sessions compact-plan"}
+	}
+	if (options.allWorkspaces || strings.TrimSpace(options.agent) != "") && command != "discover" {
+		return execUsageError{"--all and --agent are only valid for sessions discover"}
+	}
+	if (options.maxEvents > 0 || options.includeReasoning) && command != "import" {
+		return execUsageError{"--max-events and --include-reasoning are only valid for sessions import"}
 	}
 	if (options.olderThan != "" || options.dryRun) && command != "prune" {
 		return execUsageError{"--older-than and --dry-run are only valid for sessions prune"}
@@ -397,7 +459,7 @@ func runSessionsRewind(store *sessions.Store, sessionID string, options sessionC
 	if session == nil {
 		return writeExecUsageError(stderr, "Zero session not found: "+redact(sessionID))
 	}
-	workspaceRoot := strings.TrimSpace(session.Cwd)
+	workspaceRoot := strings.TrimSpace(sessions.OperationalCwd(*session))
 	if workspaceRoot == "" {
 		return writeExecUsageError(stderr, "session has no recorded workspace (cwd); cannot restore files")
 	}
@@ -526,7 +588,7 @@ func formatSessionSnapshotLine(session zerocommands.SessionSnapshot) string {
 		details = append(details, "spec_id="+redact(session.SpecID))
 	}
 	if session.Tag != "" {
-		details = append(details, "tag="+redact(session.Tag))
+		details = append(details, "tag="+agentsessions.DisplayField(session.Tag))
 	}
 	if session.Depth > 0 {
 		details = append(details, fmt.Sprintf("depth=%d", session.Depth))
@@ -535,7 +597,7 @@ func formatSessionSnapshotLine(session zerocommands.SessionSnapshot) string {
 		details = append(details, "parent="+redact(session.ParentSessionID))
 	}
 	if session.ModelID != "" {
-		details = append(details, "model="+redact(session.ModelID))
+		details = append(details, "model="+agentsessions.DisplayField(session.ModelID))
 	}
 	if len(details) > 0 {
 		parts = append(parts, "("+strings.Join(details, ", ")+")")
@@ -559,6 +621,8 @@ Commands:
   rewind-plan <id>      Preview events kept and dropped by a rewind
   rewind <id>           Restore workspace files and truncate the log to a checkpoint
   compact-plan <id>     Preview events compacted and preserved by compaction
+  discover              List sessions from other coding agents on this machine
+  import <agent>:<id>   Copy one of those sessions into Zero, then --resume it
   prune                 Remove sessions last updated before a cutoff
 
 Flags:
@@ -569,6 +633,14 @@ Flags:
       --exclude-target  Drop the target event (rewind-plan, rewind)
       --preserve-last <n> Keep recent events in compact-plan
       --max-prompt-chars <n> Limit compact-plan summary prompt
+      --all             Include every workspace, not just this one (discover)
+      --agent <name>    Only this agent (discover)
+      --max-events <n>  Keep only the last n events (import)
+      --include-reasoning Keep the other model's thinking blocks (import)
+
+discover and import are read-only with respect to the other agent: Zero reads
+its transcripts, never its credentials, and never writes to its store. The
+imported session runs on Zero's own provider and your own key.
       --older-than <age>  Prune cutoff, as days (30d) or a duration (720h); at least 1d.
                         Without it, prune uses sessions.retentionDays from your user config.
       --dry-run         List what prune would remove, and why it keeps the rest

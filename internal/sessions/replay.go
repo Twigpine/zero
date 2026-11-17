@@ -52,6 +52,9 @@ type CompactionPlan struct {
 	// PromptChars counts prompt text content and excludes provider protocol framing.
 	PromptChars int  `json:"promptChars"`
 	Truncated   bool `json:"truncated,omitempty"`
+	// ImportedContext records that the summary will replace foreign-derived
+	// events. It follows the derived summary through later compactions and forks.
+	ImportedContext bool `json:"importedContext,omitempty"`
 }
 
 type RecordCompactionInput struct {
@@ -72,6 +75,10 @@ type CompactionPayload struct {
 	PreservedEvents          []EventRef `json:"preservedEvents,omitempty"`
 	PromptChars              int        `json:"promptChars,omitempty"`
 	Truncated                bool       `json:"truncated,omitempty"`
+	// ImportedContext is serialized under the same marker understood by resume
+	// prompt construction. The summary is derived from imported events and owes
+	// the same reference-only boundary even after those source events age out.
+	ImportedContext bool `json:"importedEvent,omitempty"`
 }
 
 const defaultCompactionPreserveLast = 6
@@ -182,6 +189,7 @@ func (store *Store) PlanCompaction(sessionID string, options CompactionOptions) 
 		SummaryPrompt:     prompt,
 		PromptChars:       len(prompt),
 		Truncated:         truncated,
+		ImportedContext:   eventsContainImportedContext(compactable),
 	}, nil
 }
 
@@ -222,7 +230,21 @@ func CompactionPayloadFromPlan(summary string, plan CompactionPlan) (CompactionP
 		PreservedEvents:          cloneEventRefs(plan.PreservedEvents),
 		PromptChars:              plan.PromptChars,
 		Truncated:                plan.Truncated,
+		ImportedContext:          plan.ImportedContext,
 	}, nil
+}
+
+func eventsContainImportedContext(events []Event) bool {
+	for _, event := range events {
+		payload, ok := payloadObject(event.Payload)
+		if !ok {
+			continue
+		}
+		if imported, _ := payload[ImportedEventKey].(bool); imported {
+			return true
+		}
+	}
+	return false
 }
 
 func (store *Store) ReadRehydratedEvents(sessionID string) ([]Event, error) {
@@ -378,7 +400,7 @@ func CompactionMessages(events []Event) []zeroruntime.Message {
 			status := strings.ToLower(stringField("status"))
 			messages = append(messages, zeroruntime.Message{
 				Role: zeroruntime.MessageRoleTool, ToolCallID: firstSessionString(stringField("toolCallId"), stringField("id")),
-				Content: stringField("output"), IsError: status != "" && status != "ok", ChangedFiles: sessionStringSlice(payload["changedFiles"]),
+				Content: stringField("output"), IsError: status == "error", ChangedFiles: sessionStringSlice(payload["changedFiles"]),
 			})
 		case EventCompaction:
 			if summary := stringField("summary"); summary != "" {

@@ -3,12 +3,80 @@ package sessions
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestDiscardCreatedRemovesOnlyTheOwnedUncommittedSession(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir()})
+	created, discard, err := store.CreateDiscardable(CreateInput{Title: "failed import", Tag: "imported:test:id"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate AppendEvents writing a batch before a later durability or
+	// metadata failure. Metadata still has EventCount zero, so the batch never
+	// committed as a session event set.
+	if err := os.WriteFile(filepath.Join(store.RootDir, created.SessionID, EventsFile), []byte("partial append\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := discard(); err != nil {
+		t.Fatalf("discard created session: %v", err)
+	}
+	if session, err := store.Get(created.SessionID); err != nil || session != nil {
+		t.Fatalf("discarded session still resolves: session=%+v err=%v", session, err)
+	}
+}
+
+func TestDiscardCreatedRefusesChangedOrCommittedSession(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir()})
+	created, err := store.Create(CreateInput{Title: "owned", Tag: "imported:test:id"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongReceipt := created
+	wrongReceipt.Title = "different"
+	if err := store.discardCreated(wrongReceipt); err == nil {
+		t.Fatal("discardCreated accepted a mismatched ownership receipt")
+	}
+	if _, err := store.AppendEvent(created.SessionID, AppendEventInput{Type: EventMessage, Payload: map[string]string{"content": "kept"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.discardCreated(created); err == nil {
+		t.Fatal("discardCreated removed a session with committed events")
+	}
+	if session, err := store.Get(created.SessionID); err != nil || session == nil || session.EventCount != 1 {
+		t.Fatalf("committed session was damaged: session=%+v err=%v", session, err)
+	}
+}
+
+func TestDiscardCreatedRefusesAnotherStoresLiveLease(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(StoreOptions{RootDir: root})
+	created, discard, err := store.CreateDiscardable(CreateInput{Title: "owned import"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := NewStore(StoreOptions{RootDir: root})
+	other.Hold(created.SessionID)
+	if err := discard(); err == nil {
+		t.Fatal("discard removed a session held by another Store")
+	}
+	if got, err := store.Get(created.SessionID); err != nil || got == nil {
+		t.Fatalf("refused cleanup damaged the session: %+v %v", got, err)
+	}
+	other.Release(created.SessionID)
+	if err := discard(); err != nil {
+		t.Fatalf("cleanup after borrower release: %v", err)
+	}
+	if _, err := os.Stat(store.sessionPath(created.SessionID)); !os.IsNotExist(err) {
+		t.Fatalf("owned session directory remains: %v", err)
+	}
+}
 
 func TestStoreAppendEventsBatchesSequencesAndMetadata(t *testing.T) {
 	store := NewStore(StoreOptions{RootDir: t.TempDir(), Now: sequenceClock([]time.Time{

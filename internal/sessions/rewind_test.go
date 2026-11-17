@@ -1,6 +1,7 @@
 package sessions
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -212,7 +213,7 @@ func TestForkRewindRestoresFromCopiedBlobs(t *testing.T) {
 	}
 	mustWriteFile(t, path, "changed")
 
-	fork, err := store.Fork("parent", ForkInput{SessionID: "fork"})
+	fork, err := store.Fork("parent", ForkInput{SessionID: "fork", Cwd: ws})
 	if err != nil {
 		t.Fatalf("Fork: %v", err)
 	}
@@ -240,6 +241,65 @@ func TestForkRewindRestoresFromCopiedBlobs(t *testing.T) {
 	if got, _ := os.ReadFile(path); string(got) != "original" {
 		t.Fatalf("fork rewind did not restore from copied blob, got %q", got)
 	}
+}
+
+func TestCrossWorkspaceForkDoesNotReplayParentCheckpoints(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir()})
+	workspaceA := t.TempDir()
+	workspaceB := t.TempDir()
+	if _, err := store.Create(CreateInput{SessionID: "parent", Cwd: workspaceA}); err != nil {
+		t.Fatal(err)
+	}
+	target, err := store.AppendEvent("parent", AppendEventInput{Type: EventMessage, Payload: map[string]any{"content": "before"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pathA := filepath.Join(workspaceA, "config.yaml")
+	pathB := filepath.Join(workspaceB, "config.yaml")
+	mustWriteFile(t, pathA, "a-before")
+	mustWriteFile(t, pathB, "b-must-not-change")
+	if _, err := store.CaptureToolCheckpoint("parent", workspaceA, "write_file", []string{"config.yaml"}); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, pathA, "a-after")
+
+	fork, err := store.Fork("parent", ForkInput{SessionID: "fork-b", Cwd: workspaceB})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := store.ReadEvents(fork.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Type == EventSessionCheckpoint {
+			t.Fatal("cross-workspace fork retained a parent checkpoint")
+		}
+	}
+	var marker struct {
+		SkippedCheckpointCount int `json:"skippedCheckpointCount"`
+	}
+	if err := json.Unmarshal(events[len(events)-1].Payload, &marker); err != nil {
+		t.Fatal(err)
+	}
+	if marker.SkippedCheckpointCount != 1 {
+		t.Fatalf("skippedCheckpointCount = %d, want 1", marker.SkippedCheckpointCount)
+	}
+
+	report, err := store.ApplyRewind(fork.SessionID, workspaceB, target.Sequence)
+	if err != nil {
+		t.Fatalf("ApplyRewind on cross-workspace fork: %v", err)
+	}
+	if report.FilesRestored != 0 || report.FilesDeleted != 0 {
+		t.Fatalf("cross-workspace rewind mutated files: %+v", report)
+	}
+	if got, err := os.ReadFile(pathA); err != nil || string(got) != "a-after" {
+		t.Fatalf("parent workspace changed: got %q err=%v", got, err)
+	}
+	if got, err := os.ReadFile(pathB); err != nil || string(got) != "b-must-not-change" {
+		t.Fatalf("fork workspace changed by a parent checkpoint: got %q err=%v", got, err)
+	}
+
 }
 
 // Audit finding (LOW): restoring a checkpointed blob must preserve the original
