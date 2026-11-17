@@ -92,9 +92,16 @@ func TestDirectoryCompensationDoesNotRemoveASubstitute(t *testing.T) {
 	aside := filepath.Join(parent, "renamed-aside")
 	swapDuringCompensation(t, created, aside)
 
+	// The name now belongs to the substitute, so a bound delete reports the path
+	// still present. That error is not the result under test: a pathname Remove
+	// fails the same way because the substitute is not empty, and discarding it
+	// used to let the verified original survive at aside.
 	_ = removeCreatedRuntimeDirBound(created, identity)
 
 	if _, err := os.Stat(filepath.Join(created, "substitute.txt")); err != nil {
 		t.Errorf("compensation removed the substitute directory's contents: %v", err)
+	}
+	if _, err := os.Stat(aside); !os.IsNotExist(err) {
+		t.Errorf("compensation left the verified original at %s: %v", aside, err)
 	}
 }
