@@ -20,6 +20,7 @@
   },
   "overrides": {
     "tuistory": {
+      "@hono/node-server": "^2.1.6",
       "zod": "^4.6.6"
     }
   },
