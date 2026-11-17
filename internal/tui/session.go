@@ -749,13 +749,20 @@ func permissionEventFromPayload(payload map[string]any) agent.PermissionEvent {
 		DecisionAction:    agent.PermissionDecisionAction(payloadString(payload, "decisionAction")),
 		Permission:        payloadString(payload, "permission"),
 		PermissionGranted: payloadBool(payload, "permissionGranted"),
-		PermissionMode:    agent.PermissionMode(payloadString(payload, "permissionMode")),
-		Autonomy:          payloadString(payload, "autonomy"),
-		SideEffect:        payloadString(payload, "sideEffect"),
-		Reason:            payloadString(payload, "reason"),
-		Scope:             payloadString(payload, "scope"),
-		DecisionReason:    payloadString(payload, "decisionReason"),
-		GrantMatched:      payloadBool(payload, "grantMatched"),
+		// NORMALISED ON THE WAY IN, so the legacy "unsafe" spelling and the
+		// canonical "full-auto" are one value here. The only consumer is the
+		// render cache's fingerprint (render_cache.go), where two spellings of the
+		// same mode would otherwise look like a mode change and evict for nothing.
+		// An earlier note justified leaving this raw by saying the value also
+		// feeds transcript rendering; it does not — grepping every reader of
+		// PermissionMode in this package returns the fingerprint and nothing else.
+		PermissionMode: agent.NormalizePermissionMode(agent.PermissionMode(payloadString(payload, "permissionMode"))),
+		Autonomy:       payloadString(payload, "autonomy"),
+		SideEffect:     payloadString(payload, "sideEffect"),
+		Reason:         payloadString(payload, "reason"),
+		Scope:          payloadString(payload, "scope"),
+		DecisionReason: payloadString(payload, "decisionReason"),
+		GrantMatched:   payloadBool(payload, "grantMatched"),
 	}
 	if risk, ok := payloadMap(payload, "risk"); ok {
 		event.Risk = sandbox.Risk{
