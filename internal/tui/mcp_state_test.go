@@ -41,12 +41,14 @@ func TestBuildMCPViewStateSummarizesConfiguredServers(t *testing.T) {
 	}
 	assertServerView(t, state.Servers[0], MCPServerView{
 		Name:      "docs",
+		ConfigKey: "docs",
 		Transport: "stdio",
 		State:     "enabled",
 		Target:    "docs-mcp --workspace . env ZERO_DOCS_TOKEN=[REDACTED]",
 	})
 	assertServerView(t, state.Servers[1], MCPServerView{
 		Name:      "linear",
+		ConfigKey: "linear",
 		Transport: "http",
 		State:     "disabled",
 		Target:    "https://linear.example/mcp headers Authorization=[REDACTED]",
@@ -54,6 +56,7 @@ func TestBuildMCPViewStateSummarizesConfiguredServers(t *testing.T) {
 	})
 	assertServerView(t, state.Servers[2], MCPServerView{
 		Name:      "updates",
+		ConfigKey: "updates",
 		Transport: "sse",
 		State:     "enabled",
 		Target:    "https://events.example/sse headers X-Api-Key=[REDACTED]",
