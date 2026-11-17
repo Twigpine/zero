@@ -95,8 +95,12 @@ func (store *AuditStore) lockAudit() (func(), error) {
 // The user config keeps its sibling; every other config (the project's
 // .zero/hooks.json above all) locks a digest of its canonical path under the
 // user state directory, which keeps hostile project path characters out of the
-// lock file name and lets two spellings of the same location — macOS /var vs
-// /private/var, a linked project directory — contend on one lock.
+// lock file name and lets two symlinked spellings of the same directory —
+// macOS /var vs /private/var, a symlinked project directory — contend on one
+// lock. Windows junctions are not symlinks and are left unresolved by
+// filepath.EvalSymlinks, so a real directory and a junction to it hash to two
+// lock files; that is a documented limit (the kernel lock still prevents
+// partial writes through either spelling).
 func configLockPath(path string) (string, error) {
 	canonical := canonicalConfigPath(path)
 	if isUserConfigPath(canonical) {
@@ -172,23 +176,42 @@ func configLockRootFor(goos string, getenv func(string) string) (string, error) 
 	return filepath.Join(home, ".local", "state", "zero", "hooks", "config-locks"), nil
 }
 
-// canonicalConfigPath resolves path to the physical form its existing
-// ancestors resolve to, keeping the not-yet-created tail spelled under the
-// resolved ancestor. A directory another writer creates concurrently resolves
-// to the same physical ancestor either way, so both sides of that race key the
-// same lock; the walk never fails, falling back to the cleaned absolute path.
+// canonicalConfigPath resolves the directory containing path to the physical
+// form its existing ancestors resolve to, but keeps the final component (the
+// config file) spelled exactly as given. Only the parent is resolved so that a
+// symlinked hooks.json is replaced by the atomic rename in writeConfigData,
+// matching the behavior before the lock was added; resolving the file itself
+// would write through the link and clobber whatever it points at. Resolving
+// the parent still folds two symlinked spellings of the same directory (macOS
+// /var vs /private/var, a symlinked project directory) into one lock key.
+//
+// Windows junctions are not symlinks: filepath.EvalSymlinks leaves them
+// unresolved, so a real directory and a junction to it hash to two lock files.
+// That is a documented limit of the user-state lock, not a correctness issue:
+// the kernel lock still makes partial writes impossible through either path.
 func canonicalConfigPath(path string) string {
 	if abs, err := filepath.Abs(path); err == nil {
 		path = abs
 	}
+	path = filepath.Clean(path)
+	dir, base := filepath.Split(path)
+	return filepath.Join(canonicalConfigDir(dir), base)
+}
+
+// canonicalConfigDir resolves dir to the physical form its existing ancestors
+// resolve to, keeping the not-yet-created tail spelled under the resolved
+// ancestor. A directory another writer creates concurrently resolves to the
+// same physical ancestor either way, so both sides of that race key the same
+// lock; the walk never fails, falling back to the cleaned absolute path.
+func canonicalConfigDir(dir string) string {
 	var missing []string
-	for current := filepath.Clean(path); ; {
+	for current := filepath.Clean(dir); ; {
 		if resolved, err := filepath.EvalSymlinks(current); err == nil {
 			return filepath.Join(append([]string{resolved}, missing...)...)
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
-			return path
+			return dir
 		}
 		missing = append([]string{filepath.Base(current)}, missing...)
 		current = parent

@@ -205,6 +205,58 @@ func TestUserConfigLockIsStableSibling(t *testing.T) {
 	}
 }
 
+// TestUpsertReplacesLinkedHooksConfigWithoutTouchingTarget pins the behavior
+// of a symlinked hooks.json: the atomic rename must replace the link with a
+// regular file and leave the file it pointed at unchanged. Canonicalizing the
+// config file itself (final component included) would instead write through
+// the link and clobber its target — a repository can commit .zero/hooks.json
+// as a relative link, so that would overwrite a file outside the project.
+func TestUpsertReplacesLinkedHooksConfigWithoutTouchingTarget(t *testing.T) {
+	isolateStateRoot(t)
+	configDir := filepath.Join(t.TempDir(), ".zero")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	target := filepath.Join(t.TempDir(), "package.json")
+	targetData := []byte("{\"name\":\"not-a-hooks-config\"}\n")
+	if err := os.WriteFile(target, targetData, 0o600); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	link := filepath.Join(configDir, "hooks.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable on %s: %v", runtime.GOOS, err)
+	}
+	store, err := NewConfigStore(StoreOptions{ConfigPath: link})
+	if err != nil {
+		t.Fatalf("NewConfigStore: %v", err)
+	}
+	if _, err := store.Upsert(Definition{ID: "linked", Event: EventAfterTool, Command: "node"}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("the config link survived the write; Upsert wrote through it instead of replacing it")
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile target: %v", err)
+	}
+	if string(got) != string(targetData) {
+		t.Fatalf("the symlink target was overwritten: got %q, want %q", got, targetData)
+	}
+	config, err := store.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if findHook(config.Hooks, "linked") == nil {
+		t.Fatalf("the written hook was not published: %v", hookIDs(config.Hooks))
+	}
+}
+
 // TestCrossProcessHooksMutationExcludesAndPreserves is the coordinated
 // two-process regression for lost updates. The child announces itself and then
 // mutates; the parent holds the config lock across that window and asserts the
@@ -686,4 +738,26 @@ func TestCanonicalConfigPath(t *testing.T) {
 	if throughLink != direct {
 		t.Fatalf("canonicalConfigPath through a link = %s, want the physical form %s", throughLink, direct)
 	}
+
+	// A symlinked config file is deliberately NOT resolved: its own path is
+	// kept so the atomic rename replaces the link instead of writing through
+	// it. Only the parent directory is canonicalized.
+	targetFile := filepath.Join(root, "target.json")
+	if err := os.WriteFile(targetFile, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile target: %v", err)
+	}
+	linkFile := filepath.Join(root, "hooks-link.json")
+	if err := os.Symlink(targetFile, linkFile); err != nil {
+		t.Skipf("symlinks unavailable on %s: %v", runtime.GOOS, err)
+	}
+	want := filepath.Join(physicalRoot, "hooks-link.json")
+	if got := canonicalConfigPath(linkFile); got != want {
+		t.Fatalf("canonicalConfigPath kept the file link = %s, want the link's own path under the resolved parent: %s", got, want)
+	}
+
+	// Windows junctions are not symlinks: filepath.EvalSymlinks leaves them
+	// unresolved, so a real directory and a junction to it hash to two lock
+	// files. That is a documented limit, not covered by a portable unit test
+	// (creating a junction needs elevation); the kernel lock still prevents
+	// partial writes through either spelling.
 }
