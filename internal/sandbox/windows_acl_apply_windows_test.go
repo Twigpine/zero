@@ -48,6 +48,63 @@ func TestApplyWindowsACLPathGroupHandleBasedRoundTrip(t *testing.T) {
 	}
 }
 
+// Both refusals leave the target alone, but they are different facts: one
+// target was never identified, the other was replaced. The operator has to be
+// told which, or a missing identity reads as a substitution that never happened.
+func TestRollbackTellsAnUnidentifiedTargetFromAReplacedOne(t *testing.T) {
+	dir := t.TempDir()
+	group := windowsACLPathGroup{
+		Path: dir,
+		Entries: []WindowsACLEntry{{
+			Action:     WindowsACLAllowWrite,
+			Path:       dir,
+			Capability: "S-1-1-0",
+		}},
+	}
+	snapshot, applied, err := applyWindowsACLPathGroup(group)
+	if err != nil || !applied {
+		t.Fatalf("apply: applied=%v err=%v", applied, err)
+	}
+	t.Cleanup(func() {
+		if err := rollbackWindowsACLSnapshots([]windowsACLSnapshot{snapshot}); err != nil {
+			t.Errorf("restore: %v", err)
+		}
+	})
+
+	other := t.TempDir()
+	handle, _, err := openWindowsACLTarget(other)
+	if err != nil {
+		t.Fatalf("open the other directory: %v", err)
+	}
+	otherIdentity := windowsIdentityFromHandle(handle)
+	_ = windows.CloseHandle(handle)
+	if !otherIdentity.valid {
+		t.Fatal("SETUP INVALID: could not identify the other directory")
+	}
+
+	for _, tc := range []struct {
+		name     string
+		identity windowsObjectIdentity
+		want     string
+		notWant  string
+	}{
+		{"never identified", windowsObjectIdentity{}, "could not be identified", "no longer the object"},
+		{"replaced", otherIdentity, "no longer the object", "could not be identified"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			changed := snapshot
+			changed.Identity = tc.identity
+			err := rollbackWindowsACLSnapshots([]windowsACLSnapshot{changed})
+			if err == nil {
+				t.Fatal("rollback acted on a target it could not prove was the one it changed")
+			}
+			if !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), tc.notWant) {
+				t.Fatalf("rollback error = %q, want it to say %q and not %q", err, tc.want, tc.notWant)
+			}
+		})
+	}
+}
+
 // dirDeniesReadSID reports whether path's DACL has a DENY ACE for wantSID whose
 // mask covers FILE_GENERIC_READ (DenyRead shape) without the full write-probe
 // mask of experimental DenyWrite.

@@ -393,10 +393,11 @@ func realSmokeExecutable(t *testing.T, envKey string, fallbackName string) strin
 
 func runWindowsRealSmokeSetup(t *testing.T, setupExe string, options WindowsSandboxSetupArgsOptions) {
 	t.Helper()
-	args, err := BuildWindowsSandboxSetupArgs(options)
+	setupPlan, err := BuildWindowsSandboxSetupArgs(options)
 	if err != nil {
 		t.Fatalf("BuildWindowsSandboxSetupArgs: %v", err)
 	}
+	args := setupPlan.Args
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, setupExe, args...)
@@ -406,8 +407,30 @@ func runWindowsRealSmokeSetup(t *testing.T, setupExe string, options WindowsSand
 	}
 }
 
+// prepareWindowsRealSmokeCommand gives an elevated-tier smoke command the profile
+// the planner would have given it. The elevated runner validates the command
+// against the setup marker, and setup fingerprinted a profile with the selected
+// runtime folded in, so a command built from the bare profile can only be
+// refused. The unelevated tier applies its own plan and has no marker to agree
+// with, so it is left exactly as the test wrote it.
+func prepareWindowsRealSmokeCommand(t *testing.T, base WindowsSandboxCommandArgsOptions) (WindowsSandboxCommandArgsOptions, func()) {
+	t.Helper()
+	if base.SandboxLevel != WindowsSandboxLevelRestrictedToken || base.PermissionProfile.Runtime != nil {
+		return base, func() {}
+	}
+	workspace := firstNonEmpty(base.WorkspaceRoots...)
+	prepared, release, err := plannerPreparedWindowsProfile(workspace, base.SandboxHome, base.PermissionProfile)
+	if err != nil {
+		t.Fatalf("prepare the smoke command the way the planner does: %v", err)
+	}
+	base.PermissionProfile = prepared
+	return base, release
+}
+
 func runWindowsRealSmokeCommand(t *testing.T, runnerExe string, base WindowsSandboxCommandArgsOptions, command []string, wantCode int) {
 	t.Helper()
+	base, release := prepareWindowsRealSmokeCommand(t, base)
+	defer release()
 	base.Command = command
 	args, err := BuildWindowsSandboxCommandArgs(base)
 	if err != nil {
@@ -433,6 +456,8 @@ func runWindowsRealSmokeCommand(t *testing.T, runnerExe string, base WindowsSand
 // explicit unsupported-mode rejections rather than sandboxed command failures).
 func runWindowsRealSmokeCommandExpectError(t *testing.T, runnerExe string, base WindowsSandboxCommandArgsOptions, command []string, wantSubstr ...string) {
 	t.Helper()
+	base, release := prepareWindowsRealSmokeCommand(t, base)
+	defer release()
 	base.Command = command
 	args, err := BuildWindowsSandboxCommandArgs(base)
 	if err != nil {

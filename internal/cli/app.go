@@ -198,7 +198,10 @@ func defaultAppDeps() appDeps {
 			cmd := exec.Command(path, args...)
 			cmd.Stdout = stdout
 			cmd.Stderr = stderr
-			return cmd.Run()
+			if err := cmd.Start(); err != nil {
+				return fmt.Errorf("%w: %w", errSandboxSetupHelperNotStarted, err)
+			}
+			return cmd.Wait()
 		},
 		registerMCPTools: func(ctx context.Context, registry *tools.Registry, cfg config.MCPConfig, options mcp.RegisterOptions) (mcpToolRuntime, error) {
 			return mcp.RegisterTools(ctx, registry, cfg, options)
