@@ -1313,21 +1313,23 @@ func shouldRegisterExecSpecialistTools(options execOptions, resolved agent.Permi
 	if strings.EqualFold(strings.TrimSpace(options.tag), specialist.SessionTagSpecialist) {
 		return false
 	}
-	// Register at medium/high (and unsafe). The Task tool's permission gate
-	// auto-approves only read-only specialist spawns and prompts for write-capable
-	// ones, so a non-trivial exec can auto-delegate exploration safely (a headless
-	// write spawn still gets denied at the prompt). Default "low" stays clean — no
-	// specialist tooling or swarm runtime for trivial/CI one-shots.
-	// The RESOLVED mode decides, not the raw flags. Every spelling that reaches
-	// full-auto (`--full-auto`, `--skip-permissions-unsafe`, `--auto high`,
-	// `--permission-mode full-auto|full_auto|unsafe|high`) resolves to the same
-	// value, so a new alias cannot create an unequal capability set the way
-	// `--permission-mode full-auto` did.
+	// Register at medium, and at every spelling that resolves to full-auto.
+	// The Task tool's permission gate auto-approves only read-only specialist
+	// spawns and prompts for write-capable ones, so a non-trivial exec can
+	// auto-delegate exploration safely (a headless write spawn still gets
+	// denied at the prompt). Default "low" stays clean — no specialist tooling
+	// or swarm runtime for trivial/CI one-shots.
+	//
+	// The resolved mode is the only full-auto signal. `--full-auto`,
+	// `--skip-permissions-unsafe`, and `--auto high` already fold into it
+	// inside resolveExecPermissionMode, and an explicit --permission-mode
+	// wins over those flags. Reading the raw flag or "high" again registered
+	// Task and swarm tools for a run that had resolved to auto or ask.
+	// Medium is the one autonomy that registers without becoming full-auto.
 	if resolved == agent.PermissionModeFullAuto {
 		return true
 	}
-	autonomy := strings.ToLower(strings.TrimSpace(options.autonomy))
-	return options.skipPermissionsUnsafe || autonomy == "high" || autonomy == "medium"
+	return strings.EqualFold(strings.TrimSpace(options.autonomy), "medium")
 }
 
 func closeMCPRuntime(stderr io.Writer, runtime mcpToolRuntime) {

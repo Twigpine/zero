@@ -287,6 +287,54 @@ func TestOfferConfirmsOnlyWhereTheFooterShowsItsKey(t *testing.T) {
 	}
 }
 
+// A hidden offer is a declined offer. From Auto the first Shift+Tab lands on
+// Ask, and the second must return to Auto even when the footer cannot show
+// ctrl+g. Clearing the arm and staying on Ask made every later press offer
+// again, so the session never left Ask. A wide layout still offers instead of
+// skipping the confirmation.
+func TestShiftTabReachesAutoWhenTheOfferKeyIsHidden(t *testing.T) {
+	shiftTab := tea.Key{Code: tea.KeyTab, Mod: tea.ModShift}
+	for _, width := range []int{24, 30} {
+		t.Run(fmt.Sprintf("%d columns with a docked pet", width), func(t *testing.T) {
+			m := dockedPetModel(t, width)
+			m.permissionMode = agent.PermissionModeAuto
+			once := pressKey(t, m, shiftTab)
+			if once.permissionMode != agent.PermissionModeAsk {
+				t.Fatalf("first press = %s, want ask", once.permissionMode)
+			}
+			twice := pressKey(t, once, shiftTab)
+			if twice.permissionMode != agent.PermissionModeAuto {
+				t.Fatalf("second press = %s, want auto; the hidden offer trapped the cycle on ask", twice.permissionMode)
+			}
+			if twice.unsafeArmed {
+				t.Fatal("the hidden offer stayed armed")
+			}
+		})
+	}
+
+	wide := dockedPetModel(t, 96)
+	wide.permissionMode = agent.PermissionModeAuto
+	once := pressKey(t, wide, shiftTab)
+	twice := pressKey(t, once, shiftTab)
+	if twice.permissionMode != agent.PermissionModeAsk || !twice.unsafeArmed {
+		t.Fatalf("wide layout after two presses = mode %s armed %v, want ask and armed", twice.permissionMode, twice.unsafeArmed)
+	}
+}
+
+func dockedPetModel(t *testing.T, width int) model {
+	t.Helper()
+	m := newModel(context.Background(), Options{AltScreen: true})
+	m.width, m.height = width, 24
+	frame := image.NewNRGBA(image.Rect(0, 0, 12, 12))
+	m.petAnimation, _ = terminalpet.ThumbnailAnimation(frame)
+	m.petID = "boba"
+	m.petRenderer = terminalpet.NewImageRenderer(terminalpet.ImageSupport{Protocol: terminalpet.ImageProtocolKitty})
+	if m.petComposerReservedColumns(m.width) == 0 {
+		t.Fatal("SETUP INVALID: the docked pet reserved no footer columns")
+	}
+	return m
+}
+
 // And an offer that was visible when raised is withdrawn when the terminal
 // shrinks under it, rather than staying confirmable behind a truncated chip.
 func TestOfferIsWithdrawnWhenTheTerminalShrinksUnderIt(t *testing.T) {

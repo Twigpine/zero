@@ -89,6 +89,60 @@ func TestUnparseableFallbackKeepsNetworkForServingCommands(t *testing.T) {
 //
 // Driving the loop off pythonLauncherPrograms means a launcher added there
 // cannot silently weaken the fallback: this fails the moment the two disagree.
+// Fetch subcommands are one inventory. The AST path flags ci, create, view,
+// search, and the rest of packageManagerNetworkSubcommands. The fallback used
+// to list a shorter set, so a Windows conditional the POSIX parser rejects
+// lost the network category the parseable spelling still had.
+func TestUnparseableFallbackCoversPackageManagerFetchSubcommands(t *testing.T) {
+	if len(packageManagerNetworkSubcommands) == 0 {
+		t.Fatal("SETUP INVALID: no package-manager fetch subcommands")
+	}
+	type commandPair struct {
+		name        string
+		parseable   string
+		unparseable string
+	}
+	cases := make([]commandPair, 0, len(packageManagerNetworkSubcommands)+len(packageManagerNetworkLiteralAliases))
+	for subcommand := range packageManagerNetworkSubcommands {
+		parseable := "npm --prefix ./web " + subcommand
+		cases = append(cases, commandPair{
+			name:        "npm " + subcommand,
+			parseable:   parseable,
+			unparseable: `if "%OS%"=="Windows_NT" (` + parseable + ") else (true)",
+		})
+	}
+	for _, alias := range packageManagerNetworkLiteralAliases {
+		// The alias is rewritten before the AST switch, so the program under
+		// test has to be one that actually owns it. bun maps x to exec.
+		parseable := "bun --cwd ./web " + alias + " cowsay"
+		cases = append(cases, commandPair{
+			name:        "bun " + alias,
+			parseable:   parseable,
+			unparseable: `if "%OS%"=="Windows_NT" (` + parseable + ") else (true)",
+		})
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if AnalyzeCommand(testCase.parseable).TooComplex {
+				t.Fatalf("SETUP INVALID: %q was expected to parse", testCase.parseable)
+			}
+			if !AnalyzeCommand(testCase.unparseable).TooComplex {
+				t.Fatalf("SETUP INVALID: %q was expected to defeat the parser", testCase.unparseable)
+			}
+			for _, script := range []string{testCase.parseable, testCase.unparseable} {
+				risk := Classify(Request{
+					ToolName:   "bash",
+					SideEffect: SideEffectShell,
+					Args:       map[string]any{"command": script},
+				})
+				if !HasRiskCategory(risk, "network") {
+					t.Errorf("%q was not classified as network: %v", script, risk.Categories)
+				}
+			}
+		})
+	}
+}
+
 func TestUnparseableFallbackCoversEveryPythonLauncher(t *testing.T) {
 	if len(pythonLauncherPrograms) == 0 {
 		t.Fatal("SETUP INVALID: no python launchers to check")

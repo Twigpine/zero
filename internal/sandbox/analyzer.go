@@ -310,6 +310,30 @@ func commandUsesNetwork(prog string, args []*syntax.Word) bool {
 	}
 }
 
+// packageManagerNetworkSubcommands are the registry-reaching package-manager
+// subcommands. packageManagerUsesNetwork and the unparseable fallback both
+// read this set. A second hand-written list is how `npm ci` stayed flagged on
+// the AST path and lost network once the POSIX parser gave up.
+//
+// exec is included because a package-manager exec may download a missing
+// package before launching it. start, serve, dev, and preview are absent on
+// purpose: those bind a local server and are classified by
+// packageManagerRunsLocalServer. The fallback covers them with its serving
+// alternative. An explicit offline flag is handled before this set is consulted.
+var packageManagerNetworkSubcommands = map[string]bool{
+	"access": true, "add": true, "adduser": true, "audit": true, "ci": true,
+	"create": true, "deprecate": true, "dist-tag": true, "dlx": true, "exec": true,
+	"info": true, "install": true, "login": true, "logout": true, "org": true,
+	"outdated": true, "owner": true, "ping": true, "profile": true, "publish": true,
+	"search": true, "show": true, "team": true, "token": true, "unpublish": true,
+	"update": true, "upgrade": true, "view": true, "whoami": true,
+}
+
+// packageManagerNetworkLiteralAliases are tokens rewritten to a network
+// subcommand before the AST switch. The unparseable fallback never rewrites
+// them, so it matches the token as typed. bun's x is exec.
+var packageManagerNetworkLiteralAliases = []string{"x"}
+
 func packageManagerUsesNetwork(words []string, aliases map[string]string) bool {
 	if packageManagerOffline(words) {
 		return false
@@ -320,21 +344,7 @@ func packageManagerUsesNetwork(words []string, aliases map[string]string) bool {
 		if alias, ok := aliases[subcommand]; ok {
 			subcommand = alias
 		}
-		switch subcommand {
-		case "install", "add", "ci", "create", "dlx", "publish", "unpublish",
-			"login", "logout", "adduser", "whoami", "ping", "audit", "outdated",
-			"update", "upgrade", "search", "view", "info", "show", "dist-tag",
-			"deprecate", "owner", "org", "team", "token", "profile", "access":
-			return true
-		// start / serve / dev / preview are handled by packageManagerRunsLocalServer
-		// instead. They start a dev server, which binds rather than fetches, and
-		// `npm run dev` is the single most common command an agent is asked to run
-		// while building something. Classifying it as egress made every one of them
-		// stop for a network approval that protected nothing.
-		case "exec":
-			// Package-manager exec commands may resolve and download a missing
-			// package before launching it. An explicit offline flag keeps this path
-			// inside the isolated namespace; otherwise request egress up front.
+		if packageManagerNetworkSubcommands[subcommand] {
 			return true
 		}
 	}

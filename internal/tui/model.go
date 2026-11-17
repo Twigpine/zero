@@ -728,7 +728,7 @@ func (msg agentResponseMsg) usageModelIDAt(index int) string {
 
 type peerMessageMsg struct {
 	message peermsg.InboundMessage
-	admit   chan<- bool
+	admit   *peerAdmitGate
 }
 
 type peerStatusMsg struct{ event peermsg.StatusEvent }
@@ -1526,8 +1526,11 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case peerMessageMsg:
 		admitted := m.canAcceptPeerMessage(msg.message)
-		if msg.admit != nil {
-			msg.admit <- admitted
+		// claim is the admission decision. Once the timeout has refused the
+		// sender, claim fails and this message must not run: the queue still
+		// holds it, but the service has already reported DeliveryRefused.
+		if msg.admit != nil && !msg.admit.claim(admitted) {
+			return m, nil
 		}
 		if !admitted {
 			m.transcript = appendTranscriptRow(m.transcript, transcriptRow{kind: rowError, text: "Dropped peer message because the inbound queue is full."})
@@ -2156,11 +2159,15 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.noBlockingModal() {
 				m.permissionMode, m.unsafeArmed = advancePermissionMode(m.permissionMode, unsafeWasArmed)
 				// An offer the footer cannot show is not an offer. Raising it
-				// anyway would leave a truncated chip on screen and a live
-				// confirmation nobody was asked for; the next press re-offers, so
-				// full-auto stays two visible presses away, never a hidden one.
+				// anyway would leave a truncated chip and a live confirmation
+				// nobody was asked for. Clearing the arm and staying on Ask
+				// made the next press offer again, so Shift+Tab never returned
+				// to Auto. Treat the hidden offer as declined: land on Auto
+				// and do not arm. Wide layouts still show the offer and wait
+				// for the next press.
 				if m.unsafeArmed && !m.offerKeyVisible() {
 					m.unsafeArmed = false
+					m.permissionMode = agent.PermissionModeAuto
 				}
 				// The peer record carries the permission class, so it has to be
 				// resynced wherever the mode changes. This branch and the ctrl+g

@@ -66,7 +66,12 @@ var (
 	// the approval gate disappearing on exactly the platform where it is the only
 	// egress control. Restored until a runner actually provides a scoped listener
 	// capability and the AST path stops setting Network for these itself.
-	unparseableNetworkPattern = regexp.MustCompile(`(?i)\b(curl|wget|fetch|aria2c|ssh|scp|sftp|rsync|nc|ncat|netcat|telnet|ftp|npx)\b|\b(npm|pnpm|yarn|bun|pip|pip2|pip3)` + leadingOptionsPattern + `\s+(install|add|publish|login|exec|x|dlx)\b|\b(npm|pnpm|yarn|bun)` + leadingOptionsPattern + `\s+(run|dev|serve|start|preview)\b|\b(http-server|serve|vite|next|nuxt|astro)\b|\b(python(2|3)?|py)\s+-m\s+http\.server\b|\bgo\s+get\b|\bgit\s+clone\b|\b(python(2|3)?|py)\s+-m\s+pip\s+install\b|\bgh\s+(api|repo\s+clone|release\s+download)\b`)
+	//
+	// The fetch alternative is compiled from packageManagerNetworkSubcommands
+	// rather than a second list. The shorter list omitted ci, create, view, and
+	// search, so `npm --prefix ./web ci` kept network when it parsed and lost
+	// it inside a Windows conditional.
+	unparseableNetworkPattern *regexp.Regexp
 	// destructiveExtraPatterns hold high-severity patterns that the legacy
 	// destructiveCommandPattern does not already cover. Folded in from the
 	// blueprint safe_bash.go without duplicating existing matches.
@@ -86,6 +91,26 @@ var (
 		regexp.MustCompile(`(?i)\bmkfs\.[a-z0-9]+\b`),
 	}
 )
+
+func init() {
+	unparseableNetworkPattern = regexp.MustCompile(unparseableNetworkPatternSource())
+}
+
+func unparseableNetworkPatternSource() string {
+	subcommands := make([]string, 0, len(packageManagerNetworkSubcommands)+len(packageManagerNetworkLiteralAliases))
+	for subcommand := range packageManagerNetworkSubcommands {
+		subcommands = append(subcommands, regexp.QuoteMeta(subcommand))
+	}
+	for _, alias := range packageManagerNetworkLiteralAliases {
+		subcommands = append(subcommands, regexp.QuoteMeta(alias))
+	}
+	sort.Strings(subcommands)
+	fetch := `\b(npm|pnpm|yarn|bun|pip|pip2|pip3)` + leadingOptionsPattern + `\s+(` + strings.Join(subcommands, "|") + `)\b`
+	serving := `\b(npm|pnpm|yarn|bun)` + leadingOptionsPattern + `\s+(run|dev|serve|start|preview)\b`
+	return `(?i)\b(curl|wget|fetch|aria2c|ssh|scp|sftp|rsync|nc|ncat|netcat|telnet|ftp|npx)\b|` +
+		fetch + `|` + serving +
+		`|\b(http-server|serve|vite|next|nuxt|astro)\b|\b(python(2|3)?|py)\s+-m\s+http\.server\b|\bgo\s+get\b|\bgit\s+clone\b|\b(python(2|3)?|py)\s+-m\s+pip\s+install\b|\bgh\s+(api|repo\s+clone|release\s+download)\b`
+}
 
 func matchesDestructive(command string) bool {
 	if destructiveCommandPattern.MatchString(command) {

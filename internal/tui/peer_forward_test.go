@@ -148,6 +148,93 @@ func TestFullAutoConfirmationReleasesAHeldPeerMessageWithoutBlockingTheLoop(t *t
 	}
 }
 
+// A stalled shell must refuse the sender and must not run the message when
+// delivery resumes. The timeout used to return false while leaving the queued
+// peerMessageMsg eligible, so the later Update admitted and executed it.
+func TestPeerAdmitTimeoutRefusesWithoutLaterDispatch(t *testing.T) {
+	release := make(chan struct{})
+	delivered := make(chan tea.Msg, 1)
+	forwarder := newPeerForwarder(func(msg tea.Msg) {
+		<-release
+		delivered <- msg
+	})
+	defer forwarder.stop()
+	service := &fakePeerService{}
+	if !wirePeerService(service, forwarder.send) {
+		t.Fatal("wiring reported the service did not start")
+	}
+
+	message := peermsg.InboundMessage{ID: "late-1", Body: "run this later", From: peermsg.Peer{Ref: "peer-other"}}
+	result := make(chan bool, 1)
+	go func() {
+		result <- service.inbound(message)
+	}()
+	select {
+	case accepted := <-result:
+		if accepted {
+			t.Fatal("admission succeeded while the shell was stalled past the timeout")
+		}
+	case <-time.After(peerAdmitTimeout + 2*time.Second):
+		t.Fatal("the inbound handler did not return after the admit timeout")
+	}
+	close(release)
+
+	var msg tea.Msg
+	select {
+	case msg = <-delivered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the queued peer message was never delivered to the shell")
+	}
+	m := newModel(context.Background(), Options{})
+	m.pending = true
+	next, _ := m.updateModel(msg)
+	got := next.(model)
+	if len(got.peerInbox) != 0 || len(got.peerApprovalQueue) != 0 || got.peerPendingApproval != nil {
+		t.Fatalf("refused message was dispatched after the timeout: inbox=%d approvals=%d pending=%v", len(got.peerInbox), len(got.peerApprovalQueue), got.peerPendingApproval != nil)
+	}
+}
+
+func TestPeerAdmitAcceptsWhenTheShellAdmitsInTime(t *testing.T) {
+	delivered := make(chan tea.Msg, 1)
+	forwarder := newPeerForwarder(func(msg tea.Msg) {
+		delivered <- msg
+	})
+	defer forwarder.stop()
+	service := &fakePeerService{}
+	if !wirePeerService(service, forwarder.send) {
+		t.Fatal("wiring reported the service did not start")
+	}
+
+	message := peermsg.InboundMessage{ID: "on-time", Body: "run this now", From: peermsg.Peer{Ref: "peer-other"}}
+	result := make(chan bool, 1)
+	go func() {
+		result <- service.inbound(message)
+	}()
+
+	var msg tea.Msg
+	select {
+	case msg = <-delivered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the peer message was not delivered to the shell")
+	}
+	m := newModel(context.Background(), Options{})
+	m.pending = true
+	next, _ := m.updateModel(msg)
+	got := next.(model)
+
+	select {
+	case accepted := <-result:
+		if !accepted {
+			t.Fatal("a timely admission was refused")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the inbound handler did not observe the admission")
+	}
+	if len(got.peerInbox) != 1 || got.peerInbox[0].ID != message.ID {
+		t.Fatalf("timely message was not queued: %#v", got.peerInbox)
+	}
+}
+
 // The forwarder keeps peer events in order and never makes the caller wait.
 func TestPeerForwarderDeliversInOrderWithoutBlockingTheCaller(t *testing.T) {
 	var mu sync.Mutex

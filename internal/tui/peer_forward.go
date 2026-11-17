@@ -94,6 +94,44 @@ func (forwarder *peerForwarder) stop() {
 // to admit it before the service is told no.
 const peerAdmitTimeout = 4 * time.Second
 
+// peerAdmitGate is the single admission decision for one inbound message.
+// The service timeout and the shell's Update share it, so a refusal and a
+// later delivery of the same queued message cannot both succeed.
+type peerAdmitGate struct {
+	mu   sync.Mutex
+	done bool
+	ch   chan bool
+}
+
+func newPeerAdmitGate() *peerAdmitGate {
+	return &peerAdmitGate{ch: make(chan bool, 1)}
+}
+
+// claim records the shell's decision. It returns false when the timeout
+// already refused the message; the caller must not deliver it.
+func (gate *peerAdmitGate) claim(accepted bool) bool {
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	if gate.done {
+		return false
+	}
+	gate.done = true
+	gate.ch <- accepted
+	return true
+}
+
+// refuse records the timeout. It returns false when the shell already
+// decided, in which case the caller must use the value on ch.
+func (gate *peerAdmitGate) refuse() bool {
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	if gate.done {
+		return false
+	}
+	gate.done = true
+	return true
+}
+
 // peerServiceWiring is what the shell needs from the peer service to hook it up.
 // An interface rather than *peermsg.Service so the event-loop regression can
 // stand in a fake that hands back the handlers it was given.
@@ -118,13 +156,21 @@ func wirePeerService(service peerServiceWiring, forward func(tea.Msg)) bool {
 		forward(peerHeldReleasedMsg{message: message})
 	})
 	if err := service.Start(func(message peermsg.InboundMessage) bool {
-		admit := make(chan bool, 1)
+		// One gate for the timeout and the shell. Returning false on the
+		// timer used to leave the queued message free to admit itself later,
+		// so a refused delivery still ran when the loop caught up.
+		admit := newPeerAdmitGate()
 		forward(peerMessageMsg{message: message, admit: admit})
+		timer := time.NewTimer(peerAdmitTimeout)
+		defer timer.Stop()
 		select {
-		case accepted := <-admit:
+		case accepted := <-admit.ch:
 			return accepted
-		case <-time.After(peerAdmitTimeout):
-			return false
+		case <-timer.C:
+			if admit.refuse() {
+				return false
+			}
+			return <-admit.ch
 		}
 	}); err != nil {
 		forward(peerRuntimeErrorMsg{err: err})
