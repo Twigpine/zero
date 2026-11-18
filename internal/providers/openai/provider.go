@@ -360,7 +360,7 @@ func (provider *Provider) emitChunk(
 		}
 	}
 
-	if m := zeroruntime.SanitizeResolvedModel(chunk.Model); m != "" {
+	if m := zeroruntime.SanitizeResolvedModel(string(chunk.Model)); m != "" {
 		state.resolvedModel = m
 	}
 
@@ -374,6 +374,7 @@ func (provider *Provider) emitChunk(
 				CacheWriteTokens:  chunk.Usage.PromptTokensDetails.CacheWriteTokens,
 				ReasoningTokens:   chunk.Usage.CompletionTokensDetails.ReasoningTokens,
 				ResolvedModel:     zeroruntime.ResolvedModelAttribution(provider.model, state.resolvedModel),
+				ModelReported:     state.resolvedModel != "",
 			},
 		})
 	}

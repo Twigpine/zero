@@ -1,5 +1,7 @@
 package openai
 
+import "github.com/Twigpine/zero/internal/zeroruntime"
+
 type chatCompletionRequest struct {
 	Model               string           `json:"model"`
 	Messages            []chatMessage    `json:"messages"`
@@ -73,10 +75,10 @@ type toolFunction struct {
 }
 
 type streamChunk struct {
-	Choices []streamChoice `json:"choices"`
-	Usage   *usage         `json:"usage"`
-	Error   *apiError      `json:"error"`
-	Model   string         `json:"model"`
+	Choices []streamChoice            `json:"choices"`
+	Usage   *usage                    `json:"usage"`
+	Error   *apiError                 `json:"error"`
+	Model   zeroruntime.ReportedModel `json:"model"`
 }
 
 type streamChoice struct {

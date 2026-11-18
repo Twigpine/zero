@@ -226,3 +226,43 @@ func TestD2_1_8_ResolvedModelAttribution(t *testing.T) {
 		})
 	}
 }
+
+// The sanitizer must stop at the cap instead of materializing the whole
+// printable value: a megabyte-long model id would otherwise be copied in full
+// only to keep 256 bytes.
+func TestSanitizeResolvedModelDoesNotAllocateTheDiscardedSuffix(t *testing.T) {
+	huge := strings.Repeat("m", 1<<20)
+	allocs := testing.AllocsPerRun(5, func() { _ = SanitizeResolvedModel(huge) })
+	if allocs > 4 {
+		t.Fatalf("allocs per run = %v, want a small constant", allocs)
+	}
+	if got := SanitizeResolvedModel(huge); len(got) != MaxResolvedModelBytes {
+		t.Fatalf("len = %d, want %d", len(got), MaxResolvedModelBytes)
+	}
+}
+
+// A later snapshot that reports the requested model itself ends the router
+// attribution: its ResolvedModel is empty because the provider reported a model
+// that matched, not because it reported none. A snapshot with no model update
+// keeps the earlier attribution.
+func TestMergeUsageSnapshotEchoOfRequestedModelClearsAttribution(t *testing.T) {
+	t.Parallel()
+	left := Usage{PromptTokens: 10, ResolvedModel: "deepseek/x", ModelReported: true}
+	t.Run("echo-clears", func(t *testing.T) {
+		t.Parallel()
+		merged := mergeUsageSnapshot(left, Usage{CompletionTokens: 5, ModelReported: true})
+		if merged.ResolvedModel != "" {
+			t.Fatalf("ResolvedModel = %q, want cleared by the echo of the requested model", merged.ResolvedModel)
+		}
+		if merged.PromptTokens != 10 && merged.EffectiveInputTokens() != 10 || merged.EffectiveOutputTokens() != 5 {
+			t.Fatalf("token counts lost: %+v", merged)
+		}
+	})
+	t.Run("no-model-update-keeps", func(t *testing.T) {
+		t.Parallel()
+		merged := mergeUsageSnapshot(left, Usage{CompletionTokens: 5})
+		if merged.ResolvedModel != "deepseek/x" {
+			t.Fatalf("ResolvedModel = %q, want deepseek/x kept", merged.ResolvedModel)
+		}
+	})
+}

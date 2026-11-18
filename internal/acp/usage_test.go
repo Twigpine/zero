@@ -24,7 +24,9 @@ func TestD2_1_18_ACPPromptPersistsSanitizedResolvedModel(t *testing.T) {
 	deps := testDeps(t)
 	deps.RunAgent = func(_ context.Context, _ string, _ zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
 		if opts.OnUsage == nil {
-			t.Fatal("agent.Options.OnUsage is not wired")
+			// Not t.Fatal: this runs on the server goroutine. The error reaches
+			// the test goroutine through the session/prompt call below.
+			return agent.Result{}, errors.New("agent.Options.OnUsage is not wired")
 		}
 		opts.OnUsage(agent.Usage{InputTokens: 5, OutputTokens: 1, ResolvedModel: "\x1b[31mx\u0085y"})
 		return agent.Result{FinalAnswer: "done"}, nil

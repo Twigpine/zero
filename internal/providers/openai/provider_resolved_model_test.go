@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
@@ -179,5 +180,33 @@ func TestD2_1_12_StreamCompletionWithoutModelUnchangedUsage(t *testing.T) {
 	if usageEvent.Usage.PromptTokens != 12 || usageEvent.Usage.CompletionTokens != 5 ||
 		usageEvent.Usage.CachedInputTokens != 3 || usageEvent.Usage.CacheWriteTokens != 2 {
 		t.Fatalf("usage fields changed: %#v", usageEvent.Usage)
+	}
+}
+
+// A usage chunk that echoes the requested model after a router named another
+// one ends the attribution: the collected usage must not keep reporting the
+// earlier model next to the later token counts.
+func TestStreamCompletionEchoOfRequestedModelClearsEarlierAttribution(t *testing.T) {
+	t.Parallel()
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"model":"deepseek/x","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1}}`)
+		writeSSE(w, `{"model":"gpt-test","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":4}}`)
+		writeSSE(w, `[DONE]`)
+	})
+	events := collectProviderEvents(t, provider)
+	stream := make(chan zeroruntime.StreamEvent, len(events))
+	for _, event := range events {
+		stream <- event
+	}
+	close(stream)
+	var last zeroruntime.Usage
+	zeroruntime.CollectStreamWithOptions(context.Background(), stream, zeroruntime.CollectOptions{
+		OnUsage: func(usage zeroruntime.Usage) { last = usage },
+	})
+	if last.ResolvedModel != "" {
+		t.Fatalf("ResolvedModel = %q, want cleared after the echo of the requested model", last.ResolvedModel)
+	}
+	if last.EffectiveOutputTokens() != 4 {
+		t.Fatalf("output tokens = %d, want the later snapshot's 4", last.EffectiveOutputTokens())
 	}
 }
