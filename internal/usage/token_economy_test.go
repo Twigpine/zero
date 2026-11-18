@@ -3,6 +3,7 @@ package usage
 import (
 	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/Twigpine/zero/internal/modelregistry"
@@ -78,7 +79,27 @@ func TestEventUsagePayloadOmitsZeroFields(t *testing.T) {
 	}
 }
 
-func TestEventUsagePayloadResolvedModelRoundTrip(t *testing.T) {
+func TestD2_1_15_EventUsagePayloadSanitizesResolvedModel(t *testing.T) {
+	p := EventUsagePayload(zeroruntime.Usage{InputTokens: 10, OutputTokens: 2, ResolvedModel: "\x1b[31mx\u202e"})
+	if p["resolvedModel"] != "[31mx" {
+		t.Fatalf("resolvedModel = %#v, want [31mx", p["resolvedModel"])
+	}
+	empty := EventUsagePayload(zeroruntime.Usage{InputTokens: 1, OutputTokens: 1, ResolvedModel: "\x00\u200b"})
+	if _, ok := empty["resolvedModel"]; ok {
+		t.Fatalf("resolvedModel present for only-removable value: %#v", empty)
+	}
+	huge := strings.Repeat("m", 1024)
+	capped := EventUsagePayload(zeroruntime.Usage{InputTokens: 1, OutputTokens: 1, ResolvedModel: huge})
+	rm, ok := capped["resolvedModel"].(string)
+	if !ok {
+		t.Fatalf("resolvedModel type = %T", capped["resolvedModel"])
+	}
+	if len(rm) > zeroruntime.MaxResolvedModelBytes {
+		t.Fatalf("resolvedModel len %d exceeds cap", len(rm))
+	}
+}
+
+func TestD2_1_16_EventUsagePayloadResolvedModelRoundTrip(t *testing.T) {
 	raw, err := json.Marshal(EventUsagePayload(zeroruntime.Usage{
 		InputTokens:   10,
 		OutputTokens:  2,

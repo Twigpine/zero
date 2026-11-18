@@ -179,12 +179,11 @@ func TestBuildReportRatiosGuardNetZero(t *testing.T) {
 	}
 }
 
-func TestBuildReportPricesFromSessionModelWhenOnlyResolvedModelPresent(t *testing.T) {
+func TestD2_1_17a_BuildReportPricesFromSessionModelWhenOnlyResolvedModelPresent(t *testing.T) {
 	registry, err := modelregistry.DefaultRegistry()
 	if err != nil {
 		t.Fatalf("DefaultRegistry: %v", err)
 	}
-	// resolvedModel is observability-only; it must not replace payload.Model for pricing.
 	payload, err := json.Marshal(map[string]any{
 		"promptTokens":     1000,
 		"completionTokens": 200,
@@ -195,14 +194,10 @@ func TestBuildReportPricesFromSessionModelWhenOnlyResolvedModelPresent(t *testin
 		t.Fatalf("marshal payload: %v", err)
 	}
 	events := []sessions.Event{{
-		SessionID: "s1",
-		Sequence:  1,
-		Type:      sessions.EventUsage,
-		CreatedAt: "2026-06-01T09:00:00Z",
-		Payload:   payload,
+		SessionID: "s1", Sequence: 1, Type: sessions.EventUsage,
+		CreatedAt: "2026-06-01T09:00:00Z", Payload: payload,
 	}}
 	meta := []sessions.Metadata{{SessionID: "s1", ModelID: "gpt-4.1"}}
-
 	report, err := BuildReport(events, meta, &registry, 10)
 	if err != nil {
 		t.Fatalf("BuildReport: %v", err)
@@ -217,6 +212,82 @@ func TestBuildReportPricesFromSessionModelWhenOnlyResolvedModelPresent(t *testin
 	}
 	if report.Total.TotalCost != want.TotalCost {
 		t.Fatalf("cost = %v, want %v (must price from session model, not resolvedModel)", report.Total.TotalCost, want.TotalCost)
+	}
+}
+
+func TestD2_1_17b_BuildReportEscalationModelPrecedenceUnchanged(t *testing.T) {
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry: %v", err)
+	}
+	payload, err := json.Marshal(map[string]any{
+		"promptTokens":     1000,
+		"completionTokens": 200,
+		"totalTokens":      1200,
+		"model":            "gpt-4.1",
+		"resolvedModel":    "deepseek/deepseek-r1:free",
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	events := []sessions.Event{{
+		SessionID: "s1", Sequence: 1, Type: sessions.EventUsage,
+		CreatedAt: "2026-06-01T09:00:00Z", Payload: payload,
+	}}
+	meta := []sessions.Metadata{{SessionID: "s1", ModelID: "claude-sonnet-4.5"}}
+	report, err := BuildReport(events, meta, &registry, 10)
+	if err != nil {
+		t.Fatalf("BuildReport: %v", err)
+	}
+	model, err := registry.Require("gpt-4.1")
+	if err != nil {
+		t.Fatalf("Require: %v", err)
+	}
+	want, err := modelregistry.CalculateCost(model, zeroruntime.Usage{InputTokens: 1000, OutputTokens: 200})
+	if err != nil {
+		t.Fatalf("CalculateCost: %v", err)
+	}
+	if report.Total.TotalCost != want.TotalCost {
+		t.Fatalf("cost = %v, want %v (must price payload.model, not session or resolvedModel)", report.Total.TotalCost, want.TotalCost)
+	}
+}
+
+func TestD2_1_17c_BuildReportTotalsIgnoreResolvedModelKey(t *testing.T) {
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry: %v", err)
+	}
+	base := usageEvent(t, "s1", 1, "2026-06-01T09:00:00Z", 1000, 200)
+	withRM, err := json.Marshal(map[string]any{
+		"promptTokens":     1000,
+		"completionTokens": 200,
+		"totalTokens":      1200,
+		"resolvedModel":    "deepseek/deepseek-r1:free",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	eventsWith := []sessions.Event{{SessionID: "s1", Sequence: 1, Type: sessions.EventUsage, CreatedAt: base.CreatedAt, Payload: withRM}}
+	eventsWithout := []sessions.Event{base}
+	meta := []sessions.Metadata{{SessionID: "s1", ModelID: "gpt-4.1"}}
+	plain, err := BuildReport(eventsWithout, meta, &registry, 10)
+	if err != nil {
+		t.Fatalf("BuildReport plain: %v", err)
+	}
+	with, err := BuildReport(eventsWith, meta, &registry, 10)
+	if err != nil {
+		t.Fatalf("BuildReport with resolvedModel: %v", err)
+	}
+	if plain.Total != with.Total {
+		t.Fatalf("totals differ: plain %+v vs with %+v", plain.Total, with.Total)
+	}
+	if len(plain.Buckets) != len(with.Buckets) {
+		t.Fatalf("bucket count %d vs %d", len(plain.Buckets), len(with.Buckets))
+	}
+	for i := range plain.Buckets {
+		if plain.Buckets[i] != with.Buckets[i] {
+			t.Fatalf("bucket[%d] plain %+v vs with %+v", i, plain.Buckets[i], with.Buckets[i])
+		}
 	}
 }
 

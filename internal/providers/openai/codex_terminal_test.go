@@ -226,3 +226,143 @@ func TestHandleTerminalResponseFailedPayloadWithoutError(t *testing.T) {
 		}
 	}
 }
+
+func codexProviderGPTTest(t *testing.T) *CodexProvider {
+	t.Helper()
+	p, err := NewCodexProvider(CodexOptions{Options: Options{
+		APIKey:  "sk-test",
+		BaseURL: "https://example.invalid",
+		Model:   "gpt-test",
+	}})
+	if err != nil {
+		t.Fatalf("NewCodexProvider: %v", err)
+	}
+	return p
+}
+
+func collectTerminalEvents(t *testing.T, p *CodexProvider, event *responsesEvent) []zeroruntime.StreamEvent {
+	t.Helper()
+	out := make(chan zeroruntime.StreamEvent, 8)
+	st := &responsesState{}
+	p.handleTerminalResponse(context.Background(), event, st, out)
+	close(out)
+	var collected []zeroruntime.StreamEvent
+	for ev := range out {
+		collected = append(collected, ev)
+	}
+	return collected
+}
+
+func TestD2_1_13_HandleTerminalResponseResolvedModel(t *testing.T) {
+	t.Parallel()
+	usage := &usagePayload{InputTokens: 11, OutputTokens: 7}
+	cases := []struct {
+		name      string
+		eventType string
+		model     string
+		wantRM    string
+		withUsage bool
+		withError bool
+		wantOrder []zeroruntime.StreamEventType
+	}{
+		{
+			name: "completed-different-model", eventType: responsesEventCompleted,
+			model: "gpt-5-2025-08-07", wantRM: "gpt-5-2025-08-07", withUsage: true,
+			wantOrder: []zeroruntime.StreamEventType{zeroruntime.StreamEventUsage, zeroruntime.StreamEventDone},
+		},
+		{
+			name: "completed-equal", eventType: responsesEventCompleted,
+			model: "gpt-test", wantRM: "", withUsage: true,
+			wantOrder: []zeroruntime.StreamEventType{zeroruntime.StreamEventUsage, zeroruntime.StreamEventDone},
+		},
+		{
+			name: "completed-empty-model", eventType: responsesEventCompleted,
+			model: "", wantRM: "", withUsage: true,
+			wantOrder: []zeroruntime.StreamEventType{zeroruntime.StreamEventUsage, zeroruntime.StreamEventDone},
+		},
+		{
+			name: "completed-sanitized", eventType: responsesEventCompleted,
+			model: "gpt\u202e-x\x1b[0m", wantRM: "gpt-x[0m", withUsage: true,
+			wantOrder: []zeroruntime.StreamEventType{zeroruntime.StreamEventUsage, zeroruntime.StreamEventDone},
+		},
+		{
+			name: "completed-split-nul", eventType: responsesEventCompleted,
+			model: "gpt-\x00test", wantRM: "", withUsage: true,
+			wantOrder: []zeroruntime.StreamEventType{zeroruntime.StreamEventUsage, zeroruntime.StreamEventDone},
+		},
+		{
+			name: "failed-with-usage", eventType: responsesEventFailed,
+			model: "other", wantRM: "other", withUsage: true, withError: true,
+			wantOrder: []zeroruntime.StreamEventType{zeroruntime.StreamEventUsage, zeroruntime.StreamEventError},
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := codexProviderGPTTest(t)
+			resp := &responsePayload{ID: "resp-1", Status: "completed", Model: tc.model}
+			if tc.withUsage {
+				resp.Usage = usage
+			}
+			if tc.withError {
+				resp.Error = &errorPayload{Message: "boom"}
+			}
+			evs := collectTerminalEvents(t, p, &responsesEvent{Type: tc.eventType, Response: resp})
+			if len(evs) != len(tc.wantOrder) {
+				t.Fatalf("events = %#v, want %d events", evs, len(tc.wantOrder))
+			}
+			for i, wantType := range tc.wantOrder {
+				if evs[i].Type != wantType {
+					t.Fatalf("event[%d].Type = %v, want %v", i, evs[i].Type, wantType)
+				}
+			}
+			if tc.withUsage {
+				if evs[0].Usage.ResolvedModel != tc.wantRM {
+					t.Fatalf("ResolvedModel = %q, want %q", evs[0].Usage.ResolvedModel, tc.wantRM)
+				}
+			}
+		})
+	}
+}
+
+func TestD2_1_13_CodexStreamResolvedModelFromEscapedJSON(t *testing.T) {
+	t.Parallel()
+	var rec codexRequest
+	srv := newCodexResponsesServer(t, &rec,
+		`{"type":"response.created","response":{"id":"resp-1","status":"in_progress"}}`,
+		"{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"status\":\"completed\",\"model\":\"\\u001b[31mx\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}",
+	)
+	defer srv.Close()
+
+	provider, err := NewCodexProvider(CodexOptions{Options: Options{
+		APIKey:  "sk-test",
+		BaseURL: srv.URL,
+		Model:   "gpt-test",
+	}})
+	if err != nil {
+		t.Fatalf("NewCodexProvider: %v", err)
+	}
+	stream, err := provider.StreamCompletion(context.Background(), zeroruntime.CompletionRequest{
+		Messages: []zeroruntime.Message{{Role: zeroruntime.MessageRoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("StreamCompletion: %v", err)
+	}
+	var usageEv *zeroruntime.StreamEvent
+	for ev := range stream {
+		if ev.Type == zeroruntime.StreamEventError {
+			t.Fatalf("unexpected error: %q", ev.Error)
+		}
+		if ev.Type == zeroruntime.StreamEventUsage {
+			usageEv = &ev
+		}
+	}
+	if usageEv == nil {
+		t.Fatal("missing usage event")
+	}
+	if usageEv.Usage.ResolvedModel != "[31mx" {
+		t.Fatalf("ResolvedModel = %q, want [31mx", usageEv.Usage.ResolvedModel)
+	}
+	_ = rec
+}

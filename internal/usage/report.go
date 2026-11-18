@@ -51,8 +51,8 @@ func EventUsagePayload(u zeroruntime.Usage) map[string]any {
 	if u.ReasoningTokens > 0 {
 		payload["reasoningTokens"] = u.ReasoningTokens
 	}
-	if u.ResolvedModel != "" {
-		payload["resolvedModel"] = u.ResolvedModel
+	if m := zeroruntime.SanitizeResolvedModel(u.ResolvedModel); m != "" {
+		payload["resolvedModel"] = m
 	}
 	return payload
 }

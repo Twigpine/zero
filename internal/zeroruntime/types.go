@@ -163,8 +163,8 @@ type Usage struct {
 	CachedInputTokens int
 	CacheWriteTokens  int
 	ReasoningTokens   int
-	// ResolvedModel is the provider-reported model that actually served the request
-	// (e.g. OpenRouter echo on routed aliases). Observability only — not used for pricing.
+	// ResolvedModel is cleaned provider-reported attribution, at most
+	// MaxResolvedModelBytes, empty when equal to the requested model. Never pricing.
 	ResolvedModel string
 }
 

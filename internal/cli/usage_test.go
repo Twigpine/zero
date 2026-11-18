@@ -318,6 +318,82 @@ func TestRunUsageInvalidSince(t *testing.T) {
 // TestRunUsageEmptyStore verifies that running `usage report` against a store
 // with no usage events exits successfully, prints the header, shows a zero
 // total, and does not panic.
+func TestD2_1_19_UsageReportIgnoresRawResolvedModelInStoredEvents(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	plainStore := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir(), Now: fixedCLITime("2026-06-01T09:00:00Z")})
+	rawStore := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir(), Now: fixedCLITime("2026-06-01T09:00:00Z")})
+	for _, store := range []*sessions.Store{plainStore, rawStore} {
+		sess, err := store.Create(sessions.CreateInput{SessionID: "guard_s1", Title: "Guard", Cwd: "/repo", ModelID: "gpt-4.1", Provider: "openai"})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		payload := map[string]any{"promptTokens": 1000, "completionTokens": 200, "totalTokens": 1200}
+		if store == rawStore {
+			payload["resolvedModel"] = "\x1b[31mx\u0085"
+		}
+		if _, err := store.AppendEvent(sess.SessionID, sessions.AppendEventInput{Type: sessions.EventUsage, Payload: payload}); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
+		}
+	}
+
+	var plainText, plainJSON bytes.Buffer
+	var plainStderr bytes.Buffer
+	plainExit := runWithDeps([]string{"usage", "report"}, &plainText, &plainStderr, appDeps{
+		newSessionStore: func() *sessions.Store { return plainStore },
+		inspectChanges:  stubInspectChanges(""),
+	})
+	var rawText, rawJSON bytes.Buffer
+	var rawStderr bytes.Buffer
+	rawExit := runWithDeps([]string{"usage", "report"}, &rawText, &rawStderr, appDeps{
+		newSessionStore: func() *sessions.Store { return rawStore },
+		inspectChanges:  stubInspectChanges(""),
+	})
+	if plainExit != exitSuccess || rawExit != exitSuccess {
+		t.Fatalf("exit codes plain=%d raw=%d stderr plain=%q raw=%q", plainExit, rawExit, plainStderr.String(), rawStderr.String())
+	}
+	rawJSONExit := runWithDeps([]string{"usage", "report", "--json"}, &rawJSON, &rawStderr, appDeps{
+		newSessionStore: func() *sessions.Store { return rawStore },
+		inspectChanges:  stubInspectChanges(""),
+	})
+	runWithDeps([]string{"usage", "report", "--json"}, &plainJSON, &plainStderr, appDeps{
+		newSessionStore: func() *sessions.Store { return plainStore },
+		inspectChanges:  stubInspectChanges(""),
+	})
+	if rawJSONExit != exitSuccess {
+		t.Fatalf("json report exit %d: %s", rawJSONExit, rawStderr.String())
+	}
+
+	for _, out := range []string{rawText.String(), rawJSON.String()} {
+		if strings.Contains(out, "\x1b") || strings.Contains(out, `\u001b`) || strings.Contains(out, "\u0085") {
+			t.Fatalf("output contains control/format escape: %q", out)
+		}
+	}
+
+	var plainRep, rawRep struct {
+		Total   json.RawMessage `json:"total"`
+		Buckets []any           `json:"buckets"`
+	}
+	if err := json.Unmarshal(plainJSON.Bytes(), &plainRep); err != nil {
+		t.Fatalf("plain json: %v", err)
+	}
+	if err := json.Unmarshal(rawJSON.Bytes(), &rawRep); err != nil {
+		t.Fatalf("raw json: %v", err)
+	}
+	if !bytes.Equal(plainRep.Total, rawRep.Total) {
+		t.Fatalf("total differs: plain %s raw %s", plainRep.Total, rawRep.Total)
+	}
+	plainBuckets, _ := json.Marshal(plainRep.Buckets)
+	rawBuckets, _ := json.Marshal(rawRep.Buckets)
+	if !bytes.Equal(plainBuckets, rawBuckets) {
+		t.Fatalf("buckets differ: plain %s raw %s", plainBuckets, rawBuckets)
+	}
+}
+
 func TestRunUsageEmptyStore(t *testing.T) {
 	store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir()})
 	var stdout, stderr bytes.Buffer
