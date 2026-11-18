@@ -179,6 +179,47 @@ func TestBuildReportRatiosGuardNetZero(t *testing.T) {
 	}
 }
 
+func TestBuildReportPricesFromSessionModelWhenOnlyResolvedModelPresent(t *testing.T) {
+	registry, err := modelregistry.DefaultRegistry()
+	if err != nil {
+		t.Fatalf("DefaultRegistry: %v", err)
+	}
+	// resolvedModel is observability-only; it must not replace payload.Model for pricing.
+	payload, err := json.Marshal(map[string]any{
+		"promptTokens":     1000,
+		"completionTokens": 200,
+		"totalTokens":      1200,
+		"resolvedModel":    "deepseek/deepseek-r1:free",
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	events := []sessions.Event{{
+		SessionID: "s1",
+		Sequence:  1,
+		Type:      sessions.EventUsage,
+		CreatedAt: "2026-06-01T09:00:00Z",
+		Payload:   payload,
+	}}
+	meta := []sessions.Metadata{{SessionID: "s1", ModelID: "gpt-4.1"}}
+
+	report, err := BuildReport(events, meta, &registry, 10)
+	if err != nil {
+		t.Fatalf("BuildReport: %v", err)
+	}
+	model, err := registry.Require("gpt-4.1")
+	if err != nil {
+		t.Fatalf("Require: %v", err)
+	}
+	want, err := modelregistry.CalculateCost(model, zeroruntime.Usage{InputTokens: 1000, OutputTokens: 200})
+	if err != nil {
+		t.Fatalf("CalculateCost: %v", err)
+	}
+	if report.Total.TotalCost != want.TotalCost {
+		t.Fatalf("cost = %v, want %v (must price from session model, not resolvedModel)", report.Total.TotalCost, want.TotalCost)
+	}
+}
+
 func TestBuildReportIgnoresNonUsageEvents(t *testing.T) {
 	registry, err := modelregistry.DefaultRegistry()
 	if err != nil {

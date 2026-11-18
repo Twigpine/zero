@@ -26,6 +26,7 @@ type usageEventPayload struct {
 	CacheWriteTokens  int    `json:"cacheWriteTokens,omitempty"`
 	ReasoningTokens   int    `json:"reasoningTokens,omitempty"`
 	Model             string `json:"model,omitempty"`
+	ResolvedModel     string `json:"resolvedModel,omitempty"`
 }
 
 // EventUsagePayload builds the persisted EventUsage payload for a usage record.
@@ -49,6 +50,9 @@ func EventUsagePayload(u zeroruntime.Usage) map[string]any {
 	}
 	if u.ReasoningTokens > 0 {
 		payload["reasoningTokens"] = u.ReasoningTokens
+	}
+	if u.ResolvedModel != "" {
+		payload["resolvedModel"] = u.ResolvedModel
 	}
 	return payload
 }

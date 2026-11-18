@@ -68,12 +68,37 @@ func TestEventUsageRoundTripPreservesCacheAndReasoningCost(t *testing.T) {
 // decode identically to the pre-feature payload.
 func TestEventUsagePayloadOmitsZeroFields(t *testing.T) {
 	p := EventUsagePayload(zeroruntime.Usage{InputTokens: 1000, OutputTokens: 200})
-	for _, k := range []string{"cachedInputTokens", "cacheWriteTokens", "reasoningTokens"} {
+	for _, k := range []string{"cachedInputTokens", "cacheWriteTokens", "reasoningTokens", "resolvedModel"} {
 		if _, ok := p[k]; ok {
 			t.Errorf("expected %q omitted when zero", k)
 		}
 	}
 	if p["promptTokens"] != 1000 || p["completionTokens"] != 200 {
 		t.Fatalf("base fields wrong: %#v", p)
+	}
+}
+
+func TestEventUsagePayloadResolvedModelRoundTrip(t *testing.T) {
+	raw, err := json.Marshal(EventUsagePayload(zeroruntime.Usage{
+		InputTokens:   10,
+		OutputTokens:  2,
+		ResolvedModel: "deepseek/deepseek-r1:free",
+	}))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded usageEventPayload
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if decoded.ResolvedModel != "deepseek/deepseek-r1:free" {
+		t.Fatalf("ResolvedModel = %q", decoded.ResolvedModel)
+	}
+	var legacy usageEventPayload
+	if err := json.Unmarshal([]byte(`{"promptTokens":10,"completionTokens":2,"totalTokens":12}`), &legacy); err != nil {
+		t.Fatalf("legacy unmarshal: %v", err)
+	}
+	if legacy.ResolvedModel != "" {
+		t.Fatalf("legacy ResolvedModel = %q, want empty", legacy.ResolvedModel)
 	}
 }

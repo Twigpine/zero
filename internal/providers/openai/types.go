@@ -76,6 +76,7 @@ type streamChunk struct {
 	Choices []streamChoice `json:"choices"`
 	Usage   *usage         `json:"usage"`
 	Error   *apiError      `json:"error"`
+	Model   string         `json:"model"`
 }
 
 type streamChoice struct {

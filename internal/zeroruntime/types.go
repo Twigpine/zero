@@ -163,6 +163,9 @@ type Usage struct {
 	CachedInputTokens int
 	CacheWriteTokens  int
 	ReasoningTokens   int
+	// ResolvedModel is the provider-reported model that actually served the request
+	// (e.g. OpenRouter echo on routed aliases). Observability only — not used for pricing.
+	ResolvedModel string
 }
 
 // TotalTokens returns prompt plus completion tokens.

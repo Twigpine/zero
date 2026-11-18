@@ -194,6 +194,11 @@ func mergeUsageSnapshot(left Usage, right Usage) Usage {
 		reasoningTokens = right.ReasoningTokens
 	}
 
+	resolvedModel := left.ResolvedModel
+	if right.ResolvedModel != "" {
+		resolvedModel = right.ResolvedModel
+	}
+
 	usage, err := NormalizeUsage(TokenUsage{
 		InputTokens:       inputTokens,
 		OutputTokens:      outputTokens,
@@ -202,8 +207,10 @@ func mergeUsageSnapshot(left Usage, right Usage) Usage {
 		ReasoningTokens:   reasoningTokens,
 	})
 	if err != nil {
+		right.ResolvedModel = resolvedModel
 		return right
 	}
+	usage.ResolvedModel = resolvedModel
 	return usage
 }
 

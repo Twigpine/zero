@@ -289,6 +289,15 @@ func TestCollectStreamReportsOneMergedUsageCallback(t *testing.T) {
 	}
 }
 
+func TestMergeUsageSnapshotKeepsLastResolvedModel(t *testing.T) {
+	left := Usage{PromptTokens: 1, ResolvedModel: "router/alias"}
+	right := Usage{CompletionTokens: 2, ResolvedModel: "deepseek/deepseek-r1:free"}
+	merged := mergeUsageSnapshot(left, right)
+	if merged.ResolvedModel != "deepseek/deepseek-r1:free" {
+		t.Fatalf("ResolvedModel = %q, want deepseek/deepseek-r1:free", merged.ResolvedModel)
+	}
+}
+
 func TestCollectStreamWithOptionsEmitsTextReasoningAndUsageCallbacks(t *testing.T) {
 	events := make(chan StreamEvent)
 	go func() {
