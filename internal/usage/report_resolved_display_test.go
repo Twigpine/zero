@@ -133,7 +133,7 @@ func TestD2_1_22_BuildReportSanitizesResolvedModelOnRead(t *testing.T) {
 		if err := json.Unmarshal(raw, &payload); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
-		if payload.ResolvedModel != lit {
+		if string(payload.ResolvedModel) != lit {
 			t.Fatalf("precondition ResolvedModel = %q", payload.ResolvedModel)
 		}
 		ev := sessions.Event{SessionID: "s1", Sequence: 1, Type: sessions.EventUsage, CreatedAt: day, Payload: raw}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -260,7 +261,7 @@ func FormatReport(report usage.Report, insertions int, deletions int) string {
 				requested = "(unknown)"
 			}
 			fmt.Fprintf(&builder, "  requests %d, tokens %s: %s -> %s\n",
-				m.Requests, groupThousands(m.TotalTokens), requested, m.ResolvedModel)
+				m.Requests, groupThousands(m.TotalTokens), modelLabel(requested), modelLabel(m.ResolvedModel))
 		}
 	}
 
@@ -274,6 +275,16 @@ func FormatReport(report usage.Report, insertions int, deletions int) string {
 		builder.WriteString("est. cost per net LOC: n/a (net LOC <= 0)\n")
 	}
 	return strings.TrimRight(builder.String(), "\n")
+}
+
+// modelLabel shows a model id as is, and quoted when it contains the " -> "
+// separator of the row, so that ("router", "alias -> leaf") and
+// ("router -> alias", "leaf") do not render as the same text.
+func modelLabel(id string) string {
+	if strings.Contains(id, " -> ") {
+		return strconv.Quote(id)
+	}
+	return id
 }
 
 func formatUSD(value float64) string {

@@ -282,6 +282,14 @@ func TestD2_1_14_MergeUsageSnapshotResolvedModel(t *testing.T) {
 		if merged.ResolvedModel != "a" {
 			t.Fatalf("ResolvedModel = %q, want a on NormalizeUsage error path", merged.ResolvedModel)
 		}
+		// The fallback returns the right snapshot as it came, not the merge:
+		// without these checks a successful merge would pass the same test.
+		if merged.CacheWriteTokens != -1 {
+			t.Fatalf("CacheWriteTokens = %d, want -1 from the right snapshot (fallback path)", merged.CacheWriteTokens)
+		}
+		if merged.InputTokens != 0 {
+			t.Fatalf("InputTokens = %d, want 0: the fallback must not inherit the left snapshot", merged.InputTokens)
+		}
 	})
 }
 

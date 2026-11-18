@@ -301,7 +301,7 @@ func TestD2_1_13_HandleTerminalResponseResolvedModel(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			p := codexProviderGPTTest(t)
-			resp := &responsePayload{ID: "resp-1", Status: "completed", Model: tc.model}
+			resp := &responsePayload{ID: "resp-1", Status: "completed", Model: zeroruntime.ReportedModel(tc.model)}
 			if tc.withUsage {
 				resp.Usage = usage
 			}

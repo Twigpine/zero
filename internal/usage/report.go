@@ -19,14 +19,14 @@ import (
 // mid-run only under --allow-escalation); when absent, cost is reconstructed from
 // the session's Metadata.ModelID and is a labeled estimate.
 type usageEventPayload struct {
-	PromptTokens      int    `json:"promptTokens"`
-	CompletionTokens  int    `json:"completionTokens"`
-	TotalTokens       int    `json:"totalTokens"`
-	CachedInputTokens int    `json:"cachedInputTokens,omitempty"`
-	CacheWriteTokens  int    `json:"cacheWriteTokens,omitempty"`
-	ReasoningTokens   int    `json:"reasoningTokens,omitempty"`
-	Model             string `json:"model,omitempty"`
-	ResolvedModel     string `json:"resolvedModel,omitempty"`
+	PromptTokens      int                       `json:"promptTokens"`
+	CompletionTokens  int                       `json:"completionTokens"`
+	TotalTokens       int                       `json:"totalTokens"`
+	CachedInputTokens int                       `json:"cachedInputTokens,omitempty"`
+	CacheWriteTokens  int                       `json:"cacheWriteTokens,omitempty"`
+	ReasoningTokens   int                       `json:"reasoningTokens,omitempty"`
+	Model             string                    `json:"model,omitempty"`
+	ResolvedModel     zeroruntime.ReportedModel `json:"resolvedModel,omitempty"`
 }
 
 // EventUsagePayload builds the persisted EventUsage payload for a usage record.
@@ -118,6 +118,9 @@ func BuildReport(events []sessions.Event, meta []sessions.Metadata, registry *mo
 		LOCEstimated:  true,
 		CostEstimated: true,
 	}
+	// Grouped by the requested id as stored: two ids that only differ past the
+	// display cap are priced apart, so they are reported apart. The label shown
+	// is the sanitized, capped form.
 	type resolvedKey struct {
 		requested string
 		resolved  string
@@ -159,14 +162,14 @@ func BuildReport(events []sessions.Event, meta []sessions.Metadata, registry *mo
 		if requested == "" {
 			requested = modelBySession[event.SessionID]
 		}
-		if r := zeroruntime.ResolvedModelAttribution(requested, payload.ResolvedModel); r != "" {
+		if r := zeroruntime.ResolvedModelAttribution(requested, string(payload.ResolvedModel)); r != "" {
 			key := resolvedKey{
-				requested: zeroruntime.SanitizeResolvedModel(requested),
+				requested: requested,
 				resolved:  r,
 			}
 			entry, ok := resolvedAgg[key]
 			if !ok {
-				entry = &ResolvedModelUsage{RequestedModel: key.requested, ResolvedModel: key.resolved}
+				entry = &ResolvedModelUsage{RequestedModel: zeroruntime.SanitizeResolvedModel(requested), ResolvedModel: r}
 				resolvedAgg[key] = entry
 			}
 			entry.Requests++
@@ -213,7 +216,15 @@ func BuildReport(events []sessions.Event, meta []sessions.Metadata, registry *mo
 			if a.RequestedModel != b.RequestedModel {
 				return a.RequestedModel < b.RequestedModel
 			}
-			return a.ResolvedModel < b.ResolvedModel
+			if a.ResolvedModel != b.ResolvedModel {
+				return a.ResolvedModel < b.ResolvedModel
+			}
+			// Groups that only differ past the display cap share their labels;
+			// order them by size so the output is stable run to run.
+			if a.TotalTokens != b.TotalTokens {
+				return a.TotalTokens > b.TotalTokens
+			}
+			return a.Requests > b.Requests
 		})
 	}
 

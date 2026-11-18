@@ -320,11 +320,7 @@ func TestRunUsageInvalidSince(t *testing.T) {
 // with no usage events exits successfully, prints the header, shows a zero
 // total, and does not panic.
 func TestD2_1_19_UsageReportIgnoresRawResolvedModelInStoredEvents(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	isolateCLIUserState(t)
 
 	plainStore := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir(), Now: fixedCLITime("2026-06-01T09:00:00Z")})
 	rawStore := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir(), Now: fixedCLITime("2026-06-01T09:00:00Z")})
@@ -512,11 +508,7 @@ func TestD2_1_25_FormatReportAndRunUsage(t *testing.T) {
 	})
 
 	t.Run("d-e2e-clean-attribution", func(t *testing.T) {
-		t.Setenv("HOME", t.TempDir())
-		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-		t.Setenv("XDG_DATA_HOME", t.TempDir())
-		t.Setenv("XDG_CACHE_HOME", t.TempDir())
-		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		isolateCLIUserState(t)
 
 		store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir(), Now: fixedCLITime("2026-06-01T09:00:00Z")})
 		sess, err := store.Create(sessions.CreateInput{SessionID: "attr_s1", Title: "Attr", Cwd: "/repo", ModelID: "gpt-4.1", Provider: "openai"})
@@ -545,8 +537,16 @@ func TestD2_1_25_FormatReportAndRunUsage(t *testing.T) {
 		}
 		text := textOut.String()
 		wantLine := "  requests 1, tokens 1,200: gpt-4.1 -> [31mx"
-		if !strings.Contains(text, wantLine) {
-			t.Fatalf("text missing %q:\n%s", wantLine, text)
+		// The whole row, not a prefix: a row that continues past the expected
+		// text (an unsanitized tail) must not pass.
+		foundRow := false
+		for _, row := range strings.Split(text, "\n") {
+			if row == wantLine {
+				foundRow = true
+			}
+		}
+		if !foundRow {
+			t.Fatalf("text has no row equal to %q:\n%s", wantLine, text)
 		}
 		var rep struct {
 			ResolvedModels []struct {
@@ -567,11 +567,7 @@ func TestD2_1_25_FormatReportAndRunUsage(t *testing.T) {
 	})
 
 	t.Run("e-plain-store-no-block", func(t *testing.T) {
-		t.Setenv("HOME", t.TempDir())
-		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-		t.Setenv("XDG_DATA_HOME", t.TempDir())
-		t.Setenv("XDG_CACHE_HOME", t.TempDir())
-		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		isolateCLIUserState(t)
 
 		store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir(), Now: fixedCLITime("2026-06-01T09:00:00Z")})
 		sess, err := store.Create(sessions.CreateInput{SessionID: "plain_s1", Title: "Plain", Cwd: "/repo", ModelID: "gpt-4.1", Provider: "openai"})
@@ -605,4 +601,25 @@ func TestD2_1_25_FormatReportAndRunUsage(t *testing.T) {
 			t.Fatalf("json has resolvedModels key: %s", jsonOut.String())
 		}
 	})
+}
+
+// The " -> " separator is printable, so it survives sanitizing. Two different
+// (requested, resolved) pairs must not render as the same row.
+func TestFormatReportQuotesModelIDsThatContainTheSeparator(t *testing.T) {
+	render := func(requested, resolved string) string {
+		return FormatReport(usage.Report{
+			ResolvedModels: []usage.ResolvedModelUsage{{RequestedModel: requested, ResolvedModel: resolved, Requests: 1, TotalTokens: 5}},
+		}, 0, 0)
+	}
+	a := render("router", "alias -> leaf")
+	b := render("router -> alias", "leaf")
+	if a == b {
+		t.Fatalf("two different pairs render the same text:\n%s", a)
+	}
+	if !strings.Contains(a, `router -> "alias -> leaf"`) || !strings.Contains(b, `"router -> alias" -> leaf`) {
+		t.Fatalf("ids that contain the separator are not quoted:\n%s\n%s", a, b)
+	}
+	if plain := render("router", "leaf"); !strings.Contains(plain, "  requests 1, tokens 5: router -> leaf") {
+		t.Fatalf("plain ids must stay unquoted:\n%s", plain)
+	}
 }

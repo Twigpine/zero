@@ -166,6 +166,12 @@ type Usage struct {
 	// ResolvedModel is cleaned provider-reported attribution, at most
 	// MaxResolvedModelBytes, empty when equal to the requested model. Never pricing.
 	ResolvedModel string
+	// ModelReported is true when the provider reported a model on this usage
+	// snapshot, even one equal to the requested model (which leaves
+	// ResolvedModel empty). It lets a merge tell "the router now serves the
+	// requested model" apart from "this snapshot carries no model". Never
+	// persisted.
+	ModelReported bool
 }
 
 // TotalTokens returns prompt plus completion tokens.
