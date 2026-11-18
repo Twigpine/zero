@@ -252,6 +252,18 @@ func FormatReport(report usage.Report, insertions int, deletions int) string {
 	fmt.Fprintf(&builder, "\n%-12s %10d %14s %14s\n",
 		"total", report.Total.Requests, groupThousands(report.Total.TotalTokens), formatUSD(report.Total.TotalCost))
 
+	if len(report.ResolvedModels) > 0 {
+		builder.WriteString("\nresolved models (reported by provider; cost uses the requested model)\n")
+		for _, m := range report.ResolvedModels {
+			requested := m.RequestedModel
+			if requested == "" {
+				requested = "(unknown)"
+			}
+			fmt.Fprintf(&builder, "  requests %d, tokens %s: %s -> %s\n",
+				m.Requests, groupThousands(m.TotalTokens), requested, m.ResolvedModel)
+		}
+	}
+
 	fmt.Fprintf(&builder, "\nnet LOC (estimate): +%d / -%d = %d\n",
 		insertions, deletions, report.NetLOC)
 	if report.NetLOCPositive {

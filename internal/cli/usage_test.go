@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Twigpine/zero/internal/sessions"
+	"github.com/Twigpine/zero/internal/usage"
 	"github.com/Twigpine/zero/internal/zerogit"
 )
 
@@ -412,4 +413,196 @@ func TestRunUsageEmptyStore(t *testing.T) {
 	if !strings.Contains(output, "total") {
 		t.Fatalf("empty store: expected 'total' row in output, got:\n%s", output)
 	}
+}
+
+func TestD2_1_25_FormatReportAndRunUsage(t *testing.T) {
+	const reportHeader = "resolved models (reported by provider; cost uses the requested model)"
+
+	t.Run("a-no-resolved-block", func(t *testing.T) {
+		// Same shape as TestRunUsageTextReport / seedUsageStore (2× gpt-4.1 events, net LOC 70).
+		report := usage.Report{
+			Buckets: []usage.DayBucket{{
+				Date: "2026-06-01", Requests: 2, InputTokens: 1500, OutputTokens: 300,
+				TotalTokens: 1800, TotalCost: 0.0054,
+			}},
+			Total: usage.Totals{
+				Requests: 2, InputTokens: 1500, OutputTokens: 300, TotalTokens: 1800, TotalCost: 0.0054,
+			},
+			NetLOC:          70,
+			NetLOCPositive:  true,
+			TokensPerNetLOC: 1800.0 / 70,
+			CostPerNetLOC:   0.0054 / 70,
+			LOCEstimated:    true,
+			CostEstimated:   true,
+		}
+		const want = "" +
+			"Usage report (cost is a reconstructed estimate)\n" +
+			"\n" +
+			"date           requests         tokens      est. cost\n" +
+			"2026-06-01            2          1,800      $0.005400\n" +
+			"\n" +
+			"total                 2          1,800      $0.005400\n" +
+			"\n" +
+			"net LOC (estimate): +100 / -30 = 70\n" +
+			"tokens per net LOC: 25.7\n" +
+			"est. cost per net LOC: $0.000077"
+		got := FormatReport(report, 100, 30)
+		if got != want {
+			t.Fatalf("FormatReport =\n%q\nwant\n%q", got, want)
+		}
+	})
+
+	t.Run("b-resolved-block-placement", func(t *testing.T) {
+		report := usage.Report{
+			Buckets: []usage.DayBucket{{Date: "2026-06-01", Requests: 3, TotalTokens: 66}},
+			Total:   usage.Totals{Requests: 3, TotalTokens: 66},
+			NetLOC:  10, NetLOCPositive: true, TokensPerNetLOC: 6.6, LOCEstimated: true, CostEstimated: true,
+			ResolvedModels: []usage.ResolvedModelUsage{
+				{RequestedModel: "a-model", ResolvedModel: "z", Requests: 1, TotalTokens: 33},
+				{RequestedModel: "gpt-test", ResolvedModel: "deepseek/a", Requests: 1, TotalTokens: 22},
+				{RequestedModel: "gpt-test", ResolvedModel: "x/y", Requests: 1, TotalTokens: 11},
+			},
+		}
+		text := FormatReport(report, 5, 5)
+		lines := strings.Split(text, "\n")
+		totalIdx, headerIdx, netLOCIdx := -1, -1, -1
+		for i, line := range lines {
+			if strings.HasPrefix(line, "total") && totalIdx < 0 {
+				totalIdx = i
+			}
+			if line == reportHeader {
+				headerIdx = i
+			}
+			if strings.HasPrefix(line, "net LOC") {
+				netLOCIdx = i
+			}
+		}
+		if totalIdx < 0 || headerIdx < 0 || netLOCIdx < 0 {
+			t.Fatalf("could not find total/header/net LOC in:\n%s", text)
+		}
+		if totalIdx >= headerIdx || headerIdx >= netLOCIdx {
+			t.Fatalf("block order wrong: total@%d header@%d netLOC@%d", totalIdx, headerIdx, netLOCIdx)
+		}
+		wantLines := []string{
+			"  requests 1, tokens 33: a-model -> z",
+			"  requests 1, tokens 22: gpt-test -> deepseek/a",
+			"  requests 1, tokens 11: gpt-test -> x/y",
+		}
+		block := lines[headerIdx+1 : headerIdx+1+len(wantLines)]
+		for i := range wantLines {
+			if block[i] != wantLines[i] {
+				t.Fatalf("line %d = %q, want %q", i, block[i], wantLines[i])
+			}
+		}
+	})
+
+	t.Run("c-unknown-requested", func(t *testing.T) {
+		report := usage.Report{
+			Buckets:        []usage.DayBucket{{Date: "2026-06-01", Requests: 1, TotalTokens: 9}},
+			Total:          usage.Totals{Requests: 1, TotalTokens: 9},
+			NetLOC:         1,
+			LOCEstimated:   true,
+			CostEstimated:  true,
+			ResolvedModels: []usage.ResolvedModelUsage{{RequestedModel: "", ResolvedModel: "x", Requests: 1, TotalTokens: 9}},
+		}
+		text := FormatReport(report, 0, 0)
+		if !strings.Contains(text, "  requests 1, tokens 9: (unknown) -> x") {
+			t.Fatalf("missing (unknown) line in:\n%s", text)
+		}
+	})
+
+	t.Run("d-e2e-clean-attribution", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		t.Setenv("XDG_DATA_HOME", t.TempDir())
+		t.Setenv("XDG_CACHE_HOME", t.TempDir())
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+		store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir(), Now: fixedCLITime("2026-06-01T09:00:00Z")})
+		sess, err := store.Create(sessions.CreateInput{SessionID: "attr_s1", Title: "Attr", Cwd: "/repo", ModelID: "gpt-4.1", Provider: "openai"})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		payload := map[string]any{
+			"promptTokens": 1000, "completionTokens": 200, "totalTokens": 1200,
+			"resolvedModel": "\x1b[31mx\u0085",
+		}
+		if _, err := store.AppendEvent(sess.SessionID, sessions.AppendEventInput{Type: sessions.EventUsage, Payload: payload}); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
+		}
+
+		var textOut, jsonOut bytes.Buffer
+		var stderr bytes.Buffer
+		deps := appDeps{
+			newSessionStore: func() *sessions.Store { return store },
+			inspectChanges:  stubInspectChanges(""),
+		}
+		if code := runWithDeps([]string{"usage", "report"}, &textOut, &stderr, deps); code != exitSuccess {
+			t.Fatalf("text report exit %d: %s", code, stderr.String())
+		}
+		if code := runWithDeps([]string{"usage", "report", "--json"}, &jsonOut, &stderr, deps); code != exitSuccess {
+			t.Fatalf("json report exit %d: %s", code, stderr.String())
+		}
+		text := textOut.String()
+		wantLine := "  requests 1, tokens 1,200: gpt-4.1 -> [31mx"
+		if !strings.Contains(text, wantLine) {
+			t.Fatalf("text missing %q:\n%s", wantLine, text)
+		}
+		var rep struct {
+			ResolvedModels []struct {
+				ResolvedModel string `json:"resolvedModel"`
+			} `json:"resolvedModels"`
+		}
+		if err := json.Unmarshal(jsonOut.Bytes(), &rep); err != nil {
+			t.Fatalf("json decode: %v\n%s", err, jsonOut.String())
+		}
+		if len(rep.ResolvedModels) != 1 || rep.ResolvedModels[0].ResolvedModel != "[31mx" {
+			t.Fatalf("resolvedModels = %+v, want [31mx", rep.ResolvedModels)
+		}
+		for _, out := range []string{text, jsonOut.String()} {
+			if strings.Contains(out, "\x1b") || strings.Contains(out, `\u001b`) || strings.Contains(out, "\u0085") {
+				t.Fatalf("output contains forbidden escape: %q", out)
+			}
+		}
+	})
+
+	t.Run("e-plain-store-no-block", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		t.Setenv("XDG_DATA_HOME", t.TempDir())
+		t.Setenv("XDG_CACHE_HOME", t.TempDir())
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+		store := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir(), Now: fixedCLITime("2026-06-01T09:00:00Z")})
+		sess, err := store.Create(sessions.CreateInput{SessionID: "plain_s1", Title: "Plain", Cwd: "/repo", ModelID: "gpt-4.1", Provider: "openai"})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		payload := map[string]any{"promptTokens": 1000, "completionTokens": 200, "totalTokens": 1200}
+		if _, err := store.AppendEvent(sess.SessionID, sessions.AppendEventInput{Type: sessions.EventUsage, Payload: payload}); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
+		}
+		var textOut, jsonOut bytes.Buffer
+		var stderr bytes.Buffer
+		deps := appDeps{
+			newSessionStore: func() *sessions.Store { return store },
+			inspectChanges:  stubInspectChanges(""),
+		}
+		if code := runWithDeps([]string{"usage", "report"}, &textOut, &stderr, deps); code != exitSuccess {
+			t.Fatalf("text report exit %d: %s", code, stderr.String())
+		}
+		if code := runWithDeps([]string{"usage", "report", "--json"}, &jsonOut, &stderr, deps); code != exitSuccess {
+			t.Fatalf("json report exit %d: %s", code, stderr.String())
+		}
+		if strings.Contains(textOut.String(), "resolved models") {
+			t.Fatalf("text shows resolved block:\n%s", textOut.String())
+		}
+		var keys map[string]json.RawMessage
+		if err := json.Unmarshal(jsonOut.Bytes(), &keys); err != nil {
+			t.Fatalf("json decode: %v", err)
+		}
+		if _, ok := keys["resolvedModels"]; ok {
+			t.Fatalf("json has resolvedModels key: %s", jsonOut.String())
+		}
+	})
 }

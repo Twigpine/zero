@@ -67,6 +67,16 @@ type DayBucket struct {
 	TotalCost    float64 `json:"totalCost"`
 }
 
+// ResolvedModelUsage aggregates usage events whose provider reported a model
+// different from the requested one. Attribution only: cost stays with the
+// requested model.
+type ResolvedModelUsage struct {
+	RequestedModel string `json:"requestedModel"`
+	ResolvedModel  string `json:"resolvedModel"`
+	Requests       int    `json:"requests"`
+	TotalTokens    int    `json:"totalTokens"`
+}
+
 // Totals carries report-wide sums across every bucket.
 type Totals struct {
 	Requests     int     `json:"requests"`
@@ -80,14 +90,15 @@ type Totals struct {
 // reconstructed estimate (see usageEventPayload) and NetLOC is a working-tree
 // estimate; both are surfaced as estimates in the rendered output.
 type Report struct {
-	Buckets         []DayBucket `json:"buckets"`
-	Total           Totals      `json:"total"`
-	NetLOC          int         `json:"netLOC"`
-	NetLOCPositive  bool        `json:"netLOCPositive"`
-	TokensPerNetLOC float64     `json:"tokensPerNetLOC"`
-	CostPerNetLOC   float64     `json:"costPerNetLOC"`
-	LOCEstimated    bool        `json:"locEstimated"`
-	CostEstimated   bool        `json:"costEstimated"`
+	Buckets         []DayBucket          `json:"buckets"`
+	Total           Totals               `json:"total"`
+	NetLOC          int                  `json:"netLOC"`
+	NetLOCPositive  bool                 `json:"netLOCPositive"`
+	TokensPerNetLOC float64              `json:"tokensPerNetLOC"`
+	CostPerNetLOC   float64              `json:"costPerNetLOC"`
+	LOCEstimated    bool                 `json:"locEstimated"`
+	CostEstimated   bool                 `json:"costEstimated"`
+	ResolvedModels  []ResolvedModelUsage `json:"resolvedModels,omitempty"`
 }
 
 // BuildReport aggregates persisted EventUsage events into per-day buckets and a
@@ -107,6 +118,11 @@ func BuildReport(events []sessions.Event, meta []sessions.Metadata, registry *mo
 		LOCEstimated:  true,
 		CostEstimated: true,
 	}
+	type resolvedKey struct {
+		requested string
+		resolved  string
+	}
+	resolvedAgg := map[resolvedKey]*ResolvedModelUsage{}
 
 	for _, event := range events {
 		if event.Type != sessions.EventUsage {
@@ -139,10 +155,25 @@ func BuildReport(events []sessions.Event, meta []sessions.Metadata, registry *mo
 		// Prefer the model the event itself recorded (set on escalation runs, where
 		// the model changed mid-run) so that usage is priced at the model actually
 		// used; fall back to the session's model otherwise.
-		modelID := payload.Model
-		if modelID == "" {
-			modelID = modelBySession[event.SessionID]
+		requested := payload.Model
+		if requested == "" {
+			requested = modelBySession[event.SessionID]
 		}
+		if r := zeroruntime.ResolvedModelAttribution(requested, payload.ResolvedModel); r != "" {
+			key := resolvedKey{
+				requested: zeroruntime.SanitizeResolvedModel(requested),
+				resolved:  r,
+			}
+			entry, ok := resolvedAgg[key]
+			if !ok {
+				entry = &ResolvedModelUsage{RequestedModel: key.requested, ResolvedModel: key.resolved}
+				resolvedAgg[key] = entry
+			}
+			entry.Requests++
+			entry.TotalTokens += payload.TotalTokens
+		}
+
+		modelID := requested
 		if modelID == "" || registry == nil {
 			continue
 		}
@@ -171,6 +202,20 @@ func BuildReport(events []sessions.Event, meta []sessions.Metadata, registry *mo
 	sort.SliceStable(report.Buckets, func(left int, right int) bool {
 		return report.Buckets[left].Date < report.Buckets[right].Date
 	})
+
+	if len(resolvedAgg) > 0 {
+		report.ResolvedModels = make([]ResolvedModelUsage, 0, len(resolvedAgg))
+		for _, entry := range resolvedAgg {
+			report.ResolvedModels = append(report.ResolvedModels, *entry)
+		}
+		sort.Slice(report.ResolvedModels, func(i, j int) bool {
+			a, b := report.ResolvedModels[i], report.ResolvedModels[j]
+			if a.RequestedModel != b.RequestedModel {
+				return a.RequestedModel < b.RequestedModel
+			}
+			return a.ResolvedModel < b.ResolvedModel
+		})
+	}
 
 	if netLOC > 0 {
 		report.NetLOCPositive = true
