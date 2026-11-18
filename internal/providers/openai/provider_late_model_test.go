@@ -299,3 +299,28 @@ func TestStreamCompletionEarlierUsageKeepsModelNamedOnAContentChunk(t *testing.T
 		}
 	}
 }
+
+// The usage chunk is held until the end of the stream, so content that follows
+// it is delivered first. The usage event still precedes done, and nothing reads
+// the order of text relative to usage; this pins it so a change is deliberate.
+func TestStreamCompletionHeldUsageArrivesAfterLaterContentBeforeDone(t *testing.T) {
+	t.Parallel()
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"model":"deepseek/x","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":1}}`)
+		writeSSE(w, `{"choices":[{"delta":{"content":"late"}}]}`)
+		writeSSE(w, `[DONE]`)
+	})
+	var got []zeroruntime.StreamEventType
+	for _, event := range collectProviderEvents(t, provider) {
+		got = append(got, event.Type)
+	}
+	want := []zeroruntime.StreamEventType{zeroruntime.StreamEventText, zeroruntime.StreamEventUsage, zeroruntime.StreamEventDone}
+	if len(got) != len(want) {
+		t.Fatalf("event types = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("event types = %v, want %v", got, want)
+		}
+	}
+}
