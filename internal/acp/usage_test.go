@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +20,69 @@ import (
 // OnUsage, which dropped the token counts of every ACP session. A turn with two
 // provider requests (a tool round trip) must leave two usage events, in the shape
 // the usage report reads, next to the turn's messages.
+func TestD2_1_18_ACPPromptPersistsSanitizedResolvedModel(t *testing.T) {
+	deps := testDeps(t)
+	deps.RunAgent = func(_ context.Context, _ string, _ zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
+		if opts.OnUsage == nil {
+			// Not t.Fatal: this runs on the server goroutine. The error reaches
+			// the test goroutine through the session/prompt call below.
+			return agent.Result{}, errors.New("agent.Options.OnUsage is not wired")
+		}
+		opts.OnUsage(agent.Usage{InputTokens: 5, OutputTokens: 1, ResolvedModel: "\x1b[31mx\u0085y"})
+		return agent.Result{FinalAnswer: "done"}, nil
+	}
+	h := newHarness(t, deps)
+	defer h.stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var created NewSessionResult
+	if err := h.client.Call(ctx, MethodSessionNew, NewSessionParams{Cwd: t.TempDir()}, &created); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.client.Call(ctx, MethodSessionPrompt, PromptParams{
+		SessionID: created.SessionID, Prompt: []ContentBlock{TextBlock("sanitize model")},
+	}, &PromptResult{}); err != nil {
+		t.Fatalf("session/prompt: %v", err)
+	}
+	events, err := deps.Store.ReadEvents(created.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resolved string
+	found := false
+	for _, event := range events {
+		if event.Type != sessions.EventUsage {
+			continue
+		}
+		found = true
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("payload: %v", err)
+		}
+		if err := json.Unmarshal(payload["resolvedModel"], &resolved); err != nil {
+			t.Fatalf("resolvedModel: %v", err)
+		}
+	}
+	if !found {
+		t.Fatal("missing provider_usage event")
+	}
+	if resolved != "[31mxy" {
+		t.Fatalf("resolvedModel = %q, want [31mxy", resolved)
+	}
+	path := filepath.Join(deps.Store.RootDir, created.SessionID, sessions.EventsFile)
+	rawFile, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read events.jsonl: %v", err)
+	}
+	line := string(rawFile)
+	if strings.Contains(line, `\u001b`) || strings.Contains(line, "\u001b") {
+		t.Fatalf("raw event line contains ESC escape: %q", line)
+	}
+	if strings.Contains(line, "\xc2\x85") {
+		t.Fatalf("raw event line contains U+0085 UTF-8 bytes: %q", line)
+	}
+}
+
 func TestACPPromptPersistsProviderUsage(t *testing.T) {
 	deps := testDeps(t)
 	deps.RunAgent = func(_ context.Context, _ string, _ zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
@@ -290,6 +355,7 @@ var usagePayloadAllowedKeys = map[string]bool{
 	"cachedInputTokens": true,
 	"cacheWriteTokens":  true,
 	"reasoningTokens":   true,
+	"resolvedModel":     true,
 }
 
 func assertUsagePayloadIsTokenCountsOnly(t *testing.T, payload json.RawMessage) {

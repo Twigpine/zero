@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // CollectedStream is the non-streaming summary of provider events.
@@ -104,6 +105,7 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 		select {
 		case <-ctx.Done():
 			collected.Error = ctx.Err().Error()
+			drainUsageAfterCancel(events, &collected, &usageSeen)
 			return finish()
 		case event, ok := <-events:
 			if !ok {
@@ -168,6 +170,37 @@ func CollectStreamWithOptions(ctx context.Context, events <-chan StreamEvent, op
 	}
 }
 
+// cancelDrainGrace bounds how long a cancelled collection waits for usage that
+// the provider already received but had not yet handed over.
+const cancelDrainGrace = 50 * time.Millisecond
+
+// drainUsageAfterCancel reads what the provider still sends after the caller
+// cancelled and merges only usage events, so tokens the provider reported
+// before the cancel are not lost. It stops when the channel closes, on a
+// terminal event, or when the grace period ends, so it never holds the caller.
+func drainUsageAfterCancel(events <-chan StreamEvent, collected *CollectedStream, usageSeen *bool) {
+	deadline := time.Now().Add(cancelDrainGrace)
+	timer := time.NewTimer(cancelDrainGrace)
+	defer timer.Stop()
+	for {
+		select {
+		case event, ok := <-events:
+			if !ok || !time.Now().Before(deadline) {
+				return
+			}
+			switch event.Type {
+			case StreamEventUsage:
+				collected.Usage = mergeUsageSnapshot(collected.Usage, event.Usage)
+				*usageSeen = true
+			case StreamEventDone, StreamEventError:
+				return
+			}
+		case <-timer.C:
+			return
+		}
+	}
+}
+
 func mergeUsageSnapshot(left Usage, right Usage) Usage {
 	inputTokens := left.EffectiveInputTokens()
 	if value := right.EffectiveInputTokens(); value != 0 {
@@ -194,6 +227,15 @@ func mergeUsageSnapshot(left Usage, right Usage) Usage {
 		reasoningTokens = right.ReasoningTokens
 	}
 
+	resolvedModel := left.ResolvedModel
+	modelReported := left.ModelReported
+	if right.ModelReported || right.ResolvedModel != "" {
+		// The later snapshot reported a model: it wins, including when it equals
+		// the requested model and so leaves ResolvedModel empty.
+		resolvedModel = right.ResolvedModel
+		modelReported = true
+	}
+
 	usage, err := NormalizeUsage(TokenUsage{
 		InputTokens:       inputTokens,
 		OutputTokens:      outputTokens,
@@ -202,8 +244,12 @@ func mergeUsageSnapshot(left Usage, right Usage) Usage {
 		ReasoningTokens:   reasoningTokens,
 	})
 	if err != nil {
+		right.ResolvedModel = resolvedModel
+		right.ModelReported = modelReported
 		return right
 	}
+	usage.ResolvedModel = resolvedModel
+	usage.ModelReported = modelReported
 	return usage
 }
 

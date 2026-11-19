@@ -256,6 +256,68 @@ func TestCollectStreamMergesMixedUsageSnapshots(t *testing.T) {
 	}
 }
 
+func TestD2_1_14_MergeUsageSnapshotResolvedModel(t *testing.T) {
+	t.Parallel()
+	t.Run("last-non-empty-wins", func(t *testing.T) {
+		t.Parallel()
+		left := Usage{PromptTokens: 1, ResolvedModel: "router/alias"}
+		right := Usage{CompletionTokens: 2, ResolvedModel: "deepseek/x"}
+		merged := mergeUsageSnapshot(left, right)
+		if merged.ResolvedModel != "deepseek/x" {
+			t.Fatalf("ResolvedModel = %q, want deepseek/x", merged.ResolvedModel)
+		}
+	})
+	t.Run("keep-left-when-right-empty", func(t *testing.T) {
+		t.Parallel()
+		merged := mergeUsageSnapshot(Usage{ResolvedModel: "a"}, Usage{})
+		if merged.ResolvedModel != "a" {
+			t.Fatalf("ResolvedModel = %q, want a", merged.ResolvedModel)
+		}
+	})
+	t.Run("normalize-error-keeps-merged-model", func(t *testing.T) {
+		t.Parallel()
+		left := Usage{InputTokens: 10, ResolvedModel: "a"}
+		right := Usage{CacheWriteTokens: -1}
+		merged := mergeUsageSnapshot(left, right)
+		if merged.ResolvedModel != "a" {
+			t.Fatalf("ResolvedModel = %q, want a on NormalizeUsage error path", merged.ResolvedModel)
+		}
+		// The fallback returns the right snapshot as it came, not the merge:
+		// without these checks a successful merge would pass the same test.
+		if merged.CacheWriteTokens != -1 {
+			t.Fatalf("CacheWriteTokens = %d, want -1 from the right snapshot (fallback path)", merged.CacheWriteTokens)
+		}
+		if merged.InputTokens != 0 {
+			t.Fatalf("InputTokens = %d, want 0: the fallback must not inherit the left snapshot", merged.InputTokens)
+		}
+	})
+}
+
+func TestD2_1_14_CollectStreamMergesResolvedModelFromFirstUsage(t *testing.T) {
+	events := make(chan StreamEvent)
+	go func() {
+		defer close(events)
+		events <- StreamEvent{Type: StreamEventUsage, Usage: Usage{
+			PromptTokens: 10, ResolvedModel: "deepseek/x",
+		}}
+		events <- StreamEvent{Type: StreamEventUsage, Usage: Usage{CompletionTokens: 5}}
+		events <- StreamEvent{Type: StreamEventDone}
+	}()
+	var usageEvents []Usage
+	collected := CollectStreamWithOptions(context.Background(), events, CollectOptions{
+		OnUsage: func(usage Usage) { usageEvents = append(usageEvents, usage) },
+	})
+	if len(usageEvents) != 1 {
+		t.Fatalf("usage callbacks = %#v, want one merged callback", usageEvents)
+	}
+	if usageEvents[0].ResolvedModel != "deepseek/x" {
+		t.Fatalf("ResolvedModel = %q, want deepseek/x", usageEvents[0].ResolvedModel)
+	}
+	if collected.Usage.ResolvedModel != "deepseek/x" {
+		t.Fatalf("collected ResolvedModel = %q, want deepseek/x", collected.Usage.ResolvedModel)
+	}
+}
+
 func TestCollectStreamReportsOneMergedUsageCallback(t *testing.T) {
 	events := make(chan StreamEvent)
 	go func() {

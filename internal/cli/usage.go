@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -252,6 +253,18 @@ func FormatReport(report usage.Report, insertions int, deletions int) string {
 	fmt.Fprintf(&builder, "\n%-12s %10d %14s %14s\n",
 		"total", report.Total.Requests, groupThousands(report.Total.TotalTokens), formatUSD(report.Total.TotalCost))
 
+	if len(report.ResolvedModels) > 0 {
+		builder.WriteString("\nresolved models (reported by provider; cost uses the requested model)\n")
+		for _, m := range report.ResolvedModels {
+			requested := m.RequestedModel
+			if requested == "" {
+				requested = "(unknown)"
+			}
+			fmt.Fprintf(&builder, "  requests %d, tokens %s: %s -> %s\n",
+				m.Requests, groupThousands(m.TotalTokens), modelLabel(requested), modelLabel(m.ResolvedModel))
+		}
+	}
+
 	fmt.Fprintf(&builder, "\nnet LOC (estimate): +%d / -%d = %d\n",
 		insertions, deletions, report.NetLOC)
 	if report.NetLOCPositive {
@@ -262,6 +275,16 @@ func FormatReport(report usage.Report, insertions int, deletions int) string {
 		builder.WriteString("est. cost per net LOC: n/a (net LOC <= 0)\n")
 	}
 	return strings.TrimRight(builder.String(), "\n")
+}
+
+// modelLabel shows a model id as is, and quoted when it contains the " -> "
+// separator of the row, so that ("router", "alias -> leaf") and
+// ("router -> alias", "leaf") do not render as the same text.
+func modelLabel(id string) string {
+	if strings.Contains(id, " -> ") {
+		return strconv.Quote(id)
+	}
+	return id
 }
 
 func formatUSD(value float64) string {
