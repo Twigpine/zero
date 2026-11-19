@@ -858,9 +858,11 @@ func TestSwitchProviderModelRecordsRecentHistory(t *testing.T) {
 	}
 }
 
-// Switching providers warms discovery for the target. The result must pass the
-// supersession guard even when the picker registered that provider earlier and
-// a /model list refresh of another provider has since advanced the generation.
+// Switching providers warms discovery for the target and registers that request.
+// The switch's result must land even though the picker registered the provider
+// earlier and a /model list refresh of another provider advanced the generation,
+// and a result from that earlier picker request arriving after the switch must
+// not replace the switch's models.
 func TestSwitchProviderModelDiscoveryPassesRefreshGuard(t *testing.T) {
 	probe := httptest.NewServer(http.NotFoundHandler())
 	defer probe.Close()
@@ -891,27 +893,46 @@ func TestSwitchProviderModelDiscoveryPassesRefreshGuard(t *testing.T) {
 	m, _ = m.openModelPicker()
 	m.picker = nil
 	m, _ = m.modelListDiscoveryCmd()
+	descriptor, ok := m.descriptorForProfile(ollama)
+	if !ok {
+		t.Fatal("ollama profile has no descriptor")
+	}
+	ollamaKey := modelPickerDiscoveryKey(providerEndpointKey(ollama, descriptor), descriptor.ID)
+	pickerRequest := m.modelPickerDiscoveryRequests[ollamaKey]
+	if pickerRequest == 0 {
+		t.Fatal("opening the picker did not register the ollama request")
+	}
 
 	next, status, switched, cmd, _ := m.switchProviderModel("ollama", "kimi-k2.7-code:cloud")
 	if !switched || cmd == nil {
 		t.Fatalf("switch failed or scheduled no discovery: %q", status)
 	}
-	var result tea.Msg
+	var result modelPickerModelsDiscoveredMsg
+	found := false
 	for _, sub := range cmd().(tea.BatchMsg) {
 		if msg, ok := sub().(modelPickerModelsDiscoveredMsg); ok {
-			result = msg
+			result, found = msg, true
 		}
 	}
-	if result == nil {
+	if !found {
 		t.Fatal("provider switch produced no discovery result")
 	}
-	updated, _ := next.Update(result)
-	for _, models := range updated.(model).modelPickerLiveByProvider {
-		if len(models) == 1 && models[0].ID == "kimi-live" {
-			return
-		}
+	if key := modelPickerDiscoveryKey(result.endpointKey, result.providerID); key != ollamaKey {
+		t.Fatalf("switch result keyed %q, want %q", key, ollamaKey)
 	}
-	t.Fatalf("provider switch discovery was discarded as stale; cache = %#v", updated.(model).modelPickerLiveByProvider)
+	updated, _ := next.Update(result)
+	if models := updated.(model).modelPickerLiveByProvider[ollamaKey]; len(models) != 1 || models[0].ID != "kimi-live" {
+		t.Fatalf("provider switch discovery was discarded as stale; cache = %#v", updated.(model).modelPickerLiveByProvider)
+	}
+	// The picker's earlier request for ollama answers late: the switch registered
+	// a newer request, so this older result must be dropped.
+	updated, _ = updated.(model).Update(modelPickerModelsDiscoveredMsg{
+		providerID: result.providerID, endpointKey: result.endpointKey, generation: pickerRequest,
+		models: []providermodeldiscovery.Model{{ID: "kimi-stale"}},
+	})
+	if models := updated.(model).modelPickerLiveByProvider[ollamaKey]; len(models) != 1 || models[0].ID != "kimi-live" {
+		t.Fatalf("older picker result replaced the switch's models; cache = %#v", models)
+	}
 }
 
 func TestSwitchProviderModelReportsLockedConfigAsNotSavedWithoutPartialSelection(t *testing.T) {
