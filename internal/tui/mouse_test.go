@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -1035,6 +1036,36 @@ func TestModelPickerMouseUsesRenderedRowBoundaries(t *testing.T) {
 	}
 }
 
+func TestModelPickerMouseAccountsForWrappedDiscoveryNotices(t *testing.T) {
+	for _, label := range []string{"target-row", "refresh failed"} {
+		t.Run(label, func(t *testing.T) {
+			m := subscriptionTestModel(t)
+			m.width, m.height = 80, 40
+			m.modelPickerErrorsByProvider = map[string]string{"subscription": "login expired; authenticate again before refreshing account models"}
+			m.picker = &commandPicker{kind: pickerModel, items: []pickerItem{
+				{Group: "Models", Label: "first-row", Value: "first"},
+				{Group: "Models", Label: "target-row", Value: "target"},
+			}}
+			overlay := m.modelPickerOverlay(80)
+			rect := m.overlayMouseRect(len(viewLines(overlay)), 80)
+			for row, text := range strings.Split(plainRender(t, overlay), "\n") {
+				if !strings.Contains(text, label) {
+					continue
+				}
+				target, ok := m.selectModelPickerAtMouse(testMouseClick(tea.MouseLeft, 40, rect.y+row))
+				if label == "target-row" && (!ok || target.Value != "target") {
+					t.Fatalf("click on rendered model selected %#v, ok=%v; want target", target, ok)
+				}
+				if label == "refresh failed" && ok {
+					t.Fatalf("click on discovery notice selected %#v", target)
+				}
+				return
+			}
+			t.Fatalf("rendered picker lacks %q", label)
+		})
+	}
+}
+
 func TestModelPickerFitsMultilineRowsToViewport(t *testing.T) {
 	for _, selected := range []int{0, 5, 9} {
 		m := mouseTestModel()
@@ -1128,4 +1159,85 @@ func setupMouseTestModel() model {
 	m.height = 30
 	m.altScreen = true
 	return m
+}
+
+func TestModelPickerCapsDiscoveryNoticesFromManyAccounts(t *testing.T) {
+	m := subscriptionTestModel(t)
+	m.width, m.height = 80, 24
+	m.modelPickerErrorsByProvider = map[string]string{}
+	for i := 0; i < 8; i++ {
+		name := fmt.Sprintf("account-%d", i)
+		m.savedProviders = append(m.savedProviders, config.ProviderProfile{
+			Name: name, CatalogID: "chatgpt", BaseURL: m.providerProfile.BaseURL,
+			ProviderKind: config.ProviderKindOpenAICompatible,
+		})
+		m.modelPickerErrorsByProvider[name] = "login expired; authenticate again before refreshing account models"
+	}
+	m.picker = &commandPicker{kind: pickerModel, items: []pickerItem{
+		{Group: "Models", Label: "first-row", Value: "first"},
+		{Group: "Models", Label: "target-row", Value: "target"},
+	}}
+	if got := len(m.modelPickerDiscoveryNoticeLines(76)); got > modelPickerMaxNoticeLines {
+		t.Fatalf("discovery notices use %d rows, want at most %d", got, modelPickerMaxNoticeLines)
+	}
+	overlay := m.modelPickerOverlay(80)
+	text := plainRender(t, overlay)
+	// The hidden notices belong to other accounts, which /model list does not
+	// report, so the summary row must not send the user there.
+	if strings.Contains(text, "/model list") {
+		t.Fatalf("picker points hidden notices at /model list:\n%s", text)
+	}
+	for _, want := range []string{"target-row", "Esc close", "more notices hidden. Ctrl+R to retry."} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("picker lacks %q with many failing accounts:\n%s", want, text)
+		}
+	}
+	rect := m.overlayMouseRect(len(viewLines(overlay)), 80)
+	for row, line := range strings.Split(text, "\n") {
+		if strings.Contains(line, "target-row") {
+			target, ok := m.selectModelPickerAtMouse(testMouseClick(tea.MouseLeft, 40, rect.y+row))
+			if !ok || target.Value != "target" {
+				t.Fatalf("click on rendered model selected %#v, ok=%v; want target", target, ok)
+			}
+		}
+	}
+}
+
+// A single notice longer than the cap is cut rather than hidden; the summary
+// row says so without pointing at /model list, which would show the active
+// profile's notice only when the cut one belongs to it. The cut removes the
+// notice's own retry text, so the summary row has to name Ctrl+R, down to the
+// narrowest picker.
+func TestModelPickerTruncatesLongDiscoveryNotice(t *testing.T) {
+	m := subscriptionTestModel(t)
+	m.width, m.height = 80, 24
+	m.savedProviders = append(m.savedProviders, config.ProviderProfile{
+		Name: "other-account", CatalogID: "chatgpt", BaseURL: m.providerProfile.BaseURL,
+		ProviderKind: config.ProviderKindOpenAICompatible,
+	})
+	m.modelPickerErrorsByProvider = map[string]string{
+		"other-account": strings.Repeat("login expired; authenticate again before refreshing account models. ", 12),
+	}
+	lines := m.modelPickerDiscoveryNoticeLines(76)
+	if len(lines) != modelPickerMaxNoticeLines {
+		t.Fatalf("long notice uses %d rows, want exactly the cap %d", len(lines), modelPickerMaxNoticeLines)
+	}
+	text := plainRender(t, strings.Join(lines, "\n"))
+	if strings.Contains(text, "/model list") {
+		t.Fatalf("truncated notice points at /model list:\n%s", text)
+	}
+	if !strings.Contains(text, "notice truncated") {
+		t.Fatalf("truncated notice lacks the summary row:\n%s", text)
+	}
+	m.picker = &commandPicker{kind: pickerModel, items: []pickerItem{{Group: "Models", Label: "only-row", Value: "only"}}}
+	for _, width := range []int{modelPickerOverlayMinWidth, 80} {
+		m.width = width
+		text := plainRender(t, m.modelPickerOverlay(width))
+		if !strings.Contains(text, "Ctrl+R to retry") {
+			t.Fatalf("truncated notice at width %d hides the retry key:\n%s", width, text)
+		}
+		if !strings.Contains(text, "Esc close") {
+			t.Fatalf("picker footer missing at width %d:\n%s", width, text)
+		}
+	}
 }

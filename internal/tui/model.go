@@ -577,6 +577,14 @@ type model struct {
 	// catalog descriptor ID), so /model shows each provider's real current models —
 	// the same list the provider-setup wizard discovers — not the static catalog.
 	modelPickerLiveByProvider map[string][]providermodeldiscovery.Model
+	// Discovery errors and generations belong to the provider lookup, not the
+	// active model, so concurrent results cannot clear another account's status.
+	modelPickerErrorsByProvider map[string]string
+	// modelPickerDiscoveryGeneration numbers refresh requests; the map records
+	// the newest request per discovery key so a refresh of one account cannot
+	// discard another account's still-pending result.
+	modelPickerDiscoveryGeneration int
+	modelPickerDiscoveryRequests   map[string]int
 	// ollamaContextWindowByModel holds context-window sizes fetched from a local
 	// Ollama daemon's native /api/show endpoint (keyed by model name), for
 	// custom/local models that have no curated-catalog entry and whose
@@ -2093,6 +2101,10 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.noBlockingModal() {
 				return m, readClipboardImageCmd()
 			}
+		case keyCtrl(msg, 'r'):
+			if m.picker != nil && m.picker.kind == pickerModel {
+				return m.modelPickerDiscoveryCmds()
+			}
 		case keyCtrl(msg, 'f'):
 			if m.picker != nil && m.picker.kind == pickerModel {
 				if m.modelPickerIsLoading() {
@@ -3214,7 +3226,24 @@ func (m model) updateModel(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case setupOAuthDeviceMsg:
 		return m.applySetupOAuthDeviceCode(msg)
 	case modelPickerModelsDiscoveredMsg:
-		return m.applyModelPickerModelsDiscovered(msg), nil
+		requested, tracked := m.modelPickerDiscoveryRequests[modelPickerDiscoveryKey(msg.endpointKey, msg.providerID)]
+		if tracked && msg.generation < requested {
+			// A registered request for the same account supersedes every older
+			// result for it, including the unregistered startup warm-up, whose
+			// generation 0 is older than any registered request. A key with no
+			// registered request accepts its result.
+			// Honor an explicit list request using current state without letting
+			// an older response overwrite the newer discovery or its loading flag.
+			if msg.showList {
+				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.modelListText()})
+			}
+			return m, nil
+		}
+		m = m.applyModelPickerModelsDiscovered(msg)
+		if msg.showList {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.modelListText()})
+		}
+		return m, nil
 	case tea.ColorProfileMsg:
 		m.petColorProfile = msg.Profile
 		return m, nil
@@ -5124,6 +5153,11 @@ func (m model) dispatchCommand(command parsedCommand) (tea.Model, tea.Cmd) {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: m.providerText()})
 		return m, nil
 	case commandModel:
+		if arg := strings.ToLower(strings.TrimSpace(command.text)); arg == "list" || arg == "ls" {
+			if next, cmd := m.modelListDiscoveryCmd(); cmd != nil {
+				return next, cmd
+			}
+		}
 		if strings.TrimSpace(command.text) == "" {
 			if m.pending {
 				m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: pickerBusyText(command.name)})
