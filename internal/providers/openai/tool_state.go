@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Twigpine/zero/internal/zeroruntime"
 )
@@ -54,12 +55,36 @@ func (state *toolState) flushUsage(ctx context.Context, events chan<- zeroruntim
 	}
 	state.pendingUsage.ResolvedModel = zeroruntime.ResolvedModelAttribution(requested, model)
 	state.pendingUsage.ModelReported = model != ""
-	sendEvent(ctx, events, zeroruntime.StreamEvent{
+
+	event := zeroruntime.StreamEvent{
 		Type:  zeroruntime.StreamEventUsage,
 		Usage: *state.pendingUsage,
-	})
+	}
+	sendUsageEvent(ctx, events, event)
 	state.pendingUsage = nil
 	state.pendingModel = ""
+}
+
+// usageFlushGrace bounds how long a cancelled flush waits for room in a full
+// events channel; it matches the collector's drain after a cancel.
+const usageFlushGrace = 50 * time.Millisecond
+
+// sendUsageEvent delivers the held usage event. While ctx is alive it waits
+// like sendEvent. After the caller cancels it still delivers when the buffer
+// has room (sendEvent would drop a non-error event at random there), and when
+// the buffer is full it waits at most usageFlushGrace for the collector's
+// drain to free a slot, so it can never hold the stream goroutine.
+func sendUsageEvent(ctx context.Context, events chan<- zeroruntime.StreamEvent, event zeroruntime.StreamEvent) {
+	select {
+	case events <- event:
+	case <-ctx.Done():
+		timer := time.NewTimer(usageFlushGrace)
+		defer timer.Stop()
+		select {
+		case events <- event:
+		case <-timer.C:
+		}
+	}
 }
 
 type streamEventEmitter func(zeroruntime.StreamEvent)

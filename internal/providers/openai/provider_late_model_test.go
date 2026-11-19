@@ -1,8 +1,11 @@
 package openai
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/Twigpine/zero/internal/zeroruntime"
 )
@@ -322,5 +325,141 @@ func TestStreamCompletionHeldUsageArrivesAfterLaterContentBeforeDone(t *testing.
 		if got[i] != want[i] {
 			t.Fatalf("event types = %v, want %v", got, want)
 		}
+	}
+}
+
+// TestStreamCompletionUsageDeliveredOnContextCancel pins the cancel path of the
+// held usage: a usage chunk and then a content chunk arrive, the caller cancels
+// as soon as it has read that content (so the provider has already processed the
+// usage chunk and holds it), and the stream must still deliver exactly one usage
+// event with the reported tokens and model, and must close in bounded time.
+// sendEvent drops a non-error event at random when ctx.Done and the buffered
+// channel are both ready, so the scenario repeats to make the old code fail.
+func TestStreamCompletionUsageDeliveredOnContextCancel(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		t.Run(fmt.Sprintf("iteration-%d", i), func(t *testing.T) {
+			t.Parallel()
+			hold := make(chan struct{})
+			provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+				writeSSE(w, `{"model":"deepseek/x","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}`)
+				writeSSE(w, `{"model":"deepseek/x","choices":[{"delta":{"content":"hi"}}]}`)
+				<-hold // keep the stream open: no [DONE]
+			})
+			// Registered after the server cleanup, so it runs first and a failing
+			// test can never leave the handler blocking server.Close.
+			t.Cleanup(func() { close(hold) })
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			stream, err := provider.StreamCompletion(ctx, zeroruntime.CompletionRequest{})
+			if err != nil {
+				t.Fatalf("StreamCompletion returned setup error: %v", err)
+			}
+
+			var events []zeroruntime.StreamEvent
+			deadline := time.After(2 * time.Second)
+			for seenText := false; !seenText; {
+				select {
+				case event, ok := <-stream:
+					if !ok {
+						t.Fatalf("stream closed before the content chunk; events: %+v", events)
+					}
+					events = append(events, event)
+					seenText = event.Type == zeroruntime.StreamEventText
+				case <-deadline:
+					t.Fatalf("no content event within 2s; events: %+v", events)
+				}
+			}
+			// The content chunk was read, so the usage chunk before it is held.
+			cancel()
+
+			rest := make(chan []zeroruntime.StreamEvent, 1)
+			go func() { rest <- readAll(stream) }()
+			select {
+			case more := <-rest:
+				events = append(events, more...)
+			case <-time.After(2 * time.Second):
+				t.Fatal("stream did not close within 2s after cancel")
+			}
+
+			var usage []zeroruntime.StreamEvent
+			for _, event := range events {
+				if event.Type == zeroruntime.StreamEventUsage {
+					usage = append(usage, event)
+				}
+			}
+			if len(usage) != 1 {
+				t.Fatalf("usage events = %d, want exactly 1; events: %+v", len(usage), events)
+			}
+			got := usage[0].Usage
+			if got.PromptTokens != 10 || got.CompletionTokens != 5 {
+				t.Fatalf("usage tokens = %+v, want 10/5", got)
+			}
+			if got.ResolvedModel != "deepseek/x" {
+				t.Fatalf("ResolvedModel = %q, want deepseek/x", got.ResolvedModel)
+			}
+		})
+	}
+}
+
+// TestFlushUsageFullBufferAfterCancelStillDelivers covers the full-buffer case
+// of a cancelled flush: the channel has no room at the cancel, the consumer
+// frees space shortly after (as the collector's drain does), and the single
+// usage event must still arrive. sendEvent alone drops it once ctx is done.
+func TestFlushUsageFullBufferAfterCancelStillDelivers(t *testing.T) {
+	events := make(chan zeroruntime.StreamEvent, 1)
+	events <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventText, Content: "queued"}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	state := newToolState(false)
+	state.pendingUsage = &zeroruntime.Usage{PromptTokens: 10, CompletionTokens: 5}
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		<-events // free the slot, like the collector draining after the cancel
+	}()
+	done := make(chan struct{})
+	go func() {
+		state.flushUsage(ctx, events, "requested", "deepseek/x")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("flushUsage did not return within 1s")
+	}
+	select {
+	case event := <-events:
+		if event.Type != zeroruntime.StreamEventUsage || event.Usage.PromptTokens != 10 || event.Usage.ResolvedModel != "deepseek/x" {
+			t.Fatalf("event = %+v, want the usage event 10/5 deepseek/x", event)
+		}
+	default:
+		t.Fatal("usage event was dropped after the cancel with a full buffer")
+	}
+}
+
+// TestFlushUsageFullBufferNobodyReadingDoesNotBlock proves the other half: when
+// the buffer is full and nobody ever reads, a cancelled flush gives up in a
+// bounded time instead of holding the stream goroutine.
+func TestFlushUsageFullBufferNobodyReadingDoesNotBlock(t *testing.T) {
+	events := make(chan zeroruntime.StreamEvent, 1)
+	events <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventText, Content: "queued"}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	state := newToolState(false)
+	state.pendingUsage = &zeroruntime.Usage{PromptTokens: 10}
+
+	done := make(chan struct{})
+	go func() {
+		state.flushUsage(ctx, events, "requested", "")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("flushUsage blocked on a full buffer after the cancel")
+	}
+	if state.pendingUsage != nil {
+		t.Fatal("pendingUsage not cleared: a second flush could send a second usage event")
 	}
 }
