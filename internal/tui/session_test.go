@@ -1311,6 +1311,15 @@ func assertPayloadFieldContains(t *testing.T, event sessions.Event, key string, 
 }
 
 func TestRelativeAgeFormatsLastActivity(t *testing.T) {
+	// Temporarily set time.Local to a time zone west of UTC to verify that
+	// relativeAge formats according to now.Location() and does not break
+	// when the process local time zone is west of UTC (issue #1229).
+	origLocal := time.Local
+	time.Local = time.FixedZone("BRT", -3*3600)
+	t.Cleanup(func() {
+		time.Local = origLocal
+	})
+
 	now := time.Date(2026, 9, 12, 15, 0, 0, 0, time.UTC)
 	cases := []struct {
 		name string
@@ -1336,6 +1345,14 @@ func TestRelativeAgeFormatsLastActivity(t *testing.T) {
 	}
 	if got := relativeAge("", now); got != "" {
 		t.Errorf("empty timestamp = %q, want empty", got)
+	}
+
+	// Verify that relativeAge formats in now's location when now is non-UTC.
+	westZone := time.FixedZone("BRT", -3*3600)
+	nowWest := time.Date(2026, 9, 12, 15, 0, 0, 0, westZone)
+	tsWest := time.Date(2025, 6, 1, 10, 0, 0, 0, westZone)
+	if got := relativeAge(tsWest.Format(time.RFC3339), nowWest); got != "2025-06-01" {
+		t.Errorf("west of UTC with non-UTC now: sessionAge = %q, want %q", got, "2025-06-01")
 	}
 }
 

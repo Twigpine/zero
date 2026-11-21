@@ -407,7 +407,7 @@ func relativeAge(timestamp string, now time.Time) string {
 	case age <= 30*24*time.Hour:
 		return fmt.Sprintf("%dd ago", int(age.Hours()/24))
 	}
-	parsed, now = parsed.Local(), now.Local()
+	parsed = parsed.In(now.Location())
 	if parsed.Year() == now.Year() {
 		return parsed.Format("Jan _2")
 	}
