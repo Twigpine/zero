@@ -42,6 +42,12 @@ func isolateCLIUserState(t *testing.T) {
 	// Credentials resolve keyring-first. This keeps a migrated key in a file
 	// under the fixture root rather than in the developer's OS keychain.
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	// Two overrides outrank every base directory above. An inherited value
+	// would send the sandbox grants file and, on Windows, the sandbox home
+	// straight back to the developer's real ones. Cleared, both resolve under
+	// the fixture root like everything else.
+	t.Setenv("ZERO_SANDBOX_GRANTS_PATH", "")
+	t.Setenv("ZERO_WINDOWS_SANDBOX_HOME", "")
 }
 
 // AND THE ISOLATION IS ITSELF PINNED, ONE HELPER AT A TIME. A seeded config

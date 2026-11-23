@@ -5,11 +5,48 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/Twigpine/zero/internal/sandbox"
 )
+
+// AN INHERITED OVERRIDE DOES NOT REACH AROUND THE ISOLATION.
+//
+// ZERO_SANDBOX_GRANTS_PATH and ZERO_WINDOWS_SANDBOX_HOME outrank the base
+// directories the helper redirects. A developer who has either set would
+// otherwise have the doctor tests read the setup marker from, and save
+// capability entries into, their real sandbox home, and get results that
+// depend on that machine. Both resolvers must land under the fixture root
+// whatever the test process inherited.
+func TestIsolateCLIUserStateNeutralizesSandboxOverrides(t *testing.T) {
+	outside := t.TempDir()
+	t.Setenv("ZERO_SANDBOX_GRANTS_PATH", filepath.Join(outside, "grants.json"))
+	t.Setenv("ZERO_WINDOWS_SANDBOX_HOME", filepath.Join(outside, "sandbox-home"))
+
+	isolateCLIUserState(t)
+
+	fixtureRoot := filepath.Clean(os.Getenv("XDG_CONFIG_HOME"))
+	if fixtureRoot == "." || fixtureRoot == filepath.Clean(outside) {
+		t.Fatalf("SETUP INVALID: the helper left XDG_CONFIG_HOME at %q", fixtureRoot)
+	}
+	grants, err := sandbox.ResolveGrantPath(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, err := sandbox.ResolveWindowsSandboxHome(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, resolved := range map[string]string{"sandbox grants path": grants, "Windows sandbox home": home} {
+		if !strings.HasPrefix(filepath.Clean(resolved), fixtureRoot+string(os.PathSeparator)) {
+			t.Errorf("%s = %s, want it under the fixture root %s; an inherited override still decides it", name, resolved, fixtureRoot)
+		}
+	}
+}
 
 // THE DOCTOR COMMAND WRITES PER-USER STATE, SO EVERY TEST THAT RUNS IT ISOLATES.
 //
