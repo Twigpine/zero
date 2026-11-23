@@ -59,6 +59,10 @@ var (
 	fileWriteApplySecurity   = applyFileSecurity
 )
 
+// fileWriteApplyAttributes carries the replaced file's attributes to the file
+// that takes its name. Tests replace it to exercise a failure.
+var fileWriteApplyAttributes = applyFileAttributes
+
 // fileWriteNoReplaceRename publishes a create without replacing an existing
 // name. Tests replace it to exercise the hard-link fallback that filesystems
 // without a no-replace rename use.
@@ -186,7 +190,7 @@ func commitRootedFileContents(root *os.Root, absolutePath, relativePath string, 
 // either absent or the whole file, a concurrent create is refused rather than
 // replaced, and a write that cannot complete leaves no file at all.
 func commitRootedFileCreate(root *os.Root, relativePath, content string) error {
-	tempName, err := writeRootedSideFile(root, relativePath, 0o644, true, nil, content)
+	tempName, err := writeRootedSideFile(root, relativePath, 0o644, true, nil, nil, content)
 	if err != nil {
 		return err
 	}
@@ -263,7 +267,7 @@ func renameNoReplaceUnsupported(err error) bool {
 // here would expose partial content and rewrite hard-link siblings, defeating
 // the guarantees that staging provides.
 func commitRootedFileOverwrite(root *os.Root, absolutePath, relativePath, publishPath string, openedInfo os.FileInfo, mode os.FileMode, security *fileSecurity, content string) error {
-	tempName, err := writeRootedSideFile(root, publishPath, mode, false, security, content)
+	tempName, err := writeRootedSideFile(root, publishPath, mode, false, security, carriedFileAttributes(openedInfo), content)
 	if err != nil {
 		return err
 	}
@@ -332,8 +336,9 @@ func resolveRootedFinalPath(root *os.Root, relativePath string) (string, error) 
 // An overwrite stages 0o600 and finally carries the observed file's permission
 // bits over, so the published file looks like the one it replaced. It also
 // carries security, the replaced file's access control, when there is any: a
-// create passes nil and keeps what the directory gives a new file.
-func writeRootedSideFile(root *os.Root, relativePath string, mode os.FileMode, umaskDerived bool, security *fileSecurity, content string) (string, error) {
+// create passes nil and keeps what the directory gives a new file. attributes
+// are the replaced file's, and a create passes nil for the same reason.
+func writeRootedSideFile(root *os.Root, relativePath string, mode os.FileMode, umaskDerived bool, security *fileSecurity, attributes *uint32, content string) (string, error) {
 	createMode := mode.Perm()
 	if !umaskDerived {
 		createMode = 0o600
@@ -366,6 +371,11 @@ func writeRootedSideFile(root *os.Root, relativePath string, mode os.FileMode, u
 			return err
 		}
 		if err := fileWriteTempWrite(temp, content); err != nil {
+			return err
+		}
+		// The attributes go on before the permission bits, which on Windows
+		// are the read-only attribute and are changed without touching the rest.
+		if err := fileWriteApplyAttributes(temp, attributes); err != nil {
 			return err
 		}
 		return temp.Chmod(granted.Perm())
