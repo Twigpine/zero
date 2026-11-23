@@ -338,7 +338,7 @@ func writeRootedSideFile(root *os.Root, relativePath string, mode os.FileMode, u
 	if !umaskDerived {
 		createMode = 0o600
 	}
-	temp, tempName, err := pathjail.CreateTempMode(root, filepath.Dir(relativePath), "zero-write", ".tmp", createMode)
+	temp, tempName, err := createSideFile(root, relativePath, createMode, security)
 	if err != nil {
 		return "", fmt.Errorf("writing %s: %w", relativePath, err)
 	}

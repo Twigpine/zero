@@ -200,6 +200,60 @@ func TestStagedBytesAreWrittenUnderTheReplacedFilesAccessControl(t *testing.T) {
 	}
 }
 
+// NOBODY ELSE CAN OPEN THE SIDE FILE, FROM THE MOMENT IT EXISTS.
+//
+// Putting the original's list on an empty side file is not enough by itself.
+// Access is granted when a file is opened and is not taken back when its list
+// changes, so a side file that existed for an instant under the directory's
+// list could be opened in that instant and read through that handle later.
+// The side file is therefore created admitting the current user alone.
+//
+// Here the directory and the replaced file both let everyone read, so neither
+// inheritance nor the carried list can explain a private side file: only the
+// way it was created can. The list is read at the point the original's list is
+// about to be applied, which is the earliest the side file can be observed.
+func TestOverwriteSideFileIsPrivateFromBirth(t *testing.T) {
+	me := currentUserSIDString(t)
+	root := t.TempDir()
+	setTestFileDACL(t, root, "D:P(A;OICI;FA;;;"+me+")(A;OICI;FR;;;WD)", true)
+	path := filepath.Join(root, "shared.txt")
+	if err := os.WriteFile(path, []byte("observed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	setTestFileDACL(t, path, "D:P(A;;FA;;;"+me+")(A;;FR;;;WD)", true)
+	want, _ := testFileDACL(t, path)
+	if !strings.Contains(want, ";;;WD)") {
+		t.Fatalf("SETUP INVALID: the replaced file does not admit everyone: %q", want)
+	}
+
+	calls := 0
+	var atBirth string
+	var protectedAtBirth bool
+	installFileWriteSecurity(t, nil, func(file *os.File, security *fileSecurity) error {
+		calls++
+		atBirth, protectedAtBirth = openFileDACL(t, file)
+		return applyFileSecurity(file, security)
+	})
+
+	result := NewScopedWriteFileTool(root, nil).Run(context.Background(), map[string]any{
+		"path": "shared.txt", "content": "replacement\n", "overwrite": true,
+	})
+	if result.Status != StatusOK {
+		t.Fatalf("overwrite = %s: %s", result.Status, result.Output)
+	}
+	if calls != 1 {
+		t.Fatalf("SETUP INVALID: the access control seam ran %d times, want once", calls)
+	}
+	if !protectedAtBirth || strings.Count(atBirth, "(") != 1 || !strings.Contains(atBirth, "(A;;FA;;;"+me+")") {
+		t.Fatalf("the side file was not private when it was created: %s (protected=%v); want one entry, for the current user",
+			atBirth, protectedAtBirth)
+	}
+	after, _ := testFileDACL(t, path)
+	if after != want {
+		t.Fatalf("the published file's access control changed:\n before: %s\n  after: %s", want, after)
+	}
+}
+
 // A VOLUME THAT KEEPS NO ACCESS CONTROL LISTS HAS NOTHING TO CARRY.
 //
 // FAT and exFAT volumes store none, and asking one to take a list fails. The

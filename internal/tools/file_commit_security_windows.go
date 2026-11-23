@@ -3,11 +3,17 @@
 package tools
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/Twigpine/zero/internal/pathjail"
 )
 
 // fileSecurity is the access control an overwrite carries from the file it
@@ -97,6 +103,94 @@ func applyFileSecurity(staged *os.File, security *fileSecurity) error {
 		return fmt.Errorf("carry the existing file's access control list: %w", err)
 	}
 	return nil
+}
+
+// createSideFile creates the side file an overwrite or a create stages its
+// bytes in, and returns it with its path relative to root.
+//
+// A create has no original and takes what the directory gives a new file. An
+// overwrite that carries access control must not let the side file exist under
+// the directory's list even while it is empty: access is granted when a file
+// is opened and is not taken back when its list changes, so anyone the
+// directory admits could open the empty side file and then read the
+// replacement through that handle. Its side file is therefore born readable
+// by the current user alone, and is given the replaced file's list afterwards.
+func createSideFile(root *os.Root, relativePath string, mode os.FileMode, security *fileSecurity) (*os.File, string, error) {
+	directory := filepath.Dir(relativePath)
+	if security == nil {
+		return pathjail.CreateTempMode(root, directory, "zero-write", ".tmp", mode)
+	}
+	return createPrivateSideFile(root, directory)
+}
+
+// createPrivateSideFile creates a uniquely named file in directory whose
+// access control list, from the moment it exists, admits only the current
+// user. The name is created relative to the directory's own handle and is a
+// single component, so nothing is resolved by path.
+func createPrivateSideFile(root *os.Root, directory string) (*os.File, string, error) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return nil, "", fmt.Errorf("identify the current user: %w", err)
+	}
+	descriptor, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;" + user.User.Sid.String() + ")")
+	if err != nil {
+		return nil, "", fmt.Errorf("build the side file's access control list: %w", err)
+	}
+	parent, err := root.Open(directory)
+	if err != nil {
+		return nil, "", err
+	}
+	defer parent.Close()
+	raw, err := parent.SyscallConn()
+	if err != nil {
+		return nil, "", err
+	}
+	for attempt := 0; attempt < 10; attempt++ {
+		noise := make([]byte, 8)
+		if _, err := rand.Read(noise); err != nil {
+			return nil, "", fmt.Errorf("generate a side file name: %w", err)
+		}
+		name := "zero-write." + hex.EncodeToString(noise) + ".tmp"
+		var handle windows.Handle
+		var createErr error
+		if err := raw.Control(func(parentHandle uintptr) {
+			objectName, nameErr := windows.NewNTUnicodeString(name)
+			if nameErr != nil {
+				createErr = nameErr
+				return
+			}
+			createErr = windows.NtCreateFile(
+				&handle,
+				windows.FILE_GENERIC_READ|windows.FILE_GENERIC_WRITE|windows.DELETE|windows.READ_CONTROL|windows.WRITE_DAC,
+				&windows.OBJECT_ATTRIBUTES{
+					Length:             uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
+					RootDirectory:      windows.Handle(parentHandle),
+					ObjectName:         objectName,
+					Attributes:         windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
+					SecurityDescriptor: descriptor,
+				},
+				&windows.IO_STATUS_BLOCK{},
+				nil,
+				windows.FILE_ATTRIBUTE_NORMAL,
+				windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+				windows.FILE_CREATE,
+				windows.FILE_NON_DIRECTORY_FILE|windows.FILE_SYNCHRONOUS_IO_NONALERT,
+				0,
+				0,
+			)
+		}); err != nil {
+			return nil, "", err
+		}
+		if createErr == nil {
+			relative := filepath.Join(directory, name)
+			return os.NewFile(uintptr(handle), relative), relative, nil
+		}
+		if errors.Is(createErr, windows.STATUS_OBJECT_NAME_COLLISION) {
+			continue
+		}
+		return nil, "", createErr
+	}
+	return nil, "", errors.New("could not create a side file with an unused name")
 }
 
 // reopenFileForSecurity opens the same file object again with the rights a
