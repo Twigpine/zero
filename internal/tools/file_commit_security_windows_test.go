@@ -4,6 +4,7 @@ package tools
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,6 +121,82 @@ func TestOverwriteKeepsTheReplacedFilesAccessControl(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// openFileDACL returns the access control list of an open file as SDDL, and
+// whether it is protected from inheritance, without going through its name.
+func openFileDACL(t *testing.T, file *os.File) (string, bool) {
+	t.Helper()
+	handle, err := reopenFileForSecurity(file, windows.READ_CONTROL)
+	if err != nil {
+		t.Fatalf("reopen the staged file: %v", err)
+	}
+	defer windows.CloseHandle(handle)
+	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatalf("read the staged file's access control list: %v", err)
+	}
+	control, _, err := descriptor.Control()
+	if err != nil {
+		t.Fatalf("read the staged file's access control flags: %v", err)
+	}
+	return descriptor.String(), control&windows.SE_DACL_PROTECTED != 0
+}
+
+// THE REPLACEMENT IS NEVER READABLE BY SOMEONE THE ORIGINAL EXCLUDED.
+//
+// The side file is born with the directory's access control. If the directory
+// lets everyone read and the file being replaced was kept to its owner, the
+// replacement bytes must not sit in that side file under the directory's list
+// even for a moment. So the original's list goes on while the side file is
+// still empty, and this looks at the side file at the instant its bytes are
+// written.
+func TestStagedBytesAreWrittenUnderTheReplacedFilesAccessControl(t *testing.T) {
+	me := currentUserSIDString(t)
+	root := t.TempDir()
+	// Everything created in this directory inherits read access for everyone.
+	setTestFileDACL(t, root, "D:P(A;OICI;FA;;;"+me+")(A;OICI;FR;;;WD)", true)
+	path := filepath.Join(root, "private.txt")
+	if err := os.WriteFile(path, []byte("observed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inherited, _ := testFileDACL(t, path)
+	if !strings.Contains(inherited, ";;;WD)") {
+		t.Fatalf("SETUP INVALID: a file created here does not inherit the everyone entry: %q", inherited)
+	}
+	setTestFileDACL(t, path, "D:P(A;;FA;;;"+me+")", true)
+	want, _ := testFileDACL(t, path)
+
+	writes := 0
+	var atWrite string
+	var protectedAtWrite bool
+	var sizeAtWrite int64
+	installFileWriteTempWrite(t, func(file *os.File, content string) error {
+		writes++
+		atWrite, protectedAtWrite = openFileDACL(t, file)
+		if info, err := file.Stat(); err == nil {
+			sizeAtWrite = info.Size()
+		}
+		_, err := io.WriteString(file, content)
+		return err
+	})
+
+	result := NewScopedWriteFileTool(root, nil).Run(context.Background(), map[string]any{
+		"path": "private.txt", "content": "replacement\n", "overwrite": true,
+	})
+	if result.Status != StatusOK {
+		t.Fatalf("overwrite = %s: %s", result.Status, result.Output)
+	}
+	if writes != 1 {
+		t.Fatalf("SETUP INVALID: the side file write ran %d times, want once", writes)
+	}
+	if sizeAtWrite != 0 {
+		t.Fatalf("SETUP INVALID: the side file already held %d bytes when the write seam ran", sizeAtWrite)
+	}
+	if strings.Contains(atWrite, ";;;WD)") || !protectedAtWrite || atWrite != want {
+		t.Fatalf("the side file was written under the wrong access control:\n at write: %s (protected=%v)\n  original: %s",
+			atWrite, protectedAtWrite, want)
 	}
 }
 

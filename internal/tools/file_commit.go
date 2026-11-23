@@ -358,13 +358,17 @@ func writeRootedSideFile(root *os.Root, relativePath string, mode os.FileMode, u
 		}
 	}
 	writeErr := func() error {
+		// The side file was created with the directory's access control. It is
+		// given the replaced file's before any byte is written, while it is still
+		// empty: applied afterwards, the replacement would sit readable by
+		// everyone the directory admits until the list landed.
+		if err := fileWriteApplySecurity(temp, security); err != nil {
+			return err
+		}
 		if err := fileWriteTempWrite(temp, content); err != nil {
 			return err
 		}
-		if err := temp.Chmod(granted.Perm()); err != nil {
-			return err
-		}
-		return fileWriteApplySecurity(temp, security)
+		return temp.Chmod(granted.Perm())
 	}()
 	closeErr := temp.Close()
 	if writeErr != nil || closeErr != nil {
