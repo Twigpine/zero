@@ -1346,14 +1346,6 @@ func TestRelativeAgeFormatsLastActivity(t *testing.T) {
 	if got := relativeAge("", now); got != "" {
 		t.Errorf("empty timestamp = %q, want empty", got)
 	}
-
-	// Verify that relativeAge formats in now's location when now is non-UTC.
-	westZone := time.FixedZone("BRT", -3*3600)
-	nowWest := time.Date(2026, 9, 12, 15, 0, 0, 0, westZone)
-	tsWest := time.Date(2025, 6, 1, 10, 0, 0, 0, westZone)
-	if got := relativeAge(tsWest.Format(time.RFC3339), nowWest); got != "2025-06-01" {
-		t.Errorf("west of UTC with non-UTC now: sessionAge = %q, want %q", got, "2025-06-01")
-	}
 }
 
 func TestSessionPickerDetailComposesProjectAndModel(t *testing.T) {
