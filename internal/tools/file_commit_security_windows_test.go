@@ -43,6 +43,30 @@ func setTestFileDACL(t *testing.T, path string, sddl string, protected bool) {
 	}
 }
 
+// renderedTestDACL returns sddl the way a list read back from a file is
+// printed. The printed form names some accounts by a two-letter alias in place
+// of the identifier they were written with: the built-in administrator account
+// a hosted Windows runner uses comes back as LA. An expectation built from the
+// raw identifier therefore matches on a developer's machine and not there.
+func renderedTestDACL(t *testing.T, sddl string) string {
+	t.Helper()
+	descriptor, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		t.Fatalf("parse %q: %v", sddl, err)
+	}
+	return descriptor.String()
+}
+
+// testDACLEntries returns the entries of a printed list without the flags in
+// front of them, which say how the list was set and not who it admits.
+func testDACLEntries(sddl string) string {
+	start := strings.Index(sddl, "(")
+	if start < 0 {
+		return ""
+	}
+	return sddl[start:]
+}
+
 // testFileDACL returns the file's access control list as SDDL, and whether it
 // is protected from inheritance.
 func testFileDACL(t *testing.T, path string) (string, bool) {
@@ -244,9 +268,10 @@ func TestOverwriteSideFileIsPrivateFromBirth(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("SETUP INVALID: the access control seam ran %d times, want once", calls)
 	}
-	if !protectedAtBirth || strings.Count(atBirth, "(") != 1 || !strings.Contains(atBirth, "(A;;FA;;;"+me+")") {
-		t.Fatalf("the side file was not private when it was created: %s (protected=%v); want one entry, for the current user",
-			atBirth, protectedAtBirth)
+	private := testDACLEntries(renderedTestDACL(t, "D:P(A;;FA;;;"+me+")"))
+	if !protectedAtBirth || testDACLEntries(atBirth) != private {
+		t.Fatalf("the side file was not private when it was created: %s (protected=%v); want the one entry %s, for the current user",
+			atBirth, protectedAtBirth, private)
 	}
 	after, _ := testFileDACL(t, path)
 	if after != want {
