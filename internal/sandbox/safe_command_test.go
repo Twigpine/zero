@@ -205,10 +205,10 @@ func TestDetectInteractiveThroughWrappersAndShellC(t *testing.T) {
 	}
 }
 
-// Audit ZERO-ESC-02: the shared shell-command-flag helper must honor POSIX
-// getopt short-option clustering, so a command hidden behind `bash -ec`/
-// `sh -lc`/`zsh -xc` (and the legacy `--command`) is still recognized, while
-// unrelated options and option values are not mistaken for the flag.
+// Audit ZERO-ESC-02: shell payload extraction must honor POSIX getopt
+// short-option clustering, so a command hidden behind `bash -ec`/`sh -lc`/
+// `zsh -xc` (and the legacy `--command`) is still recognized, while unrelated
+// options and option values are not mistaken for the command flag.
 func TestShellCommandFlag(t *testing.T) {
 	cases := []struct {
 		arg  string
@@ -234,9 +234,12 @@ func TestShellCommandFlag(t *testing.T) {
 		{arg: "", want: false},
 		{arg: "c", want: false},
 	}
-	for _, tc := range cases {
-		if got := shellCommandFlag(tc.arg); got != tc.want {
-			t.Errorf("shellCommandFlag(%q) = %v, want %v", tc.arg, got, tc.want)
+	for _, shell := range []string{"bash", "sh", "zsh", "ksh", "dash"} {
+		for _, tc := range cases {
+			got := shellDashCPayload(shell, []string{shell, tc.arg, "vim file.txt"}) == "vim file.txt"
+			if got != tc.want {
+				t.Errorf("%s %q carries a command payload = %v, want %v", shell, tc.arg, got, tc.want)
+			}
 		}
 	}
 }
@@ -252,7 +255,8 @@ func TestShellDashCPayloadStopsAtDashDash(t *testing.T) {
 	}{
 		{name: "dashdash before clustered flag", fields: []string{"bash", "--", "-ec", "vim file.txt"}, want: ""},
 		{name: "dashdash before bare flag", fields: []string{"sh", "--", "-c", "less file"}, want: ""},
-		{name: "real flag before dashdash", fields: []string{"bash", "-c", "vim file.txt", "--"}, want: "vim file.txt --"},
+		// The command string is exactly the -c operand; a trailing `--` becomes $0.
+		{name: "real flag before dashdash", fields: []string{"bash", "-c", "vim file.txt", "--"}, want: "vim file.txt"},
 		{name: "no dashdash grouped flag", fields: []string{"bash", "-ec", "vim file.txt"}, want: "vim file.txt"},
 	}
 	for _, tc := range cases {
@@ -472,6 +476,20 @@ func TestDetectInteractiveMongoEvalAndFullPaths(t *testing.T) {
 		if got != tc.interactive {
 			t.Errorf("DetectInteractiveCommand(%q).Interactive = %v, want %v", tc.command, got, tc.interactive)
 		}
+	}
+}
+
+func TestDetectInteractiveCommandBoundsNestedShellLaunchers(t *testing.T) {
+	command := "vim file"
+	for range maxAnalyzerDepth + 2 {
+		command = "bash -c '" + strings.ReplaceAll(command, "'", `'"'"'`) + "'"
+	}
+	got := DetectInteractiveCommand(command, "linux")
+	if !got.Interactive || got.Command != "nested shell launcher" {
+		t.Fatalf("DetectInteractiveCommand(deep shell chain) = %+v; want conservative depth-limit result", got)
+	}
+	if !strings.Contains(got.Reason, "cannot be proven non-interactive") {
+		t.Fatalf("DetectInteractiveCommand(deep shell chain).Reason = %q; want unresolved inspection reason", got.Reason)
 	}
 }
 

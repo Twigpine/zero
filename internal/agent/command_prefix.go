@@ -373,73 +373,69 @@ func validSedPrintArg(arg string) bool {
 	return true
 }
 
+// gitApprovableReadOnlySubcommands are the only git subcommands this prefix
+// matcher will ever auto-approve. Every other resolvable subcommand (push,
+// commit, ...) — and the case where no subcommand resolves at all — is
+// rejected by the zero value of the map lookup below, so this list is the
+// single place that grants approval; nothing else needs to enumerate it.
+var gitApprovableReadOnlySubcommands = map[string]bool{
+	"status": true, "log": true, "diff": true, "show": true, "branch": true,
+}
+
+// safeGitCommand approves only exact lowercase spellings of
+// status/log/diff/show/branch with no global option this matcher has not
+// specifically vetted as safe.
+//
+// Subcommand resolution goes through sandbox.GitSubcommand so option parsing
+// stays shared with the classifier, but authorization compares Original, never
+// Normalized. Git aliases are case-sensitive: STATUS can be an arbitrary alias
+// even though the classifier conservatively recognizes its normalized spelling
+// as status.
 func safeGitCommand(command []string) bool {
-	subIndex, subcommand, ok := gitSubcommand(command)
-	if !ok {
+	if len(command) < 2 {
 		return false
 	}
+	selection, ok := sandbox.GitSubcommand(command[1:])
+	if !ok || !gitApprovableReadOnlySubcommands[selection.Original] {
+		return false
+	}
+	// GitSubcommand indexes into command[1:] (it does not expect the "git"
+	// argv[0] itself); shift its answer back into command's own indexing so the
+	// slices below retain their command-relative meaning.
+	subIndex := selection.Index + 1
 	if gitHasUnsafeGlobalOption(command[1:subIndex]) {
 		return false
 	}
 	args := command[subIndex+1:]
-	switch subcommand {
-	case "status", "log", "diff", "show":
-		return gitArgsReadOnly(args)
-	case "branch":
+	if selection.Original == "branch" {
 		return gitArgsReadOnly(args) && gitBranchReadOnly(args)
-	default:
-		return false
 	}
+	return gitArgsReadOnly(args)
 }
 
-func gitSubcommand(command []string) (int, string, bool) {
-	for index := 1; index < len(command); index++ {
-		arg := command[index]
-		if gitOptionConsumesValue(arg) {
-			index++
-			continue
-		}
-		if gitOptionHasInlineValue(arg) || arg == "--" || strings.HasPrefix(arg, "-") {
-			continue
-		}
-		switch arg {
-		case "status", "log", "diff", "show", "branch":
-			return index, arg, true
-		default:
-			return 0, "", false
-		}
-	}
-	return 0, "", false
-}
-
-func gitOptionConsumesValue(arg string) bool {
-	switch arg {
-	case "-C", "-c", "--config-env", "--exec-path", "--git-dir", "--namespace", "--super-prefix", "--work-tree":
-		return true
-	default:
-		return false
-	}
-}
-
-func gitOptionHasInlineValue(arg string) bool {
-	return strings.HasPrefix(arg, "--config-env=") ||
-		strings.HasPrefix(arg, "--exec-path=") ||
-		strings.HasPrefix(arg, "--git-dir=") ||
-		strings.HasPrefix(arg, "--namespace=") ||
-		strings.HasPrefix(arg, "--super-prefix=") ||
-		strings.HasPrefix(arg, "--work-tree=") ||
-		((strings.HasPrefix(arg, "-C") || strings.HasPrefix(arg, "-c")) && len(arg) > 2)
-}
-
+// gitHasUnsafeGlobalOption rejects global options this matcher has not
+// specifically vetted as compatible with the read-only subcommands above.
+// -C changes which repository status/log/diff/show/branch inspects — a prefix
+// approved against the workspace repo must not silently extend to `git -C
+// /elsewhere status`, which reports on a DIFFERENT repository the approval
+// was never about. --upload-pack lets a fetch/clone run an arbitrary program
+// on the remote side; it is listed here defensively even though none of the
+// five approvable subcommands accept it, so a future addition to that list
+// does not silently inherit the gap.
+//
+// This still reads git's shared skip-list (GitGlobalOptionConsumesValue) to
+// step over an option's separate-token value correctly; only the "-C is
+// unsafe regardless" judgment is specific to this matcher, so it stays local
+// rather than joining the classifier's shared grammar.
 func gitHasUnsafeGlobalOption(args []string) bool {
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
 		switch {
 		case strings.HasPrefix(arg, "--upload-pack"):
 			return true
-		case arg == "-C" || strings.HasPrefix(arg, "-C"):
+		case strings.HasPrefix(arg, "-C"):
 			return true
-		case gitOptionConsumesValue(arg):
+		case sandbox.GitGlobalOptionConsumesValue(arg):
 			index++
 		}
 	}
