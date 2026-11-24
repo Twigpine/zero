@@ -570,14 +570,111 @@ func pythonModuleRunsLocalServer(words []string) bool {
 	return false
 }
 
+var ghValueOptions = map[string]bool{
+	"-r":             true,
+	"--repo":         true,
+	"--host":         true,
+	"--hostname":     true,
+	"-s":             true,
+	"--shell":        true,
+	"-t":             true,
+	"--template":     true,
+	"-q":             true,
+	"--jq":           true,
+	"-l":             true,
+	"--limit":        true,
+	"-x":             true,
+	"--method":       true,
+	"-f":             true,
+	"--field":        true,
+	"--raw-field":    true,
+	"-p":             true,
+	"--pattern":      true,
+	"-d":             true,
+	"--dir":          true,
+	"-o":             true,
+	"--output":       true,
+	"--owner":        true,
+	"-a":             true,
+	"--archive":      true,
+	"--custom-agent": true,
+	"-b":             true,
+	"--base":         true,
+	"--ref":          true,
+	"-e":             true,
+	"--env":          true,
+	"-i":             true,
+	"--input":        true,
+	"--cache":        true,
+}
+
+func ghSubcommands(words []string) (string, string) {
+	var subs []string
+	for i := 0; i < len(words); i++ {
+		w := words[i]
+		if w == "" {
+			continue
+		}
+		if strings.HasPrefix(w, "-") {
+			if !strings.Contains(w, "=") && ghValueOptions[w] && i+1 < len(words) {
+				i++
+			}
+			continue
+		}
+		subs = append(subs, w)
+		if len(subs) == 2 {
+			break
+		}
+	}
+	var first, second string
+	if len(subs) > 0 {
+		first = subs[0]
+	}
+	if len(subs) > 1 {
+		second = subs[1]
+	}
+	return first, second
+}
+
+func ghHasHelpOrVersionFlag(words []string) bool {
+	for i := 0; i < len(words); i++ {
+		w := words[i]
+		if w == "" {
+			continue
+		}
+		if w == "--" {
+			break
+		}
+		if strings.HasPrefix(w, "-") {
+			if !strings.Contains(w, "=") && ghValueOptions[w] && i+1 < len(words) {
+				i++
+				continue
+			}
+			switch w {
+			case "-h", "--help", "--version":
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func ghUsesNetwork(words []string) bool {
-	first := firstSubcommand(words, nil)
-	if first == "api" {
+	if ghHasHelpOrVersionFlag(words) {
+		return false
+	}
+	first, second := ghSubcommands(words)
+	if first == "" {
+		return false
+	}
+	switch first {
+	case "help", "version", "completion", "config", "alias":
+		return false
+	case "extension":
+		return second != "" && second != "list"
+	default:
 		return true
 	}
-	second := secondSubcommand(words)
-	return (first == "release" && second == "download") ||
-		(first == "repo" && second == "clone")
 }
 
 func secondSubcommand(words []string) string {
