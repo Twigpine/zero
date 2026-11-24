@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once the first release is
 tagged. Until then, source builds report the version `dev`.
 
+## [0.15.0](https://github.com/Twigpine/zero/compare/v0.14.0...v0.15.0) (2026-11-24)
+
+
+### Features
+
+* **measurements:** check a report's timings against the run's own ([#909](https://github.com/Twigpine/zero/issues/909)) ([06b3978](https://github.com/Twigpine/zero/commit/06b397846a4779135e52250aa8766ba427823672))
+* **providers:** default Twigpine OpenGateway to the auto smart-routing model ([#1220](https://github.com/Twigpine/zero/issues/1220)) ([8288ae8](https://github.com/Twigpine/zero/commit/8288ae81bd6a4315e80131db4c2629d887ec7aae))
+* **tui:** full-auto permission mode, and classify local dev servers separately ([#883](https://github.com/Twigpine/zero/issues/883)) ([89c91b9](https://github.com/Twigpine/zero/commit/89c91b9d4084708bfe132fb94878f1b27a7fa9c7))
+
+
+### Bug Fixes
+
+* **hooks:** serialize config mutations across processes and publish durably ([#1166](https://github.com/Twigpine/zero/issues/1166)) ([633dab3](https://github.com/Twigpine/zero/commit/633dab33ca0426866c0b750dcad2f52548e81b01))
+* **tools:** keep a file's access control when an overwrite replaces it on Windows ([#1241](https://github.com/Twigpine/zero/issues/1241)) ([5289824](https://github.com/Twigpine/zero/commit/5289824df9db1ae4bb73b34935eaa9c0c1713288))
+* **tui:** format relativeAge using now's location instead of process local time ([#1229](https://github.com/Twigpine/zero/issues/1229)) ([#1243](https://github.com/Twigpine/zero/issues/1243)) ([b744df5](https://github.com/Twigpine/zero/commit/b744df5686f3b066de7b175d2c960bc584101e5d))
+
 ## [0.14.0](https://github.com/Twigpine/zero/compare/v0.13.0...v0.14.0) (2026-11-17)
 
 
