@@ -49,7 +49,7 @@ func assertNoResolvedModelsJSON(t *testing.T, report Report) {
 	}
 }
 
-func TestD2_1_20_BuildReportAggregatesResolvedModelsWithoutRegistryPrice(t *testing.T) {
+func TestBuildReportAggregatesResolvedModelsWithoutRegistryPrice(t *testing.T) {
 	registry, err := modelregistry.DefaultRegistry()
 	if err != nil {
 		t.Fatalf("DefaultRegistry: %v", err)
@@ -85,7 +85,7 @@ func TestD2_1_20_BuildReportAggregatesResolvedModelsWithoutRegistryPrice(t *test
 	}
 }
 
-func TestD2_1_21_BuildReportNothingToShow(t *testing.T) {
+func TestBuildReportNothingToShow(t *testing.T) {
 	registry, err := modelregistry.DefaultRegistry()
 	if err != nil {
 		t.Fatalf("DefaultRegistry: %v", err)
@@ -119,7 +119,7 @@ func TestD2_1_21_BuildReportNothingToShow(t *testing.T) {
 	}
 }
 
-func TestD2_1_22_BuildReportSanitizesResolvedModelOnRead(t *testing.T) {
+func TestBuildReportSanitizesResolvedModelOnRead(t *testing.T) {
 	registry, err := modelregistry.DefaultRegistry()
 	if err != nil {
 		t.Fatalf("DefaultRegistry: %v", err)
@@ -193,7 +193,7 @@ func TestD2_1_22_BuildReportSanitizesResolvedModelOnRead(t *testing.T) {
 	})
 }
 
-func TestD2_1_23_BuildReportPrecedenceAndMixedLines(t *testing.T) {
+func TestBuildReportPrecedenceAndMixedLines(t *testing.T) {
 	registry, err := modelregistry.DefaultRegistry()
 	if err != nil {
 		t.Fatalf("DefaultRegistry: %v", err)
@@ -311,7 +311,7 @@ func TestD2_1_23_BuildReportPrecedenceAndMixedLines(t *testing.T) {
 	})
 }
 
-func TestD2_1_24_BuildReportTotalsUnchangedWithResolvedModelKey(t *testing.T) {
+func TestBuildReportTotalsUnchangedWithResolvedModelKey(t *testing.T) {
 	registry, err := modelregistry.DefaultRegistry()
 	if err != nil {
 		t.Fatalf("DefaultRegistry: %v", err)

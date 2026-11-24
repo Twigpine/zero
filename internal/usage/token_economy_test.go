@@ -79,7 +79,7 @@ func TestEventUsagePayloadOmitsZeroFields(t *testing.T) {
 	}
 }
 
-func TestD2_1_15_EventUsagePayloadSanitizesResolvedModel(t *testing.T) {
+func TestEventUsagePayloadSanitizesResolvedModel(t *testing.T) {
 	p := EventUsagePayload(zeroruntime.Usage{InputTokens: 10, OutputTokens: 2, ResolvedModel: "\x1b[31mx\u202e"})
 	if p["resolvedModel"] != "[31mx" {
 		t.Fatalf("resolvedModel = %#v, want [31mx", p["resolvedModel"])
@@ -99,7 +99,7 @@ func TestD2_1_15_EventUsagePayloadSanitizesResolvedModel(t *testing.T) {
 	}
 }
 
-func TestD2_1_16_EventUsagePayloadResolvedModelRoundTrip(t *testing.T) {
+func TestEventUsagePayloadResolvedModelRoundTrip(t *testing.T) {
 	raw, err := json.Marshal(EventUsagePayload(zeroruntime.Usage{
 		InputTokens:   10,
 		OutputTokens:  2,

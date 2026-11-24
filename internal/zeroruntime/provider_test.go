@@ -256,7 +256,7 @@ func TestCollectStreamMergesMixedUsageSnapshots(t *testing.T) {
 	}
 }
 
-func TestD2_1_14_MergeUsageSnapshotResolvedModel(t *testing.T) {
+func TestMergeUsageSnapshotResolvedModel(t *testing.T) {
 	t.Parallel()
 	t.Run("last-non-empty-wins", func(t *testing.T) {
 		t.Parallel()
@@ -293,7 +293,7 @@ func TestD2_1_14_MergeUsageSnapshotResolvedModel(t *testing.T) {
 	})
 }
 
-func TestD2_1_14_CollectStreamMergesResolvedModelFromFirstUsage(t *testing.T) {
+func TestCollectStreamMergesResolvedModelFromFirstUsage(t *testing.T) {
 	events := make(chan StreamEvent)
 	go func() {
 		defer close(events)

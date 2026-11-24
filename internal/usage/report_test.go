@@ -179,7 +179,7 @@ func TestBuildReportRatiosGuardNetZero(t *testing.T) {
 	}
 }
 
-func TestD2_1_17a_BuildReportPricesFromSessionModelWhenOnlyResolvedModelPresent(t *testing.T) {
+func TestBuildReportPricesFromSessionModelWhenOnlyResolvedModelPresent(t *testing.T) {
 	registry, err := modelregistry.DefaultRegistry()
 	if err != nil {
 		t.Fatalf("DefaultRegistry: %v", err)
@@ -215,7 +215,7 @@ func TestD2_1_17a_BuildReportPricesFromSessionModelWhenOnlyResolvedModelPresent(
 	}
 }
 
-func TestD2_1_17b_BuildReportEscalationModelPrecedenceUnchanged(t *testing.T) {
+func TestBuildReportEscalationModelPrecedenceUnchanged(t *testing.T) {
 	registry, err := modelregistry.DefaultRegistry()
 	if err != nil {
 		t.Fatalf("DefaultRegistry: %v", err)
@@ -252,7 +252,7 @@ func TestD2_1_17b_BuildReportEscalationModelPrecedenceUnchanged(t *testing.T) {
 	}
 }
 
-func TestD2_1_17c_BuildReportTotalsIgnoreResolvedModelKey(t *testing.T) {
+func TestBuildReportTotalsIgnoreResolvedModelKey(t *testing.T) {
 	registry, err := modelregistry.DefaultRegistry()
 	if err != nil {
 		t.Fatalf("DefaultRegistry: %v", err)

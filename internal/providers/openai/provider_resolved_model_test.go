@@ -10,7 +10,7 @@ import (
 	"github.com/Twigpine/zero/internal/zeroruntime"
 )
 
-func TestD2_1_9_StreamCompletionRecordsResolvedModelOnUsageChunk(t *testing.T) {
+func TestStreamCompletionRecordsResolvedModelOnUsageChunk(t *testing.T) {
 	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"model":"deepseek/deepseek-r1:free","choices":[{"delta":{"content":"ok"}}]}`)
@@ -33,7 +33,7 @@ func TestD2_1_9_StreamCompletionRecordsResolvedModelOnUsageChunk(t *testing.T) {
 	}
 }
 
-func TestD2_1_10_StreamCompletionKeepsLastNonEmptyModel(t *testing.T) {
+func TestStreamCompletionKeepsLastNonEmptyModel(t *testing.T) {
 	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"model":"x/y","choices":[{"delta":{"content":"ok"}}]}`)
@@ -56,7 +56,7 @@ func TestD2_1_10_StreamCompletionKeepsLastNonEmptyModel(t *testing.T) {
 	}
 }
 
-func TestD2_1_11_StreamCompletionResolvedModelTable(t *testing.T) {
+func TestStreamCompletionResolvedModelTable(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name   string
@@ -156,7 +156,7 @@ func TestD2_1_11_StreamCompletionResolvedModelTable(t *testing.T) {
 	}
 }
 
-func TestD2_1_12_StreamCompletionWithoutModelUnchangedUsage(t *testing.T) {
+func TestStreamCompletionWithoutModelUnchangedUsage(t *testing.T) {
 	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, `{"choices":[{"delta":{"content":"hello "}}]}`)

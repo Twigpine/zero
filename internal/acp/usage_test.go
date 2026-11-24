@@ -20,7 +20,7 @@ import (
 // OnUsage, which dropped the token counts of every ACP session. A turn with two
 // provider requests (a tool round trip) must leave two usage events, in the shape
 // the usage report reads, next to the turn's messages.
-func TestD2_1_18_ACPPromptPersistsSanitizedResolvedModel(t *testing.T) {
+func TestACPPromptPersistsSanitizedResolvedModel(t *testing.T) {
 	deps := testDeps(t)
 	deps.RunAgent = func(_ context.Context, _ string, _ zeroruntime.Provider, opts agent.Options) (agent.Result, error) {
 		if opts.OnUsage == nil {

@@ -253,7 +253,7 @@ func collectTerminalEvents(t *testing.T, p *CodexProvider, event *responsesEvent
 	return collected
 }
 
-func TestD2_1_13_HandleTerminalResponseResolvedModel(t *testing.T) {
+func TestHandleTerminalResponseResolvedModel(t *testing.T) {
 	t.Parallel()
 	usage := &usagePayload{InputTokens: 11, OutputTokens: 7}
 	cases := []struct {
@@ -326,7 +326,7 @@ func TestD2_1_13_HandleTerminalResponseResolvedModel(t *testing.T) {
 	}
 }
 
-func TestD2_1_13_CodexStreamResolvedModelFromEscapedJSON(t *testing.T) {
+func TestCodexStreamResolvedModelFromEscapedJSON(t *testing.T) {
 	t.Parallel()
 	var rec codexRequest
 	srv := newCodexResponsesServer(t, &rec,

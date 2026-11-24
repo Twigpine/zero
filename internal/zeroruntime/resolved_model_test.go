@@ -7,7 +7,7 @@ import (
 	"unicode/utf8"
 )
 
-func TestD2_1_1_SanitizeResolvedModelPassesThroughCleanIDs(t *testing.T) {
+func TestSanitizeResolvedModelPassesThroughCleanIDs(t *testing.T) {
 	t.Parallel()
 	for _, in := range []string{
 		"deepseek/deepseek-r1:free",
@@ -21,7 +21,7 @@ func TestD2_1_1_SanitizeResolvedModelPassesThroughCleanIDs(t *testing.T) {
 	}
 }
 
-func TestD2_1_2_SanitizeResolvedModelStripsControlCharacters(t *testing.T) {
+func TestSanitizeResolvedModelStripsControlCharacters(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		in, want string
@@ -44,7 +44,7 @@ func TestD2_1_2_SanitizeResolvedModelStripsControlCharacters(t *testing.T) {
 	}
 }
 
-func TestD2_1_3_SanitizeResolvedModelStripsFormatCharacters(t *testing.T) {
+func TestSanitizeResolvedModelStripsFormatCharacters(t *testing.T) {
 	t.Parallel()
 	inputs := []string{
 		"\u202egpt-4",
@@ -66,7 +66,7 @@ func TestD2_1_3_SanitizeResolvedModelStripsFormatCharacters(t *testing.T) {
 	}
 }
 
-func TestD2_1_4_SanitizeResolvedModelRepairsInvalidUTF8(t *testing.T) {
+func TestSanitizeResolvedModelRepairsInvalidUTF8(t *testing.T) {
 	t.Parallel()
 	got := SanitizeResolvedModel("a\xffb\xfe")
 	if got != "ab" {
@@ -77,7 +77,7 @@ func TestD2_1_4_SanitizeResolvedModelRepairsInvalidUTF8(t *testing.T) {
 	}
 }
 
-func TestD2_1_5_SanitizeResolvedModelCapsLength(t *testing.T) {
+func TestSanitizeResolvedModelCapsLength(t *testing.T) {
 	t.Parallel()
 	t.Run("cjk-3-byte", func(t *testing.T) {
 		t.Parallel()
@@ -126,7 +126,7 @@ func TestD2_1_5_SanitizeResolvedModelCapsLength(t *testing.T) {
 	})
 }
 
-func TestD2_1_6_SanitizeResolvedModelTrimsAndCapsWithoutTrailingSpace(t *testing.T) {
+func TestSanitizeResolvedModelTrimsAndCapsWithoutTrailingSpace(t *testing.T) {
 	t.Parallel()
 	if got := SanitizeResolvedModel("\x00 gpt-x \x00"); got != "gpt-x" {
 		t.Fatalf("trimmed control/spaces = %q, want gpt-x", got)
@@ -196,7 +196,7 @@ func FuzzSanitizeResolvedModel(f *testing.F) {
 	})
 }
 
-func TestD2_1_8_ResolvedModelAttribution(t *testing.T) {
+func TestResolvedModelAttribution(t *testing.T) {
 	t.Parallel()
 	requested300 := strings.Repeat("m", 300)
 	cases := []struct {

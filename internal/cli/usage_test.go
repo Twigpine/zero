@@ -319,7 +319,7 @@ func TestRunUsageInvalidSince(t *testing.T) {
 // TestRunUsageEmptyStore verifies that running `usage report` against a store
 // with no usage events exits successfully, prints the header, shows a zero
 // total, and does not panic.
-func TestD2_1_19_UsageReportIgnoresRawResolvedModelInStoredEvents(t *testing.T) {
+func TestUsageReportIgnoresRawResolvedModelInStoredEvents(t *testing.T) {
 	isolateCLIUserState(t)
 
 	plainStore := sessions.NewStore(sessions.StoreOptions{RootDir: t.TempDir(), Now: fixedCLITime("2026-06-01T09:00:00Z")})
@@ -411,7 +411,7 @@ func TestRunUsageEmptyStore(t *testing.T) {
 	}
 }
 
-func TestD2_1_25_FormatReportAndRunUsage(t *testing.T) {
+func TestFormatReportAndRunUsage(t *testing.T) {
 	const reportHeader = "resolved models (reported by provider; cost uses the requested model)"
 
 	t.Run("a-no-resolved-block", func(t *testing.T) {
