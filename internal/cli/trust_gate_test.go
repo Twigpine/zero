@@ -26,17 +26,22 @@ import (
 // at <root>/.config/zero while the tests wrote to <root>/zero, so the store-error
 // and user-hook cases silently missed. Only Windows needs its own variable (APPDATA,
 // what os.UserConfigDir consults). XDG_DATA_HOME is redirected so the hook audit
-// store never touches the user's real data dir.
+// store never touches the user's real data dir. XDG_STATE_HOME and LOCALAPPDATA are
+// redirected too: mutating a hooks config takes its cross-process lock in the user
+// state directory, and a project-scope config must never leave that state in the
+// developer's real one.
 func setTrustConfigRoot(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	switch runtime.GOOS {
 	case "windows":
 		t.Setenv("APPDATA", root)
+		t.Setenv("LOCALAPPDATA", root)
 	default:
 		t.Setenv("XDG_CONFIG_HOME", root)
 	}
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	return root
 }
 
