@@ -235,7 +235,6 @@ func (provider *Provider) stream(ctx context.Context, body []byte, sessionID str
 		return provider.emitPayload(ctx, data, state, events)
 	})
 	if errors.Is(err, providerio.ErrStreamIdle) || errors.Is(err, providerio.ErrStreamStalled) {
-		state.flushUsage(ctx, events, provider.model, state.resolvedModel)
 		state.flushBufferedContent(events)
 		state.closeBufferedOpen(events)
 		sendEvent(ctx, events, zeroruntime.StreamEvent{
@@ -245,21 +244,18 @@ func (provider *Provider) stream(ctx context.Context, body []byte, sessionID str
 		return
 	}
 	if err != nil {
-		state.flushUsage(ctx, events, provider.model, state.resolvedModel)
 		state.flushBufferedContent(events)
 		state.closeBufferedOpen(events)
 		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + err.Error())})
 		return
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		state.flushUsage(ctx, events, provider.model, state.resolvedModel)
 		state.flushBufferedContent(events)
 		state.closeBufferedOpen(events)
 		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventError, Error: provider.redact("provider stream error: " + ctxErr.Error())})
 		return
 	}
 	if !state.done {
-		state.flushUsage(ctx, events, provider.model, state.resolvedModel)
 		state.flushContent(ctx, events)
 		state.closeOpen(ctx, events)
 		sendEvent(ctx, events, zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone, FinishReason: state.finishReason})
@@ -290,7 +286,6 @@ var openAIStreamErrorStatusByCode = map[string]int{
 func (provider *Provider) emitPayload(ctx context.Context, data string, state *toolState, events chan<- zeroruntime.StreamEvent) bool {
 	var chunk streamChunk
 	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-		state.flushUsage(ctx, events, provider.model, state.resolvedModel)
 		state.flushContent(ctx, events)
 		state.closeOpen(ctx, events)
 		sendEvent(ctx, events, zeroruntime.StreamEvent{
@@ -301,7 +296,6 @@ func (provider *Provider) emitPayload(ctx context.Context, data string, state *t
 		return false
 	}
 	if chunk.Error != nil {
-		state.flushUsage(ctx, events, provider.model, state.resolvedModel)
 		state.flushContent(ctx, events)
 		state.closeOpen(ctx, events)
 		// statusCode buckets the error for classification only. The HTTP response
@@ -366,24 +360,23 @@ func (provider *Provider) emitChunk(
 		}
 	}
 
-	// Flush pending usage with pendingModel BEFORE updating resolvedModel.
-	// This ensures earlier usage chunks are attributed to the model they were
-	// originally associated with, not the later model that may appear in this chunk.
-	if chunk.Usage != nil {
-		state.flushUsage(ctx, events, provider.model, state.pendingModel)
-		if m := zeroruntime.SanitizeResolvedModel(string(chunk.Model)); m != "" {
-			state.resolvedModel = m
-		}
-		state.pendingModel = state.resolvedModel
-		state.pendingUsage = &zeroruntime.Usage{
-			PromptTokens:      chunk.Usage.PromptTokens,
-			CompletionTokens:  chunk.Usage.CompletionTokens,
-			CachedInputTokens: chunk.Usage.PromptTokensDetails.CachedTokens,
-			CacheWriteTokens:  chunk.Usage.PromptTokensDetails.CacheWriteTokens,
-			ReasoningTokens:   chunk.Usage.CompletionTokensDetails.ReasoningTokens,
-		}
-	} else if m := zeroruntime.SanitizeResolvedModel(string(chunk.Model)); m != "" {
+	if m := zeroruntime.SanitizeResolvedModel(string(chunk.Model)); m != "" {
 		state.resolvedModel = m
+	}
+
+	if chunk.Usage != nil {
+		sendEvent(ctx, events, zeroruntime.StreamEvent{
+			Type: zeroruntime.StreamEventUsage,
+			Usage: zeroruntime.Usage{
+				PromptTokens:      chunk.Usage.PromptTokens,
+				CompletionTokens:  chunk.Usage.CompletionTokens,
+				CachedInputTokens: chunk.Usage.PromptTokensDetails.CachedTokens,
+				CacheWriteTokens:  chunk.Usage.PromptTokensDetails.CacheWriteTokens,
+				ReasoningTokens:   chunk.Usage.CompletionTokensDetails.ReasoningTokens,
+				ResolvedModel:     zeroruntime.ResolvedModelAttribution(provider.model, state.resolvedModel),
+				ModelReported:     state.resolvedModel != "",
+			},
+		})
 	}
 }
 

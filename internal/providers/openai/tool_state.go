@@ -4,7 +4,6 @@ import (
 	"context"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/Twigpine/zero/internal/zeroruntime"
 )
@@ -28,13 +27,6 @@ type toolState struct {
 	// resolvedModel holds the last non-empty model id echoed by the provider
 	// (e.g. OpenRouter per-chunk); emitted on the usage frame, not for pricing.
 	resolvedModel string
-	// pendingModel holds the model to attribute to the currently pending usage.
-	// It is updated when a usage chunk is stored, so a later model-only chunk
-	// does not retroactively change the earlier usage's attribution.
-	pendingModel string
-	// pendingUsage holds a usage event waiting to be sent, so it can be updated
-	// with the final resolvedModel before emission.
-	pendingUsage *zeroruntime.Usage
 }
 
 type pendingToolCall struct {
@@ -47,44 +39,6 @@ type pendingToolCall struct {
 
 func newToolState(parseThinkTags bool) *toolState {
 	return &toolState{calls: make(map[int]*pendingToolCall), parseThinkTags: parseThinkTags}
-}
-
-func (state *toolState) flushUsage(ctx context.Context, events chan<- zeroruntime.StreamEvent, requested string, model string) {
-	if state.pendingUsage == nil {
-		return
-	}
-	state.pendingUsage.ResolvedModel = zeroruntime.ResolvedModelAttribution(requested, model)
-	state.pendingUsage.ModelReported = model != ""
-
-	event := zeroruntime.StreamEvent{
-		Type:  zeroruntime.StreamEventUsage,
-		Usage: *state.pendingUsage,
-	}
-	sendUsageEvent(ctx, events, event)
-	state.pendingUsage = nil
-	state.pendingModel = ""
-}
-
-// usageFlushGrace bounds how long a cancelled flush waits for room in a full
-// events channel; it matches the collector's drain after a cancel.
-const usageFlushGrace = 50 * time.Millisecond
-
-// sendUsageEvent delivers the held usage event. While ctx is alive it waits
-// like sendEvent. After the caller cancels it still delivers when the buffer
-// has room (sendEvent would drop a non-error event at random there), and when
-// the buffer is full it waits at most usageFlushGrace for the collector's
-// drain to free a slot, so it can never hold the stream goroutine.
-func sendUsageEvent(ctx context.Context, events chan<- zeroruntime.StreamEvent, event zeroruntime.StreamEvent) {
-	select {
-	case events <- event:
-	case <-ctx.Done():
-		timer := time.NewTimer(usageFlushGrace)
-		defer timer.Stop()
-		select {
-		case events <- event:
-		case <-timer.C:
-		}
-	}
 }
 
 type streamEventEmitter func(zeroruntime.StreamEvent)
