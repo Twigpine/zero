@@ -194,6 +194,15 @@ func mergeUsageSnapshot(left Usage, right Usage) Usage {
 		reasoningTokens = right.ReasoningTokens
 	}
 
+	resolvedModel := left.ResolvedModel
+	modelReported := left.ModelReported
+	if right.ModelReported || right.ResolvedModel != "" {
+		// The later snapshot reported a model: it wins, including when it equals
+		// the requested model and so leaves ResolvedModel empty.
+		resolvedModel = right.ResolvedModel
+		modelReported = true
+	}
+
 	usage, err := NormalizeUsage(TokenUsage{
 		InputTokens:       inputTokens,
 		OutputTokens:      outputTokens,
@@ -202,8 +211,12 @@ func mergeUsageSnapshot(left Usage, right Usage) Usage {
 		ReasoningTokens:   reasoningTokens,
 	})
 	if err != nil {
+		right.ResolvedModel = resolvedModel
+		right.ModelReported = modelReported
 		return right
 	}
+	usage.ResolvedModel = resolvedModel
+	usage.ModelReported = modelReported
 	return usage
 }
 

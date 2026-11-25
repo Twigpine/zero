@@ -286,6 +286,30 @@ func TestStreamCompletionEmitsTextUsageAndDone(t *testing.T) {
 	}
 }
 
+func TestStreamCompletionEmitsResolvedModelOnUsageChunk(t *testing.T) {
+	t.Parallel()
+	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, `{"model":"deepseek/deepseek-r1:free","choices":[{"delta":{"content":"ok"}}]}`)
+		writeSSE(w, `{"model":"deepseek/deepseek-r1:free","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1}}`)
+		writeSSE(w, `[DONE]`)
+	})
+
+	events := collectProviderEvents(t, provider)
+	var usageEvent *zeroruntime.StreamEvent
+	for i := range events {
+		if events[i].Type == zeroruntime.StreamEventUsage {
+			usageEvent = &events[i]
+			break
+		}
+	}
+	if usageEvent == nil {
+		t.Fatalf("missing usage event: %#v", events)
+	}
+	if usageEvent.Usage.ResolvedModel != "deepseek/deepseek-r1:free" {
+		t.Fatalf("ResolvedModel = %q, want deepseek/deepseek-r1:free", usageEvent.Usage.ResolvedModel)
+	}
+}
+
 func TestStreamCompletionEmitsReasoningContentDeltas(t *testing.T) {
 	t.Parallel()
 	provider := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {

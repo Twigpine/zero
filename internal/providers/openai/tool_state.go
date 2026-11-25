@@ -24,6 +24,9 @@ type toolState struct {
 	// done is set once a terminal event (error) has been emitted so the post-scan
 	// path does not emit a second done after the stream already ended.
 	done bool
+	// resolvedModel holds the last non-empty model id echoed by the provider
+	// (e.g. OpenRouter per-chunk); emitted on the usage frame, not for pricing.
+	resolvedModel string
 }
 
 type pendingToolCall struct {
