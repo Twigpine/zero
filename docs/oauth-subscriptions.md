@@ -99,6 +99,13 @@ Pick **Sign in with OAuth** → the list of providers that do real OAuth → cho
   `ZERO_OAUTH_ALLOW_PRESETS=1`. As of mid-2026 the Codex backend is
   Cloudflare-gated: requests from a non-Codex client can still be challenged, and
   the `chatgpt-proxy` route in §2 is the conservative fallback.
+
+  ChatGPT model availability comes from the authenticated Codex catalog. Open
+  `/model` or run `/model list` to refresh it; `Ctrl+R` retries from the picker.
+  If discovery fails, the picker reports the error and labels fallback suggestions
+  as unverified. Public OpenAI metadata can enrich live models but cannot establish
+  subscription access. `zero providers models chatgpt` probes the live endpoint
+  directly and reports failures.
 - **Hugging Face — opt-in preset, BYO client_id** — `zero auth login huggingface`
   (or `--device` for headless) opens a Hugging Face OAuth flow. The bearer works on
   the OpenAI-compatible router at `https://router.huggingface.co/v1` for hundreds
