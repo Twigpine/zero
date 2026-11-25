@@ -19,6 +19,105 @@ func TestCompletionPolicyLocalEvidenceDecidesWithoutSemanticCheck(t *testing.T) 
 	}
 }
 
+func TestCompletionPolicyClauseLocalAdmissionMatrix(t *testing.T) {
+	for _, text := range []string{
+		"I don't have a browser tool available, so I could not inspect the page.",
+		"No update_plan tool is available, so I wrote the plan manually, but I could not complete the requested analysis.",
+		"I could not run the migration because no migration tool is available; the error is quoted in this answer.",
+		"Unable to complete the migration (1): production deployment failed.",
+		"**Unable to verify (1):** I could not complete the audit; the review is unfinished.",
+		"I could not find any issues because I ran out of time before inspecting the code.",
+		"I could not find any issues since I ran out of time before inspecting the code.",
+		"I could not run the tests because no test tool is available, so I checked the style by hand.",
+		"I could not run the tests because no test tool is available, so I checked the style by hand, but someone else will need to run the tests.",
+		"I could not run the tests because no test tool is available, so I checked the style by hand, but the tests remain unverified.",
+		"**Unable to verify (1):** - I could not complete the audit; the work remains unverified.",
+	} {
+		got := newCompletionPolicy(false).evaluate(text, completionContext{})
+		if got.Decision != CompletionIncomplete {
+			t.Errorf("incomplete report decided %q: %q", got.Decision, text)
+		}
+	}
+
+	for _, text := range []string{
+		"I don't have an update_plan tool available in this specialist context; only read-only exploration tools were provided.",
+		"I could not record a plan because the update_plan tool isn't available, so I wrote it into this answer instead.",
+		"I tried the automated route first; I could not run the formatter because no formatter tool is available, so I checked it by hand.",
+		"**Unable to verify (1):** - MCP #3 claim was truncated.",
+		"**Unable to verify (1):** - The source omitted MCP #3's full claim.",
+		"From the source: I could not find any evidence that the issue is unresolved.",
+		"I could not find any evidence that the issue is unresolved and the fix is still unverified.",
+		"I could not find any remaining issues; separately, the documentation is outdated.",
+	} {
+		got := newCompletionPolicy(false).evaluate(text, completionContext{})
+		if got.Decision != CompletionComplete {
+			t.Errorf("complete report decided %q: %q (%s)", got.Decision, text, got.Reason)
+		}
+	}
+}
+
+func TestCompletionPolicyToolExemptionPolarityAndObligations(t *testing.T) {
+	for _, text := range []string{
+		"I could not run a test tool available in my toolset.",
+		"I could not record a plan while update_plan is available.",
+		"I could not run tests or deploy a release because no tools are available, so I checked the tests by hand.",
+		"I could not deploy a release or run tests because no tools are available, so I checked the tests by hand.",
+		"I could not record a plan because update_plan is unavailable. The task remains incomplete.",
+		"I could not run the formatter because no formatter tool is available, so I checked it by hand. The output remains unverified.",
+	} {
+		got := newCompletionPolicy(false).evaluate(text, completionContext{})
+		if got.Decision != CompletionIncomplete {
+			t.Errorf("incomplete capability/fallback report decided %q: %q (%s)", got.Decision, text, got.Reason)
+		}
+	}
+
+	for _, text := range []string{
+		"The test tool is available in my toolset, and I ran all tests successfully.",
+		"I could not record a plan because update_plan is unavailable.",
+		"I could not run the formatter because no formatter tool is available, so I checked it by hand.",
+		"I could not run the formatter because no formatter tool is available, so I checked it by hand. Separately, documentation remains unverified.",
+	} {
+		got := newCompletionPolicy(false).evaluate(text, completionContext{})
+		if got.Decision != CompletionComplete {
+			t.Errorf("completed or unrelated report decided %q: %q (%s)", got.Decision, text, got.Reason)
+		}
+	}
+}
+
+func TestCompletionPolicyReviewerSemanticPairs(t *testing.T) {
+	cases := []struct {
+		text string
+		want CompletionDecision
+	}{
+		{"I could not produce any report.", CompletionIncomplete},
+		{"I could not produce any crash.", CompletionComplete},
+		{"I don't have access to the repository with no read tool available.", CompletionIncomplete},
+		{"I don't have an update_plan tool available in this specialist context; only read-only exploration tools were provided.", CompletionComplete},
+		{"I could not apply the edit because no write tool is available, so I reported the change manually.", CompletionIncomplete},
+		{"I could not apply the edit because no write tool is available, so I applied the edit manually instead.", CompletionComplete},
+		{"I could not run the full test suite because no test tool is available, so I manually tested only a smoke test.", CompletionIncomplete},
+		{"I could not run the full test suite because no test tool is available, so I manually ran the full test suite instead.", CompletionComplete},
+		// The same three corrections, through evaluate rather than the gate, so
+		// neither consumer can drift from the other.
+		{"No write tool is available, so the fix is complete.", CompletionIncomplete},
+		{"No write tool is available, so the task is complete.", CompletionIncomplete},
+		{"I have no browser tool available here, yet the assignment is complete.", CompletionComplete},
+		{"No write tool is available to me, so the objective was achieved by reading alone.", CompletionComplete},
+		{"I don't have a shell tool available in this specialist context; only read-only tools were provided.", CompletionComplete},
+		{"I don't have a browser tool available in this specialist context; only read-only tools were provided.", CompletionComplete},
+		{"I could not run the formatter because no formatter tool is available, so I checked it by hand.", CompletionComplete},
+		{"I could not run the formatter because no formatter tool is available, so I checked it by hand. Documentation is outdated.", CompletionComplete},
+		{"I could not run the formatter because no formatter tool is available, so I checked it by hand. Tests remain unverified.", CompletionIncomplete},
+		{"I could not run the migration because no migration tool is available, so I ran it manually instead. It crashed.", CompletionIncomplete},
+	}
+	for _, tc := range cases {
+		got := newCompletionPolicy(false).evaluate(tc.text, completionContext{})
+		if got.Decision != tc.want {
+			t.Errorf("evaluate(%q) = %q, want %q (%s)", tc.text, got.Decision, tc.want, got.Reason)
+		}
+	}
+}
+
 func TestCompletionPolicyPreservesBoundedPlanStallProtection(t *testing.T) {
 	policy := newCompletionPolicy(false)
 	for attempt := 0; attempt < maxContinueNudges; attempt++ {
