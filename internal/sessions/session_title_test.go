@@ -130,6 +130,31 @@ func TestUpdateModel(t *testing.T) {
 	}
 }
 
+func TestUpdateModelMarksAndClearsImportedLocalSelection(t *testing.T) {
+	store := newTitleTestStore(t)
+	session, err := store.Create(CreateInput{
+		ModelID: "same-model",
+		Tag:     ImportedSessionTag("claude-code", "foreign-id"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, err := store.UpdateModel(session.SessionID, "same-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !selected.ModelSelectedLocally {
+		t.Fatal("an explicit local selection matching legacy metadata was not recorded")
+	}
+	cleared, err := store.UpdateModel(session.SessionID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared.ModelID != "" || cleared.ModelSelectedLocally {
+		t.Fatalf("cleared imported selection retained authority: %#v", cleared)
+	}
+}
+
 func TestUpdateMode(t *testing.T) {
 	store := newTitleTestStore(t)
 	session, err := store.Create(CreateInput{})

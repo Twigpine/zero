@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -38,6 +39,13 @@ func TestCaptureToolCheckpointWritesBlobAndEvent(t *testing.T) {
 		t.Fatalf("event type = %s", ev.Type)
 	}
 	p := decodeCk(t, ev)
+	verifiedWS, err := filepath.EvalSymlinks(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.WorkspaceRoot != verifiedWS {
+		t.Fatalf("workspace binding = %q, want verified local root %q", p.WorkspaceRoot, verifiedWS)
+	}
 	if len(p.Files) != 1 || p.Files[0].Path != "a.txt" || p.Files[0].Blob == "" || p.Files[0].Bytes != 2 {
 		t.Fatalf("unexpected payload: %+v", p)
 	}
@@ -232,6 +240,145 @@ func TestApplyRewindRestoresAndTruncates(t *testing.T) {
 		t.Fatalf("expected truncation to target seq %d", target.Sequence)
 	}
 	_ = report
+}
+
+func TestImportedSessionRewindUsesCapturedLocalWorkspaceBinding(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir()})
+	localWorkspace := t.TempDir()
+	foreignWorkspace := t.TempDir()
+	if _, err := store.Create(CreateInput{
+		SessionID:    "imported-session",
+		Cwd:          foreignWorkspace,
+		WorkspaceKey: foreignWorkspace,
+		Tag:          ImportedSessionTag("claude-code", "foreign-id"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	localPath := filepath.Join(localWorkspace, "config.yaml")
+	foreignPath := filepath.Join(foreignWorkspace, "config.yaml")
+	mustWriteFile(t, localPath, "local-before")
+	mustWriteFile(t, foreignPath, "foreign-must-not-change")
+	if _, err := store.CaptureToolCheckpoint("imported-session", localWorkspace, "write_file", []string{"config.yaml"}); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, localPath, "local-after")
+
+	// The caller supplies the imported session's foreign WorkspaceKey, matching
+	// the old CLI failure path. Restore must ignore it in favour of the verified
+	// local root bound at capture time.
+	if _, err := store.ApplyRewind("imported-session", foreignWorkspace, 0); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(localPath); err != nil || string(got) != "local-before" {
+		t.Fatalf("local checkpoint was not restored: got %q err=%v", got, err)
+	}
+	if got, err := os.ReadFile(foreignPath); err != nil || string(got) != "foreign-must-not-change" {
+		t.Fatalf("foreign workspace was mutated: got %q err=%v", got, err)
+	}
+}
+
+func TestImportedSessionRefusesLegacyCheckpointWithoutLocalBinding(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir()})
+	if _, err := store.Create(CreateInput{
+		SessionID: "imported-session",
+		Tag:       ImportedSessionTag("codex", "foreign-id"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	target, err := store.AppendEvent("imported-session", AppendEventInput{Type: EventMessage, Payload: map[string]any{"content": "before"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendEvent("imported-session", AppendEventInput{Type: EventSessionCheckpoint, Payload: CheckpointPayload{
+		Tool:  "write_file",
+		Files: []CheckpointFile{{Path: "new.txt", Absent: true}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = store.ApplyRewind("imported-session", t.TempDir(), target.Sequence)
+	if err == nil || !strings.Contains(err.Error(), "no verified local workspace binding") {
+		t.Fatalf("unbound imported checkpoint error = %v", err)
+	}
+	events, readErr := store.ReadEvents("imported-session")
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(events) != 2 {
+		t.Fatalf("failed rewind modified the event log: got %d events, want 2", len(events))
+	}
+}
+
+func TestImportedSessionRejectsTamperedAbsoluteCheckpointRoot(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir()})
+	localWorkspace := t.TempDir()
+	outsideWorkspace := t.TempDir()
+	if _, err := store.Create(CreateInput{
+		SessionID: "imported-session",
+		Tag:       ImportedSessionTag("codex", "foreign-id"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	target, err := store.AppendEvent("imported-session", AppendEventInput{Type: EventMessage, Payload: map[string]any{"content": "before"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, ok := store.SnapshotForCheckpoint("imported-session", localWorkspace, "write_file", []string{"new.txt"})
+	if !ok || len(payload.WorkspaceBinding) == 0 {
+		t.Fatal("checkpoint snapshot did not carry a verified local workspace binding")
+	}
+
+	victim := filepath.Join(outsideWorkspace, "victim.txt")
+	mustWriteFile(t, victim, "keep me")
+	payload.WorkspaceRoot = outsideWorkspace
+	payload.Files = []CheckpointFile{{Path: "victim.txt", Absent: true}}
+	if _, err := store.AppendEvent("imported-session", AppendEventInput{Type: EventSessionCheckpoint, Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.ApplyRewind("imported-session", localWorkspace, target.Sequence); err == nil || !strings.Contains(err.Error(), "does not match its verified local binding") {
+		t.Fatalf("tampered checkpoint root error = %v", err)
+	}
+	if got, err := os.ReadFile(victim); err != nil || string(got) != "keep me" {
+		t.Fatalf("tampered checkpoint mutated outside file: got %q err=%v", got, err)
+	}
+}
+
+func TestNativeImportedPrefixTagCanApplyLegacyCheckpoint(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir()})
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "config.yaml")
+	mustWriteFile(t, path, "before")
+	if _, err := store.Create(CreateInput{SessionID: "native-tagged", Tag: "imported:archive"}); err != nil {
+		t.Fatal(err)
+	}
+	target, err := store.AppendEvent("native-tagged", AppendEventInput{Type: EventMessage, Payload: map[string]any{"content": "before"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob, err := store.writeBlob("native-tagged", []byte("before"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendEvent("native-tagged", AppendEventInput{Type: EventSessionCheckpoint, Payload: CheckpointPayload{
+		Tool: "write_file",
+		Files: []CheckpointFile{{
+			Path:  "config.yaml",
+			Blob:  blob,
+			Bytes: len("before"),
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, path, "after")
+
+	if _, err := store.ApplyRewind("native-tagged", workspace, target.Sequence); err != nil {
+		t.Fatalf("native tagged rewind: %v", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "before" {
+		t.Fatalf("legacy checkpoint was not restored: got %q err=%v", got, err)
+	}
 }
 
 func TestRestoreRejectsPathTraversal(t *testing.T) {

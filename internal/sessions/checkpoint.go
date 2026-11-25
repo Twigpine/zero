@@ -9,12 +9,17 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
+
+	"github.com/Twigpine/zero/internal/securefile"
 )
 
 // CheckpointsDir is the per-session subdirectory holding content-addressed blobs.
 const CheckpointsDir = "checkpoints"
 
 const defaultMaxCheckpointBytes = 5 << 20 // 5 MiB
+
+const checkpointRootSecretFile = ".checkpoint-root.secret"
 
 // CheckpointFile records the before-mutation state of one workspace file.
 type CheckpointFile struct {
@@ -29,8 +34,10 @@ type CheckpointFile struct {
 // CheckpointPayload is the payload of an EventSessionCheckpoint event. It indexes
 // the before-state blobs captured for one mutating tool call.
 type CheckpointPayload struct {
-	Tool  string           `json:"tool"`
-	Files []CheckpointFile `json:"files"`
+	Tool             string           `json:"tool"`
+	WorkspaceRoot    string           `json:"workspaceRoot,omitempty"`
+	WorkspaceBinding []byte           `json:"workspaceBinding,omitempty"`
+	Files            []CheckpointFile `json:"files"`
 }
 
 // CheckpointsEnabled reports whether checkpoint capture is enabled (default on;
@@ -107,6 +114,27 @@ func (store *Store) SnapshotForCheckpoint(sessionID, workspaceRoot, tool string,
 	if !CheckpointsEnabled() || len(paths) == 0 {
 		return CheckpointPayload{}, false
 	}
+	if strings.TrimSpace(workspaceRoot) == "" {
+		return CheckpointPayload{}, false
+	}
+	absoluteRoot, err := filepath.Abs(workspaceRoot)
+	if err != nil {
+		return CheckpointPayload{}, false
+	}
+	verifiedRoot, err := filepath.EvalSymlinks(filepath.Clean(absoluteRoot))
+	if err != nil {
+		return CheckpointPayload{}, false
+	}
+	if info, err := os.Stat(verifiedRoot); err != nil || !info.IsDir() {
+		return CheckpointPayload{}, false
+	}
+	// The event log is user-editable JSONL, so seal the locally verified root
+	// under a store-local key. Do this before writing any blobs: if the key is
+	// unavailable, fail before creating content no checkpoint event can reference.
+	workspaceBinding, err := store.checkpointRootCrypter().Seal([]byte(verifiedRoot))
+	if err != nil {
+		return CheckpointPayload{}, false
+	}
 	capBytes := int64(maxCheckpointBytes())
 	files := make([]CheckpointFile, 0, len(paths))
 	for _, rel := range paths {
@@ -115,7 +143,7 @@ func (store *Store) SnapshotForCheckpoint(sessionID, workspaceRoot, tool string,
 		// restore path uses (EvalSymlinks-resolved, no "../" escape). A target that
 		// does not resolve inside the workspace is Skipped — never read into a blob,
 		// and never recorded as Absent (which would delete it on rewind).
-		abs, ok := resolveWithinWorkspace(workspaceRoot, rel)
+		abs, ok := resolveWithinWorkspace(verifiedRoot, rel)
 		if !ok {
 			entry.Skipped = true
 			files = append(files, entry)
@@ -169,7 +197,16 @@ func (store *Store) SnapshotForCheckpoint(sessionID, workspaceRoot, tool string,
 	if len(files) == 0 {
 		return CheckpointPayload{}, false
 	}
-	return CheckpointPayload{Tool: tool, Files: files}, true
+	return CheckpointPayload{
+		Tool:             tool,
+		WorkspaceRoot:    verifiedRoot,
+		WorkspaceBinding: workspaceBinding,
+		Files:            files,
+	}, true
+}
+
+func (store *Store) checkpointRootCrypter() *securefile.Crypter {
+	return securefile.NewCrypter(filepath.Join(store.RootDir, checkpointRootSecretFile))
 }
 
 // writeBlob stores content under its sha256 (content-addressed, deduplicated) and

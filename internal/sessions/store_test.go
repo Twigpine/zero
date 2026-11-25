@@ -181,6 +181,90 @@ func TestStoreForkCopiesEventsAndLineage(t *testing.T) {
 	}
 }
 
+func TestNativeImportedPrefixTagRetainsOperationalModelOnFork(t *testing.T) {
+	store := NewStore(StoreOptions{RootDir: t.TempDir()})
+	parent, err := store.Create(CreateInput{
+		SessionID: "native-tagged",
+		ModelID:   "native-model",
+		Tag:       "imported:archive",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fork, err := store.Fork(parent.SessionID, ForkInput{SessionID: "native-tagged-fork"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fork.ModelID != "native-model" || fork.SourceModelID != "" {
+		t.Fatalf("native tag was treated as foreign provenance: %+v", fork)
+	}
+}
+
+func TestCreateChildMigratesImportedParentModelProvenance(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		parentModel       string
+		parentSourceModel string
+		selectLocalModel  string
+		childModel        string
+		wantModel         string
+		wantSourceModel   string
+	}{
+		{
+			name:            "legacy foreign model is provenance only",
+			parentModel:     "foreign-model",
+			wantSourceModel: "foreign-model",
+		},
+		{
+			name:            "explicit child model overrides migrated parent",
+			parentModel:     "foreign-model",
+			childModel:      "specialist-model",
+			wantModel:       "specialist-model",
+			wantSourceModel: "foreign-model",
+		},
+		{
+			name:              "locally selected parent model remains operational",
+			parentSourceModel: "foreign-model",
+			selectLocalModel:  "zero-local-model",
+			wantModel:         "zero-local-model",
+			wantSourceModel:   "foreign-model",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewStore(StoreOptions{RootDir: t.TempDir()})
+			parent, err := store.Create(CreateInput{
+				SessionID:     "imported-parent",
+				Tag:           ImportedSessionTag("claude-code", "foreign-id"),
+				ModelID:       tc.parentModel,
+				SourceModelID: tc.parentSourceModel,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.selectLocalModel != "" {
+				parent, err = store.UpdateModel(parent.SessionID, tc.selectLocalModel)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !parent.ModelSelectedLocally {
+					t.Fatal("imported parent did not retain the local-selection authority bit")
+				}
+			}
+			child, err := store.CreateChild(parent.SessionID, ChildInput{
+				SessionID: "child",
+				ModelID:   tc.childModel,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if child.ModelID != tc.wantModel || child.SourceModelID != tc.wantSourceModel {
+				t.Fatalf("child model fields = (%q, %q), want (%q, %q)", child.ModelID, child.SourceModelID, tc.wantModel, tc.wantSourceModel)
+			}
+		})
+	}
+}
+
 func TestStoreForkSupportsNonResumableSideSession(t *testing.T) {
 	store := NewStore(StoreOptions{RootDir: t.TempDir()})
 	parent, err := store.Create(CreateInput{SessionID: "parent", Title: "Parent"})

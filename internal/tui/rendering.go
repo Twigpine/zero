@@ -1539,6 +1539,10 @@ func renderToolResultCard(row transcriptRow, width int, rc rowContext, opts card
 	glyph := zeroTheme.green.Render("•")
 	nameStyle := zeroTheme.green
 	borderStyle := zeroTheme.line
+	if row.status == tools.StatusUnknown {
+		glyph = zeroTheme.faint.Render("•")
+		nameStyle = zeroTheme.ink
+	}
 	if opts.fileSelected {
 		// The selected FILES row's edit card: accent border, same as the
 		// sidebar's ▸ marker, so click → highlight reads as one gesture.

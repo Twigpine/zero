@@ -533,6 +533,9 @@ func (m *model) selectGenericPickerAtMouse(msg tea.MouseMsg) (mouseSelectionTarg
 	details := pickerShowsDetails(m.picker, width)
 	// y=0 titled top border, y=1 search line, y=2 separator; rows begin at y=3.
 	line := 3
+	if len(m.picker.tabs) > 0 {
+		line++
+	}
 	lastGroup := ""
 	for offset, item := range visible {
 		if item.Group != "" && item.Group != lastGroup {
