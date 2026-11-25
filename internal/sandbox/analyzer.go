@@ -269,40 +269,40 @@ func commandUsesNetwork(prog string, args []*syntax.Word) bool {
 		return true
 	}
 	if pythonLauncherPrograms[prog] {
-		return pythonModuleUsesNetwork(words)
+		return pythonModuleUsesNetwork(lowerWords(words))
 	}
 	switch prog {
 	case "npm":
-		return packageManagerUsesNetwork(words, map[string]string{
+		return packageManagerUsesNetwork(lowerWords(words), map[string]string{
 			"run":  "run",
 			"exec": "exec",
 			"x":    "exec",
 		})
 	case "pnpm":
-		return packageManagerUsesNetwork(words, map[string]string{
+		return packageManagerUsesNetwork(lowerWords(words), map[string]string{
 			"run":  "run",
 			"exec": "exec",
 			"dlx":  "exec",
 		})
 	case "yarn":
-		return packageManagerUsesNetwork(words, map[string]string{
+		return packageManagerUsesNetwork(lowerWords(words), map[string]string{
 			"run":  "run",
 			"exec": "exec",
 			"dlx":  "exec",
 		})
 	case "bun":
-		return packageManagerUsesNetwork(words, map[string]string{
+		return packageManagerUsesNetwork(lowerWords(words), map[string]string{
 			"run": "run",
 			"x":   "exec",
 		})
 	case "npx":
-		return npxUsesNetwork(words)
+		return npxUsesNetwork(lowerWords(words))
 	case "pip", "pip2", "pip3":
-		return firstSubcommand(words, nil) == "install"
+		return firstSubcommand(lowerWords(words), nil) == "install"
 	case "go":
-		return firstSubcommand(words, nil) == "get"
+		return firstSubcommand(lowerWords(words), nil) == "get"
 	case "git":
-		return gitUsesNetwork(words)
+		return gitUsesNetwork(lowerWords(words))
 	case "gh":
 		return ghUsesNetwork(words)
 	default:
@@ -340,7 +340,7 @@ func packageManagerUsesNetwork(words []string, aliases map[string]string) bool {
 	}
 	operands, eatable := commandOperands(words)
 	for index := 0; index < subcommandPositions(operands, eatable); index++ {
-		subcommand := operands[index]
+		subcommand := strings.ToLower(operands[index])
 		if alias, ok := aliases[subcommand]; ok {
 			subcommand = alias
 		}
@@ -377,9 +377,17 @@ func npxUsesNetwork(_ []string) bool {
 func literalWordTexts(args []*syntax.Word) []string {
 	words := make([]string, 0, len(args))
 	for _, arg := range args {
-		words = append(words, strings.ToLower(strings.TrimSpace(wordText(arg))))
+		words = append(words, strings.TrimSpace(wordText(arg)))
 	}
 	return words
+}
+
+func lowerWords(words []string) []string {
+	lowered := make([]string, len(words))
+	for i, w := range words {
+		lowered[i] = strings.ToLower(w)
+	}
+	return lowered
 }
 
 func pythonModuleUsesNetwork(words []string) bool {
@@ -408,7 +416,7 @@ func pythonModuleUsesNetwork(words []string) bool {
 // is not EGRESS, not that dev tooling is inert. Anything that actually fetches
 // still matches commandUsesNetwork through its own program or subcommand.
 func commandRunsLocalServer(prog string, args []*syntax.Word) bool {
-	words := literalWordTexts(args)
+	words := lowerWords(literalWordTexts(args))
 	if localServerPrograms[prog] {
 		return frameworkSubcommandRunsLocalServer(prog, words)
 	}
@@ -446,7 +454,7 @@ func frameworkSubcommandRunsLocalServer(prog string, words []string) bool {
 	// the same way the package managers do; see subcommandPositions.
 	operands, eatable := commandOperands(words)
 	for index := 0; index < subcommandPositions(operands, eatable); index++ {
-		switch operands[index] {
+		switch strings.ToLower(operands[index]) {
 		case "dev", "start", "serve", "preview":
 			return true
 		case "build", "optimize", "generate", "check", "lint", "export":
@@ -467,10 +475,11 @@ func frameworkSubcommandRunsLocalServer(prog string, words []string) bool {
 func packageManagerRunsLocalServer(words []string) bool {
 	operands, eatable := commandOperands(words)
 	for index := 0; index < subcommandPositions(operands, eatable); index++ {
-		if packageManagerServingScripts[operands[index]] {
+		op := strings.ToLower(operands[index])
+		if packageManagerServingScripts[op] {
 			return true
 		}
-		if operands[index] == "run" && index+1 < len(operands) && packageManagerServingScripts[operands[index+1]] {
+		if op == "run" && index+1 < len(operands) && packageManagerServingScripts[strings.ToLower(operands[index+1])] {
 			return true
 		}
 	}
@@ -571,7 +580,7 @@ func pythonModuleRunsLocalServer(words []string) bool {
 }
 
 var ghValueOptions = map[string]bool{
-	"-r":             true,
+	"-R":             true,
 	"--repo":         true,
 	"--host":         true,
 	"--hostname":     true,
@@ -581,13 +590,16 @@ var ghValueOptions = map[string]bool{
 	"--template":     true,
 	"-q":             true,
 	"--jq":           true,
-	"-l":             true,
+	"-L":             true,
 	"--limit":        true,
-	"-x":             true,
+	"-X":             true,
 	"--method":       true,
 	"-f":             true,
+	"-F":             true,
 	"--field":        true,
 	"--raw-field":    true,
+	"-H":             true,
+	"--header":       true,
 	"-p":             true,
 	"--pattern":      true,
 	"-d":             true,
@@ -608,6 +620,16 @@ var ghValueOptions = map[string]bool{
 	"--cache":        true,
 }
 
+func ghOptionTakesValue(flag string, subcommand string) bool {
+	if strings.HasPrefix(flag, "--") {
+		flag = strings.ToLower(flag)
+	}
+	if ghValueOptions[flag] {
+		return true
+	}
+	return subcommand == "auth" && flag == "-h"
+}
+
 func ghSubcommands(words []string) (string, string) {
 	var subs []string
 	for i := 0; i < len(words); i++ {
@@ -615,13 +637,20 @@ func ghSubcommands(words []string) (string, string) {
 		if w == "" {
 			continue
 		}
+		if w == "--" {
+			break
+		}
 		if strings.HasPrefix(w, "-") {
-			if !strings.Contains(w, "=") && ghValueOptions[w] && i+1 < len(words) {
+			first := ""
+			if len(subs) > 0 {
+				first = subs[0]
+			}
+			if !strings.Contains(w, "=") && ghOptionTakesValue(w, first) && i+1 < len(words) {
 				i++
 			}
 			continue
 		}
-		subs = append(subs, w)
+		subs = append(subs, strings.ToLower(w))
 		if len(subs) == 2 {
 			break
 		}
@@ -636,7 +665,7 @@ func ghSubcommands(words []string) (string, string) {
 	return first, second
 }
 
-func ghHasHelpOrVersionFlag(words []string) bool {
+func ghHasHelpOrVersionFlag(words []string, subcommand string) bool {
 	for i := 0; i < len(words); i++ {
 		w := words[i]
 		if w == "" {
@@ -646,13 +675,17 @@ func ghHasHelpOrVersionFlag(words []string) bool {
 			break
 		}
 		if strings.HasPrefix(w, "-") {
-			if !strings.Contains(w, "=") && ghValueOptions[w] && i+1 < len(words) {
+			if !strings.Contains(w, "=") && ghOptionTakesValue(w, subcommand) && i+1 < len(words) {
 				i++
 				continue
 			}
 			switch w {
-			case "-h", "--help", "--version":
+			case "--help", "--version":
 				return true
+			case "-h":
+				if subcommand != "auth" {
+					return true
+				}
 			}
 		}
 	}
@@ -660,10 +693,10 @@ func ghHasHelpOrVersionFlag(words []string) bool {
 }
 
 func ghUsesNetwork(words []string) bool {
-	if ghHasHelpOrVersionFlag(words) {
+	first, second := ghSubcommands(words)
+	if ghHasHelpOrVersionFlag(words, first) {
 		return false
 	}
-	first, second := ghSubcommands(words)
 	if first == "" {
 		return false
 	}
