@@ -375,3 +375,91 @@ func TestBackendDoctorHelperProcess(t *testing.T) {
 		os.Exit(0)
 	}
 }
+
+func TestRunBackendsJSONIncludesRedactedHookDiagnostics(t *testing.T) {
+	cwd := t.TempDir()
+	secret := "sk-proj-" + strings.Repeat("b", 23) + "0"
+	deps := appDeps{
+		getwd: func() (string, error) { return cwd, nil },
+		resolveMCPConfig: func(string, bool) (config.MCPConfig, error) {
+			return config.MCPConfig{}, nil
+		},
+		loadHooks: func(hooks.LoadOptions) (hooks.LoadResult, error) {
+			return hooks.LoadResult{
+				Config: hooks.Config{Enabled: true, Hooks: []hooks.Definition{{
+					ID:      "zero.preflight",
+					Event:   hooks.EventBeforeTool,
+					Command: "sh",
+					Enabled: true,
+				}}},
+				Diagnostics: []hooks.Diagnostic{{
+					Kind:    hooks.DiagnosticIO,
+					Source:  hooks.SourceUser,
+					Path:    "https://alice:hunter2@example.com/hooks.json",
+					Message: "api_key=" + secret,
+				}},
+			}, hooks.ErrInvalidConfig
+		},
+		loadPlugins: func(plugins.LoadOptions) (plugins.LoadResult, error) {
+			return plugins.LoadResult{}, nil
+		},
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDeps([]string{"backends", "--json"}, &stdout, &stderr, deps)
+	if exitCode != exitSuccess {
+		t.Fatalf("exitCode = %d stderr=%s", exitCode, stderr.String())
+	}
+	if strings.Contains(stdout.String(), secret) || strings.Contains(stdout.String(), "hunter2") {
+		t.Fatalf("backend JSON leaked hook diagnostic material:\n%s", stdout.String())
+	}
+	var snapshot zerocommands.BackendLifecycleSnapshot
+	if err := json.Unmarshal(stdout.Bytes(), &snapshot); err != nil {
+		t.Fatalf("backend JSON failed to decode: %v\n%s", err, stdout.String())
+	}
+	if !snapshot.HooksIncomplete || len(snapshot.HooksDiagnostics) != 1 {
+		t.Fatalf("expected incomplete hook snapshot with diagnostics: %#v", snapshot)
+	}
+	if len(snapshot.Hooks) != 1 || snapshot.Hooks[0].ID != "zero.preflight" {
+		t.Fatalf("partial snapshot dropped valid hook: %#v", snapshot.Hooks)
+	}
+	if snapshot.HooksDiagnostics[0].Kind != string(hooks.DiagnosticIO) || snapshot.HooksDiagnostics[0].Message == "" {
+		t.Fatalf("unexpected hook diagnostic snapshot: %#v", snapshot.HooksDiagnostics[0])
+	}
+}
+
+func TestFormatBackendLifecycleSnapshotIncludesPathAndField(t *testing.T) {
+	snapshot := zerocommands.BackendLifecycleSnapshot{
+		HooksIncomplete: true,
+		HooksDiagnostics: []zerocommands.HookDiagnosticSnapshot{{
+			Kind:      string(hooks.DiagnosticSchema),
+			Path:      "/tmp/hooks.json",
+			FieldPath: "hooks.0.command",
+			Message:   "Expected a non-empty string.",
+		}},
+	}
+	out := formatBackendLifecycleSnapshot(snapshot)
+	if !strings.Contains(out, "/tmp/hooks.json: hooks.0.command") {
+		t.Fatalf("missing path+field in diagnostic output: %q", out)
+	}
+}
+
+func TestFormatBackendLifecycleSnapshotEscapesControlCharacters(t *testing.T) {
+	snapshot := zerocommands.BackendLifecycleSnapshot{
+		HooksIncomplete: true,
+		HooksDiagnostics: []zerocommands.HookDiagnosticSnapshot{{
+			Kind:      "io\n[pass] forged",
+			Path:      "/tmp/ws\n[pass] forged",
+			FieldPath: "",
+			Message:   "bad\nline\tvalue",
+		}},
+	}
+	out := formatBackendLifecycleSnapshot(snapshot)
+	if strings.Contains(out, "\n[pass] forged\n") {
+		t.Fatalf("diagnostic output contains raw injected newline: %q", out)
+	}
+	if !strings.Contains(out, `\n[pass] forged`) {
+		t.Fatalf("diagnostic output did not escape newline: %q", out)
+	}
+}

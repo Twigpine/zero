@@ -208,20 +208,35 @@ func runHooks(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) i
 			return writeAppError(stderr, "failed to resolve workspace: "+err.Error(), exitCrash)
 		}
 		result, err := deps.loadHooks(hooks.LoadOptions{Cwd: cwd})
+		incomplete := false
 		if err != nil {
-			return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+			if !errors.Is(err, hooks.ErrInvalidConfig) {
+				return writeAppError(stderr, redaction.ErrorMessage(err, redaction.Options{}), exitCrash)
+			}
+			// The loader returns the valid layers and diagnostics alongside
+			// ErrInvalidConfig. Reporting commands must still show that partial
+			// state instead of exiting before the operator can see what broke.
+			incomplete = true
 		}
 		if options.json {
 			payload := struct {
 				Hooks       hooks.Config       `json:"hooks"`
 				Diagnostics []hooks.Diagnostic `json:"diagnostics"`
-			}{Hooks: result.Config, Diagnostics: result.Diagnostics}
+				Incomplete  bool               `json:"incomplete"`
+				Error       string             `json:"error,omitempty"`
+			}{Hooks: result.Config, Diagnostics: result.Diagnostics, Incomplete: incomplete}
+			if err != nil {
+				payload.Error = redaction.ErrorMessage(err, redaction.Options{})
+			}
 			if err := writePrettyJSON(stdout, redaction.RedactValue(payload, redaction.Options{})); err != nil {
 				return exitCrash
 			}
 			return exitSuccess
 		}
 		output := redaction.RedactString(hooks.FormatList(result.Config, result.Diagnostics), redaction.Options{})
+		if incomplete {
+			output += "\nHook policy is incomplete: " + redaction.ErrorMessage(err, redaction.Options{})
+		}
 		if _, err := fmt.Fprintln(stdout, output); err != nil {
 			return exitCrash
 		}

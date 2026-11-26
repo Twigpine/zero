@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -137,15 +138,26 @@ func backendLifecycleSnapshot(deps appDeps) (zerocommands.BackendLifecycleSnapsh
 	}
 
 	hookResult, err := deps.loadHooks(hooks.LoadOptions{Cwd: cwd})
+	hooksIncomplete := false
 	if err != nil {
-		return zerocommands.BackendLifecycleSnapshot{}, err
+		if !errors.Is(err, hooks.ErrInvalidConfig) {
+			return zerocommands.BackendLifecycleSnapshot{}, err
+		}
+		// Keep the available layers and mark the snapshot as partial rather than
+		// hiding every configured backend behind one broken hooks.json.
+		hooksIncomplete = true
 	}
 	pluginResult, err := deps.loadPlugins(plugins.LoadOptions{Cwd: cwd})
 	if err != nil {
 		return zerocommands.BackendLifecycleSnapshot{}, err
 	}
 
-	return zerocommands.NewBackendLifecycleSnapshot(servers, hookResult.Config.Hooks, pluginResult.Plugins), nil
+	snapshot := zerocommands.NewBackendLifecycleSnapshot(servers, hookResult.Config.Hooks, pluginResult.Plugins)
+	snapshot.HooksIncomplete = hooksIncomplete
+	if hooksIncomplete {
+		snapshot.HooksDiagnostics = zerocommands.HookDiagnosticSnapshots(hookResult.Diagnostics)
+	}
+	return snapshot, nil
 }
 
 func backendDoctorReport(deps appDeps) (zerocommands.BackendDoctorReport, error) {
@@ -161,7 +173,7 @@ func backendDoctorReport(deps appDeps) (zerocommands.BackendDoctorReport, error)
 		return zerocommands.BackendDoctorReport{}, err
 	}
 	hookResult, err := deps.loadHooks(hooks.LoadOptions{Cwd: cwd})
-	if err != nil {
+	if err != nil && !errors.Is(err, hooks.ErrInvalidConfig) {
 		return zerocommands.BackendDoctorReport{}, err
 	}
 	pluginResult, err := deps.loadPlugins(plugins.LoadOptions{Cwd: cwd})
@@ -174,6 +186,31 @@ func backendDoctorReport(deps appDeps) (zerocommands.BackendDoctorReport, error)
 		Hooks:   hookResult,
 		Plugins: pluginResult,
 	}), nil
+}
+
+func escapeControl(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		switch r {
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '\u2028', '\u2029':
+			fmt.Fprintf(&b, `\u%04x`, r)
+		default:
+			if r < 0x20 || r == 0x7f {
+				fmt.Fprintf(&b, `\x%02x`, r)
+			} else if r >= 0x80 && r <= 0x9f {
+				fmt.Fprintf(&b, `\u%04x`, r)
+			} else {
+				b.WriteRune(r)
+			}
+		}
+	}
+	return b.String()
 }
 
 func formatBackendLifecycleSnapshot(snapshot zerocommands.BackendLifecycleSnapshot) string {
@@ -201,7 +238,23 @@ func formatBackendLifecycleSnapshot(snapshot zerocommands.BackendLifecycleSnapsh
 		lines = append(lines, fmt.Sprintf("    - %s [%s] %s%s", server.Name, server.Type, detail, suffix))
 	}
 
-	lines = append(lines, fmt.Sprintf("  Hooks: %d", len(snapshot.Hooks)))
+	hooksSummary := fmt.Sprintf("  Hooks: %d", len(snapshot.Hooks))
+	if snapshot.HooksIncomplete {
+		hooksSummary += " (incomplete; hooks.json could not be fully loaded)"
+	}
+	lines = append(lines, hooksSummary)
+	if len(snapshot.HooksDiagnostics) > 0 {
+		for _, diagnostic := range snapshot.HooksDiagnostics {
+			target := diagnostic.Path
+			if diagnostic.FieldPath != "" {
+				if target != "" {
+					target += ": "
+				}
+				target += diagnostic.FieldPath
+			}
+			lines = append(lines, fmt.Sprintf("    ! [%s] %s: %s", escapeControl(diagnostic.Kind), escapeControl(target), escapeControl(diagnostic.Message)))
+		}
+	}
 	for _, hook := range snapshot.Hooks {
 		label := hook.Name
 		if label == "" {
