@@ -1,11 +1,15 @@
 package tui
 
 import (
+	"encoding/base64"
 	"os"
+	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
@@ -1631,7 +1635,7 @@ func copyTranscriptSelectionCmd(text string) tea.Cmd {
 		// at all — so the auto-copy-on-select actually lands on the clipboard. Fall
 		// back to OSC52 (forwarded by the terminal) for remote/SSH sessions where no
 		// local clipboard utility is reachable.
-		if err := clipboard.WriteAll(text); err != nil {
+		if err := writeClipboard(text); err != nil {
 			if _, oscErr := os.Stdout.WriteString(ansi.SetSystemClipboard(text)); oscErr != nil {
 				// Both paths failed; report it rather than claiming a copy that
 				// never reached any clipboard.
@@ -1640,4 +1644,59 @@ func copyTranscriptSelectionCmd(text string) tea.Cmd {
 		}
 		return transcriptCopiedMsg{chars: utf8.RuneCountInString(text)}
 	}
+}
+
+var (
+	isWSLFunc         = detectWSL
+	writeWSLFunc      = writeWSLClipboard
+	clipboardWriteAll = clipboard.WriteAll
+)
+
+func writeClipboard(text string) error {
+	if isWSLFunc() {
+		if err := writeWSLFunc(text); err == nil {
+			return nil
+		}
+	}
+	return clipboardWriteAll(text)
+}
+
+func detectWSL() bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	if os.Getenv("WSL_DISTRO_NAME") != "" {
+		return true
+	}
+	data, err := os.ReadFile("/proc/version")
+	if err != nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(data)), "microsoft")
+}
+
+func writeWSLClipboard(text string) error {
+	exe, err := exec.LookPath("powershell.exe")
+	if err != nil {
+		return err
+	}
+	encoded := powershellSetClipboardCommand(text)
+	cmd := exec.Command(exe, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded)
+	return cmd.Run()
+}
+
+// powershellSetClipboardCommand builds a Base64-encoded UTF-16LE PowerShell
+// -EncodedCommand payload that decodes the UTF-8 text from Base64 inside
+// PowerShell so no non-ASCII byte crosses the process boundary or gets
+// reinterpreted through the Windows ANSI code page (e.g. clip.exe + CP932).
+func powershellSetClipboardCommand(text string) string {
+	payloadB64 := base64.StdEncoding.EncodeToString([]byte(text))
+	script := "Set-Clipboard -Value ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('" + payloadB64 + "')))"
+	u16 := utf16.Encode([]rune(script))
+	raw := make([]byte, len(u16)*2)
+	for i, v := range u16 {
+		raw[i*2] = byte(v)
+		raw[i*2+1] = byte(v >> 8)
+	}
+	return base64.StdEncoding.EncodeToString(raw)
 }
