@@ -602,6 +602,7 @@ var ghValueOptions = map[string]bool{
 	"--header":       true,
 	"-p":             true,
 	"--pattern":      true,
+	"--preview":      true,
 	"-d":             true,
 	"--dir":          true,
 	"-o":             true,

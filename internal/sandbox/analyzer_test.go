@@ -109,6 +109,8 @@ func TestAnalyzeCommand(t *testing.T) {
 		{name: "gh repo view", script: "gh repo view", network: true},
 		{name: "gh api", script: "gh api /user", network: true},
 		{name: "gh api with header flag -H stays network", script: `gh api -H "Accept: application/vnd.github+json" /user`, network: true},
+		{name: "gh api with preview value --help stays network", script: "gh api /user --preview --help", network: true},
+		{name: "gh api --help is offline", script: "gh api --help", network: false},
 		{name: "gh auth status", script: "gh auth status", network: true},
 		{name: "gh auth status with hostname flag -h stays network", script: "gh auth status -h github.com", network: true},
 		{name: "gh auth status --help is offline", script: "gh auth status --help", network: false},
