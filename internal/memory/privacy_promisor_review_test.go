@@ -99,7 +99,7 @@ func TestLocalPrivacyNeverFetchesMissingSparseTrees(t *testing.T) {
 			if fallback {
 				// Emulate Git that ignores the newer no-lazy-fetch setting:
 				// the protocol allow-list must stop transport independently.
-				cmd.Env = append(cmd.Env, "GIT_NO_LAZY_FETCH=0")
+				cmd.Env = append(withoutPrivacyFetchGuards(cmd.Env), "GIT_ALLOW_PROTOCOL=", "GIT_NO_LAZY_FETCH=0")
 			}
 			var diagnostics bytes.Buffer
 			cmd.Stderr = &diagnostics

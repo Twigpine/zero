@@ -51,13 +51,28 @@ func TestIndexEntriesAreLiteralCachedAndNeverRunRepositoryPrograms(t *testing.T)
 	}
 	t.Setenv("GIT_DIR", filepath.Join(t.TempDir(), ".git"))
 	t.Setenv("GIT_INDEX_FILE", filepath.Join(t.TempDir(), "empty-index"))
+	t.Setenv("GIT_ALLOW_PROTOCOL", "file")
+	t.Setenv("GIT_NO_LAZY_FETCH", "0")
 	// Conflicting inherited pathspec modes must not turn a literal query into
 	// an empty or wildcard answer about a different set of tracked paths.
 	for _, key := range []string{"GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"} {
 		t.Setenv(key, "1")
 	}
 	for _, dir := range []string{"notes[1]", "--others"} {
-		out, err := IndexEntriesCommand(context.Background(), root, dir).CombinedOutput()
+		cmd := IndexEntriesCommand(context.Background(), root, dir)
+		for key, want := range map[string]string{"GIT_ALLOW_PROTOCOL": "", "GIT_NO_LAZY_FETCH": "1"} {
+			var values []string
+			for _, entry := range cmd.Env {
+				name, value, ok := strings.Cut(entry, "=")
+				if ok && strings.EqualFold(name, key) {
+					values = append(values, value)
+				}
+			}
+			if len(values) != 1 || values[0] != want {
+				t.Fatalf("privacy query %s = %q, want one value %q", key, values, want)
+			}
+		}
+		out, err := cmd.CombinedOutput()
 		if err != nil || string(out) != dir+"/tracked.md\x00" {
 			t.Fatalf("literal index query %q = %q, %v", dir, out, err)
 		}
