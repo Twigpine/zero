@@ -358,7 +358,7 @@ func (client *networkClient) post(ctx context.Context, message rpcMessage, expec
 		client.sessionID = sessionID
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return rpcMessage{}, httpRPCStatusError(client.server, response, message)
+		return rpcMessage{}, httpRPCStatusError(client.server, response, message, sent.list()...)
 	}
 	if !expectResponse {
 		_, _ = io.Copy(io.Discard, response.Body)
@@ -442,7 +442,7 @@ func (client *remoteSSEClient) post(ctx context.Context, message rpcMessage) (se
 	}
 	defer closeResponseBody(&err, client.server, response.Body)
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return nil, httpRPCStatusError(client.server, response, message)
+		return nil, httpRPCStatusError(client.server, response, message, append(append([]string(nil), client.streamKeys...), sent.list()...)...)
 	}
 	_, _ = io.Copy(io.Discard, response.Body)
 	return nil, nil
@@ -651,7 +651,7 @@ func (client *remoteSSEClient) failPending(err error) {
 // Some servers return a JSON-RPC version rejection with HTTP 400 instead of a
 // successful transport response. Preserve that error for negotiation. Other
 // HTTP failures retain the existing diagnostics and credential-body policy.
-func httpRPCStatusError(server Server, response *http.Response, request rpcMessage) error {
+func httpRPCStatusError(server Server, response *http.Response, request rpcMessage, keys ...string) error {
 	if request.Method != "initialize" || response.StatusCode != http.StatusBadRequest || sentAIMLAPIServiceKey(server, response.Request) {
 		return httpStatusError(server, response)
 	}
@@ -665,6 +665,7 @@ func httpRPCStatusError(server Server, response *http.Response, request rpcMessa
 	if readErr == nil && len(body) <= maxErrorBytes && json.Unmarshal(body, &rejected) == nil &&
 		rejected.JSONRPC == "2.0" && !rejected.isRequestOrNotification() && rejected.Error != nil &&
 		(rejected.ID == nil || (validID && rpcIDMatches(rejected.ID, expectedID))) {
+		rejected = scrubAIMLAPIKeys(rejected, keys...)
 		return fmt.Errorf("MCP %s server %s returned HTTP %d: %w", server.Type, server.Name, response.StatusCode, rejected.Error)
 	}
 	return httpStatusError(server, response)

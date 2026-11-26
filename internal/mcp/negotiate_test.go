@@ -116,3 +116,20 @@ func TestHTTPVersionRejectionRequiresMatchingRPCResponse(t *testing.T) {
 		}
 	}
 }
+
+func TestHTTPVersionRejectionScrubsJSONEncodedServiceKeys(t *testing.T) {
+	const key = "review-fake-injected-service-key"
+	response := fakeHTTPResponse(nil, 400, `{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"Invalid params","data":{"detail":"Unsupported protocol version","echo":"\u0072eview-fake-injected-service-key"}}}`)
+	err := httpRPCStatusError(Server{Name: "versions", Type: ServerTypeHTTP}, response, rpcMessage{ID: 1, Method: "initialize"}, key)
+	var rpc *rpcError
+	if !errors.As(err, &rpc) {
+		t.Fatalf("version error lost its type: %v", err)
+	}
+	var data map[string]string
+	if err := json.Unmarshal(rpc.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(data["echo"], key) || data["detail"] != "Unsupported protocol version" {
+		t.Fatal("HTTP rejection retained an encoded service key or lost its version detail")
+	}
+}
