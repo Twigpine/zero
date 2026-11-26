@@ -172,6 +172,7 @@ func scrubAIMLAPIKeys(message rpcMessage, keys ...string) rpcMessage {
 	if message.Error != nil {
 		scrubbed := *message.Error
 		scrubbed.Message = redaction.RedactSecretValues(scrubbed.Message, sent...)
+		scrubbed.Data = scrubAIMLAPIKeysFromJSON(scrubbed.Data, sent)
 		message.Error = &scrubbed
 	}
 	message.Method = redaction.RedactSecretValues(message.Method, sent...)

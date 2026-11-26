@@ -17,24 +17,26 @@ import (
 )
 
 type networkClient struct {
-	server    Server
-	client    *http.Client
-	mu        sync.Mutex
-	nextID    int
-	sessionID string
+	server          Server
+	client          *http.Client
+	mu              sync.Mutex
+	nextID          int
+	sessionID       string
+	protocolVersion string
 }
 
 type remoteSSEClient struct {
-	server       Server
-	client       *http.Client
-	mu           sync.Mutex
-	nextID       int
-	endpointURL  string
-	streamBody   io.Closer
-	streamCancel context.CancelFunc
-	pending      map[string]chan ssePendingResponse
-	streamErr    error
-	closed       bool
+	server          Server
+	client          *http.Client
+	mu              sync.Mutex
+	nextID          int
+	endpointURL     string
+	streamBody      io.Closer
+	streamCancel    context.CancelFunc
+	pending         map[string]chan ssePendingResponse
+	streamErr       error
+	closed          bool
+	protocolVersion string
 	// streamKeys are the injected AI/ML API keys the stream request carried,
 	// redirect hops included. openStream sets them once, before the reader
 	// starts; the endpoint and the messages on the stream come from a server
@@ -91,37 +93,29 @@ func connectRemoteSSE(ctx context.Context, server Server) (ToolClient, error) {
 }
 
 func (client *networkClient) initialize(ctx context.Context) error {
-	var result struct {
-		ProtocolVersion string `json:"protocolVersion"`
-	}
-	if err := client.request(ctx, "initialize", map[string]any{
-		"protocolVersion": "2024-11-05",
-		"capabilities":    map[string]any{},
-		"clientInfo": map[string]any{
-			"name":    "zero",
-			"version": "dev",
-		},
-	}, &result); err != nil {
+	initCtx, cancel := context.WithTimeout(ctx, initializeTimeout)
+	defer cancel()
+	version, err := negotiateProtocol(initCtx, client.request)
+	if err != nil {
 		return err
 	}
-	return client.notify(ctx, "notifications/initialized", map[string]any{})
+	client.mu.Lock()
+	client.protocolVersion = version
+	client.mu.Unlock()
+	return client.notify(initCtx, "notifications/initialized", map[string]any{})
 }
 
 func (client *remoteSSEClient) initialize(ctx context.Context) error {
-	var result struct {
-		ProtocolVersion string `json:"protocolVersion"`
-	}
-	if err := client.request(ctx, "initialize", map[string]any{
-		"protocolVersion": "2024-11-05",
-		"capabilities":    map[string]any{},
-		"clientInfo": map[string]any{
-			"name":    "zero",
-			"version": "dev",
-		},
-	}, &result); err != nil {
+	initCtx, cancel := context.WithTimeout(ctx, initializeTimeout)
+	defer cancel()
+	version, err := negotiateProtocol(initCtx, client.request)
+	if err != nil {
 		return err
 	}
-	return client.notify(ctx, "notifications/initialized", map[string]any{})
+	client.mu.Lock()
+	client.protocolVersion = version
+	client.mu.Unlock()
+	return client.notify(initCtx, "notifications/initialized", map[string]any{})
 }
 
 func (client *networkClient) ListTools(ctx context.Context) ([]RemoteTool, error) {
@@ -228,7 +222,7 @@ func (client *networkClient) request(ctx context.Context, method string, params 
 		return fmt.Errorf("MCP %s response id mismatch for server %s", method, client.server.Name)
 	}
 	if message.Error != nil {
-		return fmt.Errorf("MCP %s failed: %s", method, message.Error.Message)
+		return fmt.Errorf("MCP %s failed: %w", method, message.Error)
 	}
 	if target != nil && len(message.Result) > 0 {
 		if err := json.Unmarshal(message.Result, target); err != nil {
@@ -285,7 +279,7 @@ func (client *remoteSSEClient) request(ctx context.Context, method string, param
 			return fmt.Errorf("MCP %s response id mismatch for server %s", method, client.server.Name)
 		}
 		if message.Error != nil {
-			return fmt.Errorf("MCP %s failed: %s", method, message.Error.Message)
+			return fmt.Errorf("MCP %s failed: %w", method, message.Error)
 		}
 		if target != nil && len(message.Result) > 0 {
 			if err := json.Unmarshal(message.Result, target); err != nil {
@@ -350,6 +344,9 @@ func (client *networkClient) post(ctx context.Context, message rpcMessage, expec
 		return rpcMessage{}, fmt.Errorf("create MCP %s request for %s: %w", client.server.Type, client.server.Name, err)
 	}
 	client.applyHeaders(request)
+	if message.Method == "initialize" {
+		request.Header.Del("MCP-Protocol-Version")
+	}
 
 	response, err := client.client.Do(request)
 	if err != nil {
@@ -361,7 +358,7 @@ func (client *networkClient) post(ctx context.Context, message rpcMessage, expec
 		client.sessionID = sessionID
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return rpcMessage{}, client.statusError(response)
+		return rpcMessage{}, httpRPCStatusError(client.server, response, message)
 	}
 	if !expectResponse {
 		_, _ = io.Copy(io.Discard, response.Body)
@@ -435,6 +432,9 @@ func (client *remoteSSEClient) post(ctx context.Context, message rpcMessage) (se
 		return nil, fmt.Errorf("create MCP SSE post for %s: %w", client.server.Name, err)
 	}
 	client.applyPostHeaders(request)
+	if message.Method == "initialize" {
+		request.Header.Del("MCP-Protocol-Version")
+	}
 
 	response, err := client.client.Do(request)
 	if err != nil {
@@ -442,7 +442,7 @@ func (client *remoteSSEClient) post(ctx context.Context, message rpcMessage) (se
 	}
 	defer closeResponseBody(&err, client.server, response.Body)
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return nil, httpStatusError(client.server, response)
+		return nil, httpRPCStatusError(client.server, response, message)
 	}
 	_, _ = io.Copy(io.Discard, response.Body)
 	return nil, nil
@@ -454,6 +454,10 @@ func (client *networkClient) applyHeaders(request *http.Request) {
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json, text/event-stream")
+	request.Header.Del("MCP-Protocol-Version")
+	if client.protocolVersion != "" {
+		request.Header.Set("MCP-Protocol-Version", client.protocolVersion)
+	}
 	if client.sessionID != "" {
 		request.Header.Set("Mcp-Session-Id", client.sessionID)
 	}
@@ -465,6 +469,7 @@ func (client *remoteSSEClient) applyStreamHeaders(request *http.Request) {
 		request.Header.Set(key, value)
 	}
 	request.Header.Set("Accept", "text/event-stream")
+	request.Header.Del("MCP-Protocol-Version")
 	applyAIMLAPIRequestHeaders(client.server, request)
 }
 
@@ -474,6 +479,13 @@ func (client *remoteSSEClient) applyPostHeaders(request *http.Request) {
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
+	client.mu.Lock()
+	version := client.protocolVersion
+	client.mu.Unlock()
+	request.Header.Del("MCP-Protocol-Version")
+	if version != "" {
+		request.Header.Set("MCP-Protocol-Version", version)
+	}
 	applyAIMLAPIRequestHeaders(client.server, request)
 }
 
@@ -496,10 +508,6 @@ func (client *networkClient) decodeResponse(response *http.Response) (rpcMessage
 		return rpcMessage{}, fmt.Errorf("decode MCP %s response from %s: %w", client.server.Type, client.server.Name, err)
 	}
 	return message, nil
-}
-
-func (client *networkClient) statusError(response *http.Response) error {
-	return httpStatusError(client.server, response)
 }
 
 func (client *remoteSSEClient) readStream(reader io.Reader, ready chan<- error) {
@@ -638,6 +646,28 @@ func (client *remoteSSEClient) failPending(err error) {
 		channel <- ssePendingResponse{err: err}
 		close(channel)
 	}
+}
+
+// Some servers return a JSON-RPC version rejection with HTTP 400 instead of a
+// successful transport response. Preserve that error for negotiation. Other
+// HTTP failures retain the existing diagnostics and credential-body policy.
+func httpRPCStatusError(server Server, response *http.Response, request rpcMessage) error {
+	if request.Method != "initialize" || response.StatusCode != http.StatusBadRequest || sentAIMLAPIServiceKey(server, response.Request) {
+		return httpStatusError(server, response)
+	}
+	const maxErrorBytes = 64 * 1024
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, maxErrorBytes+1))
+	// The caller already deferred closing the original body. Restore these
+	// bytes for the ordinary status diagnostic if this is not a JSON-RPC error.
+	response.Body = io.NopCloser(bytes.NewReader(body))
+	var rejected rpcMessage
+	expectedID, validID := rpcMessageID(request.ID)
+	if readErr == nil && len(body) <= maxErrorBytes && json.Unmarshal(body, &rejected) == nil &&
+		rejected.JSONRPC == "2.0" && !rejected.isRequestOrNotification() && rejected.Error != nil &&
+		(rejected.ID == nil || (validID && rpcIDMatches(rejected.ID, expectedID))) {
+		return fmt.Errorf("MCP %s server %s returned HTTP %d: %w", server.Type, server.Name, response.StatusCode, rejected.Error)
+	}
+	return httpStatusError(server, response)
 }
 
 func httpStatusError(server Server, response *http.Response) error {
