@@ -616,9 +616,31 @@ var ghValueOptions = map[string]bool{
 	"--ref":          true,
 	"-e":             true,
 	"--env":          true,
-	"-i":             true,
 	"--input":        true,
 	"--cache":        true,
+}
+
+var ghSubcommandValueOptions = map[string]map[string]bool{
+	"auth": {
+		"-h": true,
+	},
+	"issue": {
+		"--title": true,
+		"--body":  true,
+	},
+	"pr": {
+		"--title": true,
+		"--body":  true,
+	},
+	"release": {
+		"--title": true,
+	},
+	"project": {
+		"--title": true,
+	},
+	"run": {
+		"-i": true,
+	},
 }
 
 func ghOptionTakesValue(flag string, subcommand string) bool {
@@ -628,7 +650,10 @@ func ghOptionTakesValue(flag string, subcommand string) bool {
 	if ghValueOptions[flag] {
 		return true
 	}
-	return subcommand == "auth" && flag == "-h"
+	if opts, ok := ghSubcommandValueOptions[subcommand]; ok {
+		return opts[flag]
+	}
+	return false
 }
 
 func ghSubcommands(words []string) (string, string) {
@@ -667,6 +692,7 @@ func ghSubcommands(words []string) (string, string) {
 }
 
 func ghHasHelpOrVersionFlag(words []string, subcommand string) bool {
+	var subs []string
 	for i := 0; i < len(words); i++ {
 		w := words[i]
 		if w == "" {
@@ -688,6 +714,13 @@ func ghHasHelpOrVersionFlag(words []string, subcommand string) bool {
 					return true
 				}
 			}
+			continue
+		}
+		subs = append(subs, strings.ToLower(w))
+		// Everything after `gh extension exec` (or `gh ext exec`) is forwarded to
+		// the extension runner, so `--help`/`--version`/`-h` there are not gh's own.
+		if len(subs) >= 2 && (subs[0] == "extension" || subs[0] == "ext") && subs[1] == "exec" {
+			break
 		}
 	}
 	return false
