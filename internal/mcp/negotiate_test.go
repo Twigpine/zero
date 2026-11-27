@@ -33,6 +33,35 @@ func TestNegotiateProtocol(t *testing.T) {
 			wantCalls: []string{"2025-11-25", "2025-03-26"},
 		},
 		{
+			name: "escaped supported list", selected: "2025-06-18",
+			rejection: &rpcError{Code: -32602, Message: "Invalid params", Data: json.RawMessage(`{"supportedVersions":["2025\u002d06\u002d18"]}`)},
+			wantCalls: []string{"2025-11-25", "2025-06-18"},
+		},
+		{
+			name: "escaped plaintext rejection", selected: "2025-06-18",
+			rejection: &rpcError{Code: -32602, Message: "Invalid params", Data: json.RawMessage(`"Unsupported protocol version. Supported: \u0032025-06-18"`)},
+			wantCalls: []string{"2025-11-25", "2025-06-18"},
+		},
+		{
+			name: "ignore unsupported list", selected: "2024-11-05",
+			rejection: &rpcError{Code: -32602, Message: "Invalid params", Data: json.RawMessage(`{"supportedVersions":["2024-11-05"],"unsupportedVersions":["2025-06-18"]}`)},
+			wantCalls: []string{"2025-11-25", "2024-11-05"},
+		},
+		{
+			name: "nested escaped supported list", selected: "2025-03-26",
+			rejection: &rpcError{Code: -32602, Message: "Invalid params", Data: json.RawMessage(`{"details":{"supportedVersions":["2025-03-\u00326"]},"unsupportedVersions":["2025-06-18"]}`)},
+			wantCalls: []string{"2025-11-25", "2025-03-26"},
+		},
+		{
+			name: "empty supported list", rejection: &rpcError{Code: -32602, Message: "Invalid params", Data: json.RawMessage(`{"supportedVersions":[],"unsupportedVersions":["2025-06-18"]}`)},
+			wantCalls: []string{"2025-11-25"}, wantError: "mutually supported versions",
+		},
+		{
+			name: "plaintext supported and unsupported lists", selected: "2024-11-05",
+			rejection: &rpcError{Code: -32602, Message: "Unsupported protocol version. Supported: 2024-11-05. Unsupported: 2025-06-18"},
+			wantCalls: []string{"2025-11-25", "2024-11-05"},
+		},
+		{
 			name: "no overlap", rejection: &rpcError{Code: -32602, Message: "Unsupported protocol version 2025-11-25; supported: 2026-07-28"},
 			wantCalls: []string{"2025-11-25"}, wantError: "mutually supported versions",
 		},
