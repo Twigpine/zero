@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/base64"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"unicode/utf16"
@@ -25,29 +26,58 @@ func decodeUTF16LEBase64(t *testing.T, b64 string) string {
 }
 
 func TestPowershellSetClipboardCommandRoundTrip(t *testing.T) {
+	// Windows CreateProcessW limits the full command line to 32,767 characters.
+	// 8,192 multi-byte Japanese runes would exceed that limit if embedded in
+	// -EncodedCommand, so the command line must stay fixed-size and pass the
+	// Base64 payload over stdin.
+	const windowsMaxCommandLine = 32767
+
 	samples := []string{
 		"",
 		"hello world",
 		"文字化けチェック：日本語の表示テスト",
 		"emoji 🚀 and quotes 'single' \"double\" $var `backtick`\nline2\tindented",
+		strings.Repeat("日", 8192),
 	}
 
-	for _, want := range samples {
-		encoded := powershellSetClipboardCommand(want)
-		script := decodeUTF16LEBase64(t, encoded)
-
-		const prefix = "Set-Clipboard -Value ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('"
-		const suffix = "')))"
-		if !strings.HasPrefix(script, prefix) || !strings.HasSuffix(script, suffix) {
-			t.Fatalf("unexpected PowerShell script format: %q", script)
+	var fixedEncoded string
+	for i, want := range samples {
+		cmd := buildWSLClipboardCommand("powershell.exe", want)
+		if len(cmd.Args) != 5 || cmd.Args[1] != "-NoProfile" || cmd.Args[2] != "-NonInteractive" || cmd.Args[3] != "-EncodedCommand" {
+			t.Fatalf("unexpected PowerShell args: %q", cmd.Args)
 		}
-		payloadB64 := strings.TrimSuffix(strings.TrimPrefix(script, prefix), suffix)
-		gotBytes, err := base64.StdEncoding.DecodeString(payloadB64)
+		if cmdLineLen := len(strings.Join(cmd.Args, " ")); cmdLineLen >= windowsMaxCommandLine {
+			t.Fatalf("sample %d command line length %d exceeds Windows limit %d", i, cmdLineLen, windowsMaxCommandLine)
+		}
+
+		encoded := cmd.Args[4]
+		if i == 0 {
+			fixedEncoded = encoded
+		} else if encoded != fixedEncoded {
+			t.Fatalf("sample %d changed -EncodedCommand; want fixed-size command", i)
+		}
+
+		script := decodeUTF16LEBase64(t, encoded)
+		if script != powershellSetClipboardScript {
+			t.Fatalf("unexpected PowerShell script: %q", script)
+		}
+
+		stdinBytes, err := io.ReadAll(cmd.Stdin)
 		if err != nil {
-			t.Fatalf("inner base64 decode failed: %v", err)
+			t.Fatalf("reading cmd.Stdin failed: %v", err)
+		}
+		for _, b := range stdinBytes {
+			if b > 0x7f {
+				t.Fatalf("non-ASCII byte 0x%02x in stdin payload", b)
+			}
+		}
+
+		gotBytes, err := base64.StdEncoding.DecodeString(string(stdinBytes))
+		if err != nil {
+			t.Fatalf("stdin base64 decode failed: %v", err)
 		}
 		if string(gotBytes) != want {
-			t.Fatalf("round-trip mismatch: got %q, want %q", string(gotBytes), want)
+			t.Fatalf("round-trip mismatch (len=%d): got len=%d, want len=%d", len(want), len(gotBytes), len(want))
 		}
 	}
 }
@@ -74,11 +104,13 @@ func TestWriteClipboardWSLPrefersPowershellAndFallsBack(t *testing.T) {
 			return nil
 		}
 
-		if err := writeClipboard("日本語テスト"); err != nil {
-			t.Fatalf("writeClipboard returned error: %v", err)
-		}
-		if wslGot != "日本語テスト" {
-			t.Fatalf("WSL clipboard got %q, want %q", wslGot, "日本語テスト")
+		for _, sample := range []string{"日本語テスト", strings.Repeat("日", 8192)} {
+			if err := writeClipboard(sample); err != nil {
+				t.Fatalf("writeClipboard returned error: %v", err)
+			}
+			if wslGot != sample {
+				t.Fatalf("WSL clipboard mismatch (len=%d): got len=%d", len(sample), len(wslGot))
+			}
 		}
 	})
 

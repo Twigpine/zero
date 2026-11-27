@@ -1680,23 +1680,29 @@ func writeWSLClipboard(text string) error {
 	if err != nil {
 		return err
 	}
-	encoded := powershellSetClipboardCommand(text)
-	cmd := exec.Command(exe, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded)
-	return cmd.Run()
+	return buildWSLClipboardCommand(exe, text).Run()
 }
 
-// powershellSetClipboardCommand builds a Base64-encoded UTF-16LE PowerShell
-// -EncodedCommand payload that decodes the UTF-8 text from Base64 inside
-// PowerShell so no non-ASCII byte crosses the process boundary or gets
-// reinterpreted through the Windows ANSI code page (e.g. clip.exe + CP932).
-func powershellSetClipboardCommand(text string) string {
-	payloadB64 := base64.StdEncoding.EncodeToString([]byte(text))
-	script := "Set-Clipboard -Value ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('" + payloadB64 + "')))"
-	u16 := utf16.Encode([]rune(script))
+func buildWSLClipboardCommand(exe, text string) *exec.Cmd {
+	encoded, payloadB64 := powershellSetClipboardInvocation(text)
+	cmd := exec.Command(exe, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded)
+	cmd.Stdin = strings.NewReader(payloadB64)
+	return cmd
+}
+
+const powershellSetClipboardScript = "Set-Clipboard -Value ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String([Console]::In.ReadToEnd())))"
+
+// powershellSetClipboardInvocation returns a fixed-size UTF-16LE Base64
+// -EncodedCommand script and an ASCII Base64 stdin payload for text. Sending
+// the payload via stdin avoids the Windows 32,767-character command-line limit
+// on large selections while keeping non-ASCII bytes out of the Windows ANSI
+// code page (e.g. clip.exe + CP932).
+func powershellSetClipboardInvocation(text string) (encodedCmd, stdinPayload string) {
+	u16 := utf16.Encode([]rune(powershellSetClipboardScript))
 	raw := make([]byte, len(u16)*2)
 	for i, v := range u16 {
 		raw[i*2] = byte(v)
 		raw[i*2+1] = byte(v >> 8)
 	}
-	return base64.StdEncoding.EncodeToString(raw)
+	return base64.StdEncoding.EncodeToString(raw), base64.StdEncoding.EncodeToString([]byte(text))
 }
