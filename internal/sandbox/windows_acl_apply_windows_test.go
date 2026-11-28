@@ -37,8 +37,15 @@ func TestApplyWindowsACLPathGroupHandleBasedRoundTrip(t *testing.T) {
 	if !applied {
 		t.Fatal("applied = false, want true for an existing directory target")
 	}
-	if snapshot.Path != dir || snapshot.Materialized {
-		t.Fatalf("snapshot = %#v, want Path=%q Materialized=false", snapshot, dir)
+	if snapshot.Path != dir {
+		t.Fatalf("snapshot.Path = %q, want %q", snapshot.Path, dir)
+	}
+	// The target already existed, so nothing was created and rollback must have
+	// nothing to remove. Asserting the chain rather than a bool matters: a
+	// rewiring that recorded the walked components instead of only the created
+	// ones would make rollback delete a directory the sandbox never made.
+	if snapshot.Created.createdAnything() {
+		t.Fatalf("snapshot recorded %#v as created for a target that already existed", snapshot.Created)
 	}
 	if snapshot.Descriptor == nil {
 		t.Fatal("snapshot has no captured descriptor to roll back to")
@@ -110,8 +117,21 @@ func TestApplyWindowsACLPathGroupMaterializes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("applyWindowsACLPathGroup: %v", err)
 	}
-	if !applied || !snapshot.Materialized {
-		t.Fatalf("applied=%v materialized=%v, want both true", applied, snapshot.Materialized)
+	if !applied {
+		t.Fatal("applied = false, want true for a materialized target")
+	}
+	// Exactly one component was missing, so exactly one must be recorded as
+	// created, and it must be the leaf's own name rather than a path, carrying
+	// the identity of the directory it made so rollback can prove it is still
+	// deleting that object.
+	if len(snapshot.Created.Chain) != 1 || snapshot.Created.Chain[0].Name != "created" || !snapshot.Created.Chain[0].Made {
+		t.Fatalf("created chain = %#v, want one step {created true}", snapshot.Created.Chain)
+	}
+	if snapshot.Created.Chain[0].ID.empty() {
+		t.Fatalf("created chain step carries no identity: %#v", snapshot.Created.Chain[0])
+	}
+	if snapshot.Created.AnchorPath != filepath.Dir(target) {
+		t.Fatalf("anchor = %q, want the existing parent %q", snapshot.Created.AnchorPath, filepath.Dir(target))
 	}
 	if _, err := os.Stat(target); err != nil {
 		t.Fatalf("materialized target not created: %v", err)

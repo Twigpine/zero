@@ -37,9 +37,25 @@ func TestWindowsRuntimeTokenSIDs(t *testing.T) {
 // setup serves both modes (and its fingerprint is stable across modes).
 func TestBuildWindowsNetworkInfraPlanIsModeIndependent(t *testing.T) {
 	home := t.TempDir()
+	// Pinned, because the count below depends on whether this machine happens to
+	// have the offline group already. BuildWindowsNetworkInfraPlan folds that
+	// group's SID in when it resolves, so on a Windows host where an earlier
+	// elevated setup created ZeroSandboxOffline the plan legitimately carries two
+	// identity SIDs and this test failed on a correct plan. CI never saw it: the
+	// Linux and macOS jobs leave the hook nil, and a fresh Windows runner has no
+	// group yet. Stubbing it makes the assertion about the plan rather than about
+	// the machine it runs on.
+	previousHook := resolveWindowsSandboxOfflineGroupSIDHook
+	t.Cleanup(func() { resolveWindowsSandboxOfflineGroupSIDHook = previousHook })
+	resolveWindowsSandboxOfflineGroupSIDHook = nil
+
 	mk := func(mode NetworkMode) WindowsSandboxCommandConfig {
 		return WindowsSandboxCommandConfig{
-			SandboxHome:    home,
+			SandboxHome: home,
+			// Opted in, because the offline group only enters the plan for a home
+			// that asked for principals. Without this the plan is the pre-principal
+			// one and the group assertions below have nothing to find.
+			Env:            map[string]string{windowsSandboxIdentityEnv: "1"},
 			CommandCWD:     `C:\ws`,
 			WorkspaceRoots: []string{`C:\ws`},
 			PermissionProfile: PermissionProfile{
@@ -71,6 +87,40 @@ func TestBuildWindowsNetworkInfraPlanIsModeIndependent(t *testing.T) {
 	}
 	if denyPlan.IdentitySIDs[0] != offline {
 		t.Errorf("infra plan SID = %q, want offline-marker %q", denyPlan.IdentitySIDs[0], offline)
+	}
+
+	// Mode independence has to hold on a machine that already has the offline
+	// group too, which is where the pinned counts above would otherwise be
+	// asserting something about the host rather than the plan. The group SID is
+	// folded in for both modes, so the hashes must still agree; only the count
+	// changes.
+	resolveWindowsSandboxOfflineGroupSIDHook = func() (string, error) { return "S-1-5-32-9999", nil }
+	withGroupDeny, err := BuildWindowsNetworkInfraPlan(mk(NetworkDeny))
+	if err != nil {
+		t.Fatalf("deny infra plan with the group present: %v", err)
+	}
+	withGroupAllow, err := BuildWindowsNetworkInfraPlan(mk(NetworkAllow))
+	if err != nil {
+		t.Fatalf("allow infra plan with the group present: %v", err)
+	}
+	// Assert the SIDs themselves, not the count. A duplicate offline marker or an
+	// unrelated SID would satisfy a length check while meaning something quite
+	// different.
+	if len(withGroupDeny.IdentitySIDs) != 2 ||
+		withGroupDeny.IdentitySIDs[0] != offline ||
+		withGroupDeny.IdentitySIDs[1] != "S-1-5-32-9999" {
+		t.Fatalf("group present should add its SID after the offline marker, got %v (offline marker %q)", withGroupDeny.IdentitySIDs, offline)
+	}
+	groupDenyHash, _ := WindowsNetworkInfraHash(withGroupDeny)
+	groupAllowHash, _ := WindowsNetworkInfraHash(withGroupAllow)
+	if groupDenyHash != groupAllowHash || groupDenyHash == "" {
+		t.Fatalf("infra hash must stay mode-independent with the group present: deny=%q allow=%q", groupDenyHash, groupAllowHash)
+	}
+	// And it must differ from the no-group hash, which is the cross-workspace
+	// coupling called out for a maintainer decision: one workspace creating the
+	// group changes every other sandbox home's expected fingerprint.
+	if groupDenyHash == denyHash {
+		t.Error("group presence did not change the infra hash; the marker staleness this causes is a deliberate property and should be visible here")
 	}
 }
 
