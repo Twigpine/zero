@@ -77,6 +77,10 @@ func TestLocalAdoptionSavesAndReloadsEligibleModel(t *testing.T) {
 		cmd.Dir = root
 		cmd.Env = []string{
 			"ZERO_TEST_LOCAL_ADOPTION=1", "ZERO_CRED_STORAGE=encrypted-file",
+			// The child is this test binary again. It is handed its own roots
+			// below and both invocations must share them, so tell the package
+			// setup not to replace them a second time.
+			userStateIsolatedEnv + "=1",
 			"HOME=" + root, "USERPROFILE=" + root,
 			"XDG_CONFIG_HOME=" + filepath.Join(root, "config"),
 			"XDG_CACHE_HOME=" + filepath.Join(root, "cache"),
