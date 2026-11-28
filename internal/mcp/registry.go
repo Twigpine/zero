@@ -18,6 +18,11 @@ import (
 // so a slow or unreachable server (e.g. a hosted endpoint blocked by the local
 // network) cannot delay the first model response. Servers connect concurrently,
 // so total startup cost is the slowest reachable server, not the sum.
+// launchSettleGrace bounds how long an abandoned connect attempt is given to
+// say whether it had already started. It is paid only after cancel, so an
+// attempt that never reached Start returns well inside it.
+const launchSettleGrace = 250 * time.Millisecond
+
 const defaultConnectTimeout = 8 * time.Second
 
 type RegisterOptions struct {
@@ -47,6 +52,18 @@ type SkippedServer struct {
 	UnconfiguredDefault bool
 }
 
+// StartupDisclosure is a least-privilege statement about one MCP server's
+// LAUNCH, as opposed to anything a later tool call does.
+//
+// A stdio server prepared under a weakened token serves the whole session from
+// that process, so the fact describes startup and cannot be recovered from an
+// individual tool result afterwards. It is reported once, here, rather than
+// appended to every response the server produces.
+type StartupDisclosure struct {
+	Name    string
+	Notices []string
+}
+
 type Runtime struct {
 	clients []ToolClient
 	// cancels releases the per-server connect contexts of the clients we KEPT.
@@ -55,8 +72,83 @@ type Runtime struct {
 	// is closed). Same length/order as clients is not required.
 	cancels []context.CancelFunc
 	skipped []SkippedServer
-	once    sync.Once
-	err     error
+	// disclosureSources are the least-privilege statements that applied to each
+	// server process this registration LAUNCHED, in server order, each still
+	// holding the sink that carries the authoritative launch fact.
+	//
+	// NOT a frozen snapshot. Registration is bounded and a launch is not: an
+	// attempt abandoned at the connect timeout can still be inside cmd.Start when
+	// wg.Wait returns, so the serial commit samples an empty sink and the process
+	// then starts under the reduced confinement with nobody left to say so. The
+	// sink outlives registration and StartupDisclosures reads through it, so a
+	// late Start is reported instead of lost. See StartupDisclosures.
+	disclosureSources []disclosureSource
+	// disclosureStream is the typed hand-off to whoever owns the output. Created
+	// on the first StartupDisclosureStream call and closed by Close, so a launch
+	// that resolves after the runtime is gone has somewhere defined to land:
+	// nowhere.
+	disclosureStreamOnce sync.Once
+	disclosureStream     *StartupDisclosureStream
+	once                 sync.Once
+	err                  error
+}
+
+// disclosureSource pairs a server with both the notices known at commit time and
+// the sink that may still learn them. notices wins when it is already populated,
+// so a settled server never re-reads the sink.
+type disclosureSource struct {
+	name    string
+	notices []string
+	sink    *launchSink
+}
+
+// ReportStartupDisclosures delivers each server's launch disclosure to report
+// EXACTLY ONCE, whether the launch had already completed when this was called
+// or completes later.
+//
+// StartupDisclosures reads through the sink, which stopped a late Start from
+// being lost, but a value nobody re-reads is still a lost disclosure: both
+// production reporters sample once, right after RegisterTools returns, and an
+// attempt abandoned at the connect timeout can finish Start after that sample.
+// The reaper only closes the late client. So the operator saw the skipped-server
+// warning and never learned that a local process had run under the reduced
+// enforcement.
+//
+// Servers whose notices were known at commit are reported now, in server order.
+// Every other server subscribes its sink: if the launch already happened the
+// subscriber runs before this returns, otherwise it runs from publishLaunch on
+// the connect goroutine. Either way each server reaches report once. A server
+// that never starts never publishes, so prepare, pipe and Start failures stay
+// silent, and network servers, which launch no process, contribute nothing.
+//
+// Late deliveries arrive in completion order, which is the only order they
+// have; the immediate set keeps server order.
+//
+// A STREAM, NOT A CALLBACK. An earlier version took the presentation function
+// and invoked it from whichever goroutine resolved the launch, which for an
+// abandoned attempt is the connect goroutine. That put a write to the caller's
+// writer on a goroutine and at a time the caller did not control. The runtime
+// owns the fact; it appends the fact here and the owner drains it. See
+// StartupDisclosureStream.
+func (runtime *Runtime) StartupDisclosureStream() *StartupDisclosureStream {
+	if runtime == nil {
+		return nil
+	}
+	runtime.disclosureStreamOnce.Do(func() {
+		stream := newStartupDisclosureStream()
+		runtime.disclosureStream = stream
+		for _, source := range runtime.disclosureSources {
+			if len(source.notices) > 0 {
+				stream.offer(StartupDisclosure{Name: source.name, Notices: append([]string(nil), source.notices...)})
+				continue
+			}
+			name := source.name
+			source.sink.subscribe(func(notices []string) {
+				stream.offer(StartupDisclosure{Name: name, Notices: notices})
+			})
+		}
+	})
+	return runtime.disclosureStream
 }
 
 // Skipped returns the servers that were skipped during registration (unreachable
@@ -110,19 +202,38 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 		remote []RemoteTool
 		cancel context.CancelFunc
 		err    error
+		// notices travels with the indexed result rather than being appended to
+		// shared state from inside the goroutine. The concurrent phase touches no
+		// shared state, which is the property the comment above promises and the
+		// reason the serial phase can be deterministic; appending here broke both,
+		// racing the slice header and ordering disclosures by completion time.
+		notices []string
 	}
 	results := make([]connectResult, len(servers))
+	// RETAINED PAST THE CONCURRENT PHASE. The timeout branch samples the sink the
+	// moment it fires, but connectStdio does not publish until cmd.Start has
+	// returned, so a Start that succeeds just after the timeout selected was
+	// sampled as "never launched" and its disclosure was lost: the reaper closes
+	// the late client and cannot amend a commit that has already happened.
+	// Reading the sink again in the serial phase is strictly later than the
+	// timeout branch and still deterministic, because it runs after wg.Wait.
+	sinks := make([]*launchSink, len(servers))
 	var wg sync.WaitGroup
 	for index := range servers {
 		wg.Add(1)
 		go func(index int) {
 			defer wg.Done()
 			server := servers[index]
-			serverCtx, cancel := context.WithCancel(ctx)
+			// The sink hears about Start as it happens, so an attempt abandoned below
+			// can still report the confinement its process ran under. The connect
+			// result cannot supply that: it does not arrive until after this phase.
+			sink := &launchSink{}
+			sinks[index] = sink
+			serverCtx, cancel := context.WithCancel(withLaunchSink(ctx, sink))
 			done := make(chan connectResult, 1)
 			go func() {
-				client, remote, err := connectAndList(serverCtx, factory, server)
-				done <- connectResult{client: client, remote: remote, err: err}
+				client, remote, notices, err := connectAndList(serverCtx, factory, server)
+				done <- connectResult{client: client, remote: remote, notices: notices, err: err}
 			}()
 			select {
 			case res := <-done:
@@ -134,14 +245,47 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 				results[index] = res
 			case <-time.After(timeout):
 				cancel() // abandon the slow connect: tears down the conn/subprocess
-				// Reap the goroutine + any partial client in the background so a
-				// slow server never blocks startup.
-				go func() {
-					if res := <-done; res.client != nil {
+				timedOut := connectResult{err: fmt.Errorf("connect timed out after %s", timeout)}
+				// SYNCHRONIZE WITH THE START, briefly, before deciding there was none.
+				//
+				// connectStdio publishes only after cmd.Start returns, so sampling the
+				// sink the instant the timeout fires races a Start that is about to
+				// succeed: the sample reads empty, the result commits with no notice,
+				// and the reaper cannot amend a commit that has already happened. The
+				// window is microseconds and unreachable from a test seam, which is
+				// exactly why it must be closed by construction rather than measured.
+				//
+				// cancel() has already fired, so an attempt that has NOT started fails
+				// fast and this returns immediately; only one that did start can still
+				// be in Start, and it publishes on the way out. The grace is therefore
+				// paid only when there is something to learn.
+				select {
+				case res := <-done:
+					if res.client != nil {
 						_ = res.client.Close()
 					}
-				}()
-				results[index] = connectResult{err: fmt.Errorf("connect timed out after %s", timeout)}
+					if len(res.notices) > 0 {
+						timedOut.notices = res.notices
+					}
+				case <-time.After(launchSettleGrace):
+					// Still stuck past the grace. Reap in the background so a slow
+					// server never blocks startup.
+					go func() {
+						if res := <-done; res.client != nil {
+							_ = res.client.Close()
+						}
+					}()
+				}
+				// A server that reached Start ran under the planned enforcement even
+				// though its connection never became usable. One that timed out
+				// before Start discloses nothing, so the sink stays empty and this
+				// adds nothing.
+				if len(timedOut.notices) == 0 {
+					if launched, notices := sink.observe(); launched {
+						timedOut.notices = notices
+					}
+				}
+				results[index] = timedOut
 			}
 		}(index)
 	}
@@ -157,6 +301,28 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 	stagedNames := make(map[string]struct{})
 	for index, server := range servers {
 		res := results[index]
+		// Recorded here, in server order, for any server whose PROCESS STARTED,
+		// including one whose tools are rejected below: the launch happened under
+		// that token either way, and a skip warning does not say what confinement
+		// the process ran with while it was alive.
+		notices := res.notices
+		if len(notices) == 0 {
+			// A launch that published after the timeout branch sampled. Checked here
+			// rather than only there so the window between Start succeeding and the
+			// timeout committing cannot swallow the disclosure.
+			if launched, late := sinks[index].observe(); launched {
+				notices = late
+			}
+		}
+		// Recorded whether or not notices are known YET. An abandoned attempt can
+		// still be inside cmd.Start, and keeping its sink here is what lets
+		// StartupDisclosures report that launch after this phase has finished.
+		// Order is server order, so a late arrival does not reorder the rest.
+		runtime.disclosureSources = append(runtime.disclosureSources, disclosureSource{
+			name:    server.Name,
+			notices: notices,
+			sink:    sinks[index],
+		})
 		if res.err != nil {
 			runtime.skipped = append(runtime.skipped, SkippedServer{Name: server.Name, Err: res.err, UnconfiguredDefault: server.UnconfiguredDefault})
 			continue
@@ -190,17 +356,42 @@ func RegisterTools(ctx context.Context, registry *tools.Registry, cfg config.MCP
 // connectAndList connects to one server and lists its tools. It does ONLY I/O
 // (no registry, permission-store, or other shared state), so it is safe to run
 // concurrently for every server. On a list error it closes the client.
-func connectAndList(ctx context.Context, factory func(context.Context, Server) (ToolClient, error), server Server) (ToolClient, []RemoteTool, error) {
+// connectAndList returns the client, its tools, and the least-privilege
+// disclosures that applied to its LAUNCH.
+//
+// THE LAUNCH FACT OUTLIVES THE CONNECTION. A stdio server can start, and do
+// filesystem work, and then fail initialize or tools/list. Returning the notices
+// separately rather than leaving them on the client means the fact survives that
+// failure: the client is closed and discarded here, so anything reachable only
+// through it is gone by the time the caller sees the error, and the skip warning
+// on its own does not say the process already ran with reduced write
+// confinement.
+func connectAndList(ctx context.Context, factory func(context.Context, Server) (ToolClient, error), server Server) (ToolClient, []RemoteTool, []string, error) {
 	client, err := factory(ctx, server)
 	if err != nil {
-		return nil, nil, err
+		// A failure BEFORE the process started discloses nothing. A failure after it
+		// started carries the fact out through the error, because the client that
+		// held it has already been closed and discarded by then.
+		return nil, nil, startupNoticesFromError(err), err
 	}
+	notices := startupNoticesOf(client)
 	remoteTools, err := client.ListTools(ctx)
 	if err != nil {
 		_ = client.Close()
-		return nil, nil, fmt.Errorf("list MCP tools for %s: %w", server.Name, err)
+		return nil, nil, notices, fmt.Errorf("list MCP tools for %s: %w", server.Name, err)
 	}
-	return client, remoteTools, nil
+	return client, remoteTools, notices, nil
+}
+
+// startupNoticesOf reads a client's launch disclosures, if it reports any.
+func startupNoticesOf(client ToolClient) []string {
+	if client == nil {
+		return nil
+	}
+	if disclosing, ok := client.(startupDisclosing); ok {
+		return disclosing.StartupNotices()
+	}
+	return nil
 }
 
 // buildServerTools validates a server's remote tools against the registry and the
@@ -236,6 +427,25 @@ func (runtime *Runtime) Close() error {
 		return nil
 	}
 	runtime.once.Do(func() {
+		// End disclosure delivery FIRST. A launch that resolves while the clients
+		// are being closed has no owner left to print it, and the runtime must not
+		// leave a subscriber holding a writer whose lifetime it does not know.
+		//
+		// THROUGH THE ONCE, NOT THE FIELD. Reading disclosureStream directly raced
+		// a first StartupDisclosureStream call on another goroutine, and a Close
+		// that came before any call found nil and closed nothing, so a later call
+		// built a fresh, open stream and subscribed it to launches from a runtime
+		// that was already gone. Reported by CodeRabbit.
+		//
+		// If nobody asked for the stream before this, nobody is draining it, so it
+		// is published EMPTY rather than built the usual way: no sink is
+		// subscribed and nothing is queued for an owner that does not exist. Every
+		// later caller then gets this stream, already closed. The read after Do is
+		// ordered by the Once whichever call got there first.
+		runtime.disclosureStreamOnce.Do(func() {
+			runtime.disclosureStream = newStartupDisclosureStream()
+		})
+		runtime.disclosureStream.Close()
 		for _, client := range runtime.clients {
 			if err := client.Close(); err != nil && runtime.err == nil {
 				runtime.err = err
@@ -432,6 +642,41 @@ func isPersistentlyApproved(store *PermissionStore, server Server, toolName stri
 		RequestedAutonomy: autonomy,
 	})
 	return err == nil && approved
+}
+
+// StartupDisclosures returns the least-privilege statements that applied to the
+// MCP server processes this registration launched, so a caller can report them
+// once. Empty when no server was launched under reduced enforcement, and always
+// empty for network servers, which launch no local process.
+//
+// READ THROUGH THE SINK, so this is not fixed at the moment registration
+// returned. A server abandoned at the connect timeout may still have been inside
+// cmd.Start then, and its process starts under the reduced write confinement
+// regardless of whether the connection ever became usable. Registration stays
+// bounded; the disclosure does not expire with it.
+//
+// Server order, and a settled entry never re-reads its sink, so calling this
+// twice cannot reorder or duplicate anything.
+func (runtime *Runtime) StartupDisclosures() []StartupDisclosure {
+	if runtime == nil {
+		return nil
+	}
+	disclosures := make([]StartupDisclosure, 0, len(runtime.disclosureSources))
+	for _, source := range runtime.disclosureSources {
+		notices := source.notices
+		if len(notices) == 0 {
+			if launched, late := source.sink.observe(); launched {
+				notices = late
+			}
+		}
+		if len(notices) > 0 {
+			disclosures = append(disclosures, StartupDisclosure{Name: source.name, Notices: notices})
+		}
+	}
+	if len(disclosures) == 0 {
+		return nil
+	}
+	return disclosures
 }
 
 // appendServerNote joins a [zero] note to output, choosing "returned" or

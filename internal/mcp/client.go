@@ -54,6 +54,56 @@ type ToolClient interface {
 	Close() error
 }
 
+// startupDisclosureError carries a launch disclosure out through a failure.
+//
+// A launched process is a fact about the past: once Start has succeeded the
+// disclosure is true whatever the handshake does next. The client is the only
+// thing that holds it, and the failure paths close and discard the client, so
+// without this the fact dies with the connection it was attached to.
+type startupDisclosureError struct {
+	err     error
+	notices []string
+}
+
+func (e *startupDisclosureError) Error() string { return e.err.Error() }
+func (e *startupDisclosureError) Unwrap() error { return e.err }
+
+// startupNoticesFromError recovers a launch disclosure from a failed connect.
+func startupNoticesFromError(err error) []string {
+	var disclosure *startupDisclosureError
+	if errors.As(err, &disclosure) {
+		return disclosure.notices
+	}
+	return nil
+}
+
+// startupDisclosing is the optional interface a client implements when its
+// LAUNCH carried a least-privilege disclosure. A network server launches no
+// local process, so it does not implement this and reports nothing, which is the
+// correct answer rather than an empty one.
+type startupDisclosing interface {
+	StartupNotices() []string
+}
+
+// StartupNotices reports the disclosures that applied to this server's launch.
+//
+// GATED ON THE SAME DECISION AS EVERY OTHER CARRIER. connectAndList reads this on
+// the success path and hands the result straight to the disclosure sources, so
+// for a while a successfully connected wrapped server disclosed on the strength
+// of cmd.Start returning: the HELPER starting, which is the one thing the report
+// exists because it does not prove. It happened to be right, since a completed
+// handshake does imply the child ran, but by coincidence rather than by rule, and
+// the failure path next to it was already asking the adapter.
+func (client *Client) StartupNotices() []string {
+	if client == nil || len(client.startupNotices) == 0 {
+		return nil
+	}
+	if client.launched != nil && !client.launched() {
+		return nil
+	}
+	return append([]string(nil), client.startupNotices...)
+}
+
 type Client struct {
 	server  Server
 	cmd     *exec.Cmd
@@ -64,6 +114,20 @@ type Client struct {
 	idMu    sync.Mutex
 	nextID  int
 	cleanup func()
+	// startupNotices are the least-privilege disclosures that applied to THIS
+	// server's launch.
+	//
+	// THE FACT DESCRIBES STARTUP, SO IT CANNOT BE RECOVERED FROM A TOOL RESULT.
+	// A stdio server prepared under the weakened token runs for the whole session,
+	// and connectStdio used to keep only the command and its cleanup, so nothing
+	// downstream could tell the operator that the process serving these tools had
+	// reduced write confinement. Kept typed here and rendered exactly once at
+	// registration rather than pasted onto every later tool result.
+	startupNotices []string
+	// launched is the launch decision this server's disclosures are gated on, nil
+	// for a plan whose started process IS the server and where there is nothing to
+	// decide. See internal/execution/child_launch.go.
+	launched func() bool
 
 	writeMu          sync.Mutex
 	writeQueue       chan writeOp
@@ -169,6 +233,11 @@ func (b *boundedBuffer) String() string {
 func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*Client, error) {
 	var cmd *exec.Cmd
 	var cleanup func()
+	var plannedEnforcement execution.Enforcement
+	// Retained from the prepared plan rather than dropped: for a wrapped plan the
+	// adapter, not cmd.Start, owns whether the requested server process exists.
+	var launchTracker *execution.ChildLaunchTracker
+	var ownedLaunch bool
 	cleanupTransferred := false
 	defer func() {
 		if cleanup != nil && !cleanupTransferred {
@@ -192,7 +261,11 @@ func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*
 			return nil, fmt.Errorf("start MCP server %s: %w", server.Name, err)
 		}
 		cmd = prepared.Command
-		cleanup = prepared.Cleanup
+		plannedEnforcement = prepared.Enforcement
+		ownedLaunch = prepared.ChildLaunchOwnedByAdapter
+		// The tracker's cleanup, not the plan's: it settles the launch decision
+		// before the report file it was read from is deleted.
+		launchTracker, cleanup = execution.NewChildLaunchTracker(prepared)
 	} else {
 		cmd = exec.CommandContext(ctx, server.Command, server.Args...)
 		cmd.Env = mergeProcessEnv(server.Env)
@@ -211,6 +284,55 @@ func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*
 		return nil, fmt.Errorf("start MCP server %s: %w", server.Name, err)
 	}
 
+	// PUBLISHED AT START, not at return. Registration abandons a server that
+	// exceeds the connect timeout, and everything below this line (initialize, and
+	// tools/list above it in the caller) can hang past that. Announcing the launch
+	// here is what lets an abandoned attempt still disclose the confinement its
+	// process ran under.
+	//
+	// EXCEPT WHEN START IS NOT THE LAUNCH. For a wrapped plan the process started
+	// above is the sandbox helper, which creates the MCP server only after marker,
+	// ACL, network, SID and token setup, any of which can fail leaving no server at
+	// all. Publishing here would make the durable delivery machinery reliably
+	// announce a confinement nothing ever ran under. Those plans publish from
+	// publishAdapterLaunch below, once the adapter has stated the fact.
+	if !ownedLaunch {
+		publishLaunch(ctx, plannedEnforcement.Notices)
+	}
+	// ONE ANSWER, AND IT IS ONLY CACHED ONCE IT CANNOT CHANGE.
+	//
+	// The adapter's report is a file the plan's cleanup deletes, so a decision made
+	// after cleanup used to read an absent report and answer "no child" about a
+	// server that really did run. Memoizing the first read fixed that ordering and
+	// introduced another: the read can land while the adapter has created the child
+	// and not yet recorded it, and "not yet" got frozen as "never".
+	//
+	// ChildLaunchTracker holds the three states apart. It caches a launch, never an
+	// absence, until the adapter is terminal, and it settles from cleanup with the
+	// report still on disk. See internal/execution/child_launch.go.
+	//
+	// It also gives the success, late and failed paths the same input. The failure
+	// path used to carry client.StartupNotices() unconditionally while the sink was
+	// gated on the adapter, which is two competing definitions of applied
+	// enforcement: an operator was told a server ran without write confinement when
+	// only the sandbox helper ran and the requested server never existed.
+	launchedOnce := func() bool {
+		if !ownedLaunch {
+			return true
+		}
+		return launchTracker.Launched()
+	}
+	// publishAdapterLaunch announces a wrapped plan's launch, but only if the
+	// adapter confirms the requested child was created. Called on both ways this
+	// attempt can end, which is also where an attempt abandoned at the connect
+	// timeout eventually arrives, so a late disclosure is still delivered once.
+	publishAdapterLaunch := func() {
+		if !ownedLaunch || !launchedOnce() {
+			return
+		}
+		publishLaunch(ctx, plannedEnforcement.Notices)
+	}
+
 	client := &Client{
 		server:  server,
 		cmd:     cmd,
@@ -219,16 +341,51 @@ func connectStdio(ctx context.Context, server Server, options ConnectOptions) (*
 		writer:  newMessageWriter(stdin),
 		nextID:  1,
 		cleanup: cleanup,
+		// Recorded only now, AFTER Start returned. Everything above returns early,
+		// so a prepare failure or an executable that could not be launched records
+		// nothing: same launch-state rule hooks and plugins use, expressed by where
+		// this assignment sits rather than by another outcome-kind switch.
+		startupNotices: append([]string(nil), plannedEnforcement.Notices...),
+		launched:       launchedOnce,
 	}
 	cleanupTransferred = true
 	if err := client.initialize(ctx); err != nil {
+		// THE LAUNCH ALREADY HAPPENED, so the fact has to leave through the error.
+		// Start succeeded above, which means the process ran under the planned token
+		// and may have done filesystem work before the handshake failed. Returning a
+		// bare error discards the client, and with it the only carrier the notices
+		// had, so the operator was told the server was unavailable and not that it
+		// had already run without the write jail.
+		// AFTER Close, which waits out the adapter and then settles the decision
+		// with the report still on disk. Asking first would ask an adapter that may
+		// be between creating the child and recording it, and read "not yet" as
+		// "never": the connect timeout ends the attempt here while the helper is
+		// still working.
 		_ = client.Close()
+		launched := launchedOnce()
+		publishAdapterLaunch()
 		message := strings.TrimSpace(stderr.String())
+		failure := fmt.Errorf("initialize MCP server %s: %w", server.Name, err)
 		if message != "" {
-			return nil, fmt.Errorf("initialize MCP server %s: %w: %s", server.Name, err, message)
+			failure = fmt.Errorf("initialize MCP server %s: %w: %s", server.Name, err, message)
 		}
-		return nil, fmt.Errorf("initialize MCP server %s: %w", server.Name, err)
+		// Same decision as the sink above. For a wrapped plan whose helper started
+		// and then failed before creating the requested server, there is nothing to
+		// disclose: no server ran, confined or otherwise.
+		var carried []string
+		if launched {
+			carried = client.StartupNotices()
+		}
+		return nil, &startupDisclosureError{err: failure, notices: carried}
 	}
+	// THE HANDSHAKE IS THE OBSERVATION. A wrapped plan's adapter speaks no MCP and
+	// creates the child suspended, so a well-formed initialize response can only
+	// have come from the requested server, already running. That is terminal
+	// evidence and does not depend on the report having been read yet, which is
+	// what keeps a long-lived session from having to wait for an adapter that will
+	// not exit until the session ends.
+	launchTracker.Confirm()
+	publishAdapterLaunch()
 	return client, nil
 }
 

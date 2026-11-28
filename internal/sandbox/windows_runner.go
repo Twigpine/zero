@@ -3,6 +3,7 @@ package sandbox
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -156,23 +157,30 @@ func windowsShellCommandLineFromArgs(args []string) (string, bool) {
 }
 
 type WindowsSandboxCommandArgsOptions struct {
-	SandboxHome       string
-	CommandCWD        string
-	WorkspaceRoots    []string
-	PermissionProfile PermissionProfile
-	Env               []string
-	SandboxLevel      WindowsSandboxLevel
-	Command           []string
+	// ExecutionReportPath is where the helper writes its structured report,
+	// including the authoritative fact that the sandboxed child was created.
+	ExecutionReportPath string
+	SandboxHome         string
+	CommandCWD          string
+	WorkspaceRoots      []string
+	PermissionProfile   PermissionProfile
+	Env                 []string
+	SandboxLevel        WindowsSandboxLevel
+	Command             []string
 }
 
 type WindowsSandboxCommandConfig struct {
-	SandboxHome       string
-	CommandCWD        string
-	WorkspaceRoots    []string
-	PermissionProfile PermissionProfile
-	Env               map[string]string
-	SandboxLevel      WindowsSandboxLevel
-	Command           []string
+	// ExecutionReportPath is the adapter-owned side channel back to the runner.
+	// Empty when the caller wants no report, which keeps every existing test and
+	// the standalone helper working unchanged.
+	ExecutionReportPath string
+	SandboxHome         string
+	CommandCWD          string
+	WorkspaceRoots      []string
+	PermissionProfile   PermissionProfile
+	Env                 map[string]string
+	SandboxLevel        WindowsSandboxLevel
+	Command             []string
 }
 
 func BuildWindowsSandboxCommandArgs(options WindowsSandboxCommandArgsOptions) ([]string, error) {
@@ -217,6 +225,9 @@ func BuildWindowsSandboxCommandArgs(options WindowsSandboxCommandArgsOptions) ([
 		"--env-json", string(envJSON),
 		"--windows-sandbox-level", string(level),
 	}
+	if reportPath := strings.TrimSpace(options.ExecutionReportPath); reportPath != "" {
+		args = append(args, "--execution-report", reportPath)
+	}
 	for _, root := range workspaceRoots {
 		args = append(args, "--workspace-root", root)
 	}
@@ -248,6 +259,13 @@ func ParseWindowsSandboxCommandArgs(args []string) (WindowsSandboxCommandConfig,
 				return WindowsSandboxCommandConfig{}, err
 			}
 			config.SandboxHome = strings.TrimSpace(value)
+			index = next
+		case "--execution-report":
+			value, next, err := nextWindowsSandboxFlagValue(args, index)
+			if err != nil {
+				return WindowsSandboxCommandConfig{}, err
+			}
+			config.ExecutionReportPath = strings.TrimSpace(value)
 			index = next
 		case "--workspace-root":
 			value, next, err := nextWindowsSandboxFlagValue(args, index)
@@ -341,14 +359,23 @@ func windowsRestrictedTokenCommandPlan(execRequest SandboxExecutionRequest, poli
 	if execRequest.EnforcementLevel == EnforcementUnelevated {
 		level = WindowsSandboxLevelUnelevated
 	}
+	// The helper's side channel back to us. The runner starts the helper, so its
+	// own exec.Cmd.Process only proves the HELPER ran; everything that makes this
+	// a sandbox happens inside, after that. The helper writes the authoritative
+	// child-launch fact here and the runner believes it over its own observation.
+	reportPath, err := newWindowsExecutionReportPath()
+	if err != nil {
+		return CommandPlan{}, err
+	}
 	args, err := BuildWindowsSandboxCommandArgs(WindowsSandboxCommandArgsOptions{
-		SandboxHome:       sandboxHome,
-		CommandCWD:        spec.Dir,
-		WorkspaceRoots:    []string{execRequest.WorkspaceRoot},
-		PermissionProfile: execRequest.PermissionProfile,
-		Env:               childEnv,
-		SandboxLevel:      level,
-		Command:           append([]string{spec.Name}, spec.Args...),
+		ExecutionReportPath: reportPath,
+		SandboxHome:         sandboxHome,
+		CommandCWD:          spec.Dir,
+		WorkspaceRoots:      []string{execRequest.WorkspaceRoot},
+		PermissionProfile:   execRequest.PermissionProfile,
+		Env:                 childEnv,
+		SandboxLevel:        level,
+		Command:             append([]string{spec.Name}, spec.Args...),
 	})
 	if err != nil {
 		return CommandPlan{}, err
@@ -359,19 +386,36 @@ func windowsRestrictedTokenCommandPlan(execRequest SandboxExecutionRequest, poli
 	// helper .exe, where args are passed unchanged.
 	fullArgs := append(append([]string{}, execRequest.Backend.ExecutableArgsPrefix...), args...)
 	return withSandboxExecutionMetadata(CommandPlan{
-		Backend:           execRequest.Backend,
-		TargetBackend:     execRequest.TargetBackend,
-		WorkspaceRoot:     execRequest.WorkspaceRoot,
-		Policy:            policy,
-		Wrapped:           true,
-		SandboxEnvMarkers: execRequest.SandboxEnvMarkers,
-		EnforcementLevel:  execRequest.EnforcementLevel,
-		Name:              execRequest.Backend.Executable,
-		Args:              fullArgs,
-		Dir:               spec.Dir,
-		Env:               childEnv,
-		SandboxDir:        spec.Dir,
+		Backend:             execRequest.Backend,
+		TargetBackend:       execRequest.TargetBackend,
+		WorkspaceRoot:       execRequest.WorkspaceRoot,
+		Policy:              policy,
+		Wrapped:             true,
+		SandboxEnvMarkers:   execRequest.SandboxEnvMarkers,
+		EnforcementLevel:    execRequest.EnforcementLevel,
+		Name:                execRequest.Backend.Executable,
+		Args:                fullArgs,
+		Dir:                 spec.Dir,
+		Env:                 childEnv,
+		SandboxDir:          spec.Dir,
+		executionReportPath: reportPath,
+		childLaunchReported: true,
+		cleanup: func() {
+			_ = os.Remove(reportPath)
+		},
 	}, execRequest), nil
+}
+
+// newWindowsExecutionReportPath names the helper's report file under the
+// per-user temp directory. Random, and the helper creates it with O_EXCL, so a
+// name another local user pre-created makes the write fail rather than letting
+// them dictate the fact the runner reads back.
+func newWindowsExecutionReportPath() (string, error) {
+	var token [16]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return "", fmt.Errorf("generate sandbox execution report path: %w", err)
+	}
+	return filepath.Join(os.TempDir(), "zero-sandbox-report-"+hex.EncodeToString(token[:])+".json"), nil
 }
 
 func upsertEnvList(env []string, values ...string) []string {

@@ -140,6 +140,10 @@ func (m model) renderRowCacheKey(row transcriptRow, width int, rc rowContext, op
 	appendRenderCacheField(&b, row.tool)
 	appendRenderCacheField(&b, fmt.Sprint(row.status))
 	appendRenderCacheField(&b, row.detail)
+	// The disclosure renders into the card, so it keys the entry. row.text
+	// happens to carry it too, but only because ModelOutput prepends it, and that
+	// coupling is what hid the notice from the card in the first place.
+	appendRenderCacheField(&b, strings.Join(row.enforcementNotices, "\n"))
 	appendRenderCacheField(&b, row.arg)
 	appendRenderCacheField(&b, strconv.Itoa(row.runID))
 	appendRenderCacheField(&b, strconv.FormatBool(row.expanded))
