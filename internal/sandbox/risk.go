@@ -50,32 +50,6 @@ var (
 	// unparseableNetworkPattern is used only after the shell parser fails. At
 	// that point the command is already marked too complex, so this intentionally
 	// favors catching obvious network programs over proving exact shell syntax.
-	//
-	// IT MUST BE A SUPERSET OF WHAT THE AST PATH FLAGS FOR NETWORK, not a mirror
-	// of the analyzer's category names. The serving forms were dropped from here
-	// on the reasoning that they bind rather than fetch, but the analyzer sets
-	// Network for every recognized LocalServer anyway, deliberately and for two
-	// reasons it documents: nothing consumes LocalServer yet, so the approval IS
-	// the protection, and `npm run dev` is matched by SCRIPT NAME, where the
-	// repository decides what `dev` and `predev` actually do and either can reach
-	// out before a port is bound.
-	//
-	// So dropping them here did not align the two paths, it split them. The POSIX
-	// parser rejects Windows shell syntax the invoked shell accepts, and the
-	// analyzer names that as a fallback case, so:
-	//
-	//	if "%OS%"=="Windows_NT" (npm run dev) else (npm start)
-	//	  -> parsed=false network=false categories=[shell unparseable_command]
-	//
-	// while every parseable spelling of the same command gets network. That is
-	// the approval gate disappearing on exactly the platform where it is the only
-	// egress control. Restored until a runner actually provides a scoped listener
-	// capability and the AST path stops setting Network for these itself.
-	//
-	// The fetch alternative is compiled from packageManagerNetworkSubcommands
-	// rather than a second list. The shorter list omitted ci, create, view, and
-	// search, so `npm --prefix ./web ci` kept network when it parsed and lost
-	// it inside a Windows conditional.
 	unparseableNetworkPattern *regexp.Regexp
 	// destructiveExtraPatterns hold high-severity patterns that the legacy
 	// destructiveCommandPattern does not already cover. Folded in from the
@@ -114,7 +88,7 @@ func unparseableNetworkPatternSource() string {
 	serving := `\b(npm|pnpm|yarn|bun)` + leadingOptionsPattern + `\s+(run|dev|serve|start|preview)\b`
 	return `(?i)\b(curl|wget|fetch|aria2c|ssh|scp|sftp|rsync|nc|ncat|netcat|telnet|ftp|npx)\b|` +
 		fetch + `|` + serving +
-		`|\b(http-server|serve|vite|next|nuxt|astro)\b|\b(python(2|3)?|py)\s+-m\s+http\.server\b|\bgo\s+get\b|\bgit\s+clone\b|\b(python(2|3)?|py)\s+-m\s+pip\s+install\b|\bgh\s+(api|repo\s+clone|release\s+download)\b`
+		`|\b(http-server|serve|vite|next|nuxt|astro)\b|\b(python(2|3)?|py)\s+-m\s+http\.server\b|\bgo\s+get\b|\bgit\s+clone\b|\b(python(2|3)?|py)\s+-m\s+pip\s+install\b`
 }
 
 func matchesDestructive(command string) bool {
@@ -129,8 +103,216 @@ func matchesDestructive(command string) bool {
 	return false
 }
 
+func executableBaseName(token string) string {
+	if idx := strings.LastIndexAny(token, `/\`); idx >= 0 {
+		token = token[idx+1:]
+	}
+	return strings.ToLower(token)
+}
+
+func isGHExecutableToken(token string) bool {
+	base := executableBaseName(token)
+	return base == "gh" || base == "gh.exe"
+}
+
+func isShellExecutableToken(token string) bool {
+	base := strings.TrimSuffix(executableBaseName(token), ".exe")
+	return shellPrograms[base]
+}
+
+func isFDPrefix(s string) bool {
+	if s == "" {
+		return true
+	}
+	if s == "&" {
+		return true
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// extractGHInvocations tokenizes an unparseable command string while preserving
+// token case, quoted executable paths, and option values, splitting on unquoted
+// shell/cmd separators (&, |, ;, (, ), CR, LF), stripping redirection operators
+// and their filename operands, and recursing (up to maxAnalyzerDepth) into
+// recognized shell wrappers (sh/bash/zsh/ksh/dash -c ...).
+func extractGHInvocations(command string) [][]string {
+	return extractGHInvocationsDepth(command, 0)
+}
+
+func extractGHInvocationsDepth(command string, depth int) [][]string {
+	type tok struct {
+		val          string
+		sep          bool
+		redir        bool
+		consumesNext bool
+	}
+	var tokens []tok
+	var cur strings.Builder
+	hasCur := false
+	var quote byte
+
+	flush := func() {
+		if hasCur {
+			tokens = append(tokens, tok{val: cur.String()})
+			cur.Reset()
+			hasCur = false
+		}
+	}
+
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+		if quote != 0 {
+			if c == quote {
+				quote = 0
+			} else {
+				cur.WriteByte(c)
+			}
+			continue
+		}
+		switch c {
+		case '"', '\'':
+			quote = c
+			hasCur = true
+		case ' ', '\t':
+			flush()
+		case '&', '|', ';', '(', ')', '\r', '\n':
+			flush()
+			tokens = append(tokens, tok{sep: true})
+		case '<', '>':
+			if hasCur && !isFDPrefix(cur.String()) {
+				flush()
+			}
+			var redir strings.Builder
+			if hasCur {
+				redir.WriteString(cur.String())
+				cur.Reset()
+				hasCur = false
+			}
+			for i < len(command) && (command[i] == '<' || command[i] == '>') {
+				redir.WriteByte(command[i])
+				i++
+			}
+			if i < len(command) && command[i] == '&' {
+				redir.WriteByte('&')
+				i++
+				for i < len(command) && command[i] >= '0' && command[i] <= '9' {
+					redir.WriteByte(command[i])
+					i++
+				}
+				i--
+				tokens = append(tokens, tok{val: redir.String(), redir: true, consumesNext: false})
+				continue
+			}
+			hasAttachedTarget := false
+			for i < len(command) && command[i] != ' ' && command[i] != '\t' &&
+				command[i] != '&' && command[i] != '|' && command[i] != ';' &&
+				command[i] != '(' && command[i] != ')' && command[i] != '\r' && command[i] != '\n' {
+				hasAttachedTarget = true
+				if command[i] == '"' || command[i] == '\'' {
+					q := command[i]
+					i++
+					for i < len(command) && command[i] != q {
+						redir.WriteByte(command[i])
+						i++
+					}
+					if i < len(command) {
+						i++
+					}
+					continue
+				}
+				redir.WriteByte(command[i])
+				i++
+			}
+			i--
+			tokens = append(tokens, tok{
+				val:          redir.String(),
+				redir:        true,
+				consumesNext: !hasAttachedTarget,
+			})
+		default:
+			cur.WriteByte(c)
+			hasCur = true
+		}
+	}
+	flush()
+
+	var invocations [][]string
+	for i := 0; i < len(tokens); i++ {
+		if tokens[i].sep || tokens[i].redir {
+			continue
+		}
+		if isShellExecutableToken(tokens[i].val) {
+			end := i + 1
+			for end < len(tokens) && !tokens[end].sep {
+				end++
+			}
+			if depth < maxAnalyzerDepth {
+				for j := i + 1; j < end; j++ {
+					if tokens[j].redir {
+						if tokens[j].consumesNext && j+1 < end && !tokens[j+1].redir {
+							j++
+						}
+						continue
+					}
+					if tokens[j].val == "--" {
+						break
+					}
+					if shellCommandFlag(tokens[j].val) {
+						k := j + 1
+						for k < end && tokens[k].redir {
+							if tokens[k].consumesNext && k+1 < end && !tokens[k+1].redir {
+								k++
+							}
+							k++
+						}
+						if k < end && tokens[k].val != "" {
+							invocations = append(invocations, extractGHInvocationsDepth(tokens[k].val, depth+1)...)
+						}
+						break
+					}
+				}
+			}
+			i = end - 1
+			continue
+		}
+		if !isGHExecutableToken(tokens[i].val) {
+			continue
+		}
+		var args []string
+		for j := i + 1; j < len(tokens) && !tokens[j].sep; j++ {
+			if tokens[j].redir {
+				if tokens[j].consumesNext && j+1 < len(tokens) && !tokens[j+1].sep && !tokens[j+1].redir {
+					j++
+				}
+				i = j
+				continue
+			}
+			if tokens[j].val != "" {
+				args = append(args, tokens[j].val)
+			}
+			i = j
+		}
+		invocations = append(invocations, args)
+	}
+	return invocations
+}
+
+func unparseableGHUsesNetwork(command string) bool {
+	for _, words := range extractGHInvocations(command) {
+		if ghUsesNetwork(words) {
+			return true
+		}
+	}
+	return false
+}
+
 func matchesUnparseableNetwork(command string) bool {
-	return unparseableNetworkPattern.MatchString(command)
+	return unparseableNetworkPattern.MatchString(command) || unparseableGHUsesNetwork(command)
 }
 
 func Classify(request Request) Risk {

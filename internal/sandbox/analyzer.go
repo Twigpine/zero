@@ -269,40 +269,40 @@ func commandUsesNetwork(prog string, args []*syntax.Word) bool {
 		return true
 	}
 	if pythonLauncherPrograms[prog] {
-		return pythonModuleUsesNetwork(words)
+		return pythonModuleUsesNetwork(lowerWords(words))
 	}
 	switch prog {
 	case "npm":
-		return packageManagerUsesNetwork(words, map[string]string{
+		return packageManagerUsesNetwork(lowerWords(words), map[string]string{
 			"run":  "run",
 			"exec": "exec",
 			"x":    "exec",
 		})
 	case "pnpm":
-		return packageManagerUsesNetwork(words, map[string]string{
+		return packageManagerUsesNetwork(lowerWords(words), map[string]string{
 			"run":  "run",
 			"exec": "exec",
 			"dlx":  "exec",
 		})
 	case "yarn":
-		return packageManagerUsesNetwork(words, map[string]string{
+		return packageManagerUsesNetwork(lowerWords(words), map[string]string{
 			"run":  "run",
 			"exec": "exec",
 			"dlx":  "exec",
 		})
 	case "bun":
-		return packageManagerUsesNetwork(words, map[string]string{
+		return packageManagerUsesNetwork(lowerWords(words), map[string]string{
 			"run": "run",
 			"x":   "exec",
 		})
 	case "npx":
-		return npxUsesNetwork(words)
+		return npxUsesNetwork(lowerWords(words))
 	case "pip", "pip2", "pip3":
-		return firstSubcommand(words, nil) == "install"
+		return firstSubcommand(lowerWords(words), nil) == "install"
 	case "go":
-		return firstSubcommand(words, nil) == "get"
+		return firstSubcommand(lowerWords(words), nil) == "get"
 	case "git":
-		return gitUsesNetwork(words)
+		return gitUsesNetwork(lowerWords(words))
 	case "gh":
 		return ghUsesNetwork(words)
 	default:
@@ -340,7 +340,7 @@ func packageManagerUsesNetwork(words []string, aliases map[string]string) bool {
 	}
 	operands, eatable := commandOperands(words)
 	for index := 0; index < subcommandPositions(operands, eatable); index++ {
-		subcommand := operands[index]
+		subcommand := strings.ToLower(operands[index])
 		if alias, ok := aliases[subcommand]; ok {
 			subcommand = alias
 		}
@@ -377,9 +377,17 @@ func npxUsesNetwork(_ []string) bool {
 func literalWordTexts(args []*syntax.Word) []string {
 	words := make([]string, 0, len(args))
 	for _, arg := range args {
-		words = append(words, strings.ToLower(strings.TrimSpace(wordText(arg))))
+		words = append(words, strings.TrimSpace(wordText(arg)))
 	}
 	return words
+}
+
+func lowerWords(words []string) []string {
+	lowered := make([]string, len(words))
+	for i, w := range words {
+		lowered[i] = strings.ToLower(w)
+	}
+	return lowered
 }
 
 func pythonModuleUsesNetwork(words []string) bool {
@@ -408,7 +416,7 @@ func pythonModuleUsesNetwork(words []string) bool {
 // is not EGRESS, not that dev tooling is inert. Anything that actually fetches
 // still matches commandUsesNetwork through its own program or subcommand.
 func commandRunsLocalServer(prog string, args []*syntax.Word) bool {
-	words := literalWordTexts(args)
+	words := lowerWords(literalWordTexts(args))
 	if localServerPrograms[prog] {
 		return frameworkSubcommandRunsLocalServer(prog, words)
 	}
@@ -446,7 +454,7 @@ func frameworkSubcommandRunsLocalServer(prog string, words []string) bool {
 	// the same way the package managers do; see subcommandPositions.
 	operands, eatable := commandOperands(words)
 	for index := 0; index < subcommandPositions(operands, eatable); index++ {
-		switch operands[index] {
+		switch strings.ToLower(operands[index]) {
 		case "dev", "start", "serve", "preview":
 			return true
 		case "build", "optimize", "generate", "check", "lint", "export":
@@ -467,10 +475,11 @@ func frameworkSubcommandRunsLocalServer(prog string, words []string) bool {
 func packageManagerRunsLocalServer(words []string) bool {
 	operands, eatable := commandOperands(words)
 	for index := 0; index < subcommandPositions(operands, eatable); index++ {
-		if packageManagerServingScripts[operands[index]] {
+		op := strings.ToLower(operands[index])
+		if packageManagerServingScripts[op] {
 			return true
 		}
-		if operands[index] == "run" && index+1 < len(operands) && packageManagerServingScripts[operands[index+1]] {
+		if op == "run" && index+1 < len(operands) && packageManagerServingScripts[strings.ToLower(operands[index+1])] {
 			return true
 		}
 	}
@@ -570,14 +579,185 @@ func pythonModuleRunsLocalServer(words []string) bool {
 	return false
 }
 
-func ghUsesNetwork(words []string) bool {
-	first := firstSubcommand(words, nil)
-	if first == "api" {
+var ghValueOptions = map[string]bool{
+	"-R":             true,
+	"--repo":         true,
+	"--host":         true,
+	"--hostname":     true,
+	"-s":             true,
+	"--shell":        true,
+	"-t":             true,
+	"--template":     true,
+	"-q":             true,
+	"--jq":           true,
+	"-L":             true,
+	"--limit":        true,
+	"-X":             true,
+	"--method":       true,
+	"-f":             true,
+	"-F":             true,
+	"--field":        true,
+	"--raw-field":    true,
+	"-H":             true,
+	"--header":       true,
+	"-p":             true,
+	"--pattern":      true,
+	"--preview":      true,
+	"-d":             true,
+	"--dir":          true,
+	"-o":             true,
+	"--output":       true,
+	"--owner":        true,
+	"-a":             true,
+	"--archive":      true,
+	"--custom-agent": true,
+	"-b":             true,
+	"--base":         true,
+	"--ref":          true,
+	"-e":             true,
+	"--env":          true,
+	"--input":        true,
+	"--cache":        true,
+}
+
+var ghSubcommandValueOptions = map[string]map[string]bool{
+	"auth": {
+		"-h": true,
+	},
+	"issue": {
+		"--title": true,
+		"--body":  true,
+	},
+	"pr": {
+		"--title":  true,
+		"--body":   true,
+		"--search": true,
+		"-S":       true,
+	},
+	"release": {
+		"--title": true,
+	},
+	"project": {
+		"--title": true,
+	},
+	"run": {
+		"-i": true,
+	},
+}
+
+func ghSingleOptionTakesValue(flag string, subcommand string) bool {
+	if strings.HasPrefix(flag, "--") {
+		flag = strings.ToLower(flag)
+	}
+	if ghValueOptions[flag] {
 		return true
 	}
-	second := secondSubcommand(words)
-	return (first == "release" && second == "download") ||
-		(first == "repo" && second == "clone")
+	if opts, ok := ghSubcommandValueOptions[subcommand]; ok {
+		return opts[flag]
+	}
+	return false
+}
+
+func ghOptionTakesValue(flag string, subcommand string) bool {
+	if strings.HasPrefix(flag, "-") && !strings.HasPrefix(flag, "--") && len(flag) > 2 {
+		for idx := 1; idx < len(flag); idx++ {
+			if ghSingleOptionTakesValue("-"+string(flag[idx]), subcommand) {
+				// Only consumes the next token when the value-taking flag is last in the cluster;
+				// otherwise the remainder of this token is its attached value.
+				return idx == len(flag)-1
+			}
+		}
+		return false
+	}
+	return ghSingleOptionTakesValue(flag, subcommand)
+}
+
+func ghSubcommands(words []string) (string, string) {
+	var subs []string
+	for i := 0; i < len(words); i++ {
+		w := words[i]
+		if w == "" {
+			continue
+		}
+		if w == "--" {
+			break
+		}
+		if strings.HasPrefix(w, "-") {
+			first := ""
+			if len(subs) > 0 {
+				first = subs[0]
+			}
+			if !strings.Contains(w, "=") && ghOptionTakesValue(w, first) && i+1 < len(words) {
+				i++
+			}
+			continue
+		}
+		subs = append(subs, strings.ToLower(w))
+		if len(subs) == 2 {
+			break
+		}
+	}
+	var first, second string
+	if len(subs) > 0 {
+		first = subs[0]
+	}
+	if len(subs) > 1 {
+		second = subs[1]
+	}
+	return first, second
+}
+
+func ghHasHelpOrVersionFlag(words []string, subcommand string) bool {
+	var subs []string
+	for i := 0; i < len(words); i++ {
+		w := words[i]
+		if w == "" {
+			continue
+		}
+		if w == "--" {
+			break
+		}
+		if strings.HasPrefix(w, "-") {
+			if !strings.Contains(w, "=") && ghOptionTakesValue(w, subcommand) && i+1 < len(words) {
+				i++
+				continue
+			}
+			switch w {
+			case "--help", "--version":
+				return true
+			case "-h":
+				if subcommand != "auth" {
+					return true
+				}
+			}
+			continue
+		}
+		subs = append(subs, strings.ToLower(w))
+		// Everything after `gh extension exec` (or `gh ext exec`) is forwarded to
+		// the extension runner, so `--help`/`--version`/`-h` there are not gh's own.
+		if len(subs) >= 2 && (subs[0] == "extension" || subs[0] == "ext") && subs[1] == "exec" {
+			break
+		}
+	}
+	return false
+}
+
+func ghUsesNetwork(words []string) bool {
+	first, second := ghSubcommands(words)
+	if ghHasHelpOrVersionFlag(words, first) {
+		return false
+	}
+	if first == "" {
+		return false
+	}
+	switch first {
+	case "help", "version", "completion", "config", "alias":
+		return false
+	case "extension", "ext", "extensions":
+		return second != "" && second != "list" && second != "ls"
+	default:
+		return true
+	}
 }
 
 func secondSubcommand(words []string) string {

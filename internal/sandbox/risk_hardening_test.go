@@ -327,3 +327,54 @@ func TestClassifyBenignCommandStaysClean(t *testing.T) {
 		}
 	}
 }
+
+func TestClassifyUnparseableGHCommands(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+		network bool
+	}{
+		{name: "unparseable gh pr list", command: `if %ERRORLEVEL% == 0 gh pr list`, network: true},
+		{name: "unparseable gh issue view", command: `if %ERRORLEVEL% == 0 gh issue view 5`, network: true},
+		{name: "unparseable gh run watch", command: `if %ERRORLEVEL% == 0 gh run watch`, network: true},
+		{name: "unparseable gh release download with flag", command: `if %ERRORLEVEL% == 0 gh release -R owner/repo download v1`, network: true},
+		{name: "unparseable gh with flag in front", command: `if %ERRORLEVEL% == 0 gh -R owner/repo pr list`, network: true},
+		{name: "unparseable gh with quoted repo flag", command: `if %ERRORLEVEL% == 0 gh -R "owner/repo" pr list`, network: true},
+		{name: "unparseable quoted gh.exe path", command: `if %ERRORLEVEL% == 0 "C:\Program Files\GitHub CLI\gh.exe" pr list`, network: true},
+		{name: "unparseable quoted gh.exe path with quoted repo flag", command: `if %ERRORLEVEL% == 0 "C:\Program Files\GitHub CLI\gh.exe" -R "owner/repo" pr list`, network: true},
+		{name: "unparseable gh extension install", command: `if %ERRORLEVEL% == 0 gh extension install owner/ext`, network: true},
+		{name: "unparseable gh extension exec forwarded --help", command: `if %ERRORLEVEL% == 0 gh extension exec myext --help`, network: true},
+		{name: "unparseable gh issue create --title --help", command: `if %ERRORLEVEL% == 0 gh issue create --title --help --body test --repo owner/repo`, network: true},
+		{name: "unparseable gh api -i -- --help", command: `if %ERRORLEVEL% == 0 gh api -i -- --help`, network: true},
+		{name: "unparseable gh api -it --help user", command: `if %ERRORLEVEL% == 0 gh api -it --help user`, network: true},
+		{name: "unparseable gh api with uppercase -H header flag", command: `if %ERRORLEVEL% == 0 gh api -H "Accept: application/vnd.github+json" /user`, network: true},
+		{name: "unparseable gh auth status with -h hostname", command: `if %ERRORLEVEL% == 0 gh auth status -h github.com`, network: true},
+		{name: "unparseable gh auth status --help", command: `if %ERRORLEVEL% == 0 gh auth status --help`, network: false},
+		{name: "unparseable bash -c quoted gh api payload", command: `if %ERRORLEVEL% == 0 bash -c "gh api /user"`, network: true},
+		{name: "unparseable gh api redirected to --help filename", command: `if %ERRORLEVEL% == 0 gh api /user > --help`, network: true},
+		{name: "unparseable gh api --help with redirection", command: `if %ERRORLEVEL% == 0 gh api > out.txt --help`, network: false},
+		{name: "unparseable gh pr list unterminated quote", command: `gh pr list && "unterminated`, network: true},
+		{name: "unparseable gh --help", command: `if %ERRORLEVEL% == 0 gh --help`, network: false},
+		{name: "unparseable gh pr list --help", command: `if %ERRORLEVEL% == 0 gh pr list --help`, network: false},
+		{name: "unparseable gh --help pr list", command: `if %ERRORLEVEL% == 0 gh --help pr list`, network: false},
+		{name: "unparseable gh help", command: `if %ERRORLEVEL% == 0 gh help`, network: false},
+		{name: "unparseable gh config", command: `if %ERRORLEVEL% == 0 gh config get git_protocol`, network: false},
+		{name: "unparseable gh alias list", command: `if %ERRORLEVEL% == 0 gh alias list`, network: false},
+		{name: "unparseable gh alias list with flag", command: `if %ERRORLEVEL% == 0 gh -R owner/repo alias list`, network: false},
+		{name: "unparseable gh extension list", command: `if %ERRORLEVEL% == 0 gh extension list`, network: false},
+		{name: "unparseable gh extension list with flag", command: `if %ERRORLEVEL% == 0 gh extension -R owner/repo list`, network: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			risk := classifyCommand(tc.command)
+			if !HasRiskCategory(risk, "unparseable_command") {
+				t.Fatalf("Classify(%q) = categories %v, want unparseable_command", tc.command, risk.Categories)
+			}
+			hasNet := HasRiskCategory(risk, "network")
+			if hasNet != tc.network {
+				t.Fatalf("Classify(%q) network = %v, want %v (risk = %s, categories %v)",
+					tc.command, hasNet, tc.network, risk.Level, risk.Categories)
+			}
+		})
+	}
+}
