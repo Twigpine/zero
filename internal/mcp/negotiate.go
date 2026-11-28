@@ -16,6 +16,7 @@ var clientProtocolVersions = []string{"2025-11-25", "2025-06-18", "2025-03-26", 
 var protocolVersionPattern = regexp.MustCompile(`\b[0-9]{4}-[0-9]{2}-[0-9]{2}\b`)
 var supportedVersionLabel = regexp.MustCompile(`(?i)\bsupported(?:[\s_-]+(?:protocol[\s_-]+)?versions?)?\s*(?::|=|\bare\b)\s*`)
 var protocolVersionPrefix = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}\b`)
+var protocolVersionConjunction = regexp.MustCompile(`(?i)^(?:and|or)\s+`)
 
 func negotiateProtocol(ctx context.Context, request func(context.Context, string, any, any) error) (string, error) {
 	version := clientProtocolVersions[0]
@@ -128,6 +129,7 @@ func advertisedProtocolVersions(rejected *rpcError) (map[string]bool, bool) {
 			list := text[label[1]:]
 			for {
 				list = strings.TrimLeft(list, " \t\r\n,;|/[]()\"'`")
+				list = protocolVersionConjunction.ReplaceAllString(list, "")
 				version := protocolVersionPrefix.FindString(list)
 				if version == "" {
 					break

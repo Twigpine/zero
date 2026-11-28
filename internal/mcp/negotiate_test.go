@@ -62,6 +62,21 @@ func TestNegotiateProtocol(t *testing.T) {
 			wantCalls: []string{"2025-11-25", "2024-11-05"},
 		},
 		{
+			name: "conjunction separated supported list", selected: "2025-06-18",
+			rejection: &rpcError{Code: -32602, Message: "Unsupported protocol version. Supported: 2026-07-28 and 2025-06-18"},
+			wantCalls: []string{"2025-11-25", "2025-06-18"},
+		},
+		{
+			name: "or separated supported list", selected: "2025-03-26",
+			rejection: &rpcError{Code: -32602, Message: "Unsupported protocol version. Supported: 2026-07-28 OR 2025-03-26"},
+			wantCalls: []string{"2025-11-25", "2025-03-26"},
+		},
+		{
+			name: "conjunction before unsupported label", selected: "2024-11-05",
+			rejection: &rpcError{Code: -32602, Message: "Unsupported protocol version. Supported: 2024-11-05 and Unsupported: 2025-06-18"},
+			wantCalls: []string{"2025-11-25", "2024-11-05"},
+		},
+		{
 			name: "no overlap", rejection: &rpcError{Code: -32602, Message: "Unsupported protocol version 2025-11-25; supported: 2026-07-28"},
 			wantCalls: []string{"2025-11-25"}, wantError: "mutually supported versions",
 		},
