@@ -11,6 +11,14 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// testedAttributeBits are the attributes these tests make claims about. A
+// directory can hand a new file others, compression above all, and whether the
+// machine's temporary directory does that is not what is being tested.
+const testedAttributeBits = windows.FILE_ATTRIBUTE_HIDDEN | windows.FILE_ATTRIBUTE_SYSTEM |
+	windows.FILE_ATTRIBUTE_NOT_CONTENT_INDEXED | windows.FILE_ATTRIBUTE_READONLY |
+	windows.FILE_ATTRIBUTE_TEMPORARY | windows.FILE_ATTRIBUTE_ARCHIVE
+
+// testFileAttributes returns the attributes under test that the file has.
 func testFileAttributes(t *testing.T, path string) uint32 {
 	t.Helper()
 	name, err := windows.UTF16PtrFromString(path)
@@ -21,7 +29,22 @@ func testFileAttributes(t *testing.T, path string) uint32 {
 	if err != nil {
 		t.Fatalf("read the attributes of %s: %v", path, err)
 	}
-	return attributes
+	return attributes & testedAttributeBits
+}
+
+// newPlainTestFile writes the file an overwrite will replace and clears the
+// attributes under test on it. A new file takes the not-content-indexed
+// attribute from its directory, and the temporary directory of the machine
+// running this may have it, so the starting state is set and not assumed.
+func newPlainTestFile(t *testing.T, path string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte("observed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	setTestFileAttributes(t, path, windows.FILE_ATTRIBUTE_ARCHIVE)
+	if got := testFileAttributes(t, path); got != windows.FILE_ATTRIBUTE_ARCHIVE {
+		t.Fatalf("SETUP INVALID: attributes = %#x after they were cleared", got)
+	}
 }
 
 func setTestFileAttributes(t *testing.T, path string, attributes uint32) {
@@ -82,9 +105,7 @@ func TestOverwriteKeepsTheReplacedFilesAttributes(t *testing.T) {
 					}
 					root := t.TempDir()
 					path := filepath.Join(root, "kept.txt")
-					if err := os.WriteFile(path, []byte("observed\n"), 0o644); err != nil {
-						t.Fatal(err)
-					}
+					newPlainTestFile(t, path)
 					setTestFileAttributes(t, path, layout.attributes)
 					before := testFileAttributes(t, path)
 					if before&layout.attributes != layout.attributes {
@@ -119,9 +140,7 @@ func TestOverwriteKeepsTheReplacedFilesAttributes(t *testing.T) {
 func TestOverwriteCarriesNothingBeyondThePresentationAttributes(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "plain.txt")
-	if err := os.WriteFile(path, []byte("observed\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	newPlainTestFile(t, path)
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
@@ -172,9 +191,7 @@ func TestOverwriteCarriesNothingBeyondThePresentationAttributes(t *testing.T) {
 func TestOverwriteDoesNotPickUpTheDirectorysAttributes(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "kept.txt")
-	if err := os.WriteFile(path, []byte("observed\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	newPlainTestFile(t, path)
 	setTestFileAttributes(t, root, windows.FILE_ATTRIBUTE_NOT_CONTENT_INDEXED)
 	probe := filepath.Join(root, "probe.txt")
 	if err := os.WriteFile(probe, nil, 0o644); err != nil {
