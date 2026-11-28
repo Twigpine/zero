@@ -346,6 +346,7 @@ func TestClassifyUnparseableGHCommands(t *testing.T) {
 		{name: "unparseable gh extension exec forwarded --help", command: `if %ERRORLEVEL% == 0 gh extension exec myext --help`, network: true},
 		{name: "unparseable gh issue create --title --help", command: `if %ERRORLEVEL% == 0 gh issue create --title --help --body test --repo owner/repo`, network: true},
 		{name: "unparseable gh api -i -- --help", command: `if %ERRORLEVEL% == 0 gh api -i -- --help`, network: true},
+		{name: "unparseable gh api -it --help user", command: `if %ERRORLEVEL% == 0 gh api -it --help user`, network: true},
 		{name: "unparseable gh api with uppercase -H header flag", command: `if %ERRORLEVEL% == 0 gh api -H "Accept: application/vnd.github+json" /user`, network: true},
 		{name: "unparseable gh auth status with -h hostname", command: `if %ERRORLEVEL% == 0 gh auth status -h github.com`, network: true},
 		{name: "unparseable gh auth status --help", command: `if %ERRORLEVEL% == 0 gh auth status --help`, network: false},

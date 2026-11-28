@@ -629,8 +629,10 @@ var ghSubcommandValueOptions = map[string]map[string]bool{
 		"--body":  true,
 	},
 	"pr": {
-		"--title": true,
-		"--body":  true,
+		"--title":  true,
+		"--body":   true,
+		"--search": true,
+		"-S":       true,
 	},
 	"release": {
 		"--title": true,
@@ -643,7 +645,7 @@ var ghSubcommandValueOptions = map[string]map[string]bool{
 	},
 }
 
-func ghOptionTakesValue(flag string, subcommand string) bool {
+func ghSingleOptionTakesValue(flag string, subcommand string) bool {
 	if strings.HasPrefix(flag, "--") {
 		flag = strings.ToLower(flag)
 	}
@@ -654,6 +656,20 @@ func ghOptionTakesValue(flag string, subcommand string) bool {
 		return opts[flag]
 	}
 	return false
+}
+
+func ghOptionTakesValue(flag string, subcommand string) bool {
+	if strings.HasPrefix(flag, "-") && !strings.HasPrefix(flag, "--") && len(flag) > 2 {
+		for idx := 1; idx < len(flag); idx++ {
+			if ghSingleOptionTakesValue("-"+string(flag[idx]), subcommand) {
+				// Only consumes the next token when the value-taking flag is last in the cluster;
+				// otherwise the remainder of this token is its attached value.
+				return idx == len(flag)-1
+			}
+		}
+		return false
+	}
+	return ghSingleOptionTakesValue(flag, subcommand)
 }
 
 func ghSubcommands(words []string) (string, string) {
@@ -737,8 +753,8 @@ func ghUsesNetwork(words []string) bool {
 	switch first {
 	case "help", "version", "completion", "config", "alias":
 		return false
-	case "extension":
-		return second != "" && second != "list"
+	case "extension", "ext", "extensions":
+		return second != "" && second != "list" && second != "ls"
 	default:
 		return true
 	}
