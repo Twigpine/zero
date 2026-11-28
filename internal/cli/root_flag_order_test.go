@@ -35,8 +35,8 @@ func rootFlagOrderings(groups [][]string) [][]string {
 // order the operator wrote them in load-bearing: `zero --allow-escalation
 // --theme auto` stranded `--theme auto` as an unknown command and exited with
 // an argument error instead of launching. Every ordering of the three root
-// flags, with --skip-permissions-unsafe absent or at any position, has to reach
-// the TUI with all three applied.
+// flags, with either spelling of --full-auto at any position or omitted, has
+// to reach the TUI with all three applied.
 func TestRootFlagsComposeInAnyOrder(t *testing.T) {
 	extra := t.TempDir()
 	resolvedExtra, err := filepath.EvalSymlinks(extra)
@@ -45,17 +45,19 @@ func TestRootFlagsComposeInAnyOrder(t *testing.T) {
 	}
 	groups := [][]string{{"--add-dir", extra}, {"--theme", "auto"}, {"--allow-escalation"}}
 	cases := rootFlagOrderings(groups)
-	cases = append(cases, rootFlagOrderings(append(groups, []string{"--skip-permissions-unsafe"}))...)
-	if len(cases) != 6+24 {
-		t.Fatalf("SETUP INVALID: %d orderings, want 30", len(cases))
+	for _, flag := range []string{"--full-auto", "--skip-permissions-unsafe"} {
+		cases = append(cases, rootFlagOrderings(append(groups, []string{flag}))...)
+	}
+	if len(cases) != 6+2*24 {
+		t.Fatalf("SETUP INVALID: %d orderings, want 54", len(cases))
 	}
 	for _, args := range cases {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			options := captureTUIOptions(t, args...)
 			wantMode := agent.PermissionModeAsk
 			for _, arg := range args {
-				if arg == "--skip-permissions-unsafe" {
-					wantMode = agent.PermissionModeUnsafe
+				if arg == "--full-auto" || arg == "--skip-permissions-unsafe" {
+					wantMode = agent.PermissionModeFullAuto
 				}
 			}
 			if options.PermissionMode != wantMode {

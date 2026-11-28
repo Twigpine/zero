@@ -20,7 +20,7 @@ type completionContext struct {
 }
 
 var completionRoot = completionNode{
-	flags: []string{"-h", "--help", "-v", "--version", "-p", "--prompt", "--add-dir", "--allow-escalation", "--theme", "--skip-permissions-unsafe"},
+	flags: []string{"-h", "--help", "-v", "--version", "-p", "--prompt", "--add-dir", "--allow-escalation", "--theme", "--full-auto", "--skip-permissions-unsafe"},
 	children: []completionNode{
 		{names: []string{"exec"}, flags: []string{
 			"-h", "--help", "-f", "--file", "--image", "--add-dir", "--mode", "-m", "--model",
@@ -30,7 +30,7 @@ var completionRoot = completionNode{
 			"--reasoning-effort", "-C", "--cwd", "-w", "--worktree", "--worktree-dir", "-i",
 			"--input-format", "-o", "--output-format", "--prompt", "--resume", "--fork",
 			"--calling-session-id", "--calling-tool-use-id", "--tag", "--depth", "--session-title",
-			"--init-session-id", "--skip-permissions-unsafe", "--allow-escalation", "--self-correct",
+			"--init-session-id", "--full-auto", "--skip-permissions-unsafe", "--allow-escalation", "--self-correct",
 			"--notify", "--no-notify", "--no-completion-gate",
 		}},
 		{

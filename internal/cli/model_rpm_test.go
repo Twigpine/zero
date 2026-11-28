@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+
 	"github.com/Twigpine/zero/internal/config"
 	"github.com/Twigpine/zero/internal/mcp"
 	"github.com/Twigpine/zero/internal/tools"
@@ -31,10 +33,12 @@ func (p *rpmExecProvider) StreamCompletion(context.Context, zeroruntime.Completi
 }
 func rpmTestDeps(t *testing.T, p *rpmExecProvider) appDeps {
 	t.Helper()
-	root := t.TempDir()
-	for _, k := range []string{"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"} {
-		t.Setenv(k, root)
-	}
+	// isolateCLIUserState also disables the models.dev refresh. runWithDeps
+	// starts that refresh before the injected TUI runs, and it writes
+	// $XDG_CACHE_HOME/zero while the test's TempDir is being removed. The
+	// cleanup then fails with "directory not empty" on that zero directory.
+	isolateCLIUserState(t)
+	root := os.Getenv("HOME")
 	return appDeps{getwd: func() (string, error) { return root, nil }, resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
 		c := execResolvedConfig()
 		c.ModelRPM = map[string]int{c.Provider.Model: 1}

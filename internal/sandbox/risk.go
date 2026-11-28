@@ -9,6 +9,23 @@ import (
 	"strings"
 )
 
+// optionWordPattern keeps quoted and escaped fragments together, including
+// when a quoted value is attached to its option with "=". Backslashes can also
+// be literal in Windows paths, so the fallback accepts either reading.
+const optionWordPattern = `(?:\\[^\r\n]|[^\s"';&|()<>]|"(?:\\[^\r\n]|[^"\r\n])*"|'[^'\r\n]*')+`
+
+// leadingOptionsPattern spans the global options a package manager accepts
+// before its subcommand, including the word an option consumes as its value:
+// `npm --prefix ./web run dev` and `pnpm -C ./web run dev` are documented usage,
+// and without this the fallback only ever saw the unflagged spelling.
+//
+// The value is optional on purpose, so both readings of `--flag word` are
+// covered. That over-matches — `npm --prefix run` matches too — which is the
+// direction this fallback is already documented to favour: it runs only after
+// the command was declared too complex to parse, where catching an obvious
+// network program matters more than proving exact shell syntax.
+const leadingOptionsPattern = `(?:\s+-{1,2}` + optionWordPattern + `(?:\s+` + optionWordPattern + `)?)*`
+
 var (
 	// destructiveCommandPattern matches the highest-risk shell forms:
 	//   - rm -rf (with combined/reordered r/f flags) targeting /, $HOME (bare,
@@ -33,7 +50,33 @@ var (
 	// unparseableNetworkPattern is used only after the shell parser fails. At
 	// that point the command is already marked too complex, so this intentionally
 	// favors catching obvious network programs over proving exact shell syntax.
-	unparseableNetworkPattern = regexp.MustCompile(`(?i)\b(curl|wget|fetch|aria2c|ssh|scp|sftp|rsync|nc|ncat|netcat|telnet|ftp|npx|http-server|vite|next|nuxt|astro)\b|\b(npm|pnpm|yarn|bun|pip|pip2|pip3)\s+(install|add|publish|login|start|serve|dev|preview|run\s+(start|serve|dev|preview)|exec|x|dlx)\b|\bgo\s+get\b|\bgit\s+clone\b|\bpython(2|3)?\s+-m\s+(http\.server|pip\s+install)\b|\bgh\s+(api|repo\s+clone|release\s+download)\b`)
+	//
+	// IT MUST BE A SUPERSET OF WHAT THE AST PATH FLAGS FOR NETWORK, not a mirror
+	// of the analyzer's category names. The serving forms were dropped from here
+	// on the reasoning that they bind rather than fetch, but the analyzer sets
+	// Network for every recognized LocalServer anyway, deliberately and for two
+	// reasons it documents: nothing consumes LocalServer yet, so the approval IS
+	// the protection, and `npm run dev` is matched by SCRIPT NAME, where the
+	// repository decides what `dev` and `predev` actually do and either can reach
+	// out before a port is bound.
+	//
+	// So dropping them here did not align the two paths, it split them. The POSIX
+	// parser rejects Windows shell syntax the invoked shell accepts, and the
+	// analyzer names that as a fallback case, so:
+	//
+	//	if "%OS%"=="Windows_NT" (npm run dev) else (npm start)
+	//	  -> parsed=false network=false categories=[shell unparseable_command]
+	//
+	// while every parseable spelling of the same command gets network. That is
+	// the approval gate disappearing on exactly the platform where it is the only
+	// egress control. Restored until a runner actually provides a scoped listener
+	// capability and the AST path stops setting Network for these itself.
+	//
+	// The fetch alternative is compiled from packageManagerNetworkSubcommands
+	// rather than a second list. The shorter list omitted ci, create, view, and
+	// search, so `npm --prefix ./web ci` kept network when it parsed and lost
+	// it inside a Windows conditional.
+	unparseableNetworkPattern *regexp.Regexp
 	// destructiveExtraPatterns hold high-severity patterns that the legacy
 	// destructiveCommandPattern does not already cover. Folded in from the
 	// blueprint safe_bash.go without duplicating existing matches.
@@ -53,6 +96,26 @@ var (
 		regexp.MustCompile(`(?i)\bmkfs\.[a-z0-9]+\b`),
 	}
 )
+
+func init() {
+	unparseableNetworkPattern = regexp.MustCompile(unparseableNetworkPatternSource())
+}
+
+func unparseableNetworkPatternSource() string {
+	subcommands := make([]string, 0, len(packageManagerNetworkSubcommands)+len(packageManagerNetworkLiteralAliases))
+	for subcommand := range packageManagerNetworkSubcommands {
+		subcommands = append(subcommands, regexp.QuoteMeta(subcommand))
+	}
+	for _, alias := range packageManagerNetworkLiteralAliases {
+		subcommands = append(subcommands, regexp.QuoteMeta(alias))
+	}
+	sort.Strings(subcommands)
+	fetch := `\b(npm|pnpm|yarn|bun|pip|pip2|pip3)` + leadingOptionsPattern + `\s+(` + strings.Join(subcommands, "|") + `)\b`
+	serving := `\b(npm|pnpm|yarn|bun)` + leadingOptionsPattern + `\s+(run|dev|serve|start|preview)\b`
+	return `(?i)\b(curl|wget|fetch|aria2c|ssh|scp|sftp|rsync|nc|ncat|netcat|telnet|ftp|npx)\b|` +
+		fetch + `|` + serving +
+		`|\b(http-server|serve|vite|next|nuxt|astro)\b|\b(python(2|3)?|py)\s+-m\s+http\.server\b|\bgo\s+get\b|\bgit\s+clone\b|\b(python(2|3)?|py)\s+-m\s+pip\s+install\b|\bgh\s+(api|repo\s+clone|release\s+download)\b`
+}
 
 func matchesDestructive(command string) bool {
 	if destructiveCommandPattern.MatchString(command) {

@@ -20,6 +20,7 @@ import (
 )
 
 func TestRunDoctorFormatsRedactedProviderDiagnostics(t *testing.T) {
+	isolateCLIUserState(t)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cwd := t.TempDir()
@@ -63,6 +64,7 @@ func TestRunDoctorFormatsRedactedProviderDiagnostics(t *testing.T) {
 }
 
 func TestRunDoctorConnectivityProbesProvider(t *testing.T) {
+	isolateCLIUserState(t)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cwd := t.TempDir()
@@ -113,6 +115,7 @@ func TestRunDoctorConnectivityProbesProvider(t *testing.T) {
 }
 
 func TestRunDoctorConnectivityUsesOAuthLogin(t *testing.T) {
+	isolateCLIUserState(t)
 	tokenPath := filepath.Join(t.TempDir(), "oauth-tokens.json")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("ZERO_OAUTH_STORAGE", "file")
@@ -172,6 +175,7 @@ func TestRunDoctorConnectivityUsesOAuthLogin(t *testing.T) {
 }
 
 func TestRunDoctorConnectivityReportsProviderHealthFailure(t *testing.T) {
+	isolateCLIUserState(t)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cwd := t.TempDir()
@@ -211,6 +215,7 @@ func TestRunDoctorConnectivityReportsProviderHealthFailure(t *testing.T) {
 }
 
 func TestRunDoctorConnectivityDoesNotMaskConfigHealthFailure(t *testing.T) {
+	isolateCLIUserState(t)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cwd := t.TempDir()
@@ -243,6 +248,7 @@ func TestRunDoctorConnectivityDoesNotMaskConfigHealthFailure(t *testing.T) {
 }
 
 func TestRunDoctorJSONReturnsFailureForMissingProvider(t *testing.T) {
+	isolateCLIUserState(t)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
@@ -429,6 +435,7 @@ func TestRunSearchJSONRedactsQueryAndSessionMetadata(t *testing.T) {
 }
 
 func TestRunDoctorReportsConfigValidationForMalformedFile(t *testing.T) {
+	isolateCLIUserState(t)
 	cwd := t.TempDir()
 	zeroDir := filepath.Join(cwd, ".zero")
 	if err := os.MkdirAll(zeroDir, 0o755); err != nil {

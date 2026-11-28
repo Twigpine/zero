@@ -409,13 +409,13 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	}
 	netMode := engine.effectiveNetworkMode(policy)
 	if netMode == NetworkDeny && HasRiskCategory(risk, "network") && !engine.toolNetworkExempt(request) {
-		if request.SideEffect == SideEffectShell && request.PermissionMode != PermissionUnsafe {
+		if request.SideEffect == SideEffectShell && request.PermissionMode != PermissionFullAuto {
 			return Decision{Action: ActionPrompt, Risk: risk, Reason: ReasonNetworkBlocked}
 		}
 		return deny(request, risk, BlockNetwork, "", ReasonNetworkBlocked, false)
 	}
 	if HasRiskCategory(risk, "destructive") {
-		if request.SideEffect == SideEffectShell && !request.PermissionGranted && request.PermissionMode != PermissionUnsafe {
+		if request.SideEffect == SideEffectShell && !request.PermissionGranted && request.PermissionMode != PermissionFullAuto {
 			return Decision{Action: ActionPrompt, Risk: risk, Reason: "destructive shell command requires approval"}
 		}
 		if request.SideEffect == SideEffectShell && !request.PermissionGranted {
@@ -423,7 +423,7 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 		}
 	}
 	if request.SideEffect == SideEffectShell && requestRequiresEscalatedSandbox(request) {
-		if !request.PermissionGranted && request.PermissionMode != PermissionUnsafe {
+		if !request.PermissionGranted && request.PermissionMode != PermissionFullAuto {
 			return Decision{Action: ActionPrompt, Risk: risk, Reason: ReasonEscalatedSandboxRequired}
 		}
 		// Unsafe mode may auto-allow ordinary shell prompts, but it must not
@@ -466,7 +466,7 @@ func (engine *Engine) Evaluate(ctx context.Context, request Request) Decision {
 	if request.SideEffect == SideEffectShell && engine.shellSandboxActive(policy) {
 		return Decision{Action: ActionAllow, Risk: risk, Reason: "auto-allowed: sandbox is active for this shell command", AutoAllowed: true}
 	}
-	if request.PermissionGranted || request.PermissionMode == PermissionUnsafe {
+	if request.PermissionGranted || request.PermissionMode == PermissionFullAuto {
 		return Decision{Action: ActionAllow, Risk: risk, Reason: permissionReason(request)}
 	}
 	return Decision{Action: ActionPrompt, Risk: risk, Reason: permissionReason(request)}
@@ -547,7 +547,7 @@ func promptablePathBlock(request Request, block *pathBlock) bool {
 	if block == nil || block.Code != BlockOutsideWorkspace {
 		return false
 	}
-	if request.PermissionMode == PermissionUnsafe {
+	if request.PermissionMode == PermissionFullAuto {
 		return false
 	}
 	if request.ToolName == "apply_patch" {
