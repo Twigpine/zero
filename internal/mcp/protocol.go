@@ -64,8 +64,16 @@ func (m *rpcMessage) UnmarshalJSON(data []byte) error {
 }
 
 type rpcError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    json.RawMessage `json:"data,omitempty"`
+}
+
+func (err *rpcError) Error() string {
+	if len(err.Data) == 0 || string(err.Data) == "null" {
+		return err.Message
+	}
+	return err.Message + ": " + string(err.Data)
 }
 
 type messageReader struct {

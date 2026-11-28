@@ -195,7 +195,7 @@ func TestAIMLAPIMCPHeadersOnlyForExactHost(t *testing.T) {
 		if err := client.initialize(context.Background()); err != nil {
 			t.Fatalf("%s: initialize: %v", rawURL, err)
 		}
-		for _, header := range recorder.recorded() {
+		for index, header := range recorder.recorded() {
 			if strings.Contains(rawURL, "user@") && strings.HasPrefix(header.Get("Authorization"), "Basic ") {
 				// net/http turns URL userinfo into Basic auth on its own.
 				header.Del("Authorization")
@@ -205,6 +205,9 @@ func TestAIMLAPIMCPHeadersOnlyForExactHost(t *testing.T) {
 				"X-Custom":     {"kept"},
 				"Content-Type": {"application/json"},
 				"Accept":       {"application/json, text/event-stream"},
+			}
+			if index > 0 {
+				want.Set("MCP-Protocol-Version", "2024-11-05")
 			}
 			if fmt.Sprint(header) != fmt.Sprint(want) {
 				t.Fatalf("%s: headers = %v, want %v", rawURL, header, want)

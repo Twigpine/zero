@@ -238,17 +238,7 @@ func (client *Client) initialize(ctx context.Context) error {
 	initCtx, cancel := context.WithTimeout(ctx, initializeTimeout)
 	defer cancel()
 
-	var result struct {
-		ProtocolVersion string `json:"protocolVersion"`
-	}
-	if err := client.request(initCtx, "initialize", map[string]any{
-		"protocolVersion": "2024-11-05",
-		"capabilities":    map[string]any{},
-		"clientInfo": map[string]any{
-			"name":    "zero",
-			"version": "dev",
-		},
-	}, &result); err != nil {
+	if _, err := negotiateProtocol(initCtx, client.request); err != nil {
 		return err
 	}
 	return client.notify("notifications/initialized", map[string]any{})
@@ -380,7 +370,7 @@ func (client *Client) request(ctx context.Context, method string, params any, ta
 		}
 		message := result.message
 		if message.Error != nil {
-			return fmt.Errorf("MCP %s failed: %s", method, message.Error.Message)
+			return fmt.Errorf("MCP %s failed: %w", method, message.Error)
 		}
 		if target != nil && len(message.Result) > 0 {
 			if err := json.Unmarshal(message.Result, target); err != nil {
