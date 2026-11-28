@@ -70,7 +70,10 @@ const (
 const (
 	PermissionModeAuto PermissionMode = "auto"
 	PermissionModeAsk  PermissionMode = "ask"
-	PermissionUnsafe   PermissionMode = "unsafe"
+	PermissionFullAuto PermissionMode = "full-auto"
+	// Deprecated: use PermissionFullAuto. Kept as an alias so code landing
+	// independently of this branch still compiles after a merge.
+	PermissionUnsafe = PermissionFullAuto
 )
 
 const (

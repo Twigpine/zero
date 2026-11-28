@@ -11,6 +11,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/Twigpine/zero/internal/agent"
 	"github.com/Twigpine/zero/internal/config"
 	"github.com/Twigpine/zero/internal/notify"
 	"github.com/Twigpine/zero/internal/sessions"
@@ -110,6 +111,95 @@ func TestBTWCreatesIsolatedForkAndReturnsWithoutMerge(t *testing.T) {
 		if strings.Contains(string(event.Payload), "side-only answer") {
 			t.Fatal("side-only event was persisted into the parent session")
 		}
+	}
+}
+
+func TestBTWForkDiscardsFullAutoOffer(t *testing.T) {
+	main := newBTWTestModel(t)
+	main.width = 96
+	main.permissionMode = agent.PermissionModeAsk
+	main = pressKey(t, main, tea.Key(testKeyShift(tea.KeyTab)))
+	if !main.offerOwnsStatusChip() {
+		t.Fatal("expected a live full-auto offer on main")
+	}
+
+	// Test the fork boundary directly. The Enter key would clear the offer
+	// before calling it, masking an offer copied into the fork or saved parent.
+	side, _ := main.handleBTWCommand("")
+	if !side.btw.active || side.btw.parent == nil {
+		t.Fatal("expected a BTW fork")
+	}
+	confirmed, _ := side.Update(testKeyCtrl('g'))
+	if got := confirmed.(model).permissionMode; got != agent.PermissionModeAsk {
+		t.Errorf("Ctrl+G after forking = %s, want ask", got)
+	}
+	restored, _ := side.Update(testKeyCtrl('c'))
+	if restored.(model).btw.active {
+		t.Fatal("expected Ctrl+C to restore main")
+	}
+	confirmed, _ = restored.Update(testKeyCtrl('g'))
+	if got := confirmed.(model).permissionMode; got != agent.PermissionModeAsk {
+		t.Errorf("Ctrl+G after restoring main = %s, want ask", got)
+	}
+}
+
+func TestBTWParentDeliveryCancelsFullAutoOffer(t *testing.T) {
+	const mainRunID = 7
+	for _, tc := range []struct {
+		name             string
+		msg              tea.Msg
+		parentNeedsInput bool
+	}{
+		{
+			name: "completion",
+			msg:  agentResponseMsg{runID: mainRunID},
+		},
+		{
+			name: "permission request",
+			msg: permissionRequestMsg{
+				runID:   mainRunID,
+				request: testPromptPermissionRequest(),
+			},
+			parentNeedsInput: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			main := newBTWTestModel(t)
+			main.width = 96
+			main.permissionMode = agent.PermissionModeAsk
+			main.runID, main.activeRunID, main.pending = mainRunID, mainRunID, true
+			side, _ := main.handleBTWCommand("")
+			if !side.btw.active || side.btw.parent == nil {
+				t.Fatal("expected a BTW fork with main still running")
+			}
+			updated, _ := side.Update(testKeyShift(tea.KeyTab))
+			side = updated.(model)
+			if !side.offerOwnsStatusChip() {
+				t.Fatal("expected a live full-auto offer in BTW")
+			}
+
+			updated, _ = side.Update(tc.msg)
+			side = updated.(model)
+			parent := side.btw.parent
+			if parent == nil || parent.pending != tc.parentNeedsInput ||
+				(parent.pendingPermission != nil) != tc.parentNeedsInput {
+				t.Fatal("delivery did not update the hidden main session")
+			}
+			if side.pendingPermission != nil {
+				t.Fatal("main permission prompt leaked into BTW")
+			}
+			updated, _ = side.Update(testKeyCtrl('g'))
+			side = updated.(model)
+			if side.permissionMode != agent.PermissionModeAsk {
+				t.Fatalf("Ctrl+G after main delivery = %s, want ask", side.permissionMode)
+			}
+
+			updated, _ = side.Update(testKeyShift(tea.KeyTab))
+			updated, _ = updated.Update(testKeyCtrl('g'))
+			if got := updated.(model).permissionMode; got != agent.PermissionModeFullAuto {
+				t.Errorf("Ctrl+G after a fresh BTW offer = %s, want full-auto", got)
+			}
+		})
 	}
 }
 

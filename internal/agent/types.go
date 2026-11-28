@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 
 	"github.com/Twigpine/zero/internal/execution"
 	"github.com/Twigpine/zero/internal/hooks"
@@ -22,10 +23,24 @@ type PermissionAction string
 type PermissionDecisionAction string
 
 const (
-	PermissionModeAuto      PermissionMode = "auto"
-	PermissionModeAsk       PermissionMode = "ask"
-	PermissionModeUnsafe    PermissionMode = "unsafe"
-	PermissionModeSpecDraft PermissionMode = "spec-draft"
+	PermissionModeAuto     PermissionMode = "auto"
+	PermissionModeAsk      PermissionMode = "ask"
+	PermissionModeFullAuto PermissionMode = "full-auto"
+	// PermissionModeUnsafe is the former name of PermissionModeFullAuto.
+	//
+	// Kept as an alias rather than deleted because this constant is referenced
+	// across packages and by code that lands independently of this branch, so
+	// removing it turns an ordinary merge into a compile failure for whoever
+	// merges second. It is the same value, so behaviour is identical either way.
+	//
+	// Deprecated: use PermissionModeFullAuto.
+	PermissionModeUnsafe = PermissionModeFullAuto
+	// legacyFullAutoPermissionMode is the raw string full-auto used to be. The
+	// Go alias above keeps SOURCE compatible, but a value that arrives as data
+	// rather than as an identifier is unaffected by it, so it still needs
+	// mapping. See NormalizePermissionMode.
+	legacyFullAutoPermissionMode PermissionMode = "unsafe"
+	PermissionModeSpecDraft      PermissionMode = "spec-draft"
 	// PermissionModePlan is an interactive, read-only planning mode. It applies
 	// to the CURRENT session (unlike spec-draft, which drafts in a separate
 	// session): the agent may inspect the workspace and shape the plan with
@@ -517,4 +532,25 @@ func (result Result) TruncationNotice() string {
 	default:
 		return "Response ended early (" + result.FinishReason + ") and may be incomplete."
 	}
+}
+
+// NormalizePermissionMode maps a permission mode that arrived as data onto its
+// canonical value.
+//
+// full-auto was renamed from "unsafe", and a Go alias only covers callers that
+// name the constant. A value that travels as a string does not go through the
+// alias: it comes off a command line, out of a swarm member spec, or across a
+// protocol, and after the rename "unsafe" stops matching the comparisons the
+// loop makes against PermissionModeFullAuto. The mode then reads as unrecognized
+// and the run silently behaves as though full-auto was never requested.
+//
+// Only the legacy spelling is rewritten. Unknown values are returned unchanged
+// rather than folded to a default, because this package has modes the sandbox
+// layer does not know about (spec-draft, member-auto) and quietly rewriting one
+// of those would be a worse bug than the one being fixed.
+func NormalizePermissionMode(mode PermissionMode) PermissionMode {
+	if PermissionMode(strings.ToLower(strings.TrimSpace(string(mode)))) == legacyFullAutoPermissionMode {
+		return PermissionModeFullAuto
+	}
+	return mode
 }

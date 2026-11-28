@@ -73,6 +73,9 @@ func (m model) handleBTWCommand(question string) (model, tea.Cmd) {
 	// Foreground loops are session-scoped. Stop them only after the side session
 	// is ready, so a failed fork cannot destroy work in the main session.
 	parent := m
+	// The offer belongs to the foreground surface. Clear it before copying the
+	// side model so neither the fork nor the saved parent can carry it forward.
+	parent.unsafeArmed = false
 	clearedLoops := 0
 	if updated, cleared := parent.clearLoopsForSessionSwitch(); cleared > 0 {
 		parent = updated
@@ -344,6 +347,9 @@ func (m model) refreshHiddenParentFileView() (model, tea.Cmd) {
 }
 
 func (m model) routeBTWMessageToParent(msg tea.Msg) (model, tea.Cmd, bool) {
+	// Cross-session delivery ends the offer on the visible side. The hidden
+	// parent's update cannot clear the side model's confirmation state.
+	m.unsafeArmed = false
 	parentNext, cmd := m.btw.parent.updateModel(msg)
 	parent, ok := parentNext.(model)
 	if !ok {

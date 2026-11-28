@@ -251,6 +251,7 @@ func TestLoadConfigAcceptsMatchersOnSpecialistHooks(t *testing.T) {
 }
 
 func TestConfigStorePersistsUpdates(t *testing.T) {
+	isolateStateRoot(t)
 	configPath := filepath.Join(t.TempDir(), "hooks.json")
 	store, err := NewConfigStore(StoreOptions{ConfigPath: configPath})
 	if err != nil {

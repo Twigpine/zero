@@ -2749,7 +2749,7 @@ func TestRunGrantsPromptToolInUnsafeMode(t *testing.T) {
 
 	result, err := Run(context.Background(), "write notes", provider, Options{
 		Registry:       registry,
-		PermissionMode: PermissionModeUnsafe,
+		PermissionMode: PermissionModeFullAuto,
 		OnPermission: func(event PermissionEvent) {
 			permissionEvents = append(permissionEvents, event)
 		},
@@ -2775,7 +2775,7 @@ func TestRunGrantsPromptToolInUnsafeMode(t *testing.T) {
 	if event.Action != PermissionActionAllow || !event.PermissionGranted {
 		t.Fatalf("expected unsafe approval permission event, got %#v", event)
 	}
-	if event.ToolName != "write_file" || event.PermissionMode != PermissionModeUnsafe {
+	if event.ToolName != "write_file" || event.PermissionMode != PermissionModeFullAuto {
 		t.Fatalf("unexpected unsafe approval metadata: %#v", event)
 	}
 }
@@ -2980,7 +2980,7 @@ func TestRunAppliesSandboxEvenInUnsafeMode(t *testing.T) {
 
 	result, err := Run(context.Background(), "write outside", provider, Options{
 		Registry:       registry,
-		PermissionMode: PermissionModeUnsafe,
+		PermissionMode: PermissionModeFullAuto,
 		Autonomy:       "high",
 		Sandbox: sandbox.NewEngine(sandbox.EngineOptions{
 			WorkspaceRoot: root,
