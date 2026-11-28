@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -19,6 +21,8 @@ type sandboxCommandOptions struct {
 }
 
 const permissionProfileScopeNote = "permissionProfile is derived from this process's environment and working directory; a command run with its own environment can add further credential deny-read entries."
+
+var errSandboxSetupHelperNotStarted = errors.New("sandbox setup helper did not start")
 
 func runSandbox(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) int {
 	if len(args) == 0 {
@@ -174,7 +178,7 @@ func runSandboxSetup(args []string, stdout io.Writer, stderr io.Writer, deps app
 	if !setupHelper.Available() {
 		return writeAppError(stderr, "Windows sandbox setup helper is not available", exitProvider)
 	}
-	setupArgs, err := zeroSandbox.BuildWindowsSandboxSetupArgs(zeroSandbox.WindowsSandboxSetupArgsOptions{
+	setupPlan, err := zeroSandbox.BuildWindowsSandboxSetupArgs(zeroSandbox.WindowsSandboxSetupArgsOptions{
 		CommandCWD:        workspaceRoot,
 		WorkspaceRoots:    []string{workspaceRoot},
 		PermissionProfile: profile,
@@ -182,9 +186,20 @@ func runSandboxSetup(args []string, stdout io.Writer, stderr io.Writer, deps app
 	if err != nil {
 		return writeAppError(stderr, err.Error(), exitCrash)
 	}
-	setupArgs = append(append([]string{}, setupHelper.ArgsPrefix...), setupArgs...)
+	setupArgs := append(append([]string{}, setupHelper.ArgsPrefix...), setupPlan.Args...)
 	if err := deps.runSandboxSetupHelper(setupHelper.Name, setupArgs, stdout, stderr); err != nil {
-		return writeAppError(stderr, "Windows sandbox setup failed: "+err.Error(), exitProvider)
+		message := "Windows sandbox setup failed: " + err.Error()
+		// Argument preparation may have created the runtime lease and its parent
+		// directories. Undo those writes only if this helper could not have
+		// published a marker. A generic process error leaves that outcome unknown.
+		var exitErr *exec.ExitError
+		if errors.Is(err, errSandboxSetupHelperNotStarted) ||
+			(errors.As(err, &exitErr) && exitErr.ExitCode() == zeroSandbox.WindowsSandboxSetupUnpublishedExitCode) {
+			if undo := setupPlan.Rollback(); undo != nil {
+				message += "\nleftover sandbox runtime state could not be removed: " + undo.Error()
+			}
+		}
+		return writeAppError(stderr, message, exitProvider)
 	}
 	return writeSandboxSetupResult(stdout, options.json, sandboxSetupResult{
 		Platform: "windows",

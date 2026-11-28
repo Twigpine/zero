@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -436,6 +437,88 @@ func TestRunSandboxSetupRunsWindowsHelper(t *testing.T) {
 	}
 	if !payload.Ran || payload.Helper != wantPath || payload.Backend != sandbox.BackendWindowsRestrictedToken {
 		t.Fatalf("setup payload = %#v, want ran Windows helper", payload)
+	}
+}
+
+func TestRunSandboxSetupRollback(t *testing.T) {
+	const helperExitEnv = "ZERO_TEST_SANDBOX_SETUP_HELPER_EXIT"
+	if value, ok := os.LookupEnv(helperExitEnv); ok {
+		code, err := strconv.Atoi(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		os.Exit(code)
+	}
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch := defaultAppDeps().runSandboxSetupHelper
+	for _, tc := range []struct {
+		name     string
+		helper   string
+		exit     int
+		rollback bool
+	}{
+		{name: "failed to start", rollback: true},
+		{name: "failed before publication", helper: testBinary, exit: sandbox.WindowsSandboxSetupUnpublishedExitCode, rollback: true},
+		{name: "failed after publication", helper: testBinary, exit: 1},
+		{name: "unknown outcome", helper: testBinary, exit: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspace, home, tempDir := t.TempDir(), t.TempDir(), t.TempDir()
+			t.Setenv("ZERO_WINDOWS_SANDBOX_HOME", t.TempDir())
+			t.Setenv("HOME", home)
+			t.Setenv("LOCALAPPDATA", home)
+			t.Setenv("XDG_CACHE_HOME", home)
+			t.Setenv("TMPDIR", tempDir)
+			t.Setenv("TEMP", tempDir)
+			t.Setenv("TMP", tempDir)
+			cache, err := os.UserCacheDir()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(cache, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(helperExitEnv, strconv.Itoa(tc.exit))
+			var leasePath string
+			deps := appDeps{
+				getwd: func() (string, error) { return workspace, nil },
+				resolveConfig: func(string, config.Overrides) (config.ResolvedConfig, error) {
+					return config.ResolvedConfig{}, nil
+				},
+				selectSandboxBackend: func(sandbox.BackendOptions) sandbox.Backend {
+					return sandbox.Backend{
+						Platform: "windows", Name: sandbox.BackendWindowsRestrictedToken,
+						Available: true, Executable: testBinary,
+					}
+				},
+				runSandboxSetupHelper: func(_ string, _ []string, stdout, stderr io.Writer) error {
+					leases, err := filepath.Glob(filepath.Join(cache, "zero", "runtime", "v1", "*.lease"))
+					if err != nil || len(leases) != 1 {
+						t.Fatalf("setup did not create one lease before starting its helper: %v, %v", leases, err)
+					}
+					leasePath = leases[0]
+					path := tc.helper
+					if path == "" {
+						path = filepath.Join(workspace, "missing-helper.exe")
+					}
+					return launch(path, []string{"-test.run=^TestRunSandboxSetupRollback$"}, stdout, stderr)
+				},
+			}
+			var stdout, stderr bytes.Buffer
+			if code := runWithDeps([]string{"sandbox", "setup"}, &stdout, &stderr, deps); code != exitProvider || leasePath == "" {
+				t.Fatalf("setup exit = %d, lease = %q, stdout = %q, stderr = %q", code, leasePath, &stdout, &stderr)
+			}
+			_, err = os.Stat(leasePath)
+			if tc.rollback && !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("rollback did not remove the lease: %v", err)
+			}
+			if !tc.rollback && err != nil {
+				t.Errorf("setup removed its runtime lease without a confirmed pre-publication failure: %v", err)
+			}
+		})
 	}
 }
 
