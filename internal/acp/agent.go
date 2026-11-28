@@ -700,7 +700,13 @@ func (a *Agent) handleSetMode(_ context.Context, params json.RawMessage) (any, e
 	}
 	sess.turnMu.Lock()
 	defer sess.turnMu.Unlock()
-	mode := agent.PermissionMode(p.ModeID)
+	// Normalized before the switch, for the same reason the TUI normalizes at its
+	// own boundary: the mode arrives as data, so the accepted legacy "unsafe"
+	// spelling reaches this switch unrewritten and falls through to default. The
+	// client that asks for the disallowed mode by its documented old name is then
+	// told it does not exist, which reads as "try another spelling" rather than
+	// "this door is closed over ACP".
+	mode := agent.NormalizePermissionMode(agent.PermissionMode(p.ModeID))
 	switch mode {
 	case agent.PermissionModeAuto, agent.PermissionModeAsk, agent.PermissionModePlan:
 		if err := a.updateMode(sess, mode); err != nil {
@@ -708,7 +714,7 @@ func (a *Agent) handleSetMode(_ context.Context, params json.RawMessage) (any, e
 		}
 		(&notifier{conn: a.conn, sessionID: sess.id}).currentMode(string(mode))
 		return SetSessionModeResult{}, nil
-	case agent.PermissionModeUnsafe:
+	case agent.PermissionModeFullAuto:
 		// Unsafe = run every tool with no prompt. The TUI gates this behind an
 		// explicit --skip-permissions-unsafe operator flag; an editor client must
 		// not be able to grant itself unconfined, no-prompt access over the wire.
@@ -738,14 +744,17 @@ func (a *Agent) handleSetConfigOption(_ context.Context, params json.RawMessage)
 		// set_mode and set_config_option) serialize mode flips consistently.
 		sess.turnMu.Lock()
 		defer sess.turnMu.Unlock()
-		mode := agent.PermissionMode(p.Value)
+		// Normalized like handleSetMode above: this is the second advertised mode
+		// door, and an alias that only one of them rewrites is a difference
+		// between two paths that are meant to be the same contract.
+		mode := agent.NormalizePermissionMode(agent.PermissionMode(p.Value))
 		switch mode {
 		case agent.PermissionModeAuto, agent.PermissionModeAsk, agent.PermissionModePlan:
 			if err := a.updateMode(sess, mode); err != nil {
 				return nil, err
 			}
 			(&notifier{conn: a.conn, sessionID: sess.id}).currentMode(string(mode))
-		case agent.PermissionModeUnsafe:
+		case agent.PermissionModeFullAuto:
 			return nil, RPCError(codeInvalidParams, "mode not permitted over ACP: "+p.Value)
 		default:
 			return nil, RPCError(codeInvalidParams, "unknown mode: "+p.Value)

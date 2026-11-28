@@ -51,6 +51,14 @@ var fileWriteRename = func(root *os.Root, oldName, newName string) error {
 	return root.Rename(oldName, newName)
 }
 
+// fileWriteCaptureSecurity and fileWriteApplySecurity carry the replaced file's
+// access control to the file that takes its name. Tests replace them to
+// exercise a failure at either step.
+var (
+	fileWriteCaptureSecurity = captureFileSecurity
+	fileWriteApplySecurity   = applyFileSecurity
+)
+
 // fileWriteNoReplaceRename publishes a create without replacing an existing
 // name. Tests replace it to exercise the hard-link fallback that filesystems
 // without a no-replace rename use.
@@ -156,10 +164,20 @@ func commitRootedFileContents(root *os.Root, absolutePath, relativePath string, 
 			return fmt.Errorf("%w: link target changed", errFileChangedDuringWrite)
 		}
 	}
+	// The side file is created fresh and would publish with the directory's
+	// inherited access control. Read what the observed file carries while its
+	// validated handle is still open, so the file that takes its name keeps
+	// it. A list that cannot be read cannot be carried, and replacing the file
+	// anyway would reset it, so that refuses the write.
+	security, securityErr := fileWriteCaptureSecurity(file)
+	if securityErr != nil {
+		_ = file.Close()
+		return fmt.Errorf("writing %s: %w", relativePath, securityErr)
+	}
 	if err := file.Close(); err != nil {
 		return err
 	}
-	return commitRootedFileOverwrite(root, absolutePath, relativePath, publishPath, openedInfo, mode, content)
+	return commitRootedFileOverwrite(root, absolutePath, relativePath, publishPath, openedInfo, mode, security, content)
 }
 
 // commitRootedFileCreate publishes a brand-new file whose absence the caller
@@ -168,7 +186,7 @@ func commitRootedFileContents(root *os.Root, absolutePath, relativePath string, 
 // either absent or the whole file, a concurrent create is refused rather than
 // replaced, and a write that cannot complete leaves no file at all.
 func commitRootedFileCreate(root *os.Root, relativePath, content string) error {
-	tempName, err := writeRootedSideFile(root, relativePath, 0o644, true, content)
+	tempName, err := writeRootedSideFile(root, relativePath, 0o644, true, nil, content)
 	if err != nil {
 		return err
 	}
@@ -244,8 +262,8 @@ func renameNoReplaceUnsupported(err error) bool {
 // Refused renames fail without mutating the observed inode. Writing in place
 // here would expose partial content and rewrite hard-link siblings, defeating
 // the guarantees that staging provides.
-func commitRootedFileOverwrite(root *os.Root, absolutePath, relativePath, publishPath string, openedInfo os.FileInfo, mode os.FileMode, content string) error {
-	tempName, err := writeRootedSideFile(root, publishPath, mode, false, content)
+func commitRootedFileOverwrite(root *os.Root, absolutePath, relativePath, publishPath string, openedInfo os.FileInfo, mode os.FileMode, security *fileSecurity, content string) error {
+	tempName, err := writeRootedSideFile(root, publishPath, mode, false, security, content)
 	if err != nil {
 		return err
 	}
@@ -312,13 +330,15 @@ func resolveRootedFinalPath(root *os.Root, relativePath string) (string, error) 
 // 0o644 and remembers what the process umask actually granted; the bytes are
 // made owner-only while they are staged, then the granted bits are restored.
 // An overwrite stages 0o600 and finally carries the observed file's permission
-// bits over, so the published file looks like the one it replaced.
-func writeRootedSideFile(root *os.Root, relativePath string, mode os.FileMode, umaskDerived bool, content string) (string, error) {
+// bits over, so the published file looks like the one it replaced. It also
+// carries security, the replaced file's access control, when there is any: a
+// create passes nil and keeps what the directory gives a new file.
+func writeRootedSideFile(root *os.Root, relativePath string, mode os.FileMode, umaskDerived bool, security *fileSecurity, content string) (string, error) {
 	createMode := mode.Perm()
 	if !umaskDerived {
 		createMode = 0o600
 	}
-	temp, tempName, err := pathjail.CreateTempMode(root, filepath.Dir(relativePath), "zero-write", ".tmp", createMode)
+	temp, tempName, err := createSideFile(root, relativePath, createMode, security)
 	if err != nil {
 		return "", fmt.Errorf("writing %s: %w", relativePath, err)
 	}
@@ -338,6 +358,13 @@ func writeRootedSideFile(root *os.Root, relativePath string, mode os.FileMode, u
 		}
 	}
 	writeErr := func() error {
+		// The side file was created with the directory's access control. It is
+		// given the replaced file's before any byte is written, while it is still
+		// empty: applied afterwards, the replacement would sit readable by
+		// everyone the directory admits until the list landed.
+		if err := fileWriteApplySecurity(temp, security); err != nil {
+			return err
+		}
 		if err := fileWriteTempWrite(temp, content); err != nil {
 			return err
 		}

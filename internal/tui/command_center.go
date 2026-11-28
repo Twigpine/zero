@@ -390,7 +390,8 @@ func sanitizeCardField(value string) string {
 // relativeAge renders an RFC3339 timestamp as a short age ("2h ago"), falling
 // back to the month/day this year and the bare date for sessions older than a
 // month, so deep history reads as a calendar date rather than "400d ago"; ""
-// when the timestamp does not parse, so the card simply omits it.
+// when the timestamp does not parse, so the card simply omits it. Calendar
+// dates are shown in now's location.
 func relativeAge(timestamp string, now time.Time) string {
 	parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(timestamp))
 	if err != nil {
@@ -407,7 +408,7 @@ func relativeAge(timestamp string, now time.Time) string {
 	case age <= 30*24*time.Hour:
 		return fmt.Sprintf("%dd ago", int(age.Hours()/24))
 	}
-	parsed, now = parsed.Local(), now.Local()
+	parsed = parsed.In(now.Location())
 	if parsed.Year() == now.Year() {
 		return parsed.Format("Jan _2")
 	}
