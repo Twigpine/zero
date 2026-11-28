@@ -42,6 +42,12 @@ func isolateCLIUserState(t *testing.T) {
 	// Credentials resolve keyring-first. This keeps a migrated key in a file
 	// under the fixture root rather than in the developer's OS keychain.
 	t.Setenv("ZERO_CRED_STORAGE", "encrypted-file")
+	// Two overrides outrank every base directory above. An inherited value
+	// would send the sandbox grants file and, on Windows, the sandbox home
+	// straight back to the developer's real ones. Cleared, both resolve under
+	// the fixture root like everything else.
+	t.Setenv("ZERO_SANDBOX_GRANTS_PATH", "")
+	t.Setenv("ZERO_WINDOWS_SANDBOX_HOME", "")
 }
 
 // AND THE ISOLATION IS ITSELF PINNED, ONE HELPER AT A TIME. A seeded config
@@ -62,10 +68,12 @@ func TestCLILaunchHelpersLeaveUserStateAlone(t *testing.T) {
 		{"execAdvertisesEscalateModel", func(t *testing.T) {
 			_ = execAdvertisesEscalateModel(t, []string{"--allow-escalation", "exec", "say hi"})
 		}},
+		{"execListToolsFor", func(t *testing.T) { _ = execListToolsFor(t, "--auto", "high") }},
 		{"runExecWithSandbox", func(t *testing.T) {
 			_, _, _ = runExecWithSandbox(t, []string{"exec", "hello"}, unavailableTestSandbox, config.SandboxConfig{})
 		}},
 		{"launchTUIWithSandbox", func(t *testing.T) { _ = launchTUIWithSandbox(t, config.SandboxConfig{}) }},
+		{"rpmTestDeps", func(t *testing.T) { _ = rpmTestDeps(t, &rpmExecProvider{}) }},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			seedRoot, configPath, seeded, before := seedEmulatedUserConfig(t)
